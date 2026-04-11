@@ -515,9 +515,41 @@ class ECHO(BaseAgent):
                 console.print(
                     f"[yellow]edge-tts fallo: {edge_err}. Usando pyttsx3 como fallback...[/]"
                 )
-                self._synthesize_pyttsx3(clean_script, output_path)
-                self.logger.info("Audio generado con pyttsx3 (fallback)")
-                engine_used = "pyttsx3"
+                try:
+                    self._synthesize_pyttsx3(clean_script, output_path)
+                    self.logger.info("Audio generado con pyttsx3 (fallback)")
+                    engine_used = "pyttsx3"
+                except Exception as pyttsx3_err:
+                    # Último recurso: audio silencioso con ffmpeg para que el
+                    # pipeline pueda continuar y generar el vídeo igualmente.
+                    self.logger.warning(
+                        f"pyttsx3 fallo ({pyttsx3_err}) — "
+                        f"generando audio silencioso de emergencia con ffmpeg"
+                    )
+                    console.print(
+                        f"[yellow]pyttsx3 fallo: {pyttsx3_err}. "
+                        f"Generando audio silencioso (emergencia)...[/]"
+                    )
+                    duration_secs = max(30, int(self._estimate_duration(clean_script) * 60))
+                    import subprocess
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-f", "lavfi",
+                            "-i", f"anullsrc=r=44100:cl=stereo",
+                            "-t", str(duration_secs),
+                            "-q:a", "9",
+                            "-acodec", "libmp3lame",
+                            output_path,
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                    self.logger.warning(
+                        f"Audio silencioso generado ({duration_secs}s) — "
+                        f"el vídeo se generará sin voz"
+                    )
+                    engine_used = "silencio-ffmpeg"
 
             ctx.audio_path = output_path
 

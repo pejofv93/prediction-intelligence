@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     espeak-ng \
     libespeak-ng1 \
+    espeak \
+    libespeak1 \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
