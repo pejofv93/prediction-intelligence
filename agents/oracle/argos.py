@@ -393,11 +393,60 @@ class ARGOS(BaseAgent):
 
         except Exception as e:
             self.logger.error(f"ARGOS error: {e}")
-            ctx.add_error("ARGOS", str(e))
+            # No registrar error todavía — intentar fallback SQLite primero.
+            # Si hay precios en SQLite, el pipeline puede continuar con warning.
+            _fetch_error = str(e)
 
-        # ── Fallback SQLite: fuera del try principal ───────────────────────────
-        # Se ejecuta aunque _fetch_prices() haya lanzado excepción.
-        # Garantiza que BTC/ETH/SOL tengan al menos el último precio conocido.
+            # ── Fallback SQLite ────────────────────────────────────────────────
+            # Reconstruir ctx.prices desde market_prices para que CALÍOPE y
+            # HEPHAESTUS tengan los datos aunque CoinGecko esté caído.
+            _fallback_map_db = {
+                "bitcoin":     "BTC",
+                "ethereum":    "ETH",
+                "solana":      "SOL",
+                "binancecoin": "BNB",
+            }
+            fallback_prices: Dict[str, Any] = {}
+            for cg_id, sym in _fallback_map_db.items():
+                try:
+                    last = self.db.get_last_coin_price(cg_id)
+                    if last > 0:
+                        fallback_prices[sym] = {
+                            "price":          last,
+                            "change_24h":     0.0,
+                            "market_cap":     0.0,
+                            "volatility_p90": 0.0,
+                        }
+                except Exception:
+                    pass
+
+            if fallback_prices:
+                ctx.prices   = fallback_prices
+                ctx.btc_price = fallback_prices.get("BTC", {}).get("price", 0.0)
+                ctx.eth_price = fallback_prices.get("ETH", {}).get("price", 0.0)
+                ctx.sol_price = fallback_prices.get("SOL", {}).get("price", 0.0)
+                ctx.add_warning(
+                    "ARGOS",
+                    f"CoinGecko no disponible ({_fetch_error}) — "
+                    f"usando precios SQLite: BTC=${ctx.btc_price:,.0f}",
+                )
+                self.logger.warning(
+                    f"[yellow]ARGOS fallback SQLite:[/] "
+                    f"BTC=${ctx.btc_price:,.0f} ETH=${ctx.eth_price:,.0f} "
+                    f"SOL=${ctx.sol_price:,.0f} — pipeline continúa"
+                )
+            else:
+                # Sin caché y sin SQLite → error fatal (pipeline debe detenerse)
+                ctx.add_error("ARGOS", _fetch_error)
+                self.logger.error(
+                    "[red]ARGOS: sin precios en CoinGecko ni en SQLite — "
+                    "pipeline detenido[/]"
+                )
+
+            return ctx
+
+        # ── Fallback SQLite para ctx_attrs individuales (flujo normal) ─────────
+        # Solo cubre el caso en que el try tuvo éxito parcial (precio = 0).
         _fallback_map = [
             ("btc_price", "bitcoin"),
             ("eth_price", "ethereum"),
