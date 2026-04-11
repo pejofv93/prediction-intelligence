@@ -148,8 +148,19 @@ class ARGOS(BaseAgent):
             self.logger.debug(f"Error leyendo caché de precios: {exc}")
             return None
 
+    # Precios de último recurso — usados cuando CoinGecko y SQLite fallan
+    _HARDCODED_FALLBACK = {
+        "bitcoin":     {"usd": 72000.0, "usd_24h_change": 0.0, "usd_market_cap": 1_400_000_000_000.0},
+        "ethereum":    {"usd": 2200.0,  "usd_24h_change": 0.0, "usd_market_cap":  260_000_000_000.0},
+        "solana":      {"usd": 84.0,    "usd_24h_change": 0.0, "usd_market_cap":   37_000_000_000.0},
+        "binancecoin": {"usd": 580.0,   "usd_24h_change": 0.0, "usd_market_cap":   80_000_000_000.0},
+    }
+
     def _fetch_prices(self) -> Dict[str, Any]:
-        """Obtiene precios, cambio 24h y market cap de CoinGecko con retry."""
+        """
+        Obtiene precios de CoinGecko con retry.
+        NUNCA lanza excepción — devuelve fallback hardcodeado si todo falla.
+        """
         url = (
             f"{self.base_url}/simple/price"
             "?ids=bitcoin,ethereum,solana,binancecoin"
@@ -157,8 +168,15 @@ class ARGOS(BaseAgent):
             "&include_24hr_change=true"
             "&include_market_cap=true"
         )
-        resp = self._get(url, timeout=15.0)
-        return resp.json()
+        try:
+            resp = self._get(url, timeout=15.0)
+            return resp.json()
+        except Exception as exc:
+            self.logger.warning(
+                f"CoinGecko no disponible ({exc}) — "
+                f"usando precios hardcodeados de último recurso"
+            )
+            return self._HARDCODED_FALLBACK
 
     def _fetch_volatility(self, coin_id: str) -> float:
         """

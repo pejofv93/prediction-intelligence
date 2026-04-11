@@ -130,7 +130,7 @@ class NexusCore:
                     console.print(f"  [red]✗[/] {step_name} falló: {exc}")
                     logger.exception(f"Error en {step_name}")
 
-                if ctx.has_errors() and step_name in ("ORACULO", "FORGE"):
+                if ctx.has_errors() and step_name in ("FORGE",):
                     console.print("[red bold]Pipeline detenido por errores críticos.[/]")
                     break
 
