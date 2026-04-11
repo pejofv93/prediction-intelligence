@@ -174,11 +174,16 @@ class OLYMPUS(BaseAgent):
     def _build_service(self, ctx: Context):
         """
         Construye el servicio de YouTube con credenciales OAuth2.
-        Si no hay token.json disponible, registra el error en ctx y devuelve None.
+
+        En Railway/producción NUNCA abre navegador — usa refresh_token directamente.
+        Orden de búsqueda del token:
+          1. YOUTUBE_TOKEN_B64 (env var, base64)
+          2. YOUTUBE_TOKEN    (env var, JSON string)
+          3. token.json en disco (desarrollo local)
+        Si no hay credenciales válidas → warning (no error) y retorna None.
         """
         try:
             from googleapiclient.discovery import build
-            from google_auth_oauthlib.flow import InstalledAppFlow
             from google.oauth2.credentials import Credentials
             from google.auth.transport.requests import Request
         except ImportError as exc:
@@ -187,66 +192,82 @@ class OLYMPUS(BaseAgent):
             ctx.add_error("OLYMPUS", msg)
             return None
 
-        # Soporte para JSON inline (Railway/Docker): YOUTUBE_CLIENT_SECRET={"installed":{...}}
-        client_secret_json = os.getenv("YOUTUBE_CLIENT_SECRET", "")
-        if client_secret_json:
-            import tempfile
-            try:
-                tmp = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False, encoding="utf-8"
-                )
-                tmp.write(client_secret_json)
-                tmp.close()
-                client_secret_path = tmp.name
-            except Exception as exc:
-                msg = f"Error escribiendo YOUTUBE_CLIENT_SECRET temporal: {exc}"
-                self.logger.error(f"[red]OLYMPUS:[/] {msg}")
-                ctx.add_error("OLYMPUS", msg)
-                return None
-        else:
-            client_secret_path = os.getenv("YOUTUBE_CLIENT_SECRET_PATH", "")
+        # ── Obtener token data ────────────────────────────────────────────────
+        import json as _json
+        import base64 as _b64
+        token_data: dict = {}
 
-        if not client_secret_path or not Path(client_secret_path).exists():
-            msg = f"YOUTUBE_CLIENT_SECRET_PATH no válido: {client_secret_path!r}"
-            self.logger.error(f"[red]OLYMPUS:[/] {msg}")
-            ctx.add_error("OLYMPUS", msg)
+        # 1. YOUTUBE_TOKEN_B64 — base64 del JSON (más seguro en env vars)
+        token_b64 = os.getenv("YOUTUBE_TOKEN_B64", "")
+        if token_b64:
+            try:
+                token_data = _json.loads(_b64.b64decode(token_b64).decode("utf-8"))
+                self.logger.info("[yellow]OLYMPUS[/] token desde YOUTUBE_TOKEN_B64")
+            except Exception as exc:
+                self.logger.warning(f"[yellow]OLYMPUS[/] error decodificando YOUTUBE_TOKEN_B64: {exc}")
+
+        # 2. YOUTUBE_TOKEN — JSON string directo
+        if not token_data:
+            token_json = os.getenv("YOUTUBE_TOKEN", "")
+            if token_json:
+                try:
+                    token_data = _json.loads(token_json)
+                    self.logger.info("[yellow]OLYMPUS[/] token desde YOUTUBE_TOKEN")
+                except Exception as exc:
+                    self.logger.warning(f"[yellow]OLYMPUS[/] error parseando YOUTUBE_TOKEN: {exc}")
+
+        # 3. token.json en disco (desarrollo local)
+        if not token_data:
+            token_path = self._find_token_path()
+            if token_path:
+                try:
+                    token_data = _json.loads(token_path.read_text(encoding="utf-8"))
+                    self.logger.info(f"[yellow]OLYMPUS[/] token desde disco: {token_path}")
+                except Exception as exc:
+                    self.logger.warning(f"[yellow]OLYMPUS[/] error leyendo token.json: {exc}")
+
+        if not token_data:
+            msg = (
+                "YouTube: no hay token disponible. "
+                "Configura YOUTUBE_TOKEN o YOUTUBE_TOKEN_B64 en Railway."
+            )
+            self.logger.warning(f"[yellow]OLYMPUS[/] {msg}")
+            ctx.add_warning("OLYMPUS", msg)
             return None
 
-        token_path = self._find_token_path()
-        creds = None
-
-        if token_path:
-            self.logger.info(f"[yellow]OLYMPUS[/] token.json encontrado en: {token_path}")
-            try:
-                creds = Credentials.from_authorized_user_file(str(token_path), YOUTUBE_SCOPES)
-            except Exception as exc:
-                self.logger.warning(f"[yellow]OLYMPUS[/] error leyendo token.json: {exc}")
-                creds = None
-        else:
-            # Fallback: sin credenciales no se puede publicar
-            msg = "YouTube: token no encontrado"
+        # ── Construir Credentials directamente desde el token data ────────────
+        # NUNCA se llama a flow.run_local_server() — incompatible con Railway.
+        try:
+            creds = Credentials(
+                token=token_data.get("token"),
+                refresh_token=token_data.get("refresh_token"),
+                token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+                client_id=token_data.get("client_id"),
+                client_secret=token_data.get("client_secret"),
+                scopes=token_data.get("scopes", YOUTUBE_SCOPES),
+            )
+        except Exception as exc:
+            msg = f"Error construyendo Credentials: {exc}"
             self.logger.error(f"[red]OLYMPUS:[/] {msg}")
-            ctx.errors.append(msg)
+            ctx.add_warning("OLYMPUS", msg)
             return None
 
-        # Refrescar o reautorizar si es necesario
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
+        # ── Refrescar si ha expirado ──────────────────────────────────────────
+        if not creds.valid:
+            if creds.refresh_token:
                 try:
                     creds.refresh(Request())
+                    self.logger.info("[yellow]OLYMPUS[/] token refrescado correctamente")
                 except Exception as exc:
-                    self.logger.warning(f"[yellow]OLYMPUS[/] no se pudo refrescar token: {exc}")
-            else:
-                try:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        client_secret_path, YOUTUBE_SCOPES
-                    )
-                    creds = flow.run_local_server(port=0)
-                except Exception as exc:
-                    msg = f"Error en flujo OAuth2: {exc}"
-                    self.logger.error(f"[red]OLYMPUS:[/] {msg}")
-                    ctx.add_error("OLYMPUS", msg)
+                    msg = f"No se pudo refrescar el token OAuth2: {exc}"
+                    self.logger.warning(f"[yellow]OLYMPUS[/] {msg}")
+                    ctx.add_warning("OLYMPUS", msg)
                     return None
+            else:
+                msg = "Token expirado y sin refresh_token — re-autoriza desde local."
+                self.logger.warning(f"[yellow]OLYMPUS[/] {msg}")
+                ctx.add_warning("OLYMPUS", msg)
+                return None
 
             # Guardar token actualizado en la ruta encontrada (o raíz del proyecto)
             save_path = token_path or (
