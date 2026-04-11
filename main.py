@@ -586,7 +586,7 @@ def action_auto(config: dict, db) -> None:
 
     def _scheduler_loop() -> None:
         """Bucle KAIROS: lanza pipeline en la hora óptima del día."""
-        from agents.mind.kairos import Kairos
+        from agents.mind.kairos import KAIROS as Kairos
         from core.nexus_core import NexusCore
 
         kairos = Kairos(config, db)
