@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     fonts-dejavu \
     fonts-liberation \
     espeak-ng \
+    libespeak-ng1 \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
