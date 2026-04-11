@@ -124,25 +124,32 @@ ORÁCULO:      [x] ARGOS, PYTHIA, RECON, VECTOR, THEMIS (agents/oracle/)
 FORGE:        [x] CALIOPE (9 modos, duraciones correctas), HERMES, ECHO, HEPHAESTUS v3,
               IRIS, DAEDALUS · HELIOS v3 (fal.ai Kling) — pendiente saldo FAL_KEY
               PROMETHEUS/MuseTalk desactivados temporalmente
-HERALD:       [x] OLYMPUS (siempre private) · RAPID · MERCURY
+HERALD:       [x] OLYMPUS (siempre private, OAuth2 headless Railway) · RAPID · MERCURY
 SENTINEL:     [x] CROESUS · AGORA · SCROLL · ARGONAUT — sentinel_agent.py integrado
 MIND:         [x] MNEME, KAIROS, ALETHEIA
 PANEL WEB:    [x] web/app.py + 5 templates Tailwind/Alpine — puerto 8080 + PIN
 BOT TELEGRAM: [~] MERCURY cubre canal — bot privado pendiente
-DEPLOY:       [~] Dockerfile + railway.toml + docker-compose.yml + deploy_railway.sh listos
+DEPLOY:       [x] LIVE en Railway — proyecto nexus-cryptoverdad, servicio nexus
+              KAIROS scheduler activo — pipeline diario 18:00 UTC (semana) / 12:00 (finde)
+              Volumen persistente montado en /app/output
 LAYOUT:       [x] Constantes globales _YT_*/SH_* en hephaestus.py — 0px negro garantizado
               YouTube: Ticker y=0/h=40 | Gráfico y=40/h=950 | Subs y=990/h=90
               Short:   Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ticker y=1860/h=60
 
+## Railway — Variables de entorno configuradas
+GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PEXELS_API_KEY,
+YOUTUBE_TOKEN_B64 (token.json local codificado en base64 — refresh_token activo)
+Pendiente: COINGECKO_API_KEY (pro), FAL_KEY (saldo), YOUTUBE_CLIENT_SECRET_PATH (AGORA)
+
 ## Próximos pasos (orden sugerido)
-1. Verificar vídeo análisis 8+ min — ejecutar tras reset Groq (quota 00:00 UTC):
-   python main.py --dry-run --tema "Bitcoin análisis técnico" --mode analisis
-2. Primer vídeo real YouTube — cambiar OLYMPUS privacyStatus a "public"
-3. DEPLOY Railway — bash deploy_railway.sh (variables requeridas en .env):
-   GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PEXELS_API_KEY,
-   FAL_KEY, YOUTUBE_CLIENT_SECRET (JSON inline)
-4. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py para verificar
+1. Verificar primer vídeo real a las 18:00 UTC — revisar Railway logs:
+   railway logs --tail 200
+   Confirmar: OLYMPUS token refrescado ✓ · publicado https://youtu.be/xxxxx ✓
+2. Cambiar OLYMPUS privacyStatus a "public" cuando el vídeo se vea correcto en YouTube
+3. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py para verificar
+4. RAPID/TikTok — añadir tiktok-uploader a requirements.txt + subir cookies
 5. BOT TELEGRAM privado (comandos /estado, /forzar, /parar)
+6. AGORA — configurar YOUTUBE_CLIENT_SECRET_PATH en Railway para responder comentarios
 
 ## BUG CRÍTICO RESUELTO — HEPHAESTUS compositor (sesión 2026-04-05)
 Causa raíz identificada y corregida:
@@ -468,5 +475,48 @@ Objetivo: vídeos largos de 8-12 minutos, Shorts de 45-60 segundos independiente
   THEMIS podía elegir "standard" aunque el usuario pasara --mode analisis.
 - Fix: nuevo campo forced_mode en Context. nexus_core.py lo asigna en run_pipeline().
   THEMIS respeta forced_mode si está definido, solo sugiere si no hay forzado.
+
+### Sesión 2026-04-11 — Deploy Railway en producción
+
+#### Deploy completo en Railway
+- Proyecto: nexus-cryptoverdad · Servicio: nexus
+- .gitignore + git init — build context reducido de 837MB a 4.7MB
+  (excluye latsync/ 8.1GB, liveportrait/ 709MB, sadtalker/ 2.5GB, output/ 766MB)
+- railway.toml: CMD python main.py --auto · healthcheckPath /health · restart on_failure
+- Volumen persistente montado en /app/output (Railway Dashboard → Volumes)
+- main.py --auto: KAIROS en daemon thread + uvicorn panel web en hilo principal
+
+#### Bugs de deploy resueltos (Debian trixie)
+- libgl1-mesa-glx no existe → reemplazado por libgl1
+- libxrender-dev → libxrender1
+- playwright install --with-deps falla (ttf-ubuntu-font-family) → deps manuales en apt-get
+- libespeak.so.1 no encontrado → añadidos espeak + libespeak1 (paquetes legacy)
+- ImportError Kairos → clase es KAIROS (mayúsculas) en agents/mind/kairos.py
+
+#### ARGOS — CoinGecko 429 en Railway (IP compartida)
+- _fetch_prices() NUNCA lanza excepción — retorna hardcoded fallback si todo falla
+- Orden: CoinGecko API → SQLite caché → hardcoded fallback (BTC 72k/ETH 2200/SOL 84)
+- _get() con retry exponencial y backoff (MAX_RETRIES=3, CACHE_TTL=300s)
+- ORÁCULO eliminado de la lista de pasos fatales — sus errores no detienen el pipeline
+- COINGECKO_API_KEY en .env → usa endpoint pro-api.coingecko.com con menor rate limit
+
+#### ECHO — TTS fallback chain (3 niveles)
+- edge-tts → pyttsx3 → silencio ffmpeg (anullsrc, duración estimada del guión)
+- pyttsx3==2.90 añadido a requirements.txt
+- apt-get: espeak-ng libespeak-ng1 espeak libespeak1 (cubre libespeak.so.1)
+
+#### OLYMPUS — OAuth2 headless Railway
+- Eliminado InstalledAppFlow.run_local_server() — incompatible con servidor sin pantalla
+- _build_service() reescrito: YOUTUBE_TOKEN_B64 → YOUTUBE_TOKEN → token.json en disco
+- Construye google.oauth2.credentials.Credentials directamente desde token_data dict
+- Solo llama creds.refresh(Request()) si el token está caducado (no abre browser)
+- Si no hay token → ctx.add_warning() (no error) — pipeline continúa sin YouTube
+- YOUTUBE_TOKEN_B64 subido a Railway (token.json local en base64, refresh_token activo)
+
+#### Estado al cierre de sesión
+- Container arrancado a las 17:20 UTC sin errores
+- KAIROS scheduled: primer pipeline real a las 18:00 UTC (sábado → 12:00)
+  Nota: KAIROS detectó sábado → hora óptima 12:00 → próximo día domingo 12:00
+- Pendiente confirmar: OLYMPUS sube vídeo correctamente en primer pipeline real
 
 ### Sesión 2026-04-04 — SadTalker integrado (obsoleto, ver arriba)
