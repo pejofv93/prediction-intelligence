@@ -11,10 +11,12 @@ a 30 días y detecta movimientos urgentes (>10% en 24h).
 """
 
 import json
+import os
 import sqlite3
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 try:
@@ -39,7 +41,9 @@ COIN_MAP = {
     "binancecoin":  "BNB",
 }
 
-PRICE_TABLE = "oracle_prices"
+PRICE_TABLE  = "oracle_prices"
+CACHE_TTL    = 300   # segundos — reutilizar caché si tiene <5 min
+MAX_RETRIES  = 3     # intentos ante 429 / error de red
 
 
 class ARGOS(BaseAgent):
@@ -49,12 +53,103 @@ class ARGOS(BaseAgent):
         self.config = config
         self.db = db
         self.logger = get_logger("ARGOS")
-        self.base_url = "https://api.coingecko.com/api/v3"
+        # Endpoint y headers según API key disponible
+        api_key = os.getenv("COINGECKO_API_KEY", "")
+        if api_key:
+            self.base_url = "https://pro-api.coingecko.com/api/v3"
+            self._headers = {"Accept": "application/json", "x-cg-pro-api-key": api_key}
+            self.logger.info("CoinGecko PRO endpoint activo")
+        else:
+            self.base_url = "https://api.coingecko.com/api/v3"
+            self._headers = {"Accept": "application/json"}
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
+    def _get(self, url: str, timeout: float = 15.0) -> httpx.Response:
+        """GET con retry y exponential backoff ante 429 / errores de red."""
+        last_exc: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                with httpx.Client(timeout=timeout) as client:
+                    resp = client.get(url, headers=self._headers)
+                if resp.status_code == 429:
+                    wait = 2 ** attempt          # 1s, 2s, 4s
+                    self.logger.warning(
+                        f"CoinGecko 429 — intento {attempt+1}/{MAX_RETRIES}, "
+                        f"esperando {wait}s..."
+                    )
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp
+            except httpx.HTTPStatusError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                wait = 2 ** attempt
+                self.logger.warning(
+                    f"CoinGecko error de red ({exc}) — "
+                    f"intento {attempt+1}/{MAX_RETRIES}, esperando {wait}s..."
+                )
+                time.sleep(wait)
+        raise last_exc or RuntimeError("CoinGecko: máximo de reintentos alcanzado")
+
+    def _get_cached_prices(self) -> Optional[Dict[str, Any]]:
+        """
+        Lee oracle_prices en SQLite.
+        Devuelve el snapshot más reciente si tiene < CACHE_TTL segundos.
+        Devuelve None si el caché está vacío o expirado.
+        """
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                row = conn.execute(
+                    f"""
+                    SELECT coin, price_usd, change_24h, market_cap, volatility,
+                           recorded_at
+                    FROM {PRICE_TABLE}
+                    WHERE recorded_at = (
+                        SELECT MAX(recorded_at) FROM {PRICE_TABLE}
+                    )
+                    ORDER BY coin
+                    """
+                ).fetchall()
+            if not row:
+                return None
+            # Verificar antigüedad del snapshot
+            ts_str = row[0][5]
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age > CACHE_TTL:
+                self.logger.debug(f"Caché de precios expirado ({age:.0f}s > {CACHE_TTL}s)")
+                return None
+            # Reconstruir dict en formato interno
+            cached: Dict[str, Any] = {}
+            sym_map = {v: v for v in COIN_MAP.values()}  # BTC→BTC, etc.
+            coin_to_sym = {
+                "bitcoin": "BTC", "ethereum": "ETH",
+                "solana": "SOL", "binancecoin": "BNB",
+            }
+            for r in row:
+                sym = coin_to_sym.get(r[0], r[0].upper())
+                cached[sym] = {
+                    "price":          r[1],
+                    "change_24h":     r[2],
+                    "market_cap":     r[3],
+                    "volatility_p90": r[4],
+                }
+            self.logger.info(
+                f"Caché de precios válido ({age:.0f}s < {CACHE_TTL}s) — "
+                f"evitando llamada a CoinGecko"
+            )
+            return cached if cached else None
+        except Exception as exc:
+            self.logger.debug(f"Error leyendo caché de precios: {exc}")
+            return None
+
     def _fetch_prices(self) -> Dict[str, Any]:
-        """Obtiene precios, cambio 24h y market cap de CoinGecko."""
+        """Obtiene precios, cambio 24h y market cap de CoinGecko con retry."""
         url = (
             f"{self.base_url}/simple/price"
             "?ids=bitcoin,ethereum,solana,binancecoin"
@@ -62,9 +157,7 @@ class ARGOS(BaseAgent):
             "&include_24hr_change=true"
             "&include_market_cap=true"
         )
-        with httpx.Client(timeout=15.0) as client:
-            resp = client.get(url, headers={"Accept": "application/json"})
-            resp.raise_for_status()
+        resp = self._get(url, timeout=15.0)
         return resp.json()
 
     def _fetch_volatility(self, coin_id: str) -> float:
@@ -77,9 +170,7 @@ class ARGOS(BaseAgent):
             "?vs_currency=usd&days=30&interval=daily"
         )
         try:
-            with httpx.Client(timeout=20.0) as client:
-                resp = client.get(url, headers={"Accept": "application/json"})
-                resp.raise_for_status()
+            resp = self._get(url, timeout=20.0)
             data = resp.json()
             prices_raw: List[List[float]] = data.get("prices", [])
             if len(prices_raw) < 2:
@@ -181,23 +272,28 @@ class ARGOS(BaseAgent):
         try:
             self._ensure_table()
 
-            # 1. Precios actuales
-            raw = self._fetch_prices()
+            # 1. Caché primero — evita 429 si ya hay datos frescos (<5 min)
+            prices = self._get_cached_prices()
 
-            prices: Dict[str, Any] = {}
-            for coin_id, symbol in COIN_MAP.items():
-                coin_data = raw.get(coin_id, {})
-                prices[symbol] = {
-                    "price":          coin_data.get("usd", 0.0),
-                    "change_24h":     coin_data.get("usd_24h_change", 0.0),
-                    "market_cap":     coin_data.get("usd_market_cap", 0.0),
-                    "volatility_p90": 0.0,
-                }
+            if prices is None:
+                # 2. Caché vacío o expirado → llamar a CoinGecko con retry
+                raw = self._fetch_prices()
 
-            # 2. Volatilidad P90 a 30 días
-            for coin_id, symbol in COIN_MAP.items():
-                self.logger.debug(f"Calculando volatilidad P90 para {symbol}...")
-                prices[symbol]["volatility_p90"] = self._fetch_volatility(coin_id)
+                prices = {}
+                for coin_id, symbol in COIN_MAP.items():
+                    coin_data = raw.get(coin_id, {})
+                    prices[symbol] = {
+                        "price":          coin_data.get("usd", 0.0),
+                        "change_24h":     coin_data.get("usd_24h_change", 0.0),
+                        "market_cap":     coin_data.get("usd_market_cap", 0.0),
+                        "volatility_p90": 0.0,
+                    }
+
+                # 3. Volatilidad P90 a 30 días (con delay entre llamadas)
+                for coin_id, symbol in COIN_MAP.items():
+                    self.logger.debug(f"Calculando volatilidad P90 para {symbol}...")
+                    prices[symbol]["volatility_p90"] = self._fetch_volatility(coin_id)
+                    time.sleep(1)  # 1s entre llamadas para no acumular 429
 
             # 3. Guardar en ctx
             ctx.prices = prices
