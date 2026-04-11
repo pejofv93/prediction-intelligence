@@ -1,0 +1,44 @@
+# Modelos de IA pesados
+latsync/
+liveportrait/
+sadtalker/
+heygem/
+modal_app/
+
+# Output generado
+output/
+
+# Base de datos local
+cryptoverdad.db
+
+# Credenciales
+.env
+token.json
+client_secrets.json
+
+# Cache Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Media generada
+*.mp4
+*.mp3
+*.wav
+
+# Dev / test
+test_*.py
+run_*.py
+fix_*.py
+
+# IDEs y OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Entornos virtuales
+.venv/
+venv/

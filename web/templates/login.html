@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS · Acceso</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        body { background: #0A0A0A; color: #FFFFFF; font-family: 'Segoe UI', sans-serif; }
+        input[type=password] {
+            background: #141414;
+            border: 1px solid #333;
+            color: #fff;
+            border-radius: 0.5rem;
+            padding: 0.75rem 1rem;
+            font-size: 1.5rem;
+            letter-spacing: 0.5em;
+            text-align: center;
+            width: 100%;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input[type=password]:focus { border-color: #F7931A; }
+        .btn-login {
+            background: #F7931A;
+            color: #0A0A0A;
+            font-weight: 800;
+            font-size: 1rem;
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            width: 100%;
+            cursor: pointer;
+            border: none;
+            transition: opacity 0.15s;
+            letter-spacing: 0.05em;
+        }
+        .btn-login:hover { opacity: 0.85; }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center">
+    <div x-data="{ loading: false }" class="w-full max-w-sm px-6">
+
+        <!-- Logo -->
+        <div class="text-center mb-10">
+            <div class="text-5xl font-black tracking-widest mb-2" style="color:#F7931A;">NEXUS</div>
+            <div class="text-sm text-[#666]">CryptoVerdad · Panel de Control</div>
+            <div class="text-xs text-[#444] mt-1">"Crypto sin humo."</div>
+        </div>
+
+        <!-- Form -->
+        <form method="POST" action="/login" @submit="loading = true" class="space-y-4">
+
+            {% if error %}
+            <div class="bg-red-900/40 border border-red-600/50 text-red-300 text-sm px-4 py-3 rounded-lg text-center">
+                {{ error }}
+            </div>
+            {% endif %}
+
+            <div>
+                <label class="block text-xs text-[#666] uppercase tracking-widest mb-2 text-center">
+                    PIN de acceso
+                </label>
+                <input
+                    type="password"
+                    name="pin"
+                    maxlength="8"
+                    required
+                    autofocus
+                    placeholder="····"
+                    autocomplete="current-password"
+                >
+            </div>
+
+            <button type="submit" class="btn-login" :disabled="loading">
+                <span x-show="!loading">ENTRAR</span>
+                <span x-show="loading" class="opacity-70">Verificando...</span>
+            </button>
+        </form>
+
+        <!-- Footer -->
+        <div class="text-center mt-10 text-[#333] text-xs">
+            NEXUS v1.0 · Sistema Autónomo CryptoVerdad
+        </div>
+    </div>
+</body>
+</html>

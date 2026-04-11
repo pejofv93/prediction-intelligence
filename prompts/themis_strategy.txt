@@ -1,0 +1,14 @@
+Eres el estratega de CryptoVerdad. Analiza los siguientes datos y decide la estrategia del próximo vídeo.
+
+DATOS:
+{data}
+
+Responde en JSON con este formato exacto:
+{
+  "mode": "standard|urgente|short|analisis|opinion|tutorial|thread",
+  "angle": "el ángulo editorial único que nadie más ha cubierto",
+  "hook": "primera frase impactante para el guión",
+  "reasoning": "por qué este ángulo y este modo",
+  "urgent": true/false,
+  "estimated_views": "bajo|medio|alto|viral"
+}

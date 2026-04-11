@@ -1,0 +1,239 @@
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent.parent / '.env')
+"""
+agents/forge/hermes.py
+HERMES — Motor SEO de NEXUS.
+
+Genera titulo, descripcion y tags optimizados para YouTube.
+Calcula un score SEO 0-100 y emite warnings si es bajo.
+El BLOQUEO real antes de publicar lo ejecuta NexusCore.
+"""
+
+import json
+import re
+from pathlib import Path
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from core.base_agent import BaseAgent
+from core.context import Context
+from utils.llm_client import LLMClient
+
+console = Console()
+
+PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+SEO_MIN_SCORE = 70
+
+
+class HERMES(BaseAgent):
+    """
+    Motor SEO completo para CryptoVerdad.
+
+    Genera:
+        - Titulo SEO (<= 60 chars, keyword en primeras 3 palabras)
+        - Descripcion SEO (>= 300 palabras, keyword en primeras 2 lineas)
+        - 5-7 tags (primer tag = titulo exacto)
+        - Score SEO 0-100
+
+    No bloquea el pipeline; emite ctx.warnings si score < 70.
+    """
+
+    def __init__(self, config: dict, db=None):
+        super().__init__(config)
+        self.db = db
+        self.llm = LLMClient(config)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _load_system_prompt(self) -> str:
+        path = PROMPTS_DIR / "hermes_seo.txt"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return (
+            "Eres el experto en SEO de CryptoVerdad. "
+            "Genera titulos, descripciones y tags optimizados para YouTube. "
+            "Responde SOLO con JSON valido."
+        )
+
+    def _build_user_prompt(self, ctx: Context) -> str:
+        lines = [
+            f"TEMA: {ctx.topic}",
+            f"MODO: {ctx.mode}",
+        ]
+        if ctx.script:
+            # Solo los primeros 800 chars del guion para contexto
+            lines.append(f"\nRESUMEN DEL GUION:\n{ctx.script[:800]}...")
+        if ctx.prices:
+            btc = ctx.prices.get("BTC", {})
+            if isinstance(btc, dict) and btc.get("price"):
+                lines.append(f"\nPRECIO BTC: ${btc['price']:,.0f}")
+
+        lines.append(
+            "\n\nDevuelve EXACTAMENTE este JSON (sin markdown, sin explicaciones):\n"
+            '{\n'
+            '  "title": "titulo SEO aqui",\n'
+            '  "description": "descripcion larga aqui...",\n'
+            '  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]\n'
+            '}'
+        )
+        return "\n".join(lines)
+
+    def _extract_keyword(self, topic: str) -> str:
+        """Extrae la keyword principal del tema (primera palabra significativa)."""
+        stopwords = {"el", "la", "los", "las", "un", "una", "de", "del", "en", "y", "a"}
+        words = topic.lower().split()
+        for w in words:
+            if w not in stopwords and len(w) > 2:
+                return w
+        return words[0] if words else topic.lower()
+
+    def _calculate_seo_score(
+        self,
+        title: str,
+        description: str,
+        tags: list,
+        script: str,
+        keyword: str,
+    ) -> int:
+        """Calcula score SEO de 0 a 100."""
+        score = 0
+
+        # Titulo: keyword en primeras 3 palabras (+20)
+        title_words = title.lower().split()[:3]
+        if any(keyword in w for w in title_words):
+            score += 20
+
+        # Titulo: longitud <= 60 chars (+10)
+        if len(title) <= 60:
+            score += 10
+
+        # Descripcion: keyword en primeras 2 lineas (+15)
+        first_lines = "\n".join(description.split("\n")[:2]).lower()
+        if keyword in first_lines:
+            score += 15
+
+        # Descripcion: >= 300 palabras (+15)
+        if len(description.split()) >= 300:
+            score += 15
+
+        # Tags: entre 5 y 7 (+15)
+        if 5 <= len(tags) <= 7:
+            score += 15
+
+        # Primer tag = titulo exacto (+10)
+        if tags and tags[0].strip().lower() == title.strip().lower():
+            score += 10
+
+        # Legibilidad del guion: longitud razonable (+15)
+        if script and len(script.split()) >= 300:
+            score += 15
+
+        return min(score, 100)
+
+    def _parse_llm_response(self, raw: str) -> dict:
+        """Extrae JSON de la respuesta del LLM, incluso si viene con markdown."""
+        # Eliminar bloques de markdown si existen
+        clean = re.sub(r"```(?:json)?", "", raw).strip()
+        # Buscar el primer { ... }
+        match = re.search(r"\{.*\}", clean, re.DOTALL)
+        if match:
+            import re as _re
+            clean_json = _re.sub(r"[\x00-\x1f\x7f]", "", match.group())
+            return json.loads(clean_json)
+        raise ValueError(f"No se encontro JSON valido en la respuesta LLM: {raw[:200]}")
+
+    def _ensure_tag_limit(self, tags: list, title: str) -> list:
+        """Garantiza 5-7 tags con el titulo como primer elemento."""
+        # Asegurar titulo como primer tag
+        clean_tags = [t for t in tags if t.strip().lower() != title.strip().lower()]
+        result = [title] + clean_tags
+
+        # Recortar a 7 maximos
+        result = result[:7]
+
+        # Padding si hay menos de 5
+        fallback = ["Bitcoin", "Crypto", "CryptoVerdad", "BTC", "Criptomonedas"]
+        while len(result) < 5:
+            candidate = fallback.pop(0) if fallback else f"crypto{len(result)}"
+            if candidate not in result:
+                result.append(candidate)
+
+        return result
+
+    # ── run() ─────────────────────────────────────────────────────────────────
+
+    def run(self, ctx: Context) -> Context:
+        self.logger.info("HERMES iniciado")
+        console.print(
+            Panel(
+                "[bold #F7931A]HERMES[/] — Motor SEO\n"
+                f"Tema: [italic]{ctx.topic}[/]",
+                border_style="#F7931A",
+            )
+        )
+
+        try:
+            system_prompt = self._load_system_prompt()
+            user_prompt = self._build_user_prompt(ctx)
+            keyword = self._extract_keyword(ctx.topic)
+
+            console.print(f"[dim]Keyword principal detectada: [bold]{keyword}[/][/]")
+            console.print("[dim]Generando metadata SEO con LLM...[/]")
+
+            raw = self.llm.generate(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=1500,
+            )
+
+            data = self._parse_llm_response(raw)
+
+            title: str = data.get("title", ctx.topic)[:60]
+            description: str = data.get("description", "")
+            tags: list = data.get("tags", [])
+
+            # Normalizar tags
+            tags = self._ensure_tag_limit(tags, title)
+
+            # Calcular score
+            score = self._calculate_seo_score(
+                title, description, tags, ctx.script, keyword
+            )
+
+            # Guardar en Context
+            ctx.seo_title = title
+            ctx.seo_description = description
+            ctx.seo_tags = tags
+            ctx.seo_score = score
+
+            # Warning si score bajo (el bloqueo real es en NexusCore)
+            if score < SEO_MIN_SCORE:
+                msg = f"SEO bajo: {score}/100 (minimo recomendado: {SEO_MIN_SCORE})"
+                ctx.add_warning("HERMES", msg)
+                self.logger.warning(msg)
+                console.print(f"[bold yellow]⚠ {msg}[/]")
+
+            # Mostrar tabla resumen
+            table = Table(title="Resultado SEO", border_style="#F7931A", show_header=True)
+            table.add_column("Campo", style="bold white")
+            table.add_column("Valor", style="white")
+            table.add_row("Titulo", title)
+            table.add_row("Score", f"[bold {'green' if score >= 70 else 'red'}]{score}/100[/]")
+            table.add_row("Tags", ", ".join(tags))
+            table.add_row("Desc. palabras", str(len(description.split())))
+            console.print(table)
+
+            self.logger.info(
+                f"SEO generado — titulo: '{title}' | score: {score}/100 | tags: {len(tags)}"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error en HERMES: {e}")
+            ctx.add_error("HERMES", str(e))
+
+        return ctx
+
+

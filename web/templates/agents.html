@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Agentes{% endblock %}
+
+{% block content %}
+<div x-data="agentsPage()" x-init="init()">
+
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold">Agentes NEXUS</h1>
+            <p class="text-[#666] text-sm mt-0.5">24 agentes en 5 capas</p>
+        </div>
+    </div>
+
+    <!-- Capas -->
+    {% set layers = [
+        ('ORACULO', agents_by_layer.get('ORACULO', [])),
+        ('FORGE',   agents_by_layer.get('FORGE', [])),
+        ('HERALD',  agents_by_layer.get('HERALD', [])),
+        ('SENTINEL',agents_by_layer.get('SENTINEL', [])),
+        ('MIND',    agents_by_layer.get('MIND', [])),
+    ] %}
+
+    {% for layer_name, layer_agents in layers %}
+    <div class="mb-6">
+        <div class="flex items-center gap-2 mb-3">
+            <span class="text-xs font-bold text-[#888] uppercase tracking-widest">{{ layer_name }}</span>
+            <div class="flex-1 border-t border-[#1a1a1a]"></div>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+            {% for agent in layer_agents %}
+            <div class="card p-3 flex flex-col gap-2">
+                <div class="flex items-center justify-between">
+                    <span class="font-mono font-bold text-sm accent">{{ agent.name }}</span>
+                    <span class="status-badge
+                        {% if agent.status == 'OK' %}status-completed
+                        {% elif agent.status == 'ERROR' %}status-error
+                        {% elif agent.status == 'RUNNING' %}status-running
+                        {% else %}status-pending{% endif %}">
+                        {{ agent.status }}
+                    </span>
+                </div>
+                <div class="text-xs text-[#555]">{{ agent.description or agent.file or '' }}</div>
+                {% if agent.has_prompt %}
+                <button @click="openPrompt('{{ agent.name }}')"
+                        class="btn-ghost btn-sm text-xs mt-1">
+                    Ver prompt
+                </button>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+
+    <!-- Modal de prompt -->
+    <div x-show="promptOpen" x-cloak
+         class="fixed inset-0 z-50 flex items-center justify-center p-4"
+         style="background: rgba(0,0,0,0.75);">
+        <div class="bg-[#141414] border border-[#333] rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-[#222]">
+                <span class="font-bold accent" x-text="promptAgent + ' — Prompt'"></span>
+                <button @click="promptOpen = false" class="text-[#666] hover:text-white text-xl leading-none">&times;</button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-5">
+                <pre class="text-xs text-[#ccc] whitespace-pre-wrap font-mono" x-text="promptContent"></pre>
+            </div>
+        </div>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function agentsPage() {
+    return {
+        promptOpen: false,
+        promptAgent: '',
+        promptContent: '',
+        async openPrompt(name) {
+            this.promptAgent = name;
+            this.promptContent = 'Cargando...';
+            this.promptOpen = true;
+            try {
+                const r = await fetch('/api/agent-prompt/' + name);
+                if (r.ok) {
+                    const d = await r.json();
+                    this.promptContent = d.content || '(prompt vacio)';
+                } else {
+                    this.promptContent = 'No se encontro el prompt para ' + name;
+                }
+            } catch(e) {
+                this.promptContent = 'Error: ' + e;
+            }
+        },
+        init() {}
+    }
+}
+</script>
+{% endblock %}

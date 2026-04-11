@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Nuevo Vídeo{% endblock %}
+
+{% block content %}
+<div class="max-w-xl mx-auto" x-data="{ loading: false, mode: 'standard' }">
+
+    <div class="mb-6">
+        <h1 class="text-2xl font-bold">Nuevo Vídeo</h1>
+        <p class="text-[#666] text-sm mt-1">Lanza un nuevo pipeline de creación de contenido.</p>
+    </div>
+
+    <div class="card">
+        <form method="POST" action="/pipeline/start" @submit="loading = true" class="space-y-6">
+
+            <!-- Topic -->
+            <div>
+                <label class="block text-sm font-semibold mb-2">
+                    Tema del vídeo <span class="accent">*</span>
+                </label>
+                <input
+                    type="text"
+                    name="topic"
+                    required
+                    placeholder="ej: Bitcoin supera los 100k dolares"
+                    value="{{ prefill_topic or '' }}"
+                    class="w-full bg-[#0D0D0D] border border-[#333] focus:border-[#F7931A] rounded-lg px-4 py-3 text-white placeholder-[#444] outline-none transition-colors"
+                    autofocus
+                >
+                <p class="text-xs text-[#555] mt-1">Sé específico. El tema guía todo el pipeline.</p>
+            </div>
+
+            <!-- Mode -->
+            <div>
+                <label class="block text-sm font-semibold mb-2">Modo de producción</label>
+                <select
+                    name="mode"
+                    x-model="mode"
+                    class="w-full bg-[#0D0D0D] border border-[#333] focus:border-[#F7931A] rounded-lg px-4 py-3 text-white outline-none transition-colors appearance-none"
+                >
+                    <option value="standard">Standard — Vídeo largo completo (8-12 min)</option>
+                    <option value="short">Short — Vertical para TikTok/Shorts (60s)</option>
+                    <option value="urgente">Urgente — Noticia crítica, publicación rápida</option>
+                    <option value="analisis">Análisis — Deep dive técnico (15-20 min)</option>
+                    <option value="opinion">Opinión — Formato editorial / reacción</option>
+                    <option value="tutorial">Tutorial — Educativo paso a paso</option>
+                </select>
+            </div>
+
+            <!-- Mode description -->
+            <div class="bg-[#0D0D0D] rounded-lg px-4 py-3 text-sm text-[#777] border border-[#1a1a1a]">
+                <template x-if="mode === 'standard'">
+                    <span>Pipeline completo: ORÁCULO → FORGE → revisión → HERALD → YouTube + TikTok + Telegram.</span>
+                </template>
+                <template x-if="mode === 'short'">
+                    <span>Formato vertical 1080×1920. Script corto, TikTok primero, luego YouTube Short.</span>
+                </template>
+                <template x-if="mode === 'urgente'">
+                    <span>Salta revisión humana. TikTok en minutos. Máxima velocidad para noticias críticas.</span>
+                </template>
+                <template x-if="mode === 'analisis'">
+                    <span>Análisis profundo con datos de mercado, gráficos animados y comparativa histórica.</span>
+                </template>
+                <template x-if="mode === 'opinion'">
+                    <span>Editorial directo. Tono personal de CryptoVerdad. Sin filtro, con evidencia.</span>
+                </template>
+                <template x-if="mode === 'tutorial'">
+                    <span>Formato educativo paso a paso. Subtítulos completos. Ideal para nuevos en crypto.</span>
+                </template>
+            </div>
+
+            <!-- Submit -->
+            <div class="flex gap-3 pt-2">
+                <button
+                    type="submit"
+                    class="btn-accent flex-1 text-center py-3 text-base"
+                    :disabled="loading"
+                    :class="{ 'opacity-60 cursor-not-allowed': loading }"
+                >
+                    <span x-show="!loading">🚀 Lanzar Pipeline</span>
+                    <span x-show="loading">Iniciando...</span>
+                </button>
+                <a href="/dashboard" class="btn-ghost py-3 px-5">Cancelar</a>
+            </div>
+        </form>
+    </div>
+
+    <!-- Info -->
+    <div class="mt-6 grid grid-cols-2 gap-3 text-xs text-[#555]">
+        <div class="bg-[#0D0D0D] rounded-lg px-3 py-2 border border-[#1a1a1a]">
+            <div class="font-semibold text-[#777] mb-1">ORÁCULO</div>
+            Analiza precios, noticias y tendencias del tema
+        </div>
+        <div class="bg-[#0D0D0D] rounded-lg px-3 py-2 border border-[#1a1a1a]">
+            <div class="font-semibold text-[#777] mb-1">FORGE</div>
+            Genera guión, voz, vídeo y thumbnail A/B
+        </div>
+        <div class="bg-[#0D0D0D] rounded-lg px-3 py-2 border border-[#1a1a1a]">
+            <div class="font-semibold text-[#777] mb-1">REVIEW</div>
+            Revisión humana del contenido antes de publicar
+        </div>
+        <div class="bg-[#0D0D0D] rounded-lg px-3 py-2 border border-[#1a1a1a]">
+            <div class="font-semibold text-[#777] mb-1">HERALD</div>
+            Publica en YouTube, TikTok y Telegram
+        </div>
+    </div>
+</div>
+{% endblock %}

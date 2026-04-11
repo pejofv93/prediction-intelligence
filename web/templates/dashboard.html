@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div x-data="dashboard()" x-init="init()">
+
+    <!-- Header row -->
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold">Dashboard</h1>
+            <p class="text-[#666] text-sm mt-0.5">Estado del sistema en tiempo real</p>
+        </div>
+        <a href="/pipeline/new" class="btn-accent">+ Nuevo Video</a>
+    </div>
+
+    <!-- Precios en tiempo real -->
+    <div class="card mb-6">
+        <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-[#888] uppercase tracking-widest">Precios en Vivo</h2>
+            <span class="text-xs text-[#555]" x-text="pricesRefresh"></span>
+        </div>
+        <div class="grid grid-cols-3 gap-3">
+            <template x-for="coin in ['BTC','ETH','SOL']" :key="coin">
+                <div class="bg-[#0D0D0D] rounded-lg px-3 py-3 border border-[#1a1a1a]">
+                    <div class="text-xs text-[#555] font-mono" x-text="coin"></div>
+                    <div class="text-lg font-bold text-white mt-0.5"
+                         x-text="prices[coin] ? '$' + Number(prices[coin].price).toLocaleString('en-US', {maximumFractionDigits: 0}) : '—'">
+                    </div>
+                    <div class="text-xs mt-0.5"
+                         :class="prices[coin] && prices[coin].change24h >= 0 ? 'text-green-400' : 'text-red-400'"
+                         x-text="prices[coin] ? (prices[coin].change24h >= 0 ? '+' : '') + Number(prices[coin].change24h).toFixed(2) + '%' : ''">
+                    </div>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <!-- Stats cards -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <div class="card">
+            <div class="text-xs text-[#666] uppercase tracking-widest mb-1">Total Vídeos</div>
+            <div class="text-3xl font-black accent">{{ total_videos }}</div>
+            <div class="text-xs text-[#555] mt-1">pipelines registrados</div>
+        </div>
+        <div class="card">
+            <div class="text-xs text-[#666] uppercase tracking-widest mb-1">SEO Promedio</div>
+            <div class="text-3xl font-black"
+                 style="color: {% if avg_seo >= 70 %}#4CAF50{% elif avg_seo >= 50 %}#F7931A{% else %}#F44336{% endif %}">
+                {{ avg_seo }}
+            </div>
+            <div class="text-xs text-[#555] mt-1">score / 100</div>
+        </div>
+        <div class="card">
+            <div class="text-xs text-[#666] uppercase tracking-widest mb-1">Última Publicación</div>
+            <div class="text-base font-bold text-white truncate">{{ last_published }}</div>
+            <div class="text-xs text-[#555] mt-1">último vídeo publicado</div>
+        </div>
+    </div>
+
+    <!-- Status live (Alpine polling) -->
+    <div class="card mb-6">
+        <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-[#888] uppercase tracking-widest">Estado del Sistema</h2>
+            <span class="text-xs text-[#555]" x-text="lastRefresh"></span>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-[#0D0D0D] rounded-lg px-3 py-2">
+                <div class="text-xs text-[#555]">Estado</div>
+                <div class="text-sm font-bold text-green-400" x-text="status.status || 'ok'"></div>
+            </div>
+            <div class="bg-[#0D0D0D] rounded-lg px-3 py-2">
+                <div class="text-xs text-[#555]">Pipelines hoy</div>
+                <div class="text-sm font-bold accent" x-text="status.pipelines_today ?? '…'"></div>
+            </div>
+            <div class="bg-[#0D0D0D] rounded-lg px-3 py-2">
+                <div class="text-xs text-[#555]">En ejecución</div>
+                <div class="text-sm font-bold text-yellow-400" x-text="status.pipelines_running ?? 0"></div>
+            </div>
+            <div class="bg-[#0D0D0D] rounded-lg px-3 py-2">
+                <div class="text-xs text-[#555]">Groq quota</div>
+                <div class="text-sm font-bold text-white" x-text="status.groq_quota_used || 'N/A'"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pipelines recientes -->
+    <div class="card">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold text-lg">Pipelines Recientes</h2>
+            <span class="text-xs text-[#555]">Últimos 10</span>
+        </div>
+
+        {% if pipelines %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-[#555] text-xs uppercase tracking-widest border-b border-[#1a1a1a]">
+                        <th class="text-left py-2 pr-4">ID</th>
+                        <th class="text-left py-2 pr-4">Tema</th>
+                        <th class="text-left py-2 pr-4">Modo</th>
+                        <th class="text-left py-2 pr-4">Estado</th>
+                        <th class="text-left py-2 pr-4">SEO</th>
+                        <th class="text-left py-2">Creado</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-[#141414]">
+                    {% for p in pipelines %}
+                    <tr class="hover:bg-[#111] transition-colors">
+                        <td class="py-3 pr-4">
+                            <a href="/pipeline/{{ p.id }}" class="font-mono text-xs accent hover:underline">
+                                {{ p.id[:8] }}…
+                            </a>
+                        </td>
+                        <td class="py-3 pr-4">
+                            <a href="/pipeline/{{ p.id }}" class="hover:text-[#F7931A] transition-colors truncate max-w-xs block">
+                                {{ p.topic }}
+                            </a>
+                        </td>
+                        <td class="py-3 pr-4 text-[#888]">{{ p.mode }}</td>
+                        <td class="py-3 pr-4">
+                            {% set s = p.status or 'pending' %}
+                            {% if 'completed' in s %}
+                                <span class="status-badge status-completed">done</span>
+                            {% elif s == 'running' %}
+                                <span class="status-badge status-running">running</span>
+                            {% elif s == 'error' or 'error' in s %}
+                                <span class="status-badge status-error">error</span>
+                            {% elif s == 'rejected' %}
+                                <span class="status-badge status-rejected">rechazado</span>
+                            {% elif s == 'approved' %}
+                                <span class="status-badge status-approved">aprobado</span>
+                            {% else %}
+                                <span class="status-badge status-pending">{{ s }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 pr-4">
+                            {% if p.seo_score %}
+                                <span class="font-mono text-xs {% if p.seo_score >= 70 %}text-green-400{% else %}text-red-400{% endif %}">
+                                    {{ p.seo_score }}
+                                </span>
+                            {% else %}
+                                <span class="text-[#444]">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 text-[#666] text-xs">{{ (p.created_at or '')[:16] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-center py-12 text-[#444]">
+            <div class="text-4xl mb-3">⬜</div>
+            <div class="text-sm">No hay pipelines todavía.</div>
+            <a href="/pipeline/new" class="btn-accent mt-4 inline-block text-sm">Crear primer vídeo</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function dashboard() {
+    return {
+        status: {},
+        lastRefresh: '',
+        prices: { BTC: null, ETH: null, SOL: null },
+        pricesRefresh: '',
+        async fetchStatus() {
+            try {
+                const r = await fetch('/api/status');
+                if (r.ok) {
+                    this.status = await r.json();
+                    this.lastRefresh = 'Actualizado: ' + new Date().toLocaleTimeString('es-ES');
+                }
+            } catch(e) {}
+        },
+        async fetchPrices() {
+            try {
+                const r = await fetch('/api/prices');
+                if (r.ok) {
+                    this.prices = await r.json();
+                    this.pricesRefresh = new Date().toLocaleTimeString('es-ES');
+                }
+            } catch(e) {}
+        },
+        init() {
+            this.fetchStatus();
+            this.fetchPrices();
+            setInterval(() => this.fetchStatus(), 30000);
+            setInterval(() => this.fetchPrices(), 30000);
+        }
+    }
+}
+</script>
+{% endblock %}

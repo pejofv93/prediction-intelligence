@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Historial{% endblock %}
+
+{% block content %}
+<div x-data="{ filter: '{{ filter }}' }">
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold">Historial de Videos</h1>
+            <p class="text-[#666] text-sm mt-0.5">Todos los videos publicados</p>
+        </div>
+        <!-- Filtro de fecha -->
+        <form method="get" action="/history" class="flex gap-2 items-center">
+            <select name="filter" onchange="this.form.submit()"
+                    class="bg-[#141414] border border-[#333] text-sm rounded px-3 py-1.5 text-white focus:outline-none focus:border-[#F7931A]">
+                <option value="todos" {% if filter == 'todos' %}selected{% endif %}>Todos</option>
+                <option value="hoy" {% if filter == 'hoy' %}selected{% endif %}>Hoy</option>
+                <option value="semana" {% if filter == 'semana' %}selected{% endif %}>Esta semana</option>
+                <option value="mes" {% if filter == 'mes' %}selected{% endif %}>Este mes</option>
+            </select>
+        </form>
+    </div>
+
+    <div class="card">
+        {% if videos %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-[#555] text-xs uppercase tracking-widest border-b border-[#1a1a1a]">
+                        <th class="text-left py-2 pr-4">Titulo</th>
+                        <th class="text-left py-2 pr-4">Fecha</th>
+                        <th class="text-left py-2 pr-4">YouTube</th>
+                        <th class="text-left py-2 pr-4">TikTok</th>
+                        <th class="text-left py-2 pr-4">SEO</th>
+                        <th class="text-left py-2">Estado</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-[#141414]">
+                    {% for v in videos %}
+                    <tr class="hover:bg-[#111] transition-colors">
+                        <td class="py-3 pr-4 max-w-xs">
+                            <a href="/pipeline/{{ v.id }}" class="hover:text-[#F7931A] truncate block">
+                                {{ v.topic or 'Sin titulo' }}
+                            </a>
+                            <div class="text-xs text-[#555]">{{ v.mode or '' }}</div>
+                        </td>
+                        <td class="py-3 pr-4 text-[#888] text-xs font-mono whitespace-nowrap">
+                            {{ (v.created_at or '')[:16] }}
+                        </td>
+                        <td class="py-3 pr-4">
+                            {% if v.youtube_url %}
+                            <a href="{{ v.youtube_url }}" target="_blank" class="text-[#F7931A] hover:underline text-xs">Ver</a>
+                            {% else %}
+                            <span class="text-[#444] text-xs">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 pr-4">
+                            {% if v.tiktok_url %}
+                            <a href="{{ v.tiktok_url }}" target="_blank" class="text-[#F7931A] hover:underline text-xs">Ver</a>
+                            {% else %}
+                            <span class="text-[#444] text-xs">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 pr-4">
+                            {% if v.seo_score %}
+                            <span class="font-mono text-xs {% if v.seo_score >= 70 %}text-green-400{% else %}text-red-400{% endif %}">{{ v.seo_score }}</span>
+                            {% else %}
+                            <span class="text-[#444]">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3">
+                            {% set s = v.status or 'pending' %}
+                            {% if 'completed' in s %}
+                                <span class="status-badge status-completed">done</span>
+                            {% elif 'error' in s %}
+                                <span class="status-badge status-error">error</span>
+                            {% elif s == 'approved' %}
+                                <span class="status-badge status-approved">aprobado</span>
+                            {% else %}
+                                <span class="status-badge status-pending">{{ s }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="text-xs text-[#555] mt-3">{{ videos|length }} video(s) mostrados</div>
+        {% else %}
+        <div class="text-center py-16 text-[#444]">
+            <div class="text-5xl mb-4 opacity-30">&#128250;</div>
+            <div class="text-sm">No hay videos en el historial para este filtro.</div>
+            <a href="/history?filter=todos" class="btn-ghost mt-4 inline-block text-sm">Ver todos</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

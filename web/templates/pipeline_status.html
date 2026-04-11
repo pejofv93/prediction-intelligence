@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Pipeline · Estado{% endblock %}
+
+{% block content %}
+<div x-data="pipelineStatus()" x-init="init()">
+
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold">Estado del Pipeline</h1>
+            <p class="text-[#666] text-sm mt-0.5">24 agentes · logs en tiempo real</p>
+        </div>
+        <a href="/pipeline/new" class="btn-accent">+ Ejecutar pipeline</a>
+    </div>
+
+    <!-- Agentes grid -->
+    <div class="card mb-6">
+        <h2 class="text-sm font-semibold text-[#888] uppercase tracking-widest mb-4">Estado de Agentes</h2>
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+            {% for agent in agents %}
+            <div class="bg-[#0D0D0D] rounded-lg px-3 py-2 border border-[#1a1a1a]">
+                <div class="text-xs font-mono font-bold
+                    {% if agent.status == 'OK' %}text-green-400
+                    {% elif agent.status == 'ERROR' %}text-red-400
+                    {% elif agent.status == 'RUNNING' %}text-yellow-400
+                    {% else %}text-[#555]{% endif %}">
+                    {{ agent.name }}
+                </div>
+                <div class="text-[10px] text-[#444] mt-0.5">{{ agent.layer }}</div>
+                <div class="text-[10px] mt-1
+                    {% if agent.status == 'OK' %}text-green-400
+                    {% elif agent.status == 'ERROR' %}text-red-400
+                    {% elif agent.status == 'RUNNING' %}text-yellow-400
+                    {% else %}text-[#555]{% endif %}">
+                    {{ agent.status }}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Logs recientes -->
+    <div class="card">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold text-lg">Logs Recientes</h2>
+            <button @click="fetchLogs()" class="btn-ghost btn-sm text-xs">Actualizar</button>
+        </div>
+        <div class="bg-[#0A0A0A] rounded-lg p-3 font-mono text-xs overflow-y-auto max-h-96 space-y-1" id="log-container">
+            <template x-for="(line, i) in logs" :key="i">
+                <div :class="{
+                    'text-red-400': line.level === 'ERROR',
+                    'text-yellow-400': line.level === 'WARNING',
+                    'text-green-400': line.level === 'INFO' && line.agent === 'NEXUS',
+                    'text-[#888]': line.level === 'INFO' && line.agent !== 'NEXUS',
+                    'text-[#444]': line.level === 'DEBUG'
+                }">
+                    <span class="text-[#555]" x-text="line.ts"></span>
+                    <span class="text-[#F7931A]" x-text="' [' + line.agent + '] '"></span>
+                    <span x-text="line.message"></span>
+                </div>
+            </template>
+            <div x-show="logs.length === 0" class="text-[#444] py-4 text-center">Sin logs registrados todavia.</div>
+        </div>
+        <div class="text-xs text-[#555] mt-2" x-text="'Ultima actualizacion: ' + lastRefresh"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function pipelineStatus() {
+    return {
+        logs: [],
+        lastRefresh: '—',
+        async fetchLogs() {
+            try {
+                const r = await fetch('/api/logs');
+                if (r.ok) {
+                    this.logs = await r.json();
+                    this.lastRefresh = new Date().toLocaleTimeString('es-ES');
+                    const c = document.getElementById('log-container');
+                    if (c) c.scrollTop = c.scrollHeight;
+                }
+            } catch(e) {}
+        },
+        init() {
+            this.fetchLogs();
+            setInterval(() => this.fetchLogs(), 15000);
+        }
+    }
+}
+</script>
+{% endblock %}

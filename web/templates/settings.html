@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Configuracion{% endblock %}
+
+{% block content %}
+<div x-data="settingsPage()">
+
+    <div class="mb-6">
+        <h1 class="text-2xl font-bold">Configuracion</h1>
+        <p class="text-[#666] text-sm mt-0.5">Ajustes del sistema NEXUS</p>
+    </div>
+
+    {% if saved %}
+    <div class="mb-4 px-4 py-3 bg-green-900/30 border border-green-700 rounded-lg text-green-400 text-sm">
+        Configuracion guardada correctamente.
+    </div>
+    {% endif %}
+
+    {% if error %}
+    <div class="mb-4 px-4 py-3 bg-red-900/30 border border-red-700 rounded-lg text-red-400 text-sm">
+        Error: {{ error }}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/settings" class="space-y-6">
+
+        <!-- Claves API -->
+        <div class="card">
+            <h2 class="font-semibold mb-4">Claves API</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs text-[#888] mb-1 uppercase tracking-wider">GROQ API Key</label>
+                    <input type="password" name="groq_api_key" placeholder="gsk_..."
+                           value="{{ settings.groq_api_key or '' }}"
+                           class="w-full bg-[#0D0D0D] border border-[#333] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#F7931A] font-mono">
+                    <div class="text-xs text-[#555] mt-1">Dejar vacio para no cambiar</div>
+                </div>
+                <div>
+                    <label class="block text-xs text-[#888] mb-1 uppercase tracking-wider">Pexels API Key</label>
+                    <input type="password" name="pexels_api_key" placeholder="..."
+                           value="{{ settings.pexels_api_key or '' }}"
+                           class="w-full bg-[#0D0D0D] border border-[#333] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#F7931A] font-mono">
+                </div>
+                <div>
+                    <label class="block text-xs text-[#888] mb-1 uppercase tracking-wider">Telegram Bot Token</label>
+                    <input type="password" name="telegram_bot_token" placeholder="123456:ABC..."
+                           value="{{ settings.telegram_bot_token or '' }}"
+                           class="w-full bg-[#0D0D0D] border border-[#333] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#F7931A] font-mono">
+                </div>
+                <div>
+                    <label class="block text-xs text-[#888] mb-1 uppercase tracking-wider">Telegram Chat ID</label>
+                    <input type="text" name="telegram_chat_id" placeholder="-100123456789"
+                           value="{{ settings.telegram_chat_id or '' }}"
+                           class="w-full bg-[#0D0D0D] border border-[#333] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#F7931A] font-mono">
+                </div>
+            </div>
+        </div>
+
+        <!-- Seguridad -->
+        <div class="card">
+            <h2 class="font-semibold mb-4">Seguridad y Acceso</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs text-[#888] mb-1 uppercase tracking-wider">PIN del Panel Web</label>
+                    <input type="password" name="web_pin" placeholder="Nuevo PIN"
+                           class="w-full bg-[#0D0D0D] border border-[#333] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#F7931A] font-mono">
+                    <div class="text-xs text-[#555] mt-1">PIN actual: {{ settings.web_pin_masked or '****' }} — Dejar vacio para no cambiar</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pipeline -->
+        <div class="card">
+            <h2 class="font-semibold mb-4">Pipeline Automatico</h2>
+            <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <div class="text-sm font-medium">Modo automatico</div>
+                        <div class="text-xs text-[#555]">NEXUS ejecuta pipelines automaticamente segun KAIROS</div>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" name="auto_mode" value="1"
+                               {% if settings.auto_mode %}checked{% endif %}
+                               class="sr-only peer">
+                        <div class="w-11 h-6 bg-[#333] peer-focus:outline-none rounded-full peer
+                                    peer-checked:after:translate-x-full peer-checked:bg-[#F7931A]
+                                    after:content-[''] after:absolute after:top-[2px] after:left-[2px]
+                                    after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                    </label>
+                </div>
+                <div>
+                    <label class="block text-xs text-[#888] mb-1 uppercase tracking-wider">Horario pipeline (cron)</label>
+                    <input type="text" name="pipeline_schedule" placeholder="0 9,14,20 * * *"
+                           value="{{ settings.pipeline_schedule or '0 9,14,20 * * *' }}"
+                           class="w-full bg-[#0D0D0D] border border-[#333] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-[#F7931A] font-mono">
+                    <div class="text-xs text-[#555] mt-1">Formato cron — 0 9,14,20 * * * = 3 veces al dia (9h, 14h, 20h)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Guardar -->
+        <div class="flex justify-end gap-3">
+            <a href="/dashboard" class="btn-ghost">Cancelar</a>
+            <button type="submit" class="btn-accent">Guardar configuracion</button>
+        </div>
+
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function settingsPage() {
+    return {}
+}
+</script>
+{% endblock %}

@@ -1,0 +1,62 @@
+# ── Modelos de IA pesados (no necesarios en producción) ─────────────────────
+latsync
+liveportrait
+sadtalker
+heygem
+modal_app
+
+# ── Output generado (Railway usa volumen persistente en /app/output) ─────────
+output
+output/
+output/**
+
+# ── Base de datos local (se crea nueva en Railway) ───────────────────────────
+cryptoverdad.db
+
+# ── Credenciales locales (se inyectan como env vars) ─────────────────────────
+.env
+token.json
+client_secrets.json
+
+# ── Cache Python (todos los niveles) ─────────────────────────────────────────
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Archivos de media (no subir binarios grandes al build context) ────────────
+*.mp4
+*.mp3
+*.wav
+*.avi
+*.mkv
+
+# ── Archivos de desarrollo y test ────────────────────────────────────────────
+test_*.py
+run_*.py
+fix_*.py
+SESION2.md
+*.md
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ── IDEs y OS ─────────────────────────────────────────────────────────────────
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Entornos virtuales ────────────────────────────────────────────────────────
+.venv
+venv
+env
+*.egg-info
+dist
+build

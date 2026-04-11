@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  nexus:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./output:/app/output
+      - ./cryptoverdad.db:/app/cryptoverdad.db
+    restart: unless-stopped

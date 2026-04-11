@@ -1,0 +1,49 @@
+channel:
+  name: CryptoVerdad
+  handle: "@CryptoVerdad"
+  tagline: "Crypto sin humo. Análisis real, opinión directa."
+
+colors:
+  background: "#0A0A0A"
+  accent: "#F7931A"
+  text: "#FFFFFF"
+
+voice:
+  engine: edge-tts
+  voice: es-ES-AlvaroNeural
+
+llm:
+  primary: groq
+  model: llama-3.3-70b-versatile
+  fallback: ollama
+  fallback_model: llama3.2
+
+video:
+  youtube_resolution: [1280, 720]
+  shorts_resolution: [1080, 1920]
+  fps: 30
+
+seo:
+  min_score: 70
+  min_description_words: 300
+  max_title_chars: 60
+  tags_min: 5
+  tags_max: 7
+
+legal_trigger_words:
+  - comprar
+  - vender
+  - invertir
+  - bullish
+  - bearish
+  - all-in
+  - acumular
+  - entrada
+  - salida
+
+database:
+  path: cryptoverdad.db
+
+web:
+  port: 8080
+  pin: "1234"

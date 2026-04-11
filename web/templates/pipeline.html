@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% block title %}Pipeline {{ pipeline_id[:8] }}{% endblock %}
+
+{% block content %}
+<div x-data="pipelineView('{{ pipeline_id }}')" x-init="init()">
+
+    <!-- Header -->
+    <div class="flex items-start justify-between mb-6">
+        <div>
+            <div class="flex items-center gap-2 mb-1">
+                <a href="/dashboard" class="text-[#555] hover:accent text-sm">← Dashboard</a>
+                <span class="text-[#333]">/</span>
+                <span class="font-mono text-xs text-[#666]">{{ pipeline_id[:8] }}…</span>
+            </div>
+            <h1 class="text-xl font-bold">{{ pipeline.topic or 'Pipeline' }}</h1>
+            <p class="text-[#666] text-sm mt-0.5">Modo: <span class="accent">{{ pipeline.mode or '—' }}</span></p>
+        </div>
+        <div class="text-right">
+            {% set s = pipeline.status or 'pending' %}
+            {% if 'completed' in s %}
+                <span class="status-badge status-completed text-sm px-3 py-1">Completado</span>
+            {% elif s == 'running' %}
+                <span class="status-badge status-running text-sm px-3 py-1">En ejecución</span>
+            {% elif s == 'error' or 'error' in s %}
+                <span class="status-badge status-error text-sm px-3 py-1">Error</span>
+            {% elif s == 'rejected' %}
+                <span class="status-badge status-rejected text-sm px-3 py-1">Rechazado</span>
+            {% elif s == 'approved' %}
+                <span class="status-badge status-approved text-sm px-3 py-1">Aprobado</span>
+            {% else %}
+                <span class="status-badge status-pending text-sm px-3 py-1">{{ s }}</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Progress bar — capas -->
+    <div class="card mb-6">
+        <div class="text-xs text-[#555] uppercase tracking-widest mb-4">Progreso del Pipeline</div>
+        <div class="flex items-center gap-0">
+            {% set layers = [
+                ('ORÁCULO', 'oracle'),
+                ('FORGE', 'forge'),
+                ('REVIEW', 'review'),
+                ('HERALD', 'herald'),
+                ('MIND', 'mind')
+            ] %}
+            {% for label, key in layers %}
+            <div class="flex-1 flex flex-col items-center">
+                <div class="w-full h-2 rounded-full mb-2 transition-all duration-500"
+                     :class="getLayerClass('{{ key }}')"
+                     style="background:#222;">
+                    <div class="h-full rounded-full transition-all duration-700"
+                         :style="getLayerStyle('{{ key }}')"></div>
+                </div>
+                <div class="text-xs font-mono font-bold"
+                     :class="getLayerTextClass('{{ key }}')">{{ label }}</div>
+            </div>
+            {% if not loop.last %}
+            <div class="w-4 h-px bg-[#333] shrink-0 mb-5"></div>
+            {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        <!-- Log en tiempo real -->
+        <div class="card flex flex-col">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="font-semibold">Log en tiempo real</h2>
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 rounded-full"
+                         :class="polling ? 'bg-green-400 animate-pulse' : 'bg-[#333]'"></div>
+                    <span class="text-xs text-[#555]" x-text="polling ? 'Live' : 'Detenido'"></span>
+                </div>
+            </div>
+            <div
+                id="log-container"
+                class="bg-[#080808] rounded-lg p-3 font-mono text-xs text-[#aaa] flex-1 overflow-y-auto"
+                style="min-height: 200px; max-height: 350px;"
+                x-ref="logBox"
+            >
+                {% if pipeline.log %}
+                    {% for line in pipeline.log %}
+                    <div class="py-0.5 {% if '[ERROR]' in line or '[FATAL]' in line %}text-red-400{% elif '[WARN]' in line %}text-yellow-400{% elif 'completado' in line.lower() or 'ok' in line.lower() %}text-green-400{% else %}text-[#666]{% endif %}">{{ line }}</div>
+                    {% endfor %}
+                {% else %}
+                <div class="text-[#444]">Esperando logs...</div>
+                {% endif %}
+                <template x-for="(line, i) in liveLog" :key="i">
+                    <div
+                        class="py-0.5"
+                        :class="{
+                            'text-red-400': line.includes('[ERROR]') || line.includes('[FATAL]'),
+                            'text-yellow-400': line.includes('[WARN]'),
+                            'text-green-400': line.toLowerCase().includes('completado') || line.toLowerCase().includes('ok'),
+                            'text-[#666]': !line.includes('[ERROR]') && !line.includes('[FATAL]') && !line.includes('[WARN]') && !line.toLowerCase().includes('completado')
+                        }"
+                        x-text="line"
+                    ></div>
+                </template>
+            </div>
+        </div>
+
+        <!-- Estado y acciones -->
+        <div class="space-y-4">
+
+            <!-- Info del pipeline -->
+            <div class="card">
+                <h2 class="font-semibold mb-3">Información</h2>
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between">
+                        <span class="text-[#666]">ID</span>
+                        <span class="font-mono text-xs text-[#888]">{{ pipeline_id[:8] }}…</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[#666]">Estado</span>
+                        <span x-text="currentStatus" class="font-semibold"></span>
+                    </div>
+                    {% if pipeline.youtube_url %}
+                    <div class="flex justify-between">
+                        <span class="text-[#666]">YouTube</span>
+                        <a href="{{ pipeline.youtube_url }}" target="_blank" class="accent hover:underline text-xs truncate max-w-xs">{{ pipeline.youtube_url }}</a>
+                    </div>
+                    {% endif %}
+                    {% if pipeline.tiktok_url %}
+                    <div class="flex justify-between">
+                        <span class="text-[#666]">TikTok</span>
+                        <a href="{{ pipeline.tiktok_url }}" target="_blank" class="accent hover:underline text-xs">{{ pipeline.tiktok_url }}</a>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Botones Aprobar / Rechazar -->
+            <div x-show="showReviewButtons" class="card border border-[#F7931A]/30">
+                <div class="text-sm font-semibold mb-3">
+                    <span class="accent">Revisión requerida</span>
+                    <p class="text-xs text-[#666] font-normal mt-1">El guión está listo. Revísalo y decide.</p>
+                </div>
+                <div class="flex gap-3">
+                    <form method="POST" action="/pipeline/{{ pipeline_id }}/approve" class="flex-1">
+                        <button type="submit" class="btn-accent w-full py-2.5 text-sm">
+                            Aprobar y publicar
+                        </button>
+                    </form>
+                    <form method="POST" action="/pipeline/{{ pipeline_id }}/reject" class="flex-1">
+                        <button type="submit"
+                            class="w-full py-2.5 text-sm font-bold border border-red-600/50 text-red-400 rounded-lg hover:bg-red-900/20 transition-colors">
+                            Rechazar
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Guión preview -->
+    <div x-show="liveScript || {{ '\"' + (pipeline.script|default('')|replace('"', '\\"')) + '\"' }}" class="card mt-6">
+        <h2 class="font-semibold mb-3">Preview del Guión</h2>
+        <div class="bg-[#080808] rounded-lg p-4 text-sm text-[#ccc] whitespace-pre-wrap font-mono leading-relaxed overflow-y-auto" style="max-height: 400px;"
+             x-text="liveScript || '{{ pipeline.script|default('')|replace("'", "\\'")|replace('\n', '\\n') }}'">
+        </div>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function pipelineView(pipelineId) {
+    return {
+        pipelineId: pipelineId,
+        currentStatus: '{{ pipeline.status or "pending" }}',
+        liveLog: [],
+        liveScript: '',
+        polling: false,
+        pollInterval: null,
+        showReviewButtons: false,
+
+        layers: {
+            oracle: 0,
+            forge: 0,
+            review: 0,
+            herald: 0,
+            mind: 0,
+        },
+
+        getLayerClass(key) {
+            return 'bg-[#222]';
+        },
+        getLayerStyle(key) {
+            const val = this.layers[key] || 0;
+            const color = val === 100 ? '#4CAF50' : val > 0 ? '#F7931A' : '#222';
+            return `width: ${val}%; background: ${color};`;
+        },
+        getLayerTextClass(key) {
+            const val = this.layers[key] || 0;
+            if (val === 100) return 'text-green-400';
+            if (val > 0) return 'accent text-[#F7931A]';
+            return 'text-[#444]';
+        },
+
+        updateLayersFromLog(log) {
+            const joined = log.join(' ').toLowerCase();
+            const allLog = joined;
+            if (allLog.includes('oráculo') || allLog.includes('oracle') || allLog.includes('oraculo')) {
+                this.layers.oracle = 100;
+            }
+            if (allLog.includes('forge')) {
+                this.layers.forge = 100;
+            }
+            if (allLog.includes('review') || allLog.includes('revisión')) {
+                this.layers.review = 100;
+            }
+            if (allLog.includes('herald') || allLog.includes('publicando')) {
+                this.layers.herald = 100;
+            }
+            if (allLog.includes('mind') || allLog.includes('aprendizaje')) {
+                this.layers.mind = 100;
+            }
+            // If running, show current layer at 50%
+            const status = this.currentStatus;
+            if (status === 'running') {
+                if (!this.layers.oracle) this.layers.oracle = 50;
+                else if (!this.layers.forge) this.layers.forge = 50;
+                else if (!this.layers.review) this.layers.review = 50;
+                else if (!this.layers.herald) this.layers.herald = 50;
+                else if (!this.layers.mind) this.layers.mind = 50;
+            }
+            if (status === 'completed' || status === 'completed_with_errors') {
+                this.layers = { oracle: 100, forge: 100, review: 100, herald: 100, mind: 100 };
+            }
+        },
+
+        async poll() {
+            try {
+                const r = await fetch(`/api/pipeline/${this.pipelineId}`);
+                if (!r.ok) return;
+                const data = await r.json();
+                this.currentStatus = data.status;
+                if (data.log && data.log.length > 0) {
+                    this.liveLog = data.log;
+                    this.$nextTick(() => {
+                        const box = this.$refs.logBox;
+                        if (box) box.scrollTop = box.scrollHeight;
+                    });
+                }
+                if (data.script) this.liveScript = data.script;
+                this.updateLayersFromLog(this.liveLog);
+
+                // Show review buttons when forge done and not yet approved/rejected
+                const needsReview = !['urgente'].includes('{{ pipeline.mode }}')
+                    && data.script
+                    && !data.approved
+                    && !['approved', 'rejected', 'completed', 'completed_with_errors'].includes(data.status);
+                this.showReviewButtons = needsReview;
+
+                // Stop polling when terminal state
+                if (['completed', 'completed_with_errors', 'error', 'rejected', 'approved'].includes(data.status)) {
+                    this.stopPolling();
+                }
+            } catch(e) {}
+        },
+
+        startPolling() {
+            this.polling = true;
+            this.pollInterval = setInterval(() => this.poll(), 2000);
+        },
+        stopPolling() {
+            this.polling = false;
+            if (this.pollInterval) clearInterval(this.pollInterval);
+        },
+
+        init() {
+            const terminalStates = ['completed', 'completed_with_errors', 'error', 'rejected'];
+            if (!terminalStates.includes(this.currentStatus)) {
+                this.startPolling();
+            }
+            this.updateLayersFromLog([]);
+        }
+    }
+}
+</script>
+{% endblock %}
