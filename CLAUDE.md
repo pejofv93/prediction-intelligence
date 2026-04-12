@@ -11,8 +11,11 @@ LLM: Groq (llama-3.3-70b-versatile) + Ollama fallback
 Noticias: feedparser + Google News RSS
 Precios: CoinGecko API pública
 Twitter/X: Nitter RSS + Playwright
-Voz: edge-tts AlvaroNeural
-Vídeo: MoviePy + ffmpeg (SadTalker en semana 2)
+Voz: Kokoro TTS (kokoro-onnx, local ONNX) → edge-tts → pyttsx3 → silencio
+  Kokoro voces ES: em_alex > em_santa > ef_dora (hexgrad/Kokoro-82M)
+  Modelos (~310MB) en output/models/ — lazy download en primer uso
+  edge-tts y ElevenLabs bloqueados por Railway IPs (403 / Paid Subscription)
+Vídeo: MoviePy + ffmpeg
 Stock video: Pexels Videos API
 Gráficos: Matplotlib + mplfinance → MP4
 Thumbnails: Pillow
@@ -38,9 +41,9 @@ CLI: rich (siempre)
 🟢 FORGE:
   CALÍOPE    → caliope.py    — ScriptWriter 7 modos
   HERMES     → hermes.py     — SEO Engine completo
-  ECHO       → echo.py       — Voz edge-tts + .srt
-  HEPHAESTUS → hephaestus.py — VideoEngine 4 capas
-  IRIS       → iris.py       — Thumbnails A/B
+  ECHO       → echo.py       — Voz Kokoro TTS + cadena fallback
+  HEPHAESTUS → hephaestus.py — VideoEngine 4 capas (1920x1080 garantizado)
+  IRIS       → iris.py       — Thumbnails A/B (compatible Railway RGBA)
   DAEDALUS   → daedalus.py   — Gráficos animados
 
 🟡 HERALD:
@@ -142,12 +145,12 @@ YOUTUBE_TOKEN_B64 (token.json local codificado en base64 — refresh_token activ
 Pendiente: COINGECKO_API_KEY (pro), FAL_KEY (saldo), YOUTUBE_CLIENT_SECRET_PATH (AGORA)
 
 ## Próximos pasos (orden sugerido)
-1. Verificar primer vídeo real a las 18:00 UTC — revisar Railway logs:
-   railway logs --tail 200
-   Confirmar: OLYMPUS token refrescado ✓ · publicado https://youtu.be/xxxxx ✓
+1. Verificar Kokoro TTS en primer pipeline (2026-04-13 18:00 UTC):
+   railway logs --tail 100 | grep -E "(Kokoro|Motor|engine)"
+   Confirmar: "Motor: Kokoro (em_alex)" en logs — audio con voz real
 2. Cambiar OLYMPUS privacyStatus a "public" cuando el vídeo se vea correcto en YouTube
 3. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py para verificar
-4. RAPID/TikTok — añadir tiktok-uploader a requirements.txt + subir cookies
+4. RAPID/TikTok — subir cookies tiktok-uploader para publicación automática
 5. BOT TELEGRAM privado (comandos /estado, /forzar, /parar)
 6. AGORA — configurar YOUTUBE_CLIENT_SECRET_PATH en Railway para responder comentarios
 
@@ -518,5 +521,49 @@ Objetivo: vídeos largos de 8-12 minutos, Shorts de 45-60 segundos independiente
 - KAIROS scheduled: primer pipeline real a las 18:00 UTC (sábado → 12:00)
   Nota: KAIROS detectó sábado → hora óptima 12:00 → próximo día domingo 12:00
 - Pendiente confirmar: OLYMPUS sube vídeo correctamente en primer pipeline real
+
+### Sesión 2026-04-12 — 3 bugs de producción + Kokoro TTS
+
+#### Contexto
+Pipeline en Railway publicaba vídeos con audio silencioso, sin thumbnail y
+posible resolución incorrecta. Diagnóstico desde logs Railway + fixes aplicados.
+
+#### BUG 1 RESUELTO — Audio silencioso (ECHO)
+- Causa raíz 1: ElevenLabs SDK v1.x devuelve `bytes` directamente, no generador.
+  `for chunk in bytes_obj` itera enteros → `f.write(int)` → TypeError → excepción
+  silenciosa → fallback silencio-ffmpeg.
+- Causa raíz 2 (definitiva): edge-tts bloqueado 403 en IPs Railway (Microsoft rate limit).
+  ElevenLabs bloqueado también: "Paid Subscription to continue" (IPs Railway baneadas).
+- Fix definitivo: cadena TTS reemplazada por Kokoro TTS como motor principal:
+  Kokoro (ONNX local, sin red) → edge-tts → pyttsx3+espeak-ng → silencio-ffmpeg
+- Kokoro: kokoro-onnx + soundfile + huggingface_hub instalados en Dockerfile
+  Voces ES: em_alex > em_santa > ef_dora (hexgrad/Kokoro-82M)
+  Velocidad por modo: urgente=1.15, noticia=1.10, analisis=0.92, educativo=0.88
+  Modelos (~310MB) descargados en primer uso → output/models/ (volumen persistente)
+  Singleton _kokoro_instance: carga ONNX una sola vez por sesión de Railway
+  WAV temporal en OUTPUT_AUDIO_DIR → ffmpeg → MP3 final
+- _synthesize_pyttsx3(): busca voz española por id/name, velocidad por modo
+- wget no disponible en python:3.11-slim → lazy download con huggingface_hub
+
+#### BUG 2 RESUELTO — Thumbnail no generada (IRIS)
+- Causa raíz: Image.alpha_composite() puede fallar en Railway/Debian sin RGBA completo.
+- Fix: _apply_dark_overlay() reescrita usando paste+mask RGB (sin RGBA):
+  overlay RGB negro + mask "L" con valor alpha → Image.paste(overlay, mask=mask)
+- Fix adicional: _save_thumbnail() ahora logea traceback completo con traceback.format_exc()
+
+#### BUG 3 RESUELTO — Resolución 1920x1080 garantizada (HEPHAESTUS)
+- Causa raíz: _compose_analisis, _compose_educativo, _compose_noticiario (con y sin
+  avatar) llamaban _write_clip() sin force_size → resolución dependía del VideoClip
+- Fix: force_size=RES_MAIN en los 4 _write_clip de composición principal
+- Fix extra: force_size=RES_SHORT en _compose_short_vertical (garantiza 1080x1920)
+
+#### Estado al cierre de sesión 2026-04-12
+- Container activo desde ~20:30 UTC con código Kokoro (commit 47d8463)
+- Kokoro modelos NO descargados aún (primer pipeline los descargará automáticamente)
+- KAIROS: próximo pipeline 2026-04-13 18:00 UTC
+- Pipelines completados hoy: 3 (e2dce41a, 33f27866, 53b2a094) — todos con silencio-ffmpeg
+  Mañana debe ser el primer pipeline con audio real (Kokoro)
+- Vídeos publicados en modo privado en YouTube ✓
+- Pendiente verificar: voz Kokoro audible en próximo pipeline
 
 ### Sesión 2026-04-04 — SadTalker integrado (obsoleto, ver arriba)
