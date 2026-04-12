@@ -45,16 +45,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install tiktok-uploader gTTS==2.5.1 google-generativeai elevenlabs
 
 # Kokoro TTS — motor de voz local, sin API, funciona offline en Railway
-RUN pip install kokoro-onnx soundfile
-
-# Descargar modelos Kokoro durante el build (evita latencia en producción)
-# hexgrad/Kokoro-82M es público en HuggingFace (~300MB onnx + ~10MB voices)
-RUN mkdir -p /app/models && \
-    wget -q -O /app/models/kokoro-v0_19.onnx \
-      "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/kokoro-v0_19.onnx" && \
-    wget -q -O /app/models/voices.bin \
-      "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/voices.bin" && \
-    echo "Kokoro models downloaded: $(du -sh /app/models/)"
+# Los modelos (~310MB) se descargan en primer uso al volumen persistente /app/output/models/
+RUN pip install kokoro-onnx soundfile huggingface_hub
 
 # Playwright (chromium para tiktok-uploader) — deps instalados manualmente arriba
 RUN playwright install chromium

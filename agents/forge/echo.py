@@ -449,8 +449,10 @@ class ECHO(BaseAgent):
 
     # Singleton para no recargar el modelo ONNX en cada pipeline
     _kokoro_instance = None
-    _KOKORO_MODEL = "/app/models/kokoro-v0_19.onnx"
-    _KOKORO_VOICES = "/app/models/voices.bin"
+    # Modelos en volumen persistente Railway — persisten entre redeploys
+    _KOKORO_DIR    = Path(__file__).resolve().parents[2] / "output" / "models"
+    _KOKORO_MODEL  = str(_KOKORO_DIR / "kokoro-v0_19.onnx")
+    _KOKORO_VOICES = str(_KOKORO_DIR / "voices.bin")
 
     # Voces españolas en orden de preferencia (masculino → femenino)
     _KOKORO_ES_VOICES = ["em_alex", "em_santa", "ef_dora"]
@@ -466,9 +468,40 @@ class ECHO(BaseAgent):
     }
 
     @classmethod
+    def _ensure_kokoro_models(cls) -> None:
+        """
+        Descarga kokoro-v0_19.onnx y voices.bin desde HuggingFace si no existen.
+        Los guarda en output/models/ (volumen persistente Railway).
+        Solo descarga una vez — persisten entre redeploys gracias al volumen.
+        """
+        cls._KOKORO_DIR.mkdir(parents=True, exist_ok=True)
+        model_path  = Path(cls._KOKORO_MODEL)
+        voices_path = Path(cls._KOKORO_VOICES)
+
+        if model_path.exists() and voices_path.exists():
+            return  # ya descargados
+
+        from huggingface_hub import hf_hub_download  # type: ignore
+        import shutil
+
+        REPO = "hexgrad/Kokoro-82M"
+        console.print("[yellow]Kokoro: descargando modelos desde HuggingFace (primera vez ~310MB)...[/]")
+        if not model_path.exists():
+            console.print("[dim]  → kokoro-v0_19.onnx (~300MB)...[/]")
+            tmp = hf_hub_download(REPO, "kokoro-v0_19.onnx")
+            shutil.copy(tmp, cls._KOKORO_MODEL)
+            console.print(f"[green]  ✓ kokoro-v0_19.onnx guardado en {cls._KOKORO_MODEL}[/]")
+        if not voices_path.exists():
+            console.print("[dim]  → voices.bin (~10MB)...[/]")
+            tmp = hf_hub_download(REPO, "voices.bin")
+            shutil.copy(tmp, cls._KOKORO_VOICES)
+            console.print(f"[green]  ✓ voices.bin guardado en {cls._KOKORO_VOICES}[/]")
+
+    @classmethod
     def _get_kokoro(cls):
-        """Carga Kokoro una sola vez (singleton) para reutilizar el modelo ONNX."""
+        """Descarga modelos si no existen, luego carga Kokoro (singleton ONNX)."""
         if cls._kokoro_instance is None:
+            cls._ensure_kokoro_models()
             from kokoro_onnx import Kokoro  # type: ignore
             cls._kokoro_instance = Kokoro(cls._KOKORO_MODEL, cls._KOKORO_VOICES)
         return cls._kokoro_instance
