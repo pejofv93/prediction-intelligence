@@ -445,6 +445,111 @@ class ECHO(BaseAgent):
                         _time.sleep(3)  # espera breve antes de reintentar misma voz
         raise last_exc
 
+    # ── Kokoro TTS (motor principal offline, sin API) ─────────────────────────
+
+    # Singleton para no recargar el modelo ONNX en cada pipeline
+    _kokoro_instance = None
+    _KOKORO_MODEL = "/app/models/kokoro-v0_19.onnx"
+    _KOKORO_VOICES = "/app/models/voices.bin"
+
+    # Voces españolas en orden de preferencia (masculino → femenino)
+    _KOKORO_ES_VOICES = ["em_alex", "em_santa", "ef_dora"]
+
+    # Mapa de velocidad por modo (Kokoro speed: 1.0 = normal)
+    _KOKORO_SPEED_MAP = {
+        "urgente":   1.15,
+        "noticia":   1.10,
+        "analisis":  0.92,
+        "standard":  0.92,
+        "educativo": 0.88,
+        "tutorial":  0.88,
+    }
+
+    @classmethod
+    def _get_kokoro(cls):
+        """Carga Kokoro una sola vez (singleton) para reutilizar el modelo ONNX."""
+        if cls._kokoro_instance is None:
+            from kokoro_onnx import Kokoro  # type: ignore
+            cls._kokoro_instance = Kokoro(cls._KOKORO_MODEL, cls._KOKORO_VOICES)
+        return cls._kokoro_instance
+
+    def _synthesize_kokoro(self, text: str, output_path: str, mode: str = "") -> str:
+        """
+        Síntesis local con Kokoro TTS (ONNX, sin red).
+        Genera WAV en temp, convierte a MP3 con ffmpeg.
+        Devuelve el nombre de voz usado.
+
+        Requiere /app/models/kokoro-v0_19.onnx y /app/models/voices.bin
+        descargados durante el build del Docker.
+        """
+        import subprocess
+        import tempfile
+        import numpy as np
+        import soundfile as sf  # type: ignore
+
+        # Verificar que los modelos existen
+        if not Path(self._KOKORO_MODEL).exists():
+            raise FileNotFoundError(f"Modelo Kokoro no encontrado: {self._KOKORO_MODEL}")
+
+        kokoro = self._get_kokoro()
+        speed = self._KOKORO_SPEED_MAP.get(mode, 0.95)
+
+        # Intentar voces españolas en orden
+        last_err = Exception("sin intentos")
+        samples = None
+        sample_rate = 24000
+        voice_used = ""
+
+        for voice in self._KOKORO_ES_VOICES:
+            try:
+                samples, sample_rate = kokoro.create(
+                    text=text,
+                    voice=voice,
+                    speed=speed,
+                    lang="es",
+                )
+                voice_used = voice
+                self.logger.info(f"Kokoro voz={voice} speed={speed} OK")
+                break
+            except Exception as e:
+                self.logger.warning(f"Kokoro voz={voice} fallo: {e}")
+                last_err = e
+
+        if samples is None:
+            raise RuntimeError(f"Kokoro: ninguna voz española funcionó. Último error: {last_err}")
+
+        # Guardar WAV temporal → convertir a MP3 con ffmpeg
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False,
+                                          dir=OUTPUT_AUDIO_DIR) as tmp:
+            tmp_wav = tmp.name
+
+        try:
+            sf.write(tmp_wav, samples, sample_rate)
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", tmp_wav,
+                    "-acodec", "libmp3lame", "-q:a", "4",
+                    output_path,
+                ],
+                check=True,
+                capture_output=True,
+            )
+        finally:
+            try:
+                os.unlink(tmp_wav)
+            except OSError:
+                pass
+
+        # Verificar resultado
+        out = Path(output_path)
+        if not out.exists() or out.stat().st_size < 1024:
+            raise RuntimeError(
+                f"Kokoro: MP3 vacío tras conversión "
+                f"(size={out.stat().st_size if out.exists() else 0})"
+            )
+
+        return voice_used
+
     # ── pyttsx3 + espeak-ng (fallback offline, funciona en Railway) ──────────
 
     def _synthesize_pyttsx3(self, text: str, output_path: str, mode: str = "") -> str:
@@ -578,48 +683,59 @@ class ECHO(BaseAgent):
                 f"destino: output/audio/{ctx.pipeline_id[:8]}...mp3[/]"
             )
 
-            # ── Cadena TTS: edge-tts → pyttsx3+espeak-ng → silencio-ffmpeg
+            # ── Cadena TTS: Kokoro → edge-tts → pyttsx3 → silencio-ffmpeg
+            mode_str = getattr(ctx, "mode", "") or ""
             try:
-                voice_used = self._synthesize_edge_with_retry(
-                    clean_script, output_path, rate, pitch
-                )
-                self.logger.info(f"Audio generado con edge-tts [{voice_used}]")
-                engine_used = f"edge-tts ({voice_used})"
-            except Exception as edge_err:
+                console.print("[dim]Sintetizando con Kokoro TTS (local, sin API)...[/]")
+                voice_used = self._synthesize_kokoro(clean_script, output_path, mode=mode_str)
+                self.logger.info(f"Audio generado con Kokoro [{voice_used}]")
+                engine_used = f"Kokoro ({voice_used})"
+                console.print(f"[green]Kokoro OK:[/] voz={voice_used}")
+            except Exception as kokoro_err:
                 self.logger.warning(
-                    f"edge-tts (3 voces) fallaron: {edge_err} — probando pyttsx3..."
+                    f"Kokoro fallo ({kokoro_err}) — probando edge-tts..."
                 )
-                console.print("[yellow]edge-tts no disponible. Probando pyttsx3 (espeak-ng)...[/]")
+                console.print("[yellow]Kokoro no disponible. Probando edge-tts...[/]")
                 try:
-                    mode_str = getattr(ctx, "mode", "") or ""
-                    voice_id = self._synthesize_pyttsx3(clean_script, output_path, mode=mode_str)
-                    self.logger.info(f"Audio generado con pyttsx3 [{voice_id}]")
-                    engine_used = f"pyttsx3 ({voice_id})"
-                    console.print(f"[green]pyttsx3 OK:[/] voz={voice_id}")
-                except Exception as pyttsx_err:
+                    voice_used = self._synthesize_edge_with_retry(
+                        clean_script, output_path, rate, pitch
+                    )
+                    self.logger.info(f"Audio generado con edge-tts [{voice_used}]")
+                    engine_used = f"edge-tts ({voice_used})"
+                except Exception as edge_err:
                     self.logger.warning(
-                        f"pyttsx3 fallo ({pyttsx_err}) — generando audio silencioso de emergencia"
+                        f"edge-tts (3 voces) fallaron: {edge_err} — probando pyttsx3..."
                     )
-                    console.print("[yellow]pyttsx3 no disponible. Audio silencioso (emergencia)...[/]")
-                    duration_secs = max(30, int(self._estimate_duration(clean_script) * 60))
-                    import subprocess
-                    subprocess.run(
-                        [
-                            "ffmpeg", "-y",
-                            "-f", "lavfi",
-                            "-i", "anullsrc=r=44100:cl=stereo",
-                            "-t", str(duration_secs),
-                            "-q:a", "9",
-                            "-acodec", "libmp3lame",
-                            output_path,
-                        ],
-                        check=True,
-                        capture_output=True,
-                    )
-                    self.logger.warning(
-                        f"Audio silencioso generado ({duration_secs}s) — el vídeo se generará sin voz"
-                    )
-                    engine_used = "silencio-ffmpeg"
+                    console.print("[yellow]edge-tts no disponible. Probando pyttsx3 (espeak-ng)...[/]")
+                    try:
+                        voice_id = self._synthesize_pyttsx3(clean_script, output_path, mode=mode_str)
+                        self.logger.info(f"Audio generado con pyttsx3 [{voice_id}]")
+                        engine_used = f"pyttsx3 ({voice_id})"
+                        console.print(f"[green]pyttsx3 OK:[/] voz={voice_id}")
+                    except Exception as pyttsx_err:
+                        self.logger.warning(
+                            f"pyttsx3 fallo ({pyttsx_err}) — generando audio silencioso de emergencia"
+                        )
+                        console.print("[yellow]pyttsx3 no disponible. Audio silencioso (emergencia)...[/]")
+                        duration_secs = max(30, int(self._estimate_duration(clean_script) * 60))
+                        import subprocess
+                        subprocess.run(
+                            [
+                                "ffmpeg", "-y",
+                                "-f", "lavfi",
+                                "-i", "anullsrc=r=44100:cl=stereo",
+                                "-t", str(duration_secs),
+                                "-q:a", "9",
+                                "-acodec", "libmp3lame",
+                                output_path,
+                            ],
+                            check=True,
+                            capture_output=True,
+                        )
+                        self.logger.warning(
+                            f"Audio silencioso generado ({duration_secs}s) — el vídeo se generará sin voz"
+                        )
+                        engine_used = "silencio-ffmpeg"
 
             ctx.audio_path = output_path
 
@@ -650,11 +766,14 @@ class ECHO(BaseAgent):
                 try:
                     short_output = str(OUTPUT_AUDIO_DIR / f"{ctx.pipeline_id}_short.mp3")
                     short_clean = preprocess_script(ctx.short_script)
-                    # Short: edge-tts primero, pyttsx3 como fallback
+                    # Short: Kokoro → edge-tts → pyttsx3
                     try:
-                        self._synthesize_edge_with_retry(short_clean, short_output, "+5%", "+3Hz")
+                        self._synthesize_kokoro(short_clean, short_output, mode="urgente")
                     except Exception:
-                        self._synthesize_pyttsx3(short_clean, short_output, mode="urgente")
+                        try:
+                            self._synthesize_edge_with_retry(short_clean, short_output, "+5%", "+3Hz")
+                        except Exception:
+                            self._synthesize_pyttsx3(short_clean, short_output, mode="urgente")
                     ctx.short_audio_path = short_output
                     self.logger.info(f"Audio Short generado: {short_output}")
                     console.print(f"[green]Audio Short:[/] {short_output}")
