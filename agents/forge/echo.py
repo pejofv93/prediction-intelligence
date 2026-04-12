@@ -445,38 +445,69 @@ class ECHO(BaseAgent):
                         _time.sleep(3)  # espera breve antes de reintentar misma voz
         raise last_exc
 
-    # ── ElevenLabs (si ELEVENLABS_API_KEY configurada) ────────────────────────
+    # ── pyttsx3 + espeak-ng (fallback offline, funciona en Railway) ──────────
 
-    def _synthesize_elevenlabs(self, text: str, output_path: str) -> None:
+    def _synthesize_pyttsx3(self, text: str, output_path: str, mode: str = "") -> str:
         """
-        Síntesis con ElevenLabs API.
-        Usa modelo eleven_multilingual_v2 con voz Antoni (español natural).
-        """
-        api_key = os.getenv("ELEVENLABS_API_KEY", "")
-        if not api_key:
-            raise EnvironmentError("ELEVENLABS_API_KEY no configurada")
+        Síntesis offline con pyttsx3 + espeak-ng.
+        Funciona en Railway/Debian sin depender de APIs externas.
+        Devuelve el id de voz usada.
 
-        try:
-            from elevenlabs.client import ElevenLabs as _EL  # type: ignore
-            client = _EL(api_key=api_key)
-            # Antoni — voz masculina natural, multilingüe
-            VOICE_ID = "ErXwobaYiN019PkySvjV"
-            # SDK v1.x devuelve bytes directamente (no generador)
-            audio_bytes = client.text_to_speech.convert(
-                voice_id=VOICE_ID,
-                text=text[:5000],  # límite de caracteres por llamada
-                model_id="eleven_multilingual_v2",
+        Selección de voz:
+          - Busca voces cuyo id contenga 'es' o cuyo name contenga 'spanish'
+          - Si no hay voz española, usa la primera disponible
+        Velocidad ajustada por modo (igual que edge-tts):
+          urgente → 175 wpm · noticia → 165 · analisis/standard → 135
+          educativo → 125 · default → 145
+        """
+        import pyttsx3
+
+        _RATE_MAP = {
+            "urgente":   175,
+            "noticia":   165,
+            "analisis":  135,
+            "standard":  135,
+            "educativo": 125,
+            "tutorial":  125,
+        }
+        wpm = _RATE_MAP.get(mode, 145)
+
+        engine = pyttsx3.init()
+        voices = engine.getProperty("voices") or []
+
+        # Buscar voz española
+        spanish_voice = next(
+            (v for v in voices
+             if "spanish" in (v.name or "").lower()
+             or "_es" in (v.id or "").lower()
+             or "-es" in (v.id or "").lower()),
+            voices[0] if voices else None,
+        )
+
+        voice_id = ""
+        if spanish_voice:
+            engine.setProperty("voice", spanish_voice.id)
+            voice_id = spanish_voice.id
+            self.logger.info(f"pyttsx3 voz seleccionada: {spanish_voice.id} | {spanish_voice.name}")
+        else:
+            self.logger.warning("pyttsx3: no se encontró voz española — usando voz por defecto")
+
+        engine.setProperty("rate", wpm)
+        engine.setProperty("volume", 1.0)
+
+        # pyttsx3.save_to_file acepta ruta .mp3 en Linux con espeak-ng
+        engine.save_to_file(text, output_path)
+        engine.runAndWait()
+
+        # Verificar que el archivo se generó y tiene contenido
+        out = Path(output_path)
+        if not out.exists() or out.stat().st_size < 1024:
+            raise RuntimeError(
+                f"pyttsx3 generó archivo vacío o inexistente: {output_path} "
+                f"(size={out.stat().st_size if out.exists() else 0})"
             )
-            with open(output_path, "wb") as f:
-                if isinstance(audio_bytes, (bytes, bytearray)):
-                    f.write(audio_bytes)
-                else:
-                    # Fallback: iterar si es generador (SDK antiguo)
-                    for chunk in audio_bytes:
-                        if chunk:
-                            f.write(chunk)
-        except ImportError:
-            raise ImportError("Instala elevenlabs: pip install elevenlabs")
+
+        return voice_id
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -547,7 +578,7 @@ class ECHO(BaseAgent):
                 f"destino: output/audio/{ctx.pipeline_id[:8]}...mp3[/]"
             )
 
-            # ── Cadena TTS: edge-tts (3 voces × 2 intentos) → ElevenLabs → silencio
+            # ── Cadena TTS: edge-tts → pyttsx3+espeak-ng → silencio-ffmpeg
             try:
                 voice_used = self._synthesize_edge_with_retry(
                     clean_script, output_path, rate, pitch
@@ -556,18 +587,20 @@ class ECHO(BaseAgent):
                 engine_used = f"edge-tts ({voice_used})"
             except Exception as edge_err:
                 self.logger.warning(
-                    f"edge-tts (3 voces) fallaron: {edge_err} — probando ElevenLabs..."
+                    f"edge-tts (3 voces) fallaron: {edge_err} — probando pyttsx3..."
                 )
-                console.print("[yellow]edge-tts no disponible. Probando ElevenLabs...[/]")
+                console.print("[yellow]edge-tts no disponible. Probando pyttsx3 (espeak-ng)...[/]")
                 try:
-                    self._synthesize_elevenlabs(clean_script, output_path)
-                    self.logger.info("Audio generado con ElevenLabs")
-                    engine_used = "ElevenLabs"
-                except Exception as el_err:
+                    mode_str = getattr(ctx, "mode", "") or ""
+                    voice_id = self._synthesize_pyttsx3(clean_script, output_path, mode=mode_str)
+                    self.logger.info(f"Audio generado con pyttsx3 [{voice_id}]")
+                    engine_used = f"pyttsx3 ({voice_id})"
+                    console.print(f"[green]pyttsx3 OK:[/] voz={voice_id}")
+                except Exception as pyttsx_err:
                     self.logger.warning(
-                        f"ElevenLabs fallo ({el_err}) — generando audio silencioso de emergencia"
+                        f"pyttsx3 fallo ({pyttsx_err}) — generando audio silencioso de emergencia"
                     )
-                    console.print("[yellow]ElevenLabs no disponible. Audio silencioso (emergencia)...[/]")
+                    console.print("[yellow]pyttsx3 no disponible. Audio silencioso (emergencia)...[/]")
                     duration_secs = max(30, int(self._estimate_duration(clean_script) * 60))
                     import subprocess
                     subprocess.run(
@@ -617,8 +650,11 @@ class ECHO(BaseAgent):
                 try:
                     short_output = str(OUTPUT_AUDIO_DIR / f"{ctx.pipeline_id}_short.mp3")
                     short_clean = preprocess_script(ctx.short_script)
-                    # Short usa tono más dinámico: rate +5%, pitch +3Hz
-                    self._synthesize_edge_with_retry(short_clean, short_output, "+5%", "+3Hz")
+                    # Short: edge-tts primero, pyttsx3 como fallback
+                    try:
+                        self._synthesize_edge_with_retry(short_clean, short_output, "+5%", "+3Hz")
+                    except Exception:
+                        self._synthesize_pyttsx3(short_clean, short_output, mode="urgente")
                     ctx.short_audio_path = short_output
                     self.logger.info(f"Audio Short generado: {short_output}")
                     console.print(f"[green]Audio Short:[/] {short_output}")
