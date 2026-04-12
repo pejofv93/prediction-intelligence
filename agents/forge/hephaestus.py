@@ -511,15 +511,20 @@ class HEPHAESTUS:
     @staticmethod
     def _write_clip(clip, output_path: str, fps: int = FPS,
                     audio_codec: str = "aac", threads: int = 2,
-                    audio: bool = True) -> None:
+                    audio: bool = True, force_size: tuple = None) -> None:
         """
         Wrapper sobre write_videofile que:
           - garantiza que el directorio de salida existe
           - coloca temp_audiofile en el mismo directorio (evita huerfanos en CWD)
+          - fuerza resolución exacta si se especifica force_size
         """
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         temp_audio = str(out.parent / (out.stem + "_TEMP_AUDIO_.mp4"))
+
+        if force_size and tuple(clip.size) != tuple(force_size):
+            clip = clip.resize(force_size)
+
         clip.write_videofile(
             output_path,
             fps=fps,
@@ -1586,7 +1591,7 @@ class HEPHAESTUS:
                 if audio_clip:
                     final_video = final_video.set_audio(audio_clip)
 
-                self._write_clip(final_video, output_path)
+                self._write_clip(final_video, output_path, force_size=RES_MAIN)
 
                 for clip in [avatar_placed, avatar_timed, avatar_sized,
                              avatar_raw, final_video, base_video]:
@@ -1609,7 +1614,7 @@ class HEPHAESTUS:
                 )
 
         # Sin avatar: exportar solo el base
-        self._write_clip(base_video, output_path)
+        self._write_clip(base_video, output_path, force_size=RES_MAIN)
         try:
             base_video.close()
             if audio_clip:
@@ -2276,30 +2281,58 @@ class HEPHAESTUS:
         }
 
         def _make_fallback_frame(ctype: str) -> Image.Image:
-            """Genera fondo plano diferenciado por tipo de escena cuando path no existe."""
-            bg_col, accent_col, label = _SCENE_FALLBACK_STYLE.get(
+            """
+            Fallback visual cuando el gráfico específico no está disponible.
+            Prioridad:
+              1. Gráfico BTC (_chart_static) con overlay semitransparente + badge de tipo
+              2. Fondo negro sólido (solo si tampoco hay gráfico BTC)
+            Esto garantiza que CoinGecko 429 nunca produzca pantalla negra — siempre
+            se muestra el gráfico BTC disponible aunque sea con datos aproximados.
+            """
+            _, accent_col, label = _SCENE_FALLBACK_STYLE.get(
                 ctype, ((10, 10, 10), _accent_color, ctype.upper())
             )
-            fb = Image.new("RGB", (w, h), bg_col)
-            fb_draw = ImageDraw.Draw(fb)
-            # Barra superior de acento
-            fb_draw.rectangle([(0, 0), (w, 8)], fill=accent_col)
-            # Barra inferior de acento
-            fb_draw.rectangle([(0, h - 8), (w, h)], fill=accent_col)
-            # Etiqueta centrada grande
+
+            # ── Usar gráfico BTC como base si está disponible ─────────────────
+            if _chart_static is not None:
+                fb = _chart_static.copy()
+                fb_draw = ImageDraw.Draw(fb)
+                # Overlay semitransparente oscuro para distinguir del frame precio puro
+                overlay = Image.new("RGBA", (w, h), (0, 0, 0, 110))
+                fb_rgba = fb.convert("RGBA")
+                fb_rgba.paste(overlay, mask=overlay.split()[3])
+                fb = fb_rgba.convert("RGB")
+                fb_draw = ImageDraw.Draw(fb)
+            else:
+                fb = Image.new("RGB", (w, h), (10, 10, 10))
+                fb_draw = ImageDraw.Draw(fb)
+
+            # Badge de tipo de escena en esquina superior derecha
+            badge_label = label.replace("_", " ")
             try:
-                _fb_font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 72)
+                _badge_font = ImageFont.truetype(
+                    next((p for p in [
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                        "C:/Windows/Fonts/arialbd.ttf",
+                    ] if Path(p).exists()), ""), 24)
             except Exception:
-                _fb_font = F.get("dato_lbl", ImageFont.load_default())
-            fb_draw.text((w // 2, h // 2), label, fill=accent_col,
-                         font=_fb_font, anchor="mm")
-            # Subtexto "Cargando datos..." debajo
+                _badge_font = ImageFont.load_default()
+
             try:
-                _fb_sm = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 28)
+                bbox = fb_draw.textbbox((0, 0), badge_label, font=_badge_font)
+                bw = bbox[2] - bbox[0] + 20
+                bh = bbox[3] - bbox[1] + 10
             except Exception:
-                _fb_sm = F.get("info", ImageFont.load_default())
-            fb_draw.text((w // 2, h // 2 + 80), "datos no disponibles",
-                         fill=(120, 120, 120), font=_fb_sm, anchor="mm")
+                bw, bh = 160, 36
+
+            bx = w - bw - 16
+            by = _YT_TICKER_H + 8  # debajo del ticker
+            fb_draw.rectangle([(bx - 4, by), (bx + bw, by + bh)],
+                               fill=(*accent_col, 200) if hasattr(accent_col, '__len__') and len(accent_col) == 3
+                               else accent_col)
+            fb_draw.text((bx + 6, by + 5), badge_label, fill=(255, 255, 255),
+                         font=_badge_font)
             return fb
 
         def _get_base_frame(t: float, active_idx: int) -> Image.Image:
@@ -2872,7 +2905,7 @@ class HEPHAESTUS:
         if audio_clip:
             video = video.set_audio(audio_clip)
 
-        self._write_clip(video, output_path)
+        self._write_clip(video, output_path, force_size=RES_MAIN)
         try:
             video.close()
             if audio_clip:
@@ -3046,7 +3079,7 @@ class HEPHAESTUS:
         if audio_clip:
             video = video.set_audio(audio_clip)
 
-        self._write_clip(video, output_path)
+        self._write_clip(video, output_path, force_size=RES_MAIN)
         try:
             video.close()
             if audio_clip:
@@ -3131,7 +3164,7 @@ class HEPHAESTUS:
         if audio_clip:
             video = video.set_audio(audio_clip)
 
-        self._write_clip(video, output_path)
+        self._write_clip(video, output_path, force_size=RES_MAIN)
         try:
             video.close()
             if audio_clip:
@@ -3295,7 +3328,7 @@ class HEPHAESTUS:
         if audio_clip:
             video = video.set_audio(audio_clip)
 
-        self._write_clip(video, output_path)
+        self._write_clip(video, output_path, force_size=RES_SHORT)
         try:
             video.close()
             if audio_clip:
@@ -3305,14 +3338,16 @@ class HEPHAESTUS:
 
         return output_path
 
-    def _crop_to_short(self, horizontal_path: str, output_path: str) -> str:
-        """Genera version SHORT recortando el video horizontal 1920x1080 a 1080x1920.
+    SHORT_MAX_DURATION = 60  # segundos máximos para el Short
 
-        Estrategia crop+zoom para llenar 100% la pantalla vertical sin barras negras:
-          1. Escalar el video horizontal para que su ALTO llene los 1920px del target.
-             Un 1920x1080 escalado por altura 1920/1080 = 1.777x queda 3413x1920.
-          2. Recortar el centro horizontal para quedarse con 1080px de ancho.
-        Resultado: 1080x1920 con contenido al 100%, sin barras negras.
+    def _crop_to_short(self, horizontal_path: str, output_path: str) -> str:
+        """Genera version SHORT desde los primeros 60s del vídeo largo, reformateado a 1080x1920.
+
+        Estrategia:
+          1. Recortar a los primeros SHORT_MAX_DURATION segundos.
+          2. Escalar para que el ALTO llene los 1920px del target (1920/1080 = 1.777x).
+          3. Crop centro horizontal para obtener 1080px de ancho.
+        Resultado: 1080x1920 sin barras negras, contenido real del vídeo largo.
         """
         from moviepy.editor import VideoFileClip
         from moviepy.video.fx.all import crop as fx_crop
@@ -3320,31 +3355,32 @@ class HEPHAESTUS:
         try:
             src = VideoFileClip(horizontal_path)
             tw, th = RES_SHORT  # 1080, 1920
-            src_w, src_h = src.size  # tipicamente 1920, 1080
 
-            src_ratio   = src_w / src_h      # 1.777 para 16:9
-            target_ratio = tw / th           # 0.5625 para 9:16
+            # Paso 1: recortar a los primeros 60s
+            clip_dur = min(src.duration, self.SHORT_MAX_DURATION)
+            src = src.subclip(0, clip_dur)
+
+            src_w, src_h = src.size
+
+            src_ratio    = src_w / src_h
+            target_ratio = tw / th
 
             if src_ratio > target_ratio:
-                # Source es mas ancho que el target (caso tipico 16:9 → 9:16):
-                # Escalar por altura para que src_h → th (1920px)
-                scale_factor = th / src_h    # 1920/1080 = 1.777
-                scaled = src.resize(scale_factor)  # → ~3413x1920
-                # Recortar el centro horizontal para obtener tw (1080px)
+                # Caso típico 16:9 → 9:16: escalar por altura
+                scale_factor = th / src_h
+                scaled = src.resize(scale_factor)
                 x_center = scaled.w / 2
                 result = fx_crop(scaled, x_center=x_center, width=tw)
             else:
-                # Source es mas alto que el target (poco frecuente):
-                # Escalar por ancho para que src_w → tw (1080px)
                 scale_factor = tw / src_w
-                scaled = src.resize(scale_factor)  # → 1080x?
+                scaled = src.resize(scale_factor)
                 y_center = scaled.h / 2
                 result = fx_crop(scaled, y_center=y_center, height=th)
 
             if src.audio:
-                result = result.set_audio(src.audio)
+                result = result.set_audio(src.audio.subclip(0, clip_dur))
 
-            self._write_clip(result, output_path)
+            self._write_clip(result, output_path, force_size=RES_SHORT)
             src.close()
             result.close()
             return output_path

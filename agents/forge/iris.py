@@ -13,6 +13,7 @@ Dimensiones: 1280x720 (YouTube).
 
 import os
 import re
+import traceback
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -295,29 +296,64 @@ class IRIS(BaseAgent):
         )
         return img, draw
 
-    # ── Avatar ────────────────────────────────────────────────────────────────
+    # ── Frame del vídeo ──────────────────────────────────────────────────────
 
-    def _paste_avatar(self, img, x: int, y: int, height: int = 220):
-        """Pega avatar_base.png si existe; si no, no hace nada."""
+    def _extract_video_frame(self, ctx: Context, second: float = 5.0):
+        """Extrae un frame del segundo indicado del vídeo generado.
+        Devuelve PIL Image 1280x720 o None si no hay vídeo disponible.
+        """
         from PIL import Image
 
-        avatar_path = (
-            Path(__file__).resolve().parent.parent.parent
-            / "assets" / "avatar_base.png"
-        )
-        if not avatar_path.exists():
-            return img
-
+        video_path = getattr(ctx, "video_path", None)
+        if not video_path or not Path(video_path).exists():
+            return None
         try:
-            avatar = Image.open(avatar_path).convert("RGBA")
-            av_w = int(avatar.width * (height / avatar.height))
-            avatar = avatar.resize((av_w, height), Image.LANCZOS)
-            img_rgba = img.convert("RGBA")
-            img_rgba.paste(avatar, (x, y), mask=avatar.split()[3])
-            return img_rgba.convert("RGB")
-        except Exception as err:
-            self.logger.warning(f"No se pudo incrustar avatar: {err}")
+            from moviepy.editor import VideoFileClip
+            clip = VideoFileClip(video_path)
+            t = min(second, clip.duration - 0.1)
+            frame = clip.get_frame(t)  # numpy RGB array
+            clip.close()
+            img = Image.fromarray(frame).resize((THUMB_W, THUMB_H), Image.LANCZOS)
             return img
+        except Exception as err:
+            self.logger.warning(f"No se pudo extraer frame del vídeo: {err}")
+            return None
+
+    # ── Overlay oscuro ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_dark_overlay(img, alpha: int = 140):
+        """Aplica overlay negro semitransparente sobre la imagen.
+        Usa paste con máscara en lugar de alpha_composite para
+        compatibilidad con entornos Railway sin soporte RGBA completo.
+        """
+        from PIL import Image
+        # Trabajar siempre en RGB — evita problemas RGBA en Railway/Debian
+        base = img.convert("RGB")
+        overlay = Image.new("RGB", base.size, (0, 0, 0))
+        mask = Image.new("L", base.size, alpha)
+        base.paste(overlay, mask=mask)
+        return base
+
+    # ── Logo CryptoVerdad (arriba izquierda) ──────────────────────────────────
+
+    def _draw_logo_topleft(self, draw):
+        """Dibuja 'CryptoVerdad' en esquina superior izquierda."""
+        font_logo = _load_font(_FONTS_BOLD, 24)
+        # Sombra
+        draw.text((22, 22), "CryptoVerdad", fill=(0, 0, 0), font=font_logo)
+        draw.text((20, 20), "CryptoVerdad", fill=COLOR_ACCENT, font=font_logo)
+
+    # ── Precio BTC en naranja ─────────────────────────────────────────────────
+
+    def _draw_btc_price(self, draw, ctx: Context, x: int, y: int):
+        """Dibuja precio BTC en naranja."""
+        btc_str = self._get_btc_price(ctx)
+        if not btc_str:
+            return
+        font_price = _load_font(_FONTS_BOLD, 36)
+        draw.text((x + 2, y + 2), f"BTC {btc_str}", fill=(0, 0, 0), font=font_price)
+        draw.text((x, y), f"BTC {btc_str}", fill=COLOR_ACCENT, font=font_price)
 
     # ── Fondo con degradado ───────────────────────────────────────────────────
 
@@ -341,58 +377,46 @@ class IRIS(BaseAgent):
 
     def _generate_version_a(self, ctx: Context) -> "Image":
         """
-        Version A — Dato numerico impactante.
-        Texto principal izquierda + numero naranja grande + grafico 40% derecho +
-        avatar pequeno inferior izquierdo + logo superior derecho.
+        Version A — Frame del vídeo + overlay oscuro + texto ABAJO IZQUIERDA.
+        Logo CryptoVerdad arriba izquierda. Precio BTC naranja arriba derecha.
+        SIN avatar cartoon.
         """
         from PIL import Image, ImageDraw
 
-        img = Image.new("RGB", (THUMB_W, THUMB_H), COLOR_BG)
+        # Base: frame del vídeo o fondo degradado como fallback
+        img = self._extract_video_frame(ctx, second=5.0)
+        if img is None:
+            img = Image.new("RGB", (THUMB_W, THUMB_H), COLOR_BG)
+            draw = ImageDraw.Draw(img)
+            self._draw_gradient_bg(draw, THUMB_W, THUMB_H)
+
+        # Overlay oscuro semitransparente
+        img = self._apply_dark_overlay(img, alpha=150)
         draw = ImageDraw.Draw(img)
 
-        # Fondo gradiente
-        self._draw_gradient_bg(draw, THUMB_W, THUMB_H)
+        # Logo CryptoVerdad arriba izquierda
+        self._draw_logo_topleft(draw)
 
-        # Grafico lado derecho (40% del ancho)
-        chart_x = int(THUMB_W * 0.57)
-        chart_y = 40
-        chart_w = int(THUMB_W * 0.40)
-        chart_h = int(THUMB_H * 0.75)
-        img, draw = self._paste_chart(img, draw, ctx, chart_x, chart_y, chart_w, chart_h)
+        # Precio BTC arriba derecha
+        self._draw_btc_price(draw, ctx, x=THUMB_W - 420, y=18)
 
-        # Logo superior derecho
-        self._draw_logo(draw, THUMB_W)
-
-        # Texto principal (4 primeras palabras del titulo)
+        # Título en blanco bold grande — ABAJO IZQUIERDA
         title = (getattr(ctx, 'seo_title', None)
                  or getattr(ctx, 'topic', None)
                  or 'Bitcoin')
-        words = title.split()[:4]
-        main_text = _fit_text(' '.join(words).upper(), max_chars_per_line=14)
+        title_text = _fit_text(title.upper(), max_chars_per_line=18)
 
         _draw_impact_text(
-            draw, main_text,
-            x=60, y=130,
-            max_width=int(THUMB_W * 0.50),
+            draw, title_text,
+            x=40, y=THUMB_H - 240,
+            max_width=int(THUMB_W * 0.90),
             color_main=COLOR_WHITE,
             shadow_color=COLOR_ACCENT,
-            size_range=(90, 75, 60, 48, 36),
+            size_range=(72, 60, 50, 42, 34),
         )
 
-        # Numero grande naranja
-        number_text = _extract_number(ctx)
-        font_num = (_load_font(_FONTS_IMPACT, 120)
-                    or _load_font(_FONTS_BOLD, 100))
-        if font_num:
-            draw.text((62, 412), number_text, fill=(150, 80, 0), font=font_num)
-            draw.text((60, 410), number_text, fill=COLOR_ACCENT, font=font_num)
-        else:
-            draw.text((60, 410), number_text, fill=COLOR_ACCENT)
-
-        # Avatar pequeno esquina inferior izquierda
-        av_h = 220
-        img = self._paste_avatar(img, x=20, y=THUMB_H - av_h - 10, height=av_h)
-        draw = ImageDraw.Draw(img)
+        # Barra naranja en borde inferior
+        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=COLOR_ACCENT)
 
         return img
 
@@ -400,58 +424,50 @@ class IRIS(BaseAgent):
 
     def _generate_version_b(self, ctx: Context) -> "Image":
         """
-        Version B — Pregunta + flecha apuntando al grafico.
-        Grafico 40% derecho + pregunta corta izquierda + flecha naranja +
-        avatar pequeno inferior izquierdo + logo superior derecho.
+        Version B — Frame del vídeo + overlay oscuro + texto CENTRADO.
+        Logo CryptoVerdad arriba izquierda. Precio BTC naranja arriba derecha.
+        SIN avatar cartoon.
         """
         from PIL import Image, ImageDraw
 
-        img = Image.new("RGB", (THUMB_W, THUMB_H), COLOR_BG)
+        # Base: frame del vídeo o fondo degradado como fallback
+        img = self._extract_video_frame(ctx, second=5.0)
+        if img is None:
+            img = Image.new("RGB", (THUMB_W, THUMB_H), COLOR_BG)
+            draw = ImageDraw.Draw(img)
+            self._draw_gradient_bg(draw, THUMB_W, THUMB_H)
+
+        # Overlay más oscuro en el centro para que el texto destaque
+        img = self._apply_dark_overlay(img, alpha=165)
         draw = ImageDraw.Draw(img)
 
-        # Fondo gradiente
-        self._draw_gradient_bg(draw, THUMB_W, THUMB_H)
+        # Logo CryptoVerdad arriba izquierda
+        self._draw_logo_topleft(draw)
 
-        # Grafico lado derecho (40% del ancho)
-        chart_x = int(THUMB_W * 0.57)
-        chart_y = 40
-        chart_w = int(THUMB_W * 0.40)
-        chart_h = int(THUMB_H * 0.75)
-        img, draw = self._paste_chart(img, draw, ctx, chart_x, chart_y, chart_w, chart_h)
+        # Precio BTC arriba derecha
+        self._draw_btc_price(draw, ctx, x=THUMB_W - 420, y=18)
 
-        # Logo superior derecho
-        self._draw_logo(draw, THUMB_W)
-
-        # Pregunta corta basada en el contexto completo del video actual
+        # Pregunta centrada en grandes
         question = _generate_question(ctx)
+        lines = question.split("\n")
+        font_q = (_load_font(_FONTS_IMPACT, 110) or _load_font(_FONTS_BOLD, 90))
+        line_h = 120
+        total_h = len(lines) * line_h
+        start_y = (THUMB_H - total_h) // 2 - 20
 
-        _draw_impact_text(
-            draw, question,
-            x=60, y=130,
-            max_width=int(THUMB_W * 0.48),
-            color_main=COLOR_WHITE,
-            shadow_color=COLOR_ACCENT,
-            size_range=(110, 90, 75, 60),
-        )
+        for i, line in enumerate(lines):
+            y = start_y + i * line_h
+            # Sombra
+            try:
+                lw = font_q.getlength(line) if hasattr(font_q, "getlength") else len(line) * 55
+            except Exception:
+                lw = len(line) * 55
+            x = (THUMB_W - lw) // 2
+            draw.text((x + 3, y + 3), line, fill=COLOR_ACCENT, font=font_q)
+            draw.text((x, y), line, fill=COLOR_WHITE, font=font_q)
 
-        # Flecha naranja hacia el grafico
-        arrow_x1 = int(THUMB_W * 0.48)
-        arrow_y1 = int(THUMB_H * 0.45)
-        arrow_x2 = chart_x - 20
-        arrow_y2 = int(THUMB_H * 0.45)
-        draw.line([(arrow_x1, arrow_y1), (arrow_x2, arrow_y2)],
-                  fill=COLOR_ACCENT, width=5)
-        # Punta de flecha (triangulo)
-        draw.polygon([
-            (arrow_x2 + 15, arrow_y2),
-            (arrow_x2 - 12, arrow_y2 - 12),
-            (arrow_x2 - 12, arrow_y2 + 12),
-        ], fill=COLOR_ACCENT)
-
-        # Avatar pequeno esquina inferior izquierda
-        av_h = 220
-        img = self._paste_avatar(img, x=20, y=THUMB_H - av_h - 10, height=av_h)
-        draw = ImageDraw.Draw(img)
+        # Barra naranja en borde inferior
+        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=COLOR_ACCENT)
 
         return img
 
@@ -503,6 +519,7 @@ class IRIS(BaseAgent):
             return output_path
         except Exception as e:
             self.logger.error(f"Error creando thumbnail {variant}: {e}")
+            self.logger.error(f"IRIS traceback:\n{traceback.format_exc()}")
             ctx.add_error("IRIS", f"Thumbnail {variant}: {e}")
             return ""
 

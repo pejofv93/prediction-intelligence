@@ -390,49 +390,93 @@ class ECHO(BaseAgent):
         self.db = db
         OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
+    # ── Voces edge-tts en orden de prioridad ─────────────────────────────────
+    _EDGE_VOICES = [
+        "es-ES-AlvaroNeural",   # Principal: español de España
+        "es-MX-JorgeNeural",    # Fallback 1: español de México
+        "es-AR-TomasNeural",    # Fallback 2: español de Argentina
+    ]
+
     # ── edge-tts ──────────────────────────────────────────────────────────────
 
     async def _synthesize_edge(
-        self, clean_text: str, output_path: str, rate: str = "-8%", pitch: str = "+0Hz"
+        self, clean_text: str, output_path: str,
+        rate: str = "-8%", pitch: str = "+0Hz",
+        voice: str = "es-ES-AlvaroNeural",
     ) -> None:
         """
         Sintetiza texto plano con edge-tts y guarda en output_path.
-
-        edge-tts NO soporta SSML — recibe solo texto limpio en español.
-        La velocidad se pasa mediante rate y el tono mediante pitch.
-        Volume: +10% (mayor presencia).
-        pitch se expresa en formato +X% o -X% (edge-tts acepta Hz o %).
+        Acepta voice como parámetro para rotar entre voces de fallback.
         """
         import edge_tts
 
         communicate = edge_tts.Communicate(
             text=clean_text,
-            voice="es-ES-AlvaroNeural",
+            voice=voice,
             rate=rate,
             pitch=pitch,
             volume="+10%",
         )
         await communicate.save(output_path)
 
-    # ── pyttsx3 fallback ──────────────────────────────────────────────────────
-
-    def _synthesize_pyttsx3(self, text: str, output_path: str) -> None:
+    def _synthesize_edge_with_retry(
+        self, clean_text: str, output_path: str, rate: str, pitch: str
+    ) -> str:
         """
-        Fallback de sintesis con pyttsx3.
-        Recibe texto plano (sin SSML) porque pyttsx3 no lo soporta.
+        Intenta edge-tts con las 3 voces españolas, 2 intentos cada una.
+        Devuelve el nombre de la voz usada, o lanza excepción si todas fallan.
         """
-        import pyttsx3
+        import time as _time
 
-        engine = pyttsx3.init()
-        voices = engine.getProperty("voices")
-        for v in voices:
-            if "es" in v.id.lower() or "spanish" in v.name.lower():
-                engine.setProperty("voice", v.id)
-                break
+        last_exc: Exception = Exception("sin intentos")
+        for voice in self._EDGE_VOICES:
+            for attempt in range(2):
+                try:
+                    asyncio.run(
+                        self._synthesize_edge(clean_text, output_path, rate, pitch, voice)
+                    )
+                    return voice
+                except Exception as exc:
+                    last_exc = exc
+                    self.logger.warning(
+                        f"edge-tts [{voice}] intento {attempt + 1}/2 fallo: {exc}"
+                    )
+                    if attempt == 0:
+                        _time.sleep(3)  # espera breve antes de reintentar misma voz
+        raise last_exc
 
-        engine.setProperty("rate", 160)
-        engine.save_to_file(text, output_path)
-        engine.runAndWait()
+    # ── ElevenLabs (si ELEVENLABS_API_KEY configurada) ────────────────────────
+
+    def _synthesize_elevenlabs(self, text: str, output_path: str) -> None:
+        """
+        Síntesis con ElevenLabs API.
+        Usa modelo eleven_multilingual_v2 con voz Antoni (español natural).
+        """
+        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        if not api_key:
+            raise EnvironmentError("ELEVENLABS_API_KEY no configurada")
+
+        try:
+            from elevenlabs.client import ElevenLabs as _EL  # type: ignore
+            client = _EL(api_key=api_key)
+            # Antoni — voz masculina natural, multilingüe
+            VOICE_ID = "ErXwobaYiN019PkySvjV"
+            # SDK v1.x devuelve bytes directamente (no generador)
+            audio_bytes = client.text_to_speech.convert(
+                voice_id=VOICE_ID,
+                text=text[:5000],  # límite de caracteres por llamada
+                model_id="eleven_multilingual_v2",
+            )
+            with open(output_path, "wb") as f:
+                if isinstance(audio_bytes, (bytes, bytearray)):
+                    f.write(audio_bytes)
+                else:
+                    # Fallback: iterar si es generador (SDK antiguo)
+                    for chunk in audio_bytes:
+                        if chunk:
+                            f.write(chunk)
+        except ImportError:
+            raise ImportError("Instala elevenlabs: pip install elevenlabs")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -503,40 +547,34 @@ class ECHO(BaseAgent):
                 f"destino: output/audio/{ctx.pipeline_id[:8]}...mp3[/]"
             )
 
-            # Intentar edge-tts con texto plano
+            # ── Cadena TTS: edge-tts (3 voces × 2 intentos) → ElevenLabs → silencio
             try:
-                asyncio.run(self._synthesize_edge(clean_script, output_path, rate, pitch))
-                self.logger.info("Audio generado con edge-tts (texto plano)")
-                engine_used = "edge-tts"
+                voice_used = self._synthesize_edge_with_retry(
+                    clean_script, output_path, rate, pitch
+                )
+                self.logger.info(f"Audio generado con edge-tts [{voice_used}]")
+                engine_used = f"edge-tts ({voice_used})"
             except Exception as edge_err:
                 self.logger.warning(
-                    f"edge-tts fallo ({edge_err}) — intentando pyttsx3..."
+                    f"edge-tts (3 voces) fallaron: {edge_err} — probando ElevenLabs..."
                 )
-                console.print(
-                    f"[yellow]edge-tts fallo: {edge_err}. Usando pyttsx3 como fallback...[/]"
-                )
+                console.print("[yellow]edge-tts no disponible. Probando ElevenLabs...[/]")
                 try:
-                    self._synthesize_pyttsx3(clean_script, output_path)
-                    self.logger.info("Audio generado con pyttsx3 (fallback)")
-                    engine_used = "pyttsx3"
-                except Exception as pyttsx3_err:
-                    # Último recurso: audio silencioso con ffmpeg para que el
-                    # pipeline pueda continuar y generar el vídeo igualmente.
+                    self._synthesize_elevenlabs(clean_script, output_path)
+                    self.logger.info("Audio generado con ElevenLabs")
+                    engine_used = "ElevenLabs"
+                except Exception as el_err:
                     self.logger.warning(
-                        f"pyttsx3 fallo ({pyttsx3_err}) — "
-                        f"generando audio silencioso de emergencia con ffmpeg"
+                        f"ElevenLabs fallo ({el_err}) — generando audio silencioso de emergencia"
                     )
-                    console.print(
-                        f"[yellow]pyttsx3 fallo: {pyttsx3_err}. "
-                        f"Generando audio silencioso (emergencia)...[/]"
-                    )
+                    console.print("[yellow]ElevenLabs no disponible. Audio silencioso (emergencia)...[/]")
                     duration_secs = max(30, int(self._estimate_duration(clean_script) * 60))
                     import subprocess
                     subprocess.run(
                         [
                             "ffmpeg", "-y",
                             "-f", "lavfi",
-                            "-i", f"anullsrc=r=44100:cl=stereo",
+                            "-i", "anullsrc=r=44100:cl=stereo",
                             "-t", str(duration_secs),
                             "-q:a", "9",
                             "-acodec", "libmp3lame",
@@ -546,8 +584,7 @@ class ECHO(BaseAgent):
                         capture_output=True,
                     )
                     self.logger.warning(
-                        f"Audio silencioso generado ({duration_secs}s) — "
-                        f"el vídeo se generará sin voz"
+                        f"Audio silencioso generado ({duration_secs}s) — el vídeo se generará sin voz"
                     )
                     engine_used = "silencio-ffmpeg"
 
@@ -581,7 +618,7 @@ class ECHO(BaseAgent):
                     short_output = str(OUTPUT_AUDIO_DIR / f"{ctx.pipeline_id}_short.mp3")
                     short_clean = preprocess_script(ctx.short_script)
                     # Short usa tono más dinámico: rate +5%, pitch +3Hz
-                    asyncio.run(self._synthesize_edge(short_clean, short_output, "+5%", "+3Hz"))
+                    self._synthesize_edge_with_retry(short_clean, short_output, "+5%", "+3Hz")
                     ctx.short_audio_path = short_output
                     self.logger.info(f"Audio Short generado: {short_output}")
                     console.print(f"[green]Audio Short:[/] {short_output}")
