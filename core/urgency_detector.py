@@ -166,10 +166,12 @@ class UrgencyDetector:
             score, is_urgent, keywords = detect_urgency(ctx.topic)
             ctx.urgency_score = score
             ctx.is_urgent = is_urgent
-            if keywords:
+            # Solo añadir warning si es urgencia real — keywords comunes como
+            # "caída" no generan ruido en los warnings del pipeline.
+            if is_urgent and keywords:
                 ctx.add_warning(
                     "URGENCY_DETECTOR",
-                    f"Keywords de urgencia detectadas: {keywords}",
+                    f"Urgencia detectada: {keywords}",
                 )
         except Exception as exc:
             ctx.add_error("URGENCY_DETECTOR", str(exc))

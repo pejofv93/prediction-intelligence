@@ -503,7 +503,7 @@ class IRIS(BaseAgent):
             )
 
         except Exception as e:
-            self.logger.error(f"Error en IRIS: {e}")
+            self.logger.error(f"Error en IRIS: {e}\n{traceback.format_exc()}")
             ctx.add_error("IRIS", str(e))
 
         return ctx

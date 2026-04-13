@@ -455,12 +455,12 @@ class ECHO(BaseAgent):
 
     # Velocidad por modo (VITS acepta speed: 1.0 = normal)
     _COQUI_SPEED_MAP = {
-        "urgente":   1.40,
-        "noticia":   1.35,
-        "analisis":  1.30,
-        "standard":  1.30,
-        "educativo": 1.25,
-        "tutorial":  1.25,
+        "urgente":   1.50,
+        "noticia":   1.48,
+        "analisis":  1.45,
+        "standard":  1.45,
+        "educativo": 1.40,
+        "tutorial":  1.40,
     }
 
     @classmethod
@@ -480,44 +480,127 @@ class ECHO(BaseAgent):
             console.print("[green]Coqui TTS: modelo cargado OK[/]")
         return cls._coqui_instance
 
+    # Silencio en segundos por tipo de pausa
+    _PAUSE_DURATIONS = {"||P||": 0.3, "||PL||": 0.6}
+
     def _synthesize_coqui(self, text: str, output_path: str, mode: str = "") -> str:
         """
         Síntesis local con Coqui TTS (tts_models/es/css10/vits).
         Voz masculina española natural. Sin API, sin red tras primer uso.
-        Genera WAV temporal → convierte a MP3 con ffmpeg.
+
+        Soporta pausas reales:
+          ||P||  → 0.3s de silencio
+          ||PL|| → 0.6s de silencio
+        Los textos que lleguen con estos marcadores se sintetizan por segmentos
+        y se concatenan con silencios reales via ffmpeg.
+
         Devuelve el nombre del modelo usado.
         """
         import subprocess
         import tempfile
 
-        speed = self._COQUI_SPEED_MAP.get(mode, 1.30)
+        speed = self._COQUI_SPEED_MAP.get(mode, 1.45)
         tts = self._get_coqui()
+        tmp_files = []
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False,
-                                          dir=OUTPUT_AUDIO_DIR) as tmp:
-            tmp_wav = tmp.name
-
-        try:
+        def _synth_segment(seg_text: str, seg_path: str) -> None:
+            """Sintetiza un segmento de texto a WAV."""
+            clean = seg_text.strip()
+            if not clean:
+                return
             try:
-                tts.tts_to_file(text=text, file_path=tmp_wav, speed=speed)
+                tts.tts_to_file(text=clean, file_path=seg_path, speed=speed)
             except TypeError:
-                # Algunos modelos VITS no aceptan speed — usar sin él
-                tts.tts_to_file(text=text, file_path=tmp_wav)
+                tts.tts_to_file(text=clean, file_path=seg_path)
 
+        def _make_silence(duration: float, sil_path: str) -> None:
+            """Genera WAV de silencio con ffmpeg."""
             subprocess.run(
                 [
-                    "ffmpeg", "-y", "-i", tmp_wav,
-                    "-acodec", "libmp3lame", "-q:a", "4",
-                    output_path,
+                    "ffmpeg", "-y",
+                    "-f", "lavfi",
+                    "-i", f"anullsrc=r=22050:cl=mono",
+                    "-t", str(duration),
+                    sil_path,
                 ],
-                check=True,
-                capture_output=True,
+                check=True, capture_output=True,
             )
+
+        try:
+            # Dividir texto en segmentos separados por pausas
+            pattern = re.compile(r'(\|\|P\|\||\|\|PL\|\|)')
+            parts = pattern.split(text)
+
+            if len(parts) == 1:
+                # Sin pausas: síntesis directa
+                with tempfile.NamedTemporaryFile(
+                    suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
+                ) as tmp:
+                    tmp_wav = tmp.name
+                tmp_files.append(tmp_wav)
+                _synth_segment(text, tmp_wav)
+                wav_to_concat = [tmp_wav]
+            else:
+                # Con pausas: sintetizar segmentos e intercalar silencios
+                wav_to_concat = []
+                for part in parts:
+                    if part == "||P||" or part == "||PL||":
+                        dur = self._PAUSE_DURATIONS[part]
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
+                        ) as tmp:
+                            sil_path = tmp.name
+                        tmp_files.append(sil_path)
+                        _make_silence(dur, sil_path)
+                        wav_to_concat.append(sil_path)
+                    elif part.strip():
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
+                        ) as tmp:
+                            seg_path = tmp.name
+                        tmp_files.append(seg_path)
+                        _synth_segment(part, seg_path)
+                        if Path(seg_path).exists() and Path(seg_path).stat().st_size > 0:
+                            wav_to_concat.append(seg_path)
+
+            if not wav_to_concat:
+                raise RuntimeError("Coqui: ningún segmento sintetizado")
+
+            # Concatenar WAVs con ffmpeg
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR, mode='w'
+            ) as concat_f:
+                concat_list = concat_f.name
+            tmp_files.append(concat_list)
+            with open(concat_list, 'w') as f:
+                for wav in wav_to_concat:
+                    f.write(f"file '{wav}'\n")
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
+            ) as tmp_final:
+                final_wav = tmp_final.name
+            tmp_files.append(final_wav)
+
+            subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                 "-i", concat_list, final_wav],
+                check=True, capture_output=True,
+            )
+
+            # Convertir WAV final → MP3
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", final_wav,
+                 "-acodec", "libmp3lame", "-q:a", "4", output_path],
+                check=True, capture_output=True,
+            )
+
         finally:
-            try:
-                os.unlink(tmp_wav)
-            except OSError:
-                pass
+            for f in tmp_files:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
 
         out = Path(output_path)
         if not out.exists() or out.stat().st_size < 1024:
@@ -652,9 +735,21 @@ class ECHO(BaseAgent):
                 f"[dim]Preprocesando guion para voz natural...[/]"
             )
 
-            # Preprocesar el guion — devuelve texto plano listo para voz
-            clean_script = preprocess_script(ctx.script)
-            self.logger.info("Guion preprocesado (texto plano, sin SSML)")
+            # Preservar marcadores de pausa ANTES de preprocess_script:
+            # [PAUSA] → ||P|| y [PAUSA_LARGA] → ||PL|| sobreviven la limpieza de brackets
+            # y se convierten en silencio real de 0.3s / 0.6s en _synthesize_coqui.
+            raw_for_tts = ctx.script
+            raw_for_tts = raw_for_tts.replace('[PAUSA_LARGA]', '||PL||')
+            raw_for_tts = raw_for_tts.replace('[PAUSA]', '||P||')
+
+            clean_script = preprocess_script(raw_for_tts)
+
+            # Limpieza nuclear: eliminar cualquier bracket residual que haya sobrevivido.
+            # [PRECIO:BTC], [SENALA:*], cualquier etiqueta que el LLM haya dejado.
+            clean_script = re.sub(r'\[.*?\]', '', clean_script)
+            clean_script = re.sub(r' {2,}', ' ', clean_script).strip()
+
+            self.logger.info("Guion preprocesado (texto plano, pausas reales, sin brackets)")
 
             console.print(
                 f"[dim]Motor principal: Coqui TTS (es/css10/vits) · "
