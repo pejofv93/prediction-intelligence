@@ -455,12 +455,12 @@ class ECHO(BaseAgent):
 
     # Velocidad por modo (VITS acepta speed: 1.0 = normal)
     _COQUI_SPEED_MAP = {
-        "urgente":   1.15,
-        "noticia":   1.10,
-        "analisis":  0.92,
-        "standard":  0.92,
-        "educativo": 0.88,
-        "tutorial":  0.88,
+        "urgente":   1.40,
+        "noticia":   1.35,
+        "analisis":  1.30,
+        "standard":  1.30,
+        "educativo": 1.25,
+        "tutorial":  1.25,
     }
 
     @classmethod
@@ -490,7 +490,7 @@ class ECHO(BaseAgent):
         import subprocess
         import tempfile
 
-        speed = self._COQUI_SPEED_MAP.get(mode, 0.95)
+        speed = self._COQUI_SPEED_MAP.get(mode, 1.30)
         tts = self._get_coqui()
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False,

@@ -24,9 +24,9 @@ KEYWORD_WEIGHTS: dict[str, int] = {
     # Colapso / crash
     "crash": 25,
     "colapso": 25,
-    "caída": 20,
-    "caida": 20,
-    "desplome": 20,
+    "caída": 5,          # reducido: palabra común en análisis normales
+    "caida": 5,          # reducido: palabra común en análisis normales
+    "desplome": 10,      # reducido: requiere contexto adicional
     "liquidaciones": 20,
     "liquidación masiva": 25,
     # Regulación
@@ -68,15 +68,23 @@ KEYWORD_WEIGHTS: dict[str, int] = {
     "fidelity": 10,
 }
 
-# Regex para variaciones de precio extremas (>= 15 %)
+# Regex para variaciones de precio en el texto del topic
 _PRICE_MOVE_PATTERN = re.compile(
     r"([+\-±])\s*(\d+(?:\.\d+)?)\s*%",
     re.IGNORECASE,
 )
 
+# Keywords que indican emergencia real (hack, ban, colapso sistémico)
+# Solo con estas o con movimiento de precio >=5% se activa URGENTE
+_EMERGENCY_KEYWORDS: frozenset[str] = frozenset({
+    "hack", "exploit", "rugpull", "rug pull", "hackeo", "hackeado",
+    "robado", "robo", "ban", "prohibición", "prohibicion",
+    "urgente", "breaking", "liquidación masiva", "liquidacion masiva",
+})
+
 
 def _score_price_moves(text: str) -> int:
-    """Suma puntos por cada variación de precio >= 15 % mencionada en el texto."""
+    """Suma puntos por cada variación de precio >= 10% mencionada en el texto."""
     total = 0
     for match in _PRICE_MOVE_PATTERN.finditer(text):
         try:
@@ -92,14 +100,28 @@ def _score_price_moves(text: str) -> int:
     return total
 
 
+def _has_significant_price_move(text: str, min_pct: float = 5.0) -> bool:
+    """Devuelve True si el texto menciona explícitamente un movimiento >= min_pct%."""
+    for match in _PRICE_MOVE_PATTERN.finditer(text):
+        try:
+            if float(match.group(2)) >= min_pct:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
 def detect_urgency(text: str) -> Tuple[float, bool, list[str]]:
     """
     Analiza el texto y devuelve:
       - score (float 0–100)
-      - is_urgent (bool, True si score >= 70)
-      - matched_keywords (list[str] con las palabras que dispararon el score)
+      - is_urgent (bool)
+      - matched_keywords (list[str])
 
-    El score se capea en 100.
+    Regla: URGENTE solo se activa si:
+      a) El score >= 70 Y hay una keyword de emergencia real (hack/ban/etc.), O
+      b) El score >= 70 Y el topic menciona un movimiento de precio >= 5%.
+    Palabras genéricas como "caída" o "desplome" solas NO activan URGENTE.
     """
     lower = text.lower()
     score = 0
@@ -117,10 +139,15 @@ def detect_urgency(text: str) -> Tuple[float, bool, list[str]]:
         matched.append(f"variación_precio(+{price_score}pts)")
 
     score = min(score, 100)
-    is_urgent = score >= 70
+
+    # Condición de urgencia: score alto + (emergencia real O movimiento >=5%)
+    has_emergency = any(kw in lower for kw in _EMERGENCY_KEYWORDS)
+    has_price_move = _has_significant_price_move(text, min_pct=5.0)
+    is_urgent = score >= 70 and (has_emergency or has_price_move)
 
     logger.info(
         f"Urgency score: {score}/100  |  urgente={is_urgent}  |  "
+        f"emergency={has_emergency}  |  price_move_5pct={has_price_move}  |  "
         f"keywords={matched}"
     )
     return float(score), is_urgent, matched

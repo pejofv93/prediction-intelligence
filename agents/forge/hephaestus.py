@@ -435,15 +435,14 @@ class HEPHAESTUS:
                     ws, hs = RES_SHORT
                     short_audio = getattr(ctx, "short_audio_path", "") or ""
                     short_subs = []
+                    _short_generated = False
 
-                    # Si hay guion + audio Short propios, generar Short nativo vertical
+                    # Intento 1: Short nativo con guion + audio propios
                     if short_audio and Path(short_audio).exists() and getattr(ctx, "short_script", ""):
-                        # Parsear subtítulos del short_script
                         try:
                             from agents.forge.echo import preprocess_script as _pp
                             _short_clean = _pp(ctx.short_script)
                             _short_words = _short_clean.split()
-                            # Distribuir palabras uniformemente a lo largo del audio
                             from moviepy.editor import AudioFileClip as _AC
                             _ac = _AC(short_audio)
                             _dur = _ac.duration
@@ -458,17 +457,31 @@ class HEPHAESTUS:
                         except Exception as _se:
                             self.logger.warning(f"Short subs parsing: {_se}")
 
-                        self._compose_short_vertical(
-                            ws, hs, short_audio, chart_path,
-                            prices, short_subs, short_path
-                        )
-                        self.logger.info("Short nativo generado con guion propio")
-                    elif video_format == FORMAT_SHORT:
-                        self._compose_short_vertical(
-                            ws, hs, ctx.audio_path, chart_path,
-                            prices, subtitle_entries, short_path
-                        )
-                    elif ctx.video_path and Path(ctx.video_path).exists():
+                        try:
+                            self._compose_short_vertical(
+                                ws, hs, short_audio, chart_path,
+                                prices, short_subs, short_path
+                            )
+                            _short_generated = Path(short_path).exists()
+                            if _short_generated:
+                                self.logger.info("Short nativo generado con guion propio")
+                        except Exception as _ce:
+                            self.logger.warning(f"Short nativo compose fallo ({_ce}) — probando fallback")
+
+                    # Intento 2: FORMAT_SHORT con audio principal
+                    if not _short_generated and video_format == FORMAT_SHORT:
+                        try:
+                            self._compose_short_vertical(
+                                ws, hs, ctx.audio_path, chart_path,
+                                prices, subtitle_entries, short_path
+                            )
+                            _short_generated = Path(short_path).exists()
+                        except Exception as _fe:
+                            self.logger.warning(f"Short FORMAT_SHORT fallo ({_fe}) — probando crop")
+
+                    # Intento 3: Crop garantizado desde los primeros 60s del vídeo largo
+                    if not _short_generated and ctx.video_path and Path(ctx.video_path).exists():
+                        self.logger.info("Short: usando _crop_to_short como fallback garantizado")
                         self._crop_to_short(ctx.video_path, short_path)
 
                     if Path(short_path).exists():
@@ -479,11 +492,20 @@ class HEPHAESTUS:
                         )
                         self.logger.info(f"Short guardado: {short_path}")
                     else:
-                        ctx.add_warning("HEPHAESTUS", "Short no pudo generarse")
+                        ctx.add_warning("HEPHAESTUS", "Short no pudo generarse (todos los intentos fallaron)")
 
                 except Exception as e:
                     self.logger.warning(f"SHORT fallo (no critico): {e}")
                     ctx.add_warning("HEPHAESTUS", f"SHORT: {e}")
+                    # Último recurso: crop directo si el vídeo largo existe
+                    try:
+                        if ctx.video_path and Path(ctx.video_path).exists():
+                            self._crop_to_short(ctx.video_path, short_path)
+                            if Path(short_path).exists():
+                                ctx.short_video_path = short_path
+                                self.logger.info("Short generado por último recurso (crop post-excepción)")
+                    except Exception as _lr:
+                        self.logger.warning(f"Short último recurso también fallo: {_lr}")
 
             try:
                 console.print(
@@ -1387,8 +1409,8 @@ class HEPHAESTUS:
             _not_music_path = generate_music(_not_mode, duration, _not_music_path)
             if _not_music_path and Path(_not_music_path).exists() and audio_clip is not None:
                 from moviepy.editor import AudioFileClip as _AFC2, CompositeAudioClip, concatenate_audioclips
-                _m2 = _AFC2(_not_music_path).volumex(0.08)   # 8% musica
-                _v2 = audio_clip.volumex(0.92)               # 92% voz
+                _m2 = _AFC2(_not_music_path).volumex(0.03)   # 3% musica
+                _v2 = audio_clip.volumex(0.97)               # 97% voz
                 if _m2.duration < duration:
                     _loops2 = int(duration / _m2.duration) + 1
                     _m2 = concatenate_audioclips([_m2] * _loops2)
@@ -1937,8 +1959,8 @@ class HEPHAESTUS:
             _music_path = generate_music(_mode, duration, _music_path)
             if _music_path and Path(_music_path).exists() and audio_clip is not None:
                 from moviepy.editor import AudioFileClip as _AFC, CompositeAudioClip, concatenate_audioclips
-                _music_clip = _AFC(_music_path).volumex(0.08)   # 8% musica
-                _voice_clip = audio_clip.volumex(0.92)          # 92% voz
+                _music_clip = _AFC(_music_path).volumex(0.03)   # 3% musica
+                _voice_clip = audio_clip.volumex(0.97)          # 97% voz
                 if _music_clip.duration < duration:
                     _loops = int(duration / _music_clip.duration) + 1
                     _music_clip = concatenate_audioclips([_music_clip] * _loops)
