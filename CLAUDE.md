@@ -566,4 +566,52 @@ posible resolución incorrecta. Diagnóstico desde logs Railway + fixes aplicado
 - Vídeos publicados en modo privado en YouTube ✓
 - Pendiente verificar: voz Kokoro audible en próximo pipeline
 
+### Sesión 2026-04-13 — Coqui TTS + 10 fixes de audio/vídeo/scheduling
+
+#### Motor de voz: Kokoro → Coqui TTS
+- Kokoro descartado: voces españolas robóticas (em_alex/em_santa/ef_dora)
+- Coqui TTS instalado: `pip install TTS` en Dockerfile
+- Modelo: `tts_models/es/css10/vits` — voz masculina española natural, ~100MB
+- TTS_HOME=/app/output/models/tts (volumen persistente Railway)
+- Cadena: Coqui TTS → edge-tts → pyttsx3 → silencio-ffmpeg
+- Speed por modo: urgente=1.50, noticia=1.48, analisis=1.45, educativo=1.40
+- [PAUSA] → 0.3s silencio real (segmentos + ffmpeg concat)
+- [PAUSA_LARGA] → 0.6s silencio real
+- Limpieza nuclear: re.sub(r'\[.*?\]','') post-preprocess (ningún bracket llega al TTS)
+
+#### HEPHAESTUS — Música 3%, Short garantizado
+- Música de fondo: 8% → 3% voz 92% → 97% (dos ocurrencias)
+- Short: 3 intentos anidados independientes (nativo → FORMAT_SHORT → crop)
+  + último recurso _crop_to_short post-excepción global
+
+#### URGENCY_DETECTOR — menos ruido
+- "caída"/"caida": 20pts → 5pts; "desplome": 20pts → 10pts
+- is_urgent=True SOLO si score≥70 AND (emergency keyword OR move≥5% en topic)
+- ctx.add_warning solo si is_urgent=True (no ruido para temas normales)
+
+#### CALÍOPE — gancho mejorado
+- _has_strong_hook: detecta `?` en 400 chars, número concreto, o frases virales habituales
+- Gancho débil: bajado a logger.debug (eliminado de ctx.warnings)
+- import re añadido en caliope.py
+
+#### KAIROS — 18:00 UTC → 10:00 UTC
+- DEFAULT_HOURS: todos los días 10h UTC (12:00 España verano)
+- _reset_stale_defaults() en __init__: limpia filas sample_size=0, re-siembra con 10h
+- get_optimal_hour() requiere min_samples=3 — sin datos reales suficientes usa 10h
+  (evita que pocos videos a las 18h perpetúen esa hora indefinidamente)
+- Fallback hardcodeado: 18 → 10 en db.py y kairos.py
+
+#### THEMIS — auto-topic desde noticias
+- Prompt themis_strategy.txt: nuevo campo "topic" en JSON
+- _parse_llm_response: extrae topic
+- run(): si ctx.topic es genérico ("análisis crypto diario"), lo reemplaza con
+  el topic generado por THEMIS desde las noticias/precios de PYTHIA/ARGOS
+- Pipeline --auto ya no publica con título genérico
+
+#### Estado al cierre de sesión 2026-04-13
+- 4 deploys completados: commits 1aaf0b0, 19b606a, af30fa7, ad85b72, 1523126, ee3049d
+- KAIROS: próximo pipeline 2026-04-14 10:00 UTC (primer pipeline con Coqui TTS)
+- Pendiente verificar: voz Coqui audible y natural en próximo pipeline
+- OLYMPUS sigue en privacyStatus="private" — cambiar a "public" cuando vídeo se vea correcto
+
 ### Sesión 2026-04-04 — SadTalker integrado (obsoleto, ver arriba)
