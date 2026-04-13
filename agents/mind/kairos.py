@@ -47,14 +47,14 @@ class KAIROS(BaseAgent):
         super().__init__(config)
         self.db = db
         self.logger = get_logger("KAIROS")
+        # Limpiar defaults obsoletos al instanciar — garantiza que
+        # schedule_next_publish() usa DEFAULT_HOURS actuales desde el primer tick.
+        self._reset_stale_defaults()
 
     # ── run ───────────────────────────────────────────────────────────────────
     def run(self, ctx: Context) -> Context:
         self.logger.info("[bold blue]KAIROS[/] iniciado")
         try:
-            # Limpiar defaults obsoletos y re-sembrar con horas actuales.
-            # Garantiza que cambios de DEFAULT_HOURS se aplican en producción.
-            self._reset_stale_defaults()
             self._update_optimal_hours_from_history()
             today = datetime.now().weekday()  # 0=Lun … 6=Dom
             optimal_hour = self.db.get_optimal_hour(today)
