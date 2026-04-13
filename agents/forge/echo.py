@@ -445,20 +445,16 @@ class ECHO(BaseAgent):
                         _time.sleep(3)  # espera breve antes de reintentar misma voz
         raise last_exc
 
-    # ── Kokoro TTS (motor principal offline, sin API) ─────────────────────────
+    # ── Coqui TTS (motor principal offline, voz española natural) ────────────
 
-    # Singleton para no recargar el modelo ONNX en cada pipeline
-    _kokoro_instance = None
-    # Modelos en volumen persistente Railway — persisten entre redeploys
-    _KOKORO_DIR    = Path(__file__).resolve().parents[2] / "output" / "models"
-    _KOKORO_MODEL  = str(_KOKORO_DIR / "kokoro-v0_19.onnx")
-    _KOKORO_VOICES = str(_KOKORO_DIR / "voices.bin")
+    # Singleton — el modelo VITS tarda ~3s en cargar, no recargar en cada pipeline
+    _coqui_instance = None
+    _COQUI_MODEL_NAME = "tts_models/es/css10/vits"
+    # Directorio de modelos en volumen persistente Railway
+    _COQUI_MODEL_DIR = Path(__file__).resolve().parents[2] / "output" / "models" / "tts"
 
-    # Voces españolas en orden de preferencia (masculino → femenino)
-    _KOKORO_ES_VOICES = ["em_alex", "em_santa", "ef_dora"]
-
-    # Mapa de velocidad por modo (Kokoro speed: 1.0 = normal)
-    _KOKORO_SPEED_MAP = {
+    # Velocidad por modo (VITS acepta speed: 1.0 = normal)
+    _COQUI_SPEED_MAP = {
         "urgente":   1.15,
         "noticia":   1.10,
         "analisis":  0.92,
@@ -468,96 +464,46 @@ class ECHO(BaseAgent):
     }
 
     @classmethod
-    def _ensure_kokoro_models(cls) -> None:
+    def _get_coqui(cls):
+        """Carga Coqui TTS (singleton). Descarga modelo en primer uso (~100MB)."""
+        if cls._coqui_instance is None:
+            import os
+            # Apuntar caché de modelos al volumen persistente Railway
+            cls._COQUI_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            os.environ["TTS_HOME"] = str(cls._COQUI_MODEL_DIR)
+            from TTS.api import TTS  # type: ignore
+            console.print(
+                f"[yellow]Coqui TTS: cargando modelo {cls._COQUI_MODEL_NAME} "
+                f"(primera vez descarga ~100MB)...[/]"
+            )
+            cls._coqui_instance = TTS(cls._COQUI_MODEL_NAME, progress_bar=False, gpu=False)
+            console.print("[green]Coqui TTS: modelo cargado OK[/]")
+        return cls._coqui_instance
+
+    def _synthesize_coqui(self, text: str, output_path: str, mode: str = "") -> str:
         """
-        Descarga kokoro-v0_19.onnx y voices.bin desde HuggingFace si no existen.
-        Los guarda en output/models/ (volumen persistente Railway).
-        Solo descarga una vez — persisten entre redeploys gracias al volumen.
-        """
-        cls._KOKORO_DIR.mkdir(parents=True, exist_ok=True)
-        model_path  = Path(cls._KOKORO_MODEL)
-        voices_path = Path(cls._KOKORO_VOICES)
-
-        if model_path.exists() and voices_path.exists():
-            return  # ya descargados
-
-        from huggingface_hub import hf_hub_download  # type: ignore
-        import shutil
-
-        REPO = "hexgrad/Kokoro-82M"
-        console.print("[yellow]Kokoro: descargando modelos desde HuggingFace (primera vez ~310MB)...[/]")
-        if not model_path.exists():
-            console.print("[dim]  → kokoro-v0_19.onnx (~300MB)...[/]")
-            tmp = hf_hub_download(REPO, "kokoro-v0_19.onnx")
-            shutil.copy(tmp, cls._KOKORO_MODEL)
-            console.print(f"[green]  ✓ kokoro-v0_19.onnx guardado en {cls._KOKORO_MODEL}[/]")
-        if not voices_path.exists():
-            console.print("[dim]  → voices.bin (~10MB)...[/]")
-            tmp = hf_hub_download(REPO, "voices.bin")
-            shutil.copy(tmp, cls._KOKORO_VOICES)
-            console.print(f"[green]  ✓ voices.bin guardado en {cls._KOKORO_VOICES}[/]")
-
-    @classmethod
-    def _get_kokoro(cls):
-        """Descarga modelos si no existen, luego carga Kokoro (singleton ONNX)."""
-        if cls._kokoro_instance is None:
-            cls._ensure_kokoro_models()
-            from kokoro_onnx import Kokoro  # type: ignore
-            cls._kokoro_instance = Kokoro(cls._KOKORO_MODEL, cls._KOKORO_VOICES)
-        return cls._kokoro_instance
-
-    def _synthesize_kokoro(self, text: str, output_path: str, mode: str = "") -> str:
-        """
-        Síntesis local con Kokoro TTS (ONNX, sin red).
-        Genera WAV en temp, convierte a MP3 con ffmpeg.
-        Devuelve el nombre de voz usado.
-
-        Requiere /app/models/kokoro-v0_19.onnx y /app/models/voices.bin
-        descargados durante el build del Docker.
+        Síntesis local con Coqui TTS (tts_models/es/css10/vits).
+        Voz masculina española natural. Sin API, sin red tras primer uso.
+        Genera WAV temporal → convierte a MP3 con ffmpeg.
+        Devuelve el nombre del modelo usado.
         """
         import subprocess
         import tempfile
-        import numpy as np
-        import soundfile as sf  # type: ignore
 
-        # Verificar que los modelos existen
-        if not Path(self._KOKORO_MODEL).exists():
-            raise FileNotFoundError(f"Modelo Kokoro no encontrado: {self._KOKORO_MODEL}")
+        speed = self._COQUI_SPEED_MAP.get(mode, 0.95)
+        tts = self._get_coqui()
 
-        kokoro = self._get_kokoro()
-        speed = self._KOKORO_SPEED_MAP.get(mode, 0.95)
-
-        # Intentar voces españolas en orden
-        last_err = Exception("sin intentos")
-        samples = None
-        sample_rate = 24000
-        voice_used = ""
-
-        for voice in self._KOKORO_ES_VOICES:
-            try:
-                samples, sample_rate = kokoro.create(
-                    text=text,
-                    voice=voice,
-                    speed=speed,
-                    lang="es",
-                )
-                voice_used = voice
-                self.logger.info(f"Kokoro voz={voice} speed={speed} OK")
-                break
-            except Exception as e:
-                self.logger.warning(f"Kokoro voz={voice} fallo: {e}")
-                last_err = e
-
-        if samples is None:
-            raise RuntimeError(f"Kokoro: ninguna voz española funcionó. Último error: {last_err}")
-
-        # Guardar WAV temporal → convertir a MP3 con ffmpeg
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False,
                                           dir=OUTPUT_AUDIO_DIR) as tmp:
             tmp_wav = tmp.name
 
         try:
-            sf.write(tmp_wav, samples, sample_rate)
+            try:
+                tts.tts_to_file(text=text, file_path=tmp_wav, speed=speed)
+            except TypeError:
+                # Algunos modelos VITS no aceptan speed — usar sin él
+                tts.tts_to_file(text=text, file_path=tmp_wav)
+
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-i", tmp_wav,
@@ -573,15 +519,14 @@ class ECHO(BaseAgent):
             except OSError:
                 pass
 
-        # Verificar resultado
         out = Path(output_path)
         if not out.exists() or out.stat().st_size < 1024:
             raise RuntimeError(
-                f"Kokoro: MP3 vacío tras conversión "
+                f"Coqui: MP3 vacío tras conversión "
                 f"(size={out.stat().st_size if out.exists() else 0})"
             )
 
-        return voice_used
+        return self._COQUI_MODEL_NAME
 
     # ── pyttsx3 + espeak-ng (fallback offline, funciona en Railway) ──────────
 
@@ -712,23 +657,23 @@ class ECHO(BaseAgent):
             self.logger.info("Guion preprocesado (texto plano, sin SSML)")
 
             console.print(
-                f"[dim]Sintetizando con edge-tts · rate={rate} · pitch={pitch} · "
+                f"[dim]Motor principal: Coqui TTS (es/css10/vits) · "
                 f"destino: output/audio/{ctx.pipeline_id[:8]}...mp3[/]"
             )
 
-            # ── Cadena TTS: Kokoro → edge-tts → pyttsx3 → silencio-ffmpeg
+            # ── Cadena TTS: Coqui → edge-tts → pyttsx3 → silencio-ffmpeg
             mode_str = getattr(ctx, "mode", "") or ""
             try:
-                console.print("[dim]Sintetizando con Kokoro TTS (local, sin API)...[/]")
-                voice_used = self._synthesize_kokoro(clean_script, output_path, mode=mode_str)
-                self.logger.info(f"Audio generado con Kokoro [{voice_used}]")
-                engine_used = f"Kokoro ({voice_used})"
-                console.print(f"[green]Kokoro OK:[/] voz={voice_used}")
-            except Exception as kokoro_err:
+                console.print("[dim]Sintetizando con Coqui TTS (voz española natural)...[/]")
+                model_used = self._synthesize_coqui(clean_script, output_path, mode=mode_str)
+                self.logger.info(f"Audio generado con Coqui TTS [{model_used}]")
+                engine_used = f"Coqui TTS ({model_used})"
+                console.print(f"[green]Coqui TTS OK:[/] modelo={model_used}")
+            except Exception as coqui_err:
                 self.logger.warning(
-                    f"Kokoro fallo ({kokoro_err}) — probando edge-tts..."
+                    f"Coqui TTS fallo ({coqui_err}) — probando edge-tts..."
                 )
-                console.print("[yellow]Kokoro no disponible. Probando edge-tts...[/]")
+                console.print("[yellow]Coqui TTS no disponible. Probando edge-tts...[/]")
                 try:
                     voice_used = self._synthesize_edge_with_retry(
                         clean_script, output_path, rate, pitch
@@ -799,9 +744,9 @@ class ECHO(BaseAgent):
                 try:
                     short_output = str(OUTPUT_AUDIO_DIR / f"{ctx.pipeline_id}_short.mp3")
                     short_clean = preprocess_script(ctx.short_script)
-                    # Short: Kokoro → edge-tts → pyttsx3
+                    # Short: Coqui → edge-tts → pyttsx3
                     try:
-                        self._synthesize_kokoro(short_clean, short_output, mode="urgente")
+                        self._synthesize_coqui(short_clean, short_output, mode="urgente")
                     except Exception:
                         try:
                             self._synthesize_edge_with_retry(short_clean, short_output, "+5%", "+3Hz")

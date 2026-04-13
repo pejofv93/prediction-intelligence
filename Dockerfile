@@ -44,9 +44,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # tiktok-uploader (Playwright headless) + gTTS fallback TTS + ElevenLabs TTS
 RUN pip install tiktok-uploader gTTS==2.5.1 google-generativeai elevenlabs
 
-# Kokoro TTS — motor de voz local, sin API, funciona offline en Railway
-# Los modelos (~310MB) se descargan en primer uso al volumen persistente /app/output/models/
-RUN pip install kokoro-onnx soundfile huggingface_hub
+# Coqui TTS — voz española natural (tts_models/es/css10/vits, ~100MB)
+# Sin API, funciona offline. Modelo se descarga en primer uso al volumen persistente.
+ENV TTS_HOME=/app/output/models/tts
+RUN pip install TTS
 
 # Playwright (chromium para tiktok-uploader) — deps instalados manualmente arriba
 RUN playwright install chromium
