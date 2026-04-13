@@ -53,7 +53,7 @@ class THEMIS(BaseAgent):
         self.config = config
         self.db = db
         self.logger = get_logger("THEMIS")
-        self.llm = LLMClient(config)
+        self.llm = LLMClient(config, db=db)
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -130,6 +130,7 @@ class THEMIS(BaseAgent):
             mode = "standard"
 
         return {
+            "topic":           str(data.get("topic", "")).strip(),
             "mode":            mode,
             "angle":           str(data.get("angle", FALLBACK_STRATEGY["angle"])),
             "hook":            str(data.get("hook", FALLBACK_STRATEGY["hook"])),
@@ -294,6 +295,15 @@ class THEMIS(BaseAgent):
 
             # Aplicar al Context
             ctx.strategy_reasoning = strategy["reasoning"]
+
+            # Actualizar topic si THEMIS generó uno mejor (modo auto)
+            # El topic genérico "análisis crypto diario" se reemplaza siempre.
+            _generic_topics = {"análisis crypto diario", "analisis crypto diario", ""}
+            new_topic = strategy.get("topic", "").strip()
+            if new_topic and ctx.topic.strip().lower() in _generic_topics:
+                ctx.topic = new_topic
+                self.logger.info(f"THEMIS: topic actualizado desde noticias: '{new_topic}'")
+
             # Respetar modo forzado por CLI — THEMIS solo sugiere, no impone
             if ctx.forced_mode:
                 ctx.script_mode = ctx.forced_mode

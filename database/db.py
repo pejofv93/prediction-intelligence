@@ -285,6 +285,51 @@ class DBManager:
     def get_last_btc_price(self) -> float:
         return self.get_last_coin_price("bitcoin")
 
+    # ── LLM Usage tracking ───────────────────────────────────────────────────
+
+    def save_llm_usage(self, provider: str, tokens: int) -> None:
+        """Registra tokens consumidos por un proveedor LLM hoy (UTC)."""
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO llm_usage (provider, tokens, day) VALUES (?, ?, ?)",
+                    (provider, tokens, today),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning(f"save_llm_usage error (no crítico): {exc}")
+
+    def get_llm_usage_today(self, provider: str) -> int:
+        """Devuelve total de tokens usados hoy (UTC) por un proveedor."""
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(tokens), 0) as total FROM llm_usage "
+                    "WHERE provider=? AND day=?",
+                    (provider, today),
+                ).fetchone()
+                return int(row["total"]) if row else 0
+        except Exception as exc:
+            logger.warning(f"get_llm_usage_today error (no crítico): {exc}")
+            return 0
+
+    def get_llm_usage_summary(self) -> list:
+        """Devuelve resumen de uso hoy por proveedor (para el panel web)."""
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT provider, SUM(tokens) as total FROM llm_usage "
+                    "WHERE day=? GROUP BY provider ORDER BY total DESC",
+                    (today,),
+                ).fetchall()
+                return [{"provider": r["provider"], "tokens": r["total"]} for r in rows]
+        except Exception as exc:
+            logger.warning(f"get_llm_usage_summary error: {exc}")
+            return []
+
     def get_optimal_hour(self, day_of_week: int) -> Optional[int]:
         """
         Devuelve la hora con más vistas promedio para el día dado.
@@ -303,7 +348,7 @@ class DBManager:
                 ).fetchone()
             if row:
                 return row["hour"]
-            return 18  # fallback
+            return 10  # fallback 10:00 UTC (12:00 España)
         except Exception as exc:
             logger.error(f"Error obteniendo optimal_hour: {exc}")
-            return 18
+            return 10

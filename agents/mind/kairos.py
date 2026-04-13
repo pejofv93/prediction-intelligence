@@ -20,15 +20,16 @@ from utils.logger import get_logger
 
 console = Console()
 
-# Defaults: Lun-Vie = 18h, Sáb-Dom = 12h
+# Defaults: 10:00 UTC (12:00 España verano / 11:00 invierno)
+# Elegido para que cualquier redeploy nocturno tenga margen suficiente.
 DEFAULT_HOURS: Dict[int, int] = {
-    0: 18,  # Lunes
-    1: 18,  # Martes
-    2: 18,  # Miércoles
-    3: 18,  # Jueves
-    4: 18,  # Viernes
-    5: 12,  # Sábado
-    6: 12,  # Domingo
+    0: 10,  # Lunes
+    1: 10,  # Martes
+    2: 10,  # Miércoles
+    3: 10,  # Jueves
+    4: 10,  # Viernes
+    5: 10,  # Sábado
+    6: 10,  # Domingo
 }
 
 # Mínimo de muestras por slot para considerarlo fiable
@@ -51,6 +52,9 @@ class KAIROS(BaseAgent):
     def run(self, ctx: Context) -> Context:
         self.logger.info("[bold blue]KAIROS[/] iniciado")
         try:
+            # Limpiar defaults obsoletos y re-sembrar con horas actuales.
+            # Garantiza que cambios de DEFAULT_HOURS se aplican en producción.
+            self._reset_stale_defaults()
             self._update_optimal_hours_from_history()
             today = datetime.now().weekday()  # 0=Lun … 6=Dom
             optimal_hour = self.db.get_optimal_hour(today)
@@ -63,7 +67,7 @@ class KAIROS(BaseAgent):
         except Exception as exc:
             self.logger.error(f"[red]KAIROS error:[/] {exc}")
             ctx.add_error("KAIROS", str(exc))
-            ctx.optimal_publish_hour = DEFAULT_HOURS.get(datetime.now().weekday(), 18)
+            ctx.optimal_publish_hour = DEFAULT_HOURS.get(datetime.now().weekday(), 10)
         return ctx
 
     # ── actualización de la tabla optimal_hours ───────────────────────────────
@@ -121,6 +125,20 @@ class KAIROS(BaseAgent):
                 self.db.upsert_optimal_hour(dow, hour, 0.0, 0)
             except Exception:
                 pass
+
+    def _reset_stale_defaults(self) -> None:
+        """
+        Elimina filas con sample_size=0 (sem datos reales) y re-siembra
+        con los DEFAULT_HOURS actuales. Se llama en cada arranque para
+        garantizar que cambios de DEFAULT_HOURS se aplican en producción.
+        """
+        try:
+            with self.db._connect() as conn:
+                conn.execute("DELETE FROM optimal_hours WHERE sample_size = 0")
+            self.logger.info("KAIROS: defaults obsoletos eliminados de optimal_hours")
+        except Exception as exc:
+            self.logger.warning(f"KAIROS: no se pudo limpiar optimal_hours: {exc}")
+        self._seed_defaults()
 
     # ── schedule_next_publish ─────────────────────────────────────────────────
     def schedule_next_publish(self) -> datetime:

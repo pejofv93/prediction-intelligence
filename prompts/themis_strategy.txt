@@ -5,6 +5,7 @@ DATOS:
 
 Responde en JSON con este formato exacto:
 {
+  "topic": "título del vídeo en forma de pregunta o afirmación impactante, máx 80 chars",
   "mode": "standard|urgente|short|analisis|opinion|tutorial|thread",
   "angle": "el ángulo editorial único que nadie más ha cubierto",
   "hook": "primera frase impactante para el guión",
@@ -12,3 +13,6 @@ Responde en JSON con este formato exacto:
   "urgent": true/false,
   "estimated_views": "bajo|medio|alto|viral"
 }
+
+IMPORTANTE: el campo "topic" debe derivarse de las noticias y precios reales del bloque DATOS.
+No uses temas genéricos como "análisis crypto diario". Elige la noticia más relevante del momento.
