@@ -330,21 +330,22 @@ class DBManager:
             logger.warning(f"get_llm_usage_summary error: {exc}")
             return []
 
-    def get_optimal_hour(self, day_of_week: int) -> Optional[int]:
+    def get_optimal_hour(self, day_of_week: int, min_samples: int = 3) -> Optional[int]:
         """
         Devuelve la hora con más vistas promedio para el día dado.
-        Devuelve 18 (6 PM) como fallback si no hay datos.
+        Solo usa datos históricos si hay al menos min_samples muestras reales.
+        Si no hay datos suficientes, devuelve 10 (10:00 UTC = 12:00 España).
         """
         try:
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT hour FROM optimal_hours
-                    WHERE day_of_week=?
+                    SELECT hour, sample_size FROM optimal_hours
+                    WHERE day_of_week=? AND sample_size >= ?
                     ORDER BY avg_views DESC
                     LIMIT 1
                     """,
-                    (day_of_week,),
+                    (day_of_week, min_samples),
                 ).fetchone()
             if row:
                 return row["hour"]
