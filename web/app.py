@@ -1060,3 +1060,49 @@ async def api_prices(nexus_auth: Optional[str] = Cookie(default=None)):
         })
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
+
+
+# ── 22. Endpoint para Railway Cron / UptimeRobot ──────────────────────────────
+# Autenticado con CRON_SECRET (env var). Sin esta var el endpoint está desactivado.
+# Railway Cron: añade header X-Cron-Secret: <valor de CRON_SECRET>
+# UptimeRobot Monitor: HTTP keyword check con el mismo header.
+
+@app.post("/force-pipeline")
+@app.get("/force-pipeline")
+async def force_pipeline(request: Request):
+    """
+    Lanza un pipeline automático inmediatamente.
+    Requiere header X-Cron-Secret o query param secret=<CRON_SECRET>.
+    Si CRON_SECRET no está configurado, el endpoint devuelve 403.
+    """
+    cron_secret = os.getenv("CRON_SECRET", "")
+    if not cron_secret:
+        raise HTTPException(status_code=403, detail="CRON_SECRET not configured")
+
+    # Verificar secreto desde header o query param
+    provided = (
+        request.headers.get("X-Cron-Secret", "")
+        or request.query_params.get("secret", "")
+    )
+    if provided != cron_secret:
+        raise HTTPException(status_code=403, detail="Invalid secret")
+
+    # Lanzar pipeline en background (no bloquear la respuesta HTTP)
+    def _bg():
+        try:
+            cfg = _load_config()
+            db = _get_db()
+            sys.path.insert(0, str(BASE_DIR))
+            from core.nexus_core import NexusCore
+            nexus = NexusCore(cfg, db)
+            ctx = nexus.run_pipeline("análisis crypto diario", "analisis", dry_run=False)
+            console.print(
+                f"[green]force-pipeline completado: {ctx.pipeline_id[:8]} "
+                f"errores={len(ctx.errors)}[/]"
+            )
+        except Exception as exc:
+            console.print(f"[red]force-pipeline error: {exc}[/]")
+
+    t = threading.Thread(target=_bg, daemon=True)
+    t.start()
+    return JSONResponse({"status": "launched", "msg": "Pipeline starting in background"})

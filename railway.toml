@@ -7,3 +7,12 @@ healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
+
+# Cron job diario: lanza pipeline a las 10:00 UTC (12:00 España verano)
+# Requiere Railway Pro plan. Si el plan es Hobby, usar UptimeRobot:
+#   URL: https://<servicio>.railway.app/force-pipeline
+#   Header: X-Cron-Secret: <CRON_SECRET env var>
+#   Interval: Daily at 10:00 UTC
+[[crons]]
+schedule = "0 10 * * *"
+command = "python main.py --force-pipeline"

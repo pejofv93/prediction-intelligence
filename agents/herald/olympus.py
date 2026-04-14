@@ -73,16 +73,23 @@ class OLYMPUS(BaseAgent):
             # 3. Determinar privacyStatus según urgencia y modo
             privacy = self._resolve_privacy(ctx)
 
-            # 4. Construir cuerpo de la petición con todos los metadatos
+            # 4. Resolver playlist automáticamente
+            playlist_id = self._get_or_create_playlist(service, ctx)
+
+            # 5. Construir cuerpo de la petición con todos los metadatos
             body = self._build_request_body(ctx, privacy)
 
-            # 5. Subir vídeo
+            # 6. Subir vídeo
             video_id, video_url = self._upload_video(service, ctx.video_path, body)
 
-            # 6. Subir thumbnail A si existe
+            # 7. Añadir a playlist
+            if playlist_id:
+                self._add_to_playlist(service, video_id, playlist_id)
+
+            # 8. Subir thumbnail A si existe
             self._set_thumbnail(service, video_id, getattr(ctx, "thumbnail_a_path", ""))
 
-            # 7. Actualizar contexto con URL corta
+            # 9. Actualizar contexto con URL corta
             ctx.youtube_video_id = video_id
             ctx.youtube_url = f"https://youtu.be/{video_id}"
 
@@ -90,10 +97,14 @@ class OLYMPUS(BaseAgent):
                 f"[green]OLYMPUS[/] publicado: [link={ctx.youtube_url}]{ctx.youtube_url}[/link]"
             )
 
-            # 8. Persistir en SQLite
+            # 10. Persistir en SQLite (videos + youtube_url en pipelines)
             self._persist(ctx, privacy)
+            try:
+                self.db.update_pipeline_youtube_url(ctx.pipeline_id, ctx.youtube_url)
+            except Exception as exc:
+                self.logger.warning(f"[yellow]OLYMPUS[/] no se pudo actualizar youtube_url en pipeline: {exc}")
 
-            # 9. Notificar a MERCURY
+            # 11. Notificar a MERCURY
             self._notify_telegram(ctx)
 
         except Exception as exc:
@@ -101,13 +112,94 @@ class OLYMPUS(BaseAgent):
             ctx.add_error("OLYMPUS", str(exc))
         return ctx
 
+    # ── playlists automáticas ─────────────────────────────────────────────────
+
+    # Mapa de palabras clave → nombre de playlist
+    _PLAYLIST_MAP = [
+        (["bitcoin", "btc", "halving"],                     "Análisis Bitcoin"),
+        (["ethereum", "eth", "solana", "altcoin", "altcoins", "sol"], "Altcoins"),
+        (["urgente", "breaking", "última hora", "alerta"],  "Urgente — Última hora"),
+        (["educación", "educativo", "tutorial", "explico", "qué es", "cómo"], "Educación Crypto"),
+        (["noticia", "noticias", "sec", "regulación", "blackrock", "etf"], "Noticias Crypto"),
+    ]
+    _PLAYLIST_DEFAULT = "Análisis Crypto"
+
+    def _detect_playlist_name(self, ctx: Context) -> str:
+        """Detecta la playlist adecuada según tema, modo y título."""
+        text = " ".join([
+            ctx.topic or "",
+            getattr(ctx, "seo_title", "") or "",
+            getattr(ctx, "mode", "") or "",
+        ]).lower()
+        for keywords, playlist_name in self._PLAYLIST_MAP:
+            if any(kw in text for kw in keywords):
+                return playlist_name
+        return self._PLAYLIST_DEFAULT
+
+    def _get_or_create_playlist(self, service, ctx: Context) -> str:
+        """Devuelve el playlist_id de la playlist adecuada, creándola si no existe."""
+        try:
+            playlist_name = self._detect_playlist_name(ctx)
+            self.logger.info(f"[yellow]OLYMPUS[/] playlist detectada: '{playlist_name}'")
+
+            # Buscar si ya existe
+            response = service.playlists().list(
+                part="id,snippet",
+                mine=True,
+                maxResults=50,
+            ).execute()
+
+            for item in response.get("items", []):
+                if item["snippet"]["title"].strip().lower() == playlist_name.lower():
+                    playlist_id = item["id"]
+                    self.logger.info(f"[yellow]OLYMPUS[/] playlist existente: {playlist_id}")
+                    return playlist_id
+
+            # No existe → crear
+            new_playlist = service.playlists().insert(
+                part="snippet,status",
+                body={
+                    "snippet": {
+                        "title": playlist_name,
+                        "description": f"Vídeos de CryptoVerdad — {playlist_name}",
+                        "defaultLanguage": "es",
+                    },
+                    "status": {"privacyStatus": "public"},
+                },
+            ).execute()
+            playlist_id = new_playlist["id"]
+            self.logger.info(f"[green]OLYMPUS[/] playlist creada: '{playlist_name}' ({playlist_id})")
+            return playlist_id
+
+        except Exception as exc:
+            self.logger.warning(f"[yellow]OLYMPUS[/] playlist no disponible (no crítico): {exc}")
+            return ""
+
+    def _add_to_playlist(self, service, video_id: str, playlist_id: str) -> None:
+        """Añade el vídeo a la playlist indicada."""
+        try:
+            service.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {
+                            "kind": "youtube#video",
+                            "videoId": video_id,
+                        },
+                    }
+                },
+            ).execute()
+            self.logger.info(f"[green]OLYMPUS[/] vídeo añadido a playlist {playlist_id}")
+        except Exception as exc:
+            self.logger.warning(f"[yellow]OLYMPUS[/] no se pudo añadir a playlist: {exc}")
+
     # ── privacidad adaptativa ─────────────────────────────────────────────────
     def _resolve_privacy(self, ctx: Context) -> str:
         """
-        SIEMPRE private hasta nuevo aviso.
-        No publicar nada público de forma automática.
+        Publica siempre como público.
         """
-        return "private"
+        return "public"
 
     # ── validaciones ──────────────────────────────────────────────────────────
     def _validate_inputs(self, ctx: Context) -> bool:

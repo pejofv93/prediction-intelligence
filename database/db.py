@@ -92,6 +92,18 @@ class DBManager:
             logger.error(f"Error actualizando status: {exc}")
             raise
 
+    def update_pipeline_youtube_url(self, pipeline_id: str, youtube_url: str) -> None:
+        """Actualiza youtube_url en pipelines tras publicación exitosa en YouTube."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE pipelines SET youtube_url=? WHERE id=?",
+                    (youtube_url, pipeline_id),
+                )
+            logger.debug(f"Pipeline {pipeline_id[:8]} → youtube_url actualizada")
+        except Exception as exc:
+            logger.error(f"Error actualizando youtube_url: {exc}")
+
     def get_pipeline(self, pipeline_id: str) -> Optional[Dict[str, Any]]:
         """Devuelve un pipeline por su ID o None si no existe."""
         try:

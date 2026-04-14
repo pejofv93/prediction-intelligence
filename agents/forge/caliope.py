@@ -201,24 +201,41 @@ def _fix_punctuation(text: str) -> str:
 
 
 def _check_block_uniqueness(script: str) -> list:
-    """Retorna lista de pares de bloques con contenido similar (>40% palabras en comun)."""
+    """
+    Retorna lista de pares de bloques con contenido MUY similar (Jaccard > 0.70).
+    Usa Jaccard similarity con stopwords extendidas (incluye términos crypto
+    omnipresentes) para evitar falsos positivos masivos.
+    """
     import re
-    # Extraer bloques
     blocks = re.split(r'\[(?:PRECIO|AN[AÁ]LISIS|SENTIMIENTO|DOMINANCIA|ADOPCI[OÓ]N|PREDICCI[OÓ]N)\]',
                       script, flags=re.I)
     blocks = [b.strip() for b in blocks if b.strip()]
 
+    # Stopwords: artículos/preposiciones + términos crypto que aparecen en TODOS los bloques
+    stopwords = {
+        'el', 'la', 'de', 'en', 'un', 'una', 'y', 'a', 'que', 'es', 'se',
+        'no', 'lo', 'los', 'las', 'su', 'por', 'con', 'al', 'del', 'le',
+        'si', 'me', 'mi', 'ya', 'o', 'ha', 'he', 'tu', 'te', 'mas', 'más',
+        'para', 'este', 'esta', 'esto', 'pero', 'como', 'hay', 'muy', 'también',
+        # Términos crypto omnipresentes en cualquier guión
+        'bitcoin', 'btc', 'crypto', 'precio', 'mercado', 'ethereum', 'eth',
+        'sol', 'criptomoneda', 'criptomonedas', 'blockchain', 'análisis',
+        'analisis', 'dólares', 'dolares', 'mil', 'millones',
+    }
+
     warnings = []
-    stopwords = {'el', 'la', 'de', 'en', 'un', 'una', 'y', 'a', 'que', 'es', 'se',
-                 'no', 'lo', 'los', 'las', 'su', 'por', 'con', 'al', 'del', 'le',
-                 'si', 'me', 'mi', 'ya', 'o', 'ha', 'he', 'tu', 'te', 'mas'}
     for i in range(len(blocks)):
         for j in range(i + 1, len(blocks)):
             words_i = set(blocks[i].lower().split()) - stopwords
             words_j = set(blocks[j].lower().split()) - stopwords
-            common = words_i & words_j
-            if len(words_i) > 0 and len(common) / len(words_i) > 0.4:
-                warnings.append(f'Bloques {i+1} y {j+1} similares ({len(common)} palabras comunes)')
+            union = words_i | words_j
+            if not union:
+                continue
+            jaccard = len(words_i & words_j) / len(union)
+            if jaccard > 0.70:  # 70% de palabras idénticas → realmente repetitivo
+                warnings.append(
+                    f'Bloques {i+1} y {j+1} muy similares (Jaccard={jaccard:.0%})'
+                )
     return warnings
 
 

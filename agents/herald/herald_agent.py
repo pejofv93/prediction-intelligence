@@ -38,6 +38,13 @@ class HeraldAgent:
             logger.warning(f"MERCURY no disponible: {e}")
             self._mercury = None
 
+        try:
+            from agents.herald.aurora import AURORA as Aurora
+            self._aurora = Aurora(self.config, self.db)
+        except Exception as e:
+            logger.warning(f"AURORA no disponible: {e}")
+            self._aurora = None
+
     def run(self, ctx: Context) -> Context:
         logger.info("HERALD_AGENT iniciado")
 
@@ -64,6 +71,13 @@ class HeraldAgent:
             except Exception as e:
                 ctx.add_warning("MERCURY", str(e))
 
+        if self._aurora:
+            try:
+                ctx = self._aurora.run(ctx)
+                logger.info("AURORA completado")
+            except Exception as e:
+                ctx.add_warning("AURORA", str(e))
+
         return ctx
 
     def run_urgent(self, ctx: Context) -> Context:
@@ -89,6 +103,13 @@ class HeraldAgent:
                 ctx = self._mercury.run(ctx)
             except Exception as e:
                 ctx.add_warning("MERCURY", str(e))
+
+        if self._aurora:
+            try:
+                ctx = self._aurora.run(ctx)
+                logger.info("AURORA (urgente) completado")
+            except Exception as e:
+                ctx.add_warning("AURORA", str(e))
 
         return ctx
 

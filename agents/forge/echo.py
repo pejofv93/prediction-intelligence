@@ -811,6 +811,8 @@ class ECHO(BaseAgent):
                         engine_used = "silencio-ffmpeg"
 
             ctx.audio_path = output_path
+            # Guardar motor usado en Context para auditoría y MNEME
+            ctx.tts_engine = engine_used
 
             # Duracion estimada (basada en el guion original sin etiquetas SSML)
             duration_min = self._estimate_duration(ctx.script)

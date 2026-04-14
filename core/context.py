@@ -67,6 +67,7 @@ class Context:
     youtube_url: str = ""
     youtube_video_id: str = ""
     tiktok_url: str = ""
+    instagram_url: str = ""
     telegram_message_id: int = 0
 
     # ── MIND outputs ───────────────────────────────────────────────────────
@@ -111,6 +112,7 @@ class Context:
             "video_format": self.video_format,
             "youtube_url": self.youtube_url,
             "tiktok_url": self.tiktok_url,
+            "instagram_url": self.instagram_url,
             "telegram_message_id": self.telegram_message_id,
             "approved": self.approved,
             "errors": self.errors,

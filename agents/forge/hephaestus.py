@@ -551,12 +551,21 @@ class HEPHAESTUS:
             output_path,
             fps=fps,
             codec="libx264",
+            bitrate="4000k",
             audio_codec=audio_codec if audio else None,
+            audio_bitrate="192k" if audio else None,
             audio=audio,
             temp_audiofile=temp_audio,
             threads=threads,
             logger=None,
         )
+        # Limpiar archivo temporal de audio tras escritura exitosa
+        try:
+            _tmp = Path(temp_audio)
+            if _tmp.exists():
+                _tmp.unlink()
+        except Exception:
+            pass
 
     # ══════════════════════════════════════════════════════════════════════════
     # CAPA 1 — Fondo de estudio

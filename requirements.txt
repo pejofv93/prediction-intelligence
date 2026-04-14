@@ -24,3 +24,4 @@ gTTS==2.5.1
 google-generativeai
 instagrapi
 TTS
+pytrends

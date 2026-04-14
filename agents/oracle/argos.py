@@ -148,6 +148,32 @@ class ARGOS(BaseAgent):
             self.logger.debug(f"Error leyendo caché de precios: {exc}")
             return None
 
+    def _compute_change_24h_from_history(self, coin_symbol: str, current_price: float) -> float:
+        """
+        Calcula variación 24h comparando precio actual con el más reciente
+        de hace 20-28h en oracle_prices. Devuelve 0.0 si no hay histórico suficiente.
+        """
+        coin_map_rev = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin"}
+        coin_id = coin_map_rev.get(coin_symbol, coin_symbol.lower())
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                row = conn.execute(
+                    f"""
+                    SELECT price_usd FROM {PRICE_TABLE}
+                    WHERE coin = ?
+                      AND recorded_at < datetime('now', '-20 hours')
+                      AND recorded_at > datetime('now', '-28 hours')
+                    ORDER BY recorded_at DESC LIMIT 1
+                    """,
+                    (coin_id,),
+                ).fetchone()
+            if row and row[0] and row[0] > 0:
+                old_price = float(row[0])
+                return ((current_price - old_price) / old_price) * 100.0
+        except Exception:
+            pass
+        return 0.0
+
     # Precios de último recurso — usados cuando CoinGecko y SQLite fallan
     _HARDCODED_FALLBACK = {
         "bitcoin":     {"usd": 72000.0, "usd_24h_change": 0.0, "usd_market_cap": 1_400_000_000_000.0},
@@ -300,9 +326,15 @@ class ARGOS(BaseAgent):
                 prices = {}
                 for coin_id, symbol in COIN_MAP.items():
                     coin_data = raw.get(coin_id, {})
+                    raw_change = coin_data.get("usd_24h_change", 0.0) or 0.0
+                    current_price = coin_data.get("usd", 0.0) or 0.0
+                    # Si la API no devuelve cambio 24h real (fallback hardcodeado),
+                    # calcularlo desde el historial de oracle_prices
+                    if raw_change == 0.0 and current_price > 0:
+                        raw_change = self._compute_change_24h_from_history(symbol, current_price)
                     prices[symbol] = {
-                        "price":          coin_data.get("usd", 0.0),
-                        "change_24h":     coin_data.get("usd_24h_change", 0.0),
+                        "price":          current_price,
+                        "change_24h":     raw_change,
                         "market_cap":     coin_data.get("usd_market_cap", 0.0),
                         "volatility_p90": 0.0,
                     }

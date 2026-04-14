@@ -34,9 +34,22 @@ REGLAS DE TAGS (entre 5 y 7 EXACTAMENTE):
 
 FORMATO DE RESPUESTA (JSON puro, sin markdown, sin explicaciones):
 {
-  "title": "título SEO aquí (máx 60 chars)",
+  "titles": [
+    {"title": "Título opción 1 (máx 60 chars)", "score": 88},
+    {"title": "Título opción 2 (máx 60 chars)", "score": 82},
+    {"title": "Título opción 3 (máx 60 chars)", "score": 79},
+    {"title": "Título opción 4 (máx 60 chars)", "score": 75},
+    {"title": "Título opción 5 (máx 60 chars)", "score": 71}
+  ],
   "description": "descripción completa aquí... (mín 300 palabras)",
-  "tags": ["título exacto", "tag2", "tag3", "tag4", "tag5"]
+  "tags": ["título exacto del mejor título", "tag2", "tag3", "tag4", "tag5"]
 }
+
+REGLAS DE PUNTUACIÓN de título (0-100):
+- +25 si keyword en primeras 3 palabras
+- +20 si longitud <= 60 chars
+- +20 si incluye número concreto o precio
+- +20 si incluye pregunta o emoción fuerte
+- +15 si incluye verbo de acción
 
 IMPORTANTE: Devuelve SOLO el JSON. Sin texto antes ni después. Sin ```json```.

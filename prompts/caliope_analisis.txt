@@ -126,6 +126,28 @@ DATOS DISPONIBLES:
 [SOPORTE:1] [SOPORTE:2] [RESISTENCIA:1] [RESISTENCIA:2]
 [FEAR_GREED] [DOMINANCIA_BTC]
 
+ESTILO DE VOZ NATURAL — OBLIGATORIO:
+- Escribe como si hablaras directamente a UNA persona, no como si leyeras un informe.
+- Frases cortas. Variaciones de ritmo. Contracciones naturales ("es que", "o sea", "mira").
+- Alterna frases muy cortas (2-4 palabras) con frases medias (8-10 palabras).
+- Pausas dramáticas: usa [PAUSA] justo después de revelar un dato importante.
+- Ejemplos de ritmo correcto:
+    "Bitcoin ha roto el nivel. [PAUSA] Y eso lo cambia todo."
+    "¿Qué significa esto para ti? Te lo explico ahora."
+    "Mira este número. [PAUSA] Noventa y uno. [PAUSA] Eso es miedo extremo."
+- PROHIBIDO el tono de informe: "se observa una tendencia", "cabe señalar que", "en consecuencia".
+
+GANCHO DE APERTURA — REGLA ABSOLUTA:
+- El PRIMER PÁRRAFO siempre debe ser UNA de estas dos opciones:
+    OPCIÓN A — Pregunta directa al espectador:
+        "¿Sabes cuántas veces ha pasado esto en la historia de Bitcoin? [PAUSA] Solo tres."
+        "¿Estás mirando tu cartera y no entiendes qué está pasando? [PAUSA] Te lo explico."
+    OPCIÓN B — Dato impactante en las primeras 2 líneas:
+        "Bitcoin acaba de hacer algo que no hacía desde 2020. [PAUSA] Y muy poca gente lo ha notado."
+        "Hay un número que hoy define todo el mercado cripto. [PAUSA] Es ese."
+- NUNCA empezar con contexto, explicación o resumen. La tensión va PRIMERO.
+- El gancho debe capturar atención en los primeros 5 segundos de lectura.
+
 RECORDATORIO FINAL:
 El guión DEBE tener entre 1.200 y 1.500 palabras.
 Cada sección DEBE cumplir su mínimo de palabras.

@@ -44,7 +44,7 @@ class HERMES(BaseAgent):
     def __init__(self, config: dict, db=None):
         super().__init__(config)
         self.db = db
-        self.llm = LLMClient(config)
+        self.llm = LLMClient(config, db=db)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -64,7 +64,6 @@ class HERMES(BaseAgent):
             f"MODO: {ctx.mode}",
         ]
         if ctx.script:
-            # Solo los primeros 800 chars del guion para contexto
             lines.append(f"\nRESUMEN DEL GUION:\n{ctx.script[:800]}...")
         if ctx.prices:
             btc = ctx.prices.get("BTC", {})
@@ -74,9 +73,15 @@ class HERMES(BaseAgent):
         lines.append(
             "\n\nDevuelve EXACTAMENTE este JSON (sin markdown, sin explicaciones):\n"
             '{\n'
-            '  "title": "titulo SEO aqui",\n'
-            '  "description": "descripcion larga aqui...",\n'
-            '  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]\n'
+            '  "titles": [\n'
+            '    {"title": "Opcion 1 (max 60 chars)", "score": 88},\n'
+            '    {"title": "Opcion 2 (max 60 chars)", "score": 82},\n'
+            '    {"title": "Opcion 3 (max 60 chars)", "score": 79},\n'
+            '    {"title": "Opcion 4 (max 60 chars)", "score": 75},\n'
+            '    {"title": "Opcion 5 (max 60 chars)", "score": 71}\n'
+            '  ],\n'
+            '  "description": "descripcion 300+ palabras aqui...",\n'
+            '  "tags": ["titulo exacto", "tag2", "tag3", "tag4", "tag5"]\n'
             '}'
         )
         return "\n".join(lines)
@@ -191,7 +196,25 @@ class HERMES(BaseAgent):
 
             data = self._parse_llm_response(raw)
 
-            title: str = data.get("title", ctx.topic)[:60]
+            # Seleccionar el mejor título del array de 5 variantes
+            titles_list = data.get("titles", [])
+            if titles_list and isinstance(titles_list, list):
+                # Elegir el de mayor score; si hay empate, el primero
+                best = max(titles_list, key=lambda t: t.get("score", 0) if isinstance(t, dict) else 0)
+                title: str = str(best.get("title", ctx.topic))[:60]
+                # Log de variantes para auditoría
+                self.logger.info(
+                    f"Títulos generados: "
+                    + " | ".join(
+                        f'{t.get("title","?")[:30]} ({t.get("score","?")})'
+                        for t in titles_list[:5]
+                        if isinstance(t, dict)
+                    )
+                )
+            else:
+                # Fallback: campo "title" legacy
+                title = str(data.get("title", ctx.topic))[:60]
+
             description: str = data.get("description", "")
             tags: list = data.get("tags", [])
 

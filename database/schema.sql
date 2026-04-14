@@ -78,3 +78,15 @@ CREATE TABLE IF NOT EXISTS youtube_comments (
     replied_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     pipeline_id TEXT
 );
+
+-- Uso diario de tokens por proveedor LLM (para rotación inteligente)
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id          INTEGER   PRIMARY KEY AUTOINCREMENT,
+    provider    TEXT      NOT NULL,
+    tokens      INTEGER   NOT NULL DEFAULT 0,
+    day         TEXT      NOT NULL,  -- formato YYYY-MM-DD (UTC)
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_provider_day
+    ON llm_usage (provider, day);

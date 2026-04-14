@@ -114,11 +114,23 @@ class RAPID(BaseAgent):
 
     def _get_cookies_path(self) -> str:
         import os
+
+        # Si hay TIKTOK_SESSION_ID, generamos cookies en memoria (formato tiktok-uploader)
+        session_id = os.getenv("TIKTOK_SESSION_ID")
+        if session_id:
+            cookies_path = "/tmp/tiktok_cookies.txt"
+            with open(cookies_path, "w") as f:
+                f.write(
+                    "# Netscape HTTP Cookie File\n"
+                    f".tiktok.com\tTRUE\t/\tTRUE\t0\tsessionid\t{session_id}\n"
+                )
+            return cookies_path
+
         path = os.getenv("TIKTOK_COOKIES_PATH", "secrets/tiktok_cookies.txt")
         if not Path(path).exists():
             raise FileNotFoundError(
-                f"TIKTOK_COOKIES_PATH no encontrado: {path!r}. "
-                "Exporta las cookies con tiktok-uploader."
+                f"TIKTOK_SESSION_ID ni TIKTOK_COOKIES_PATH encontrados: {path!r}. "
+                "Configura TIKTOK_SESSION_ID en el entorno o exporta las cookies."
             )
         return path
 

@@ -79,7 +79,7 @@ class NexusCore:
             logger.warning("SentinelAgent no disponible aún.")
 
     # ── Pipeline principal ───────────────────────────────────────────────────
-    def run_pipeline(self, topic: str, mode: str = "standard",
+    def run_pipeline(self, topic: str, mode: str = "analisis",
                      dry_run: bool = False) -> Context:
         """
         Ejecuta el pipeline completo:

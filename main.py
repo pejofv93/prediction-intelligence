@@ -573,10 +573,95 @@ def parse_args():
         action="store_true",
         help="Modo servidor Railway: panel web (8080) + scheduler automático KAIROS",
     )
+    parser.add_argument(
+        "--force-pipeline",
+        action="store_true",
+        help="Lanza UN pipeline automático inmediatamente y termina (usado por Railway Cron)",
+    )
     return parser.parse_args()
 
 
 # ── Modo automático Railway ──────────────────────────────────────────────────────
+
+def _run_auto_pipeline(config: dict, db) -> None:
+    """Lanza UN pipeline automático inmediatamente (KAIROS elige tema via THEMIS)."""
+    from core.nexus_core import NexusCore
+    console.print("[bold #F7931A]KAIROS: lanzando pipeline automático...[/]")
+    nexus = NexusCore(config, db)
+    ctx = nexus.run_pipeline("análisis crypto diario", "analisis", dry_run=False)
+    if ctx.has_errors():
+        console.print("[red]Pipeline automático con errores — ver logs.[/]")
+    else:
+        console.print("[green]Pipeline automático completado.[/]")
+
+
+def _update_video_analytics(config: dict, db) -> None:
+    """
+    FIX-10 MNEME: actualiza views/likes de vídeos publicados hace ~24h y ~7d.
+    Sin datos reales, MNEME nunca aprende. Se llama desde el scheduler periódicamente.
+    Requiere YOUTUBE_TOKEN_B64 configurado en Railway.
+    """
+    import os
+    token_b64 = os.getenv("YOUTUBE_TOKEN_B64", "")
+    if not token_b64:
+        return  # Sin token no podemos pedir analytics
+
+    try:
+        import base64, json as _json
+        from googleapiclient.discovery import build
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+
+        token_data = _json.loads(base64.b64decode(token_b64).decode("utf-8"))
+        creds = Credentials(
+            token=token_data.get("token"),
+            refresh_token=token_data.get("refresh_token"),
+            token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=token_data.get("client_id"),
+            client_secret=token_data.get("client_secret"),
+            scopes=token_data.get("scopes", ["https://www.googleapis.com/auth/youtube.readonly"]),
+        )
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
+
+        service = build("youtube", "v3", credentials=creds)
+
+        # Obtener vídeos sin estadísticas actualizadas (views=0)
+        with db._connect() as conn:
+            rows = conn.execute(
+                "SELECT video_id, id FROM videos WHERE views = 0 OR views IS NULL LIMIT 10"
+            ).fetchall()
+
+        if not rows:
+            return
+
+        video_ids = [r[0] for r in rows if r[0]]
+        if not video_ids:
+            return
+
+        response = service.videos().list(
+            part="statistics",
+            id=",".join(video_ids),
+        ).execute()
+
+        updated = 0
+        for item in response.get("items", []):
+            yt_id = item["id"]
+            stats = item.get("statistics", {})
+            views = int(stats.get("viewCount", 0))
+            likes = int(stats.get("likeCount", 0))
+            # Buscar el id interno del vídeo
+            internal_id = next((r[1] for r in rows if r[0] == yt_id), None)
+            if internal_id:
+                db.update_video_stats(internal_id, views, likes)
+                updated += 1
+
+        if updated:
+            console.print(f"[green]MNEME analytics: {updated} vídeos actualizados (views/likes)[/]")
+
+    except Exception as exc:
+        console.print(f"[dim yellow]MNEME analytics update falló (no crítico): {exc}[/]")
+
 
 def action_auto(config: dict, db) -> None:
     """Modo servidor: panel web en hilo principal + KAIROS scheduler en background."""
@@ -585,18 +670,45 @@ def action_auto(config: dict, db) -> None:
     from datetime import datetime
 
     def _scheduler_loop() -> None:
-        """Bucle KAIROS: lanza pipeline en la hora óptima del día."""
+        """
+        Bucle KAIROS: lanza pipeline a la hora óptima del día.
+        Comprueba al arrancar si la ventana de hoy se perdió por un reinicio
+        reciente (grace period 3h) y lanza inmediatamente en ese caso.
+        """
         from agents.mind.kairos import KAIROS as Kairos
-        from core.nexus_core import NexusCore
 
         kairos = Kairos(config, db)
         console.print("[bold #F7931A]KAIROS scheduler activo[/]")
+
+        # ── Grace period: si el contenedor arrancó después de la hora óptima
+        # de hoy pero dentro de las 3 horas siguientes, lanzar de inmediato.
+        try:
+            now = datetime.now()
+            today_hour = db.get_optimal_hour(now.weekday())
+            today_slot = now.replace(hour=today_hour, minute=0, second=0, microsecond=0)
+            missed_secs = (now - today_slot).total_seconds()
+            if 0 < missed_secs <= 10800:  # hasta 3h después de la ventana
+                console.print(
+                    f"[yellow]KAIROS: ventana de hoy ({today_hour:02d}:00) perdida por "
+                    f"{missed_secs/60:.0f}min — lanzando pipeline de recuperación...[/]"
+                )
+                _run_auto_pipeline(config, db)
+                time.sleep(3600)  # no relanzar en el mismo slot
+        except Exception as exc:
+            console.print(f"[yellow]KAIROS grace-period check falló: {exc}[/]")
+
+        _analytics_last_run = 0.0
 
         while True:
             try:
                 next_run = kairos.schedule_next_publish()
                 now = datetime.now()
                 wait_sec = (next_run - now).total_seconds()
+
+                # Actualizar analytics de YouTube cada 6 horas (MNEME necesita datos reales)
+                if time.time() - _analytics_last_run > 21600:
+                    _update_video_analytics(config, db)
+                    _analytics_last_run = time.time()
 
                 if wait_sec > 60:
                     console.print(
@@ -607,14 +719,7 @@ def action_auto(config: dict, db) -> None:
                     continue
 
                 # Hora de producir
-                console.print("[bold #F7931A]KAIROS: lanzando pipeline automático...[/]")
-                nexus = NexusCore(config, db)
-                ctx = nexus.run_pipeline("análisis crypto diario", "standard", dry_run=False)
-
-                if ctx.has_errors():
-                    console.print("[red]Pipeline automático con errores — ver logs.[/]")
-                else:
-                    console.print("[green]Pipeline automático completado.[/]")
+                _run_auto_pipeline(config, db)
 
                 # Dormir 1h para no re-ejecutar el mismo slot
                 time.sleep(3600)
@@ -658,6 +763,10 @@ def main():
 
     if args.auto:
         action_auto(config, db)
+        return
+
+    if args.force_pipeline:
+        _run_auto_pipeline(config, db)
         return
 
     if args.server:
