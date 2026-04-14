@@ -88,12 +88,14 @@ class HERMES(BaseAgent):
 
     def _extract_keyword(self, topic: str) -> str:
         """Extrae la keyword principal del tema (primera palabra significativa)."""
+        import re as _re
         stopwords = {"el", "la", "los", "las", "un", "una", "de", "del", "en", "y", "a"}
         words = topic.lower().split()
         for w in words:
-            if w not in stopwords and len(w) > 2:
-                return w
-        return words[0] if words else topic.lower()
+            clean = _re.sub(r"[^\w]", "", w, flags=_re.UNICODE)
+            if clean not in stopwords and len(clean) > 2:
+                return clean
+        return _re.sub(r"[^\w]", "", words[0], flags=_re.UNICODE) if words else topic.lower()
 
     def _calculate_seo_score(
         self,

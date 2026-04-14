@@ -227,6 +227,13 @@ class NexusCore:
         if not ctx.approved:
             ctx.add_warning("HERALD", "Publicación omitida: contenido no aprobado.")
             return ctx
+        # Bloqueo SEO — no publicar si score < 70
+        seo = getattr(ctx, "seo_score", 0)
+        if seo < 70:
+            msg = f"SEO Score {seo}/100 < 70 — publicación bloqueada por HERMES."
+            ctx.add_warning("NEXUS_CORE", msg)
+            console.print(f"  [bold red]✗ {msg}[/]")
+            return ctx
         if self._herald:
             ctx = self._herald.run(ctx)
         else:
