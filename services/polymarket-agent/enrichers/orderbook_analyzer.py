@@ -4,7 +4,16 @@ Usa condition_id (no market_id) para llamar al CLOB.
 """
 import logging
 
+from shared.firestore_client import col
+
 logger = logging.getLogger(__name__)
+
+_NEUTRAL = {
+    "buy_pressure": 0.5,
+    "spread": 0.0,
+    "depth": 0.0,
+    "imbalance_signal": "NEUTRAL",
+}
 
 
 async def analyze_orderbook(market_id: str) -> dict:
@@ -19,5 +28,41 @@ async def analyze_orderbook(market_id: str) -> dict:
       depth: volumen total en libro
       imbalance_signal: "BULLISH" si buy_ratio > 0.65, "BEARISH" si < 0.35, "NEUTRAL" si no
     """
-    # TODO: implementar en Sesion 5
-    raise NotImplementedError
+    try:
+        doc = col("poly_markets").document(market_id).get()
+        if not doc.exists:
+            logger.debug("analyze_orderbook(%s): mercado no encontrado en Firestore", market_id)
+            return dict(_NEUTRAL)
+
+        condition_id = doc.to_dict().get("condition_id", "")
+        if not condition_id:
+            logger.debug("analyze_orderbook(%s): sin condition_id", market_id)
+            return dict(_NEUTRAL)
+
+        from scanner import fetch_market_orderbook
+        ob = await fetch_market_orderbook(condition_id)
+
+        buy_pressure = float(ob.get("buy_ratio", 0.5))
+        spread = float(ob.get("spread", 0.0))
+
+        bids = ob.get("bids", [])
+        asks = ob.get("asks", [])
+        depth = sum(float(b.get("size", 0)) for b in bids) + sum(float(a.get("size", 0)) for a in asks)
+
+        if buy_pressure > 0.65:
+            imbalance_signal = "BULLISH"
+        elif buy_pressure < 0.35:
+            imbalance_signal = "BEARISH"
+        else:
+            imbalance_signal = "NEUTRAL"
+
+        return {
+            "buy_pressure": round(buy_pressure, 4),
+            "spread": round(spread, 4),
+            "depth": round(depth, 2),
+            "imbalance_signal": imbalance_signal,
+        }
+
+    except Exception:
+        logger.error("analyze_orderbook(%s): error", market_id, exc_info=True)
+        return dict(_NEUTRAL)

@@ -22,5 +22,72 @@ async def check_and_alert(analysis: dict) -> bool:
       Si falla el POST → loggear y continuar (no bloquear el pipeline)
     Devuelve True si envio alerta.
     """
-    # TODO: implementar en Sesion 5
-    raise NotImplementedError
+    import os
+    import httpx
+    from datetime import datetime, timezone
+    from shared.firestore_client import col
+
+    edge = float(analysis.get("edge", 0.0))
+    confidence = float(analysis.get("confidence", 0.0))
+    volume_spike = bool(analysis.get("volume_spike", False))
+    smart_money = bool(analysis.get("smart_money_detected", False))
+
+    if edge <= POLY_MIN_EDGE:
+        return False
+    if confidence <= POLY_MIN_CONFIDENCE:
+        return False
+    if not (volume_spike or smart_money):
+        return False
+
+    market_id = analysis.get("market_id", "unknown")
+    alert_key = f"{market_id}_{round(edge, 2)}"
+
+    # Verificar deduplicacion
+    try:
+        existing = col("alerts_sent").where("alert_key", "==", alert_key).limit(1).stream()
+        if any(True for _ in existing):
+            logger.debug("check_and_alert(%s): alerta duplicada omitida", market_id)
+            return False
+    except Exception:
+        logger.error("check_and_alert(%s): error comprobando dedup", market_id, exc_info=True)
+
+    # Enviar alerta al bot de Telegram
+    if not TELEGRAM_BOT_URL:
+        logger.warning("check_and_alert: TELEGRAM_BOT_URL no configurada — alerta no enviada")
+        return False
+
+    cloud_run_token = os.environ.get("CLOUD_RUN_TOKEN", "")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{TELEGRAM_BOT_URL}/send-alert",
+                json={"type": "polymarket", "data": analysis},
+                headers={"x-cloud-token": cloud_run_token},
+            )
+        if resp.status_code not in (200, 201, 202):
+            logger.error(
+                "check_and_alert(%s): telegram-bot respondio %d",
+                market_id, resp.status_code,
+            )
+            return False
+    except Exception:
+        logger.error("check_and_alert(%s): error enviando alerta", market_id, exc_info=True)
+        return False
+
+    # Registrar en alerts_sent para deduplicacion
+    try:
+        col("alerts_sent").add({
+            "alert_key": alert_key,
+            "sent_at": datetime.now(timezone.utc),
+            "type": "polymarket",
+        })
+        # Marcar como alertado en poly_predictions
+        col("poly_predictions").document(market_id).update({"alerted": True})
+    except Exception:
+        logger.error("check_and_alert(%s): error guardando en alerts_sent", market_id, exc_info=True)
+
+    logger.info(
+        "check_and_alert(%s): alerta enviada — edge=%.3f conf=%.2f vol_spike=%s sm=%s",
+        market_id, edge, confidence, volume_spike, smart_money,
+    )
+    return True
