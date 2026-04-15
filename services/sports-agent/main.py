@@ -240,21 +240,31 @@ async def _collect_other_sports() -> None:
 
 
 async def _bg_enrich() -> None:
-    """Verifica que collect fue reciente antes de enriquecer."""
+    """
+    Pipeline de enriquecimiento:
+    Lee upcoming_matches SCHEDULED → aplica Poisson+ELO (futbol) o Groq (otros deportes)
+    → escribe enriched_matches en Firestore.
+    """
     try:
-        # Defensa contra race condition: verificar que collect se ejecuto recientemente
+        # Aviso si collect no se ha ejecutado en esta sesion (no bloquea)
         if _status["last_collect"] is None:
             logger.warning(
                 "enrich: last_collect es None — "
-                "ejecuta /run-collect primero o espera al siguiente ciclo"
+                "puede que los datos no sean frescos; continuando igualmente"
             )
-        # TODO: implementar en Sesion 3
-        # from enrichers.data_enricher import run_enrichment
-        # count = await run_enrichment()
-        logger.info("enrich: pendiente implementacion Sesion 3")
+
+        start = datetime.now(timezone.utc)
+        logger.info("enrich: iniciando pipeline")
+
+        from enrichers.data_enricher import run_enrichment
+        count = await run_enrichment()
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         _status["last_enrich"] = datetime.now(timezone.utc).isoformat()
+        logger.info("enrich: %d partidos enriquecidos en %.1fs", count, elapsed)
+
     except Exception as e:
-        logger.error("enrich: error — %s", e, exc_info=True)
+        logger.error("enrich: error no controlado — %s", e, exc_info=True)
 
 
 async def _bg_analyze() -> None:
