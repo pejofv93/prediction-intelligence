@@ -268,36 +268,94 @@ async def _bg_enrich() -> None:
 
 
 async def _bg_analyze() -> None:
-    """Verifica que enrich fue reciente antes de analizar."""
+    """
+    Pipeline de analisis:
+    Lee enriched_matches SCHEDULED → genera senales de value bet → escribe predictions.
+    """
     try:
         if _status["last_enrich"] is None:
             logger.warning(
                 "analyze: last_enrich es None — "
-                "ejecuta /run-enrich primero o espera al siguiente ciclo"
+                "puede que los datos no sean frescos; continuando igualmente"
             )
-        # TODO: implementar en Sesion 4
-        # from analyzers.value_bet_engine import generate_signal
-        logger.info("analyze: pendiente implementacion Sesion 4")
+
+        start = datetime.now(timezone.utc)
+        logger.info("analyze: iniciando pipeline")
+
+        from analyzers.value_bet_engine import generate_signal
+        from shared.firestore_client import col
+
+        # Leer todos los enriched_matches disponibles
+        try:
+            docs = list(col("enriched_matches").stream())
+        except Exception:
+            logger.error("analyze: error leyendo enriched_matches", exc_info=True)
+            return
+
+        signals_generated = 0
+        for doc in docs:
+            enriched = doc.to_dict()
+            try:
+                signal = await generate_signal(enriched)
+                if signal is not None:
+                    signals_generated += 1
+            except Exception:
+                logger.error(
+                    "analyze: error en generate_signal para %s",
+                    enriched.get("match_id"), exc_info=True,
+                )
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         _status["last_analyze"] = datetime.now(timezone.utc).isoformat()
+        logger.info(
+            "analyze: %d senales generadas de %d partidos en %.1fs",
+            signals_generated, len(docs), elapsed,
+        )
+
     except Exception as e:
-        logger.error("analyze: error — %s", e, exc_info=True)
+        logger.error("analyze: error no controlado — %s", e, exc_info=True)
 
 
 async def _bg_learning() -> None:
+    """
+    Pipeline de aprendizaje diario:
+    Evalua predicciones pasadas contra resultados reales → ajusta pesos del modelo.
+    """
     try:
-        # TODO: implementar en Sesion 4
-        # from learner.learning_engine import run_daily_learning
-        # await run_daily_learning()
-        logger.info("learning: pendiente implementacion Sesion 4")
+        logger.info("learning: iniciando pipeline")
+        start = datetime.now(timezone.utc)
+
+        from learner.learning_engine import run_daily_learning
+        await run_daily_learning()
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+        logger.info("learning: completado en %.1fs", elapsed)
+
     except Exception as e:
-        logger.error("learning: error — %s", e, exc_info=True)
+        logger.error("learning: error no controlado — %s", e, exc_info=True)
 
 
 async def _bg_backtest() -> None:
+    """
+    Backtesting historico contra las ultimas 2 temporadas.
+    Ejecutar UNA SOLA VEZ al inicializar el sistema.
+    Puede tardar 30-60 min por rate limit de football-data.org.
+    """
     try:
-        # TODO: implementar en Sesion 4
-        # from backtester.backtest import run_backtest
-        # result = await run_backtest(seasons=2)
-        logger.info("backtest: pendiente implementacion Sesion 4")
+        logger.info("backtest: iniciando — esto puede tardar 30-60 min")
+        start = datetime.now(timezone.utc)
+
+        from backtester.backtest import run_backtest
+        result = await run_backtest(seasons=2)
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+        logger.info(
+            "backtest: completado en %.0fs — accuracy=%.1f%% partidos=%d pesos=%s",
+            elapsed,
+            result.get("accuracy", 0) * 100,
+            result.get("matches_processed", 0),
+            result.get("weights_final", {}),
+        )
+
     except Exception as e:
-        logger.error("backtest: error — %s", e, exc_info=True)
+        logger.error("backtest: error no controlado — %s", e, exc_info=True)
