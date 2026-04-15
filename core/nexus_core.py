@@ -225,19 +225,41 @@ class NexusCore:
     @staticmethod
     def _force_1080p(video_path: str) -> None:
         """
-        Re-encoda el vídeo a 1920x1080 exacto con ffmpeg.
+        Verifica la resolución del vídeo con ffprobe y re-encoda SOLO si no es 1920x1080.
         Reemplaza el archivo original in-place.
         No-op si el archivo no existe o ffmpeg falla.
         """
         if not video_path or not Path(video_path).exists():
+            logger.warning(f"force_1080p: archivo no encontrado: {video_path!r}")
             return
+
+        # Verificar resolución actual con ffprobe antes de re-encodar
+        try:
+            probe = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=width,height', '-of', 'csv=p=0',
+                 video_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                dims = probe.stdout.strip().split(',')
+                cur_w, cur_h = int(dims[0]), int(dims[1])
+                if cur_w == 1920 and cur_h == 1080:
+                    logger.info(f"force_1080p: ya es 1920x1080, sin re-encodar")
+                    return
+                logger.info(f"force_1080p: resolución actual {cur_w}x{cur_h} → re-encodando a 1920x1080")
+        except Exception as exc:
+            logger.warning(f"force_1080p ffprobe: {exc} — procediendo con re-encode preventivo")
+
         output = video_path.replace('.mp4', '_1080p.mp4')
         try:
             result = subprocess.run(
                 [
                     'ffmpeg', '-y', '-i', video_path,
                     '-vf', 'scale=1920:1080',
-                    '-c:v', 'libx264', '-crf', '18',
+                    '-c:v', 'libx264', '-b:v', '4000k',
+                    '-maxrate', '5000k', '-bufsize', '10000k',
+                    '-preset', 'fast',
                     '-c:a', 'copy',
                     output,
                 ],
@@ -247,7 +269,8 @@ class NexusCore:
                 os.replace(output, video_path)
                 logger.info(f"force_1080p: {Path(video_path).name} re-encodado a 1920x1080")
             else:
-                logger.warning(f"force_1080p ffmpeg error: {result.stderr[-200:]!r}")
+                logger.warning(f"force_1080p ffmpeg error (rc={result.returncode}): "
+                               f"{result.stderr[-400:].decode(errors='replace')!r}")
                 try:
                     Path(output).unlink(missing_ok=True)
                 except Exception:

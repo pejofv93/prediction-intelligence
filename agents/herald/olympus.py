@@ -86,8 +86,12 @@ class OLYMPUS(BaseAgent):
             if playlist_id:
                 self._add_to_playlist(service, video_id, playlist_id)
 
-            # 8. Subir thumbnail A si existe
-            self._set_thumbnail(service, video_id, getattr(ctx, "thumbnail_a_path", ""))
+            # 8. Subir thumbnail A (fallback a B si A no existe)
+            self._set_thumbnail(
+                service, video_id,
+                getattr(ctx, "thumbnail_a_path", ""),
+                fallback_path=getattr(ctx, "thumbnail_b_path", ""),
+            )
 
             # 9. Actualizar contexto con URL corta
             ctx.youtube_video_id = video_id
@@ -451,19 +455,51 @@ class OLYMPUS(BaseAgent):
         return video_id, video_url
 
     # ── thumbnail ─────────────────────────────────────────────────────────────
-    def _set_thumbnail(self, service, video_id: str, thumbnail_path: str) -> None:
-        if not thumbnail_path or not Path(thumbnail_path).exists():
+    def _set_thumbnail(self, service, video_id: str, thumbnail_path: str,
+                       fallback_path: str = "") -> None:
+        """
+        Sube thumbnail a YouTube. Intenta thumbnail_path (A) primero, fallback_path (B) despues.
+
+        Requisitos:
+          - Canal verificado con telefono en YouTube Studio (obligatorio para thumbnails custom)
+          - Token OAuth2 con scope youtube.upload (suficiente para thumbnails.set)
+          - Archivo JPEG/PNG de max 2MB y min 640x360px
+        """
+        from googleapiclient.http import MediaFileUpload
+
+        # Determinar que archivo usar (A primero, B como fallback)
+        thumb_to_use = None
+        for candidate, label in [(thumbnail_path, "A"), (fallback_path, "B")]:
+            if candidate and Path(candidate).exists():
+                size_kb = Path(candidate).stat().st_size // 1024
+                self.logger.info(
+                    f"[yellow]OLYMPUS[/] thumbnail {label}: {candidate!r} ({size_kb} KB)"
+                )
+                thumb_to_use = (candidate, label)
+                break
+
+        if thumb_to_use is None:
             self.logger.warning(
-                f"[yellow]OLYMPUS[/] thumbnail_a no disponible: {thumbnail_path!r}, se omite"
+                f"[yellow]OLYMPUS[/] no hay thumbnail disponible "
+                f"(A={thumbnail_path!r} B={fallback_path!r}) — omitido. "
+                "Verifica que IRIS genero el archivo en output/thumbnails/."
             )
             return
+
+        path, label = thumb_to_use
         try:
-            from googleapiclient.http import MediaFileUpload
-            media = MediaFileUpload(thumbnail_path, mimetype="image/jpeg")
+            mime = "image/jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+            media = MediaFileUpload(path, mimetype=mime)
             service.thumbnails().set(videoId=video_id, media_body=media).execute()
-            self.logger.info("[green]OLYMPUS[/] thumbnail A subido correctamente")
+            self.logger.info(f"[green]OLYMPUS[/] thumbnail {label} subido correctamente")
         except Exception as exc:
-            self.logger.warning(f"[yellow]OLYMPUS[/] no se pudo subir thumbnail: {exc}")
+            import traceback as _tb
+            self.logger.warning(
+                f"[yellow]OLYMPUS[/] error subiendo thumbnail {label}: {exc} | "
+                f"Si es 403/forbidden: verifica canal en YouTube Studio -> Personalizacion "
+                f"-> Verificacion con telefono (requerido para miniaturas custom) | "
+                f"Detalle: {_tb.format_exc()[-400:]}"
+            )
 
     # ── persistencia ──────────────────────────────────────────────────────────
     def _persist(self, ctx: Context, privacy: str) -> None:

@@ -538,14 +538,17 @@ class HEPHAESTUS:
         Wrapper sobre write_videofile que:
           - garantiza que el directorio de salida existe
           - coloca temp_audiofile en el mismo directorio (evita huerfanos en CWD)
-          - fuerza resolución exacta si se especifica force_size
+          - fuerza resolución exacta via ffmpeg_params (más fiable que clip.resize en MoviePy 1.0.3)
         """
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         temp_audio = str(out.parent / (out.stem + "_TEMP_AUDIO_.mp4"))
 
-        if force_size and tuple(clip.size) != tuple(force_size):
-            clip = clip.resize(force_size)
+        # Forzar resolución via filtro ffmpeg — más fiable que MoviePy clip.resize()
+        # que en v1.0.3 puede perder el factor al pasar por CompositeVideoClip/set_audio.
+        ffmpeg_extra = []
+        if force_size:
+            ffmpeg_extra = ["-vf", f"scale={force_size[0]}:{force_size[1]}"]
 
         clip.write_videofile(
             output_path,
@@ -558,6 +561,7 @@ class HEPHAESTUS:
             temp_audiofile=temp_audio,
             threads=threads,
             logger=None,
+            ffmpeg_params=ffmpeg_extra if ffmpeg_extra else None,
         )
         # Limpiar archivo temporal de audio tras escritura exitosa
         try:
