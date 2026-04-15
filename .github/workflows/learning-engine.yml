@@ -1,0 +1,19 @@
+name: learning-engine
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloud Run
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-learning" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            --fail --silent --show-error

@@ -1,0 +1,20 @@
+# Copias temporales de shared/ generadas por el Makefile durante deploy
+services/*/shared/
+
+# Entorno Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Variables de entorno — NUNCA commitear valores reales
+.env
+
+# Frontend
+services/dashboard/frontend/node_modules/
+services/dashboard/frontend/dist/
+
+# GCP
+.gcloud/
+gcloud-service-key.json
