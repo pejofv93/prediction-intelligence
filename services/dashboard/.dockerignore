@@ -3,4 +3,4 @@ frontend/dist/
 __pycache__/
 *.py[cod]
 .env
-shared/
+# shared/ NO se ignora: el Makefile lo copia antes del deploy
