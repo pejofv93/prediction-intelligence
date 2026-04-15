@@ -1418,14 +1418,15 @@ class HEPHAESTUS:
             _not_music_path = generate_music(_not_mode, duration, _not_music_path)
             if _not_music_path and Path(_not_music_path).exists() and audio_clip is not None:
                 from moviepy.editor import AudioFileClip as _AFC2, CompositeAudioClip, concatenate_audioclips
-                _m2 = _AFC2(_not_music_path).volumex(0.03)   # 3% musica
-                _v2 = audio_clip.volumex(0.97)               # 97% voz
+                _m2 = _AFC2(_not_music_path)
                 if _m2.duration < duration:
                     _loops2 = int(duration / _m2.duration) + 1
                     _m2 = concatenate_audioclips([_m2] * _loops2)
-                _m2 = _m2.subclip(0, duration)
+                # volumex DESPUÉS de concatenar/recortar: garantiza que el factor se aplica
+                _m2 = _m2.subclip(0, duration).volumex(0.03)   # 3% música
+                _v2 = audio_clip.volumex(0.97)                  # 97% voz
                 audio_clip = CompositeAudioClip([_v2, _m2])
-                self.logger.info(f"Audio mezclado noticiario: voz 92% + musica 8% (modo={_not_mode})")
+                self.logger.info(f"Audio mezclado noticiario: voz 97% + musica 3% (modo={_not_mode})")
         except Exception as _me2:
             self.logger.warning(f"Mezcla musica noticiario: {_me2}")
             # Continuar sin musica — no es critico
@@ -1968,14 +1969,15 @@ class HEPHAESTUS:
             _music_path = generate_music(_mode, duration, _music_path)
             if _music_path and Path(_music_path).exists() and audio_clip is not None:
                 from moviepy.editor import AudioFileClip as _AFC, CompositeAudioClip, concatenate_audioclips
-                _music_clip = _AFC(_music_path).volumex(0.03)   # 3% musica
-                _voice_clip = audio_clip.volumex(0.97)          # 97% voz
+                _music_clip = _AFC(_music_path)
                 if _music_clip.duration < duration:
                     _loops = int(duration / _music_clip.duration) + 1
                     _music_clip = concatenate_audioclips([_music_clip] * _loops)
-                _music_clip = _music_clip.subclip(0, duration)
+                # volumex DESPUÉS de concatenar/recortar: garantiza que el factor se aplica
+                _music_clip = _music_clip.subclip(0, duration).volumex(0.03)   # 3% música
+                _voice_clip = audio_clip.volumex(0.97)                          # 97% voz
                 audio_clip = CompositeAudioClip([_voice_clip, _music_clip])
-                self.logger.info(f"Audio mezclado: voz 92% + musica 8% (modo={_mode})")
+                self.logger.info(f"Audio mezclado: voz 97% + musica 3% (modo={_mode})")
         except Exception as _me:
             self.logger.warning(f"Mezcla musica fullscreen: {_me}")
             # Continuar sin musica — no es critico

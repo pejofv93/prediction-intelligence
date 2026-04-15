@@ -6,7 +6,10 @@ y persiste el resultado en SQLite.
 """
 
 import uuid
+import subprocess
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
@@ -219,6 +222,39 @@ class NexusCore:
             logger.exception("Error en revisión humana")
         return ctx
 
+    @staticmethod
+    def _force_1080p(video_path: str) -> None:
+        """
+        Re-encoda el vídeo a 1920x1080 exacto con ffmpeg.
+        Reemplaza el archivo original in-place.
+        No-op si el archivo no existe o ffmpeg falla.
+        """
+        if not video_path or not Path(video_path).exists():
+            return
+        output = video_path.replace('.mp4', '_1080p.mp4')
+        try:
+            result = subprocess.run(
+                [
+                    'ffmpeg', '-y', '-i', video_path,
+                    '-vf', 'scale=1920:1080',
+                    '-c:v', 'libx264', '-crf', '18',
+                    '-c:a', 'copy',
+                    output,
+                ],
+                capture_output=True, timeout=600,
+            )
+            if result.returncode == 0 and Path(output).exists():
+                os.replace(output, video_path)
+                logger.info(f"force_1080p: {Path(video_path).name} re-encodado a 1920x1080")
+            else:
+                logger.warning(f"force_1080p ffmpeg error: {result.stderr[-200:]!r}")
+                try:
+                    Path(output).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning(f"force_1080p falló: {exc}")
+
     def _run_herald(self, ctx: Context) -> Context:
         if getattr(ctx, "dry_run", False):
             ctx.add_warning("HERALD", "dry-run: publicación omitida.")
@@ -234,6 +270,10 @@ class NexusCore:
             ctx.add_warning("NEXUS_CORE", msg)
             console.print(f"  [bold red]✗ {msg}[/]")
             return ctx
+        # Garantizar resolución 1920x1080 antes de subir
+        if getattr(ctx, "video_path", None):
+            console.print("  [dim]Verificando resolución 1920x1080...[/]")
+            self._force_1080p(ctx.video_path)
         if self._herald:
             ctx = self._herald.run(ctx)
         else:
@@ -247,6 +287,10 @@ class NexusCore:
             console.print("  [dim yellow]⚑ dry-run — HERALD URGENTE saltado[/]")
             return ctx
         ctx.approved = True
+        # Garantizar resolución 1920x1080 antes de subir
+        if getattr(ctx, "video_path", None):
+            console.print("  [dim]Verificando resolución 1920x1080...[/]")
+            self._force_1080p(ctx.video_path)
         if self._herald:
             ctx = self._herald.run_urgent(ctx)
         else:

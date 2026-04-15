@@ -588,9 +588,32 @@ class ECHO(BaseAgent):
                 check=True, capture_output=True,
             )
 
+            # Eliminar silencios residuales de Coqui (inicio/final de cada segmento)
+            # Umbral -40dB elimina silencio real sin cortar respiraciones naturales
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
+            ) as tmp_clean:
+                clean_wav = tmp_clean.name
+            tmp_files.append(clean_wav)
+            _sr = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", final_wav,
+                    "-af", (
+                        "silenceremove="
+                        "start_periods=1:start_duration=0.05:start_threshold=-40dB:"
+                        "stop_periods=-1:stop_duration=0.05:stop_threshold=-40dB"
+                    ),
+                    clean_wav,
+                ],
+                capture_output=True,
+            )
+            # Si silenceremove falla (ffmpeg antiguo), usar el WAV original
+            _clean_src = clean_wav if (_sr.returncode == 0 and Path(clean_wav).exists()
+                                       and Path(clean_wav).stat().st_size > 1024) else final_wav
+
             # Convertir WAV final → MP3
             subprocess.run(
-                ["ffmpeg", "-y", "-i", final_wav,
+                ["ffmpeg", "-y", "-i", _clean_src,
                  "-acodec", "libmp3lame", "-q:a", "4", output_path],
                 check=True, capture_output=True,
             )
