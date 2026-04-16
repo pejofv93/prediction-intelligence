@@ -1,0 +1,31 @@
+name: run-backtest (one-time init)
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger sports-agent /run-backtest
+        run: |
+          echo "Disparando sports backtest..."
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-backtest" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            --fail --silent --show-error
+          echo "sports backtest: 202 aceptado"
+
+      - name: Trigger polymarket-agent /run-poly-backtest
+        run: |
+          echo "Disparando poly backtest..."
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-poly-backtest" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            --fail --silent --show-error
+          echo "poly backtest: 202 aceptado"
