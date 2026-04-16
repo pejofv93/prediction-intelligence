@@ -124,27 +124,39 @@ CTA natural: invitación sin forzar ("Si quieres saber cuándo publico el próxi
 
 ## Estado del proyecto
 NEXUS CORE:   [x] nexus_core.py + context.py + urgency_detector.py + base_agent.py
-              Bloqueo SEO < 70 implementado en _run_herald()
-ORÁCULO:      [x] ARGOS (precios reales + 24h% historial) · PYTHIA · THEMIS (auto-topic)
+              [x] Bloqueo SEO < 70 en _run_herald()
+              [x] _run_crisis_pipeline() — 3 escenas, <90s, para CRISIS >=5x volatilidad
+              [x] validate_before_publish() — quality gate 5 checks + notif Telegram
+              [x] _probe_resolution() + _force_1080p() — ffprobe post-render
+ORÁCULO:      [x] ARGOS (precios reales + 24h% + _fetch_onchain_signals: mempool/hash/F&G)
+              [x] PYTHIA (scoring 7 capas + _deduplicate_articles + 10 RSS feeds)
+              [x] THEMIS (_generate_topic_from_news — LLM genera topic desde noticias)
               [~] RECON — placeholder, requiere YOUTUBE_API_KEY en Railway
               [~] VECTOR — pytrends en requirements.txt, integración parcial
-FORGE:        [x] CALÍOPE (9 modos, Jaccard uniqueness, max_tokens correctos)
+FORGE:        [x] CALÍOPE (Jaccard fix real: script_raw pre-clean_script)
               [x] HERMES (5 variantes título, keyword sin puntuación, score real)
               [x] ECHO (Coqui TTS verificado en producción, ctx.tts_engine registrado)
-              [x] HEPHAESTUS v3 (FULLSCREEN, Short nativo, bitrate 4000k, 1920x1080)
-              [x] IRIS · DAEDALUS (12 tipos de gráfico)
+              [x] HEPHAESTUS v3 (FULLSCREEN 1920x1080, lower thirds, crisis_mode=3 escenas)
+              [x] IRIS (thumbnails A/B + sentimiento: rojo si BTC<-3%, banner alerta si F&G<25)
+              [x] DAEDALUS (Binance OHLCV primario + generate_animated_chart_video)
               [~] HELIOS v3 — pendiente saldo FAL_KEY
-HERALD:       [x] OLYMPUS (público, OAuth2 headless, youtube_url persistida en pipelines)
+HERALD:       [x] OLYMPUS (_add_end_screens + _enrich_description_with_affiliates)
+              [x] PROTEUS (nuevo: Twitter thread + LinkedIn + blog HTML con schema SEO)
+              [x] AURORA (Instagram Reels con thumbnail cover + youtube_url en caption)
               [~] RAPID — Playwright falla sin cookies TikTok
               [x] MERCURY (Telegram canal)
 SENTINEL:     [x] AGORA · SCROLL · CROESUS · ARGONAUT — sentinel_agent.py integrado
               [~] AGORA comentarios — requiere YOUTUBE_CLIENT_SECRETS_B64 en Railway
-MIND:         [x] MNEME (analytics cada 6h) · KAIROS (10:00 UTC + grace 3h) · ALETHEIA
-PANEL WEB:    [x] web/app.py + 5 templates + /force-pipeline endpoint (requiere CRON_SECRET)
+MIND:         [x] MNEME (YouTube Analytics retention: avg_view_percentage, watch_time)
+              [x] KAIROS (10:00 UTC + grace 3h + _process_ab_swap_queue)
+              [x] ALETHEIA (A/B real: _select_ab_thumbnail con confidence + ab_swap_queue)
+PANEL WEB:    [x] web/app.py + 5 templates + /force-pipeline + /pipeline/stream SSE + /analytics
+              [x] dashboard.html: Alpine.js live status card conectado al SSE
 BOT TELEGRAM: [~] MERCURY cubre canal — bot privado pendiente
 DEPLOY:       [x] LIVE en Railway — pipeline diario 10:00 UTC
               [x] Primer pipeline con Coqui TTS: 2026-04-14 (d711feb0, 4:37 min, 0 errores)
               [x] YouTube URL activa: https://youtu.be/jf7cLzvRAoY
+              [x] 18 mejoras desplegadas: commit 5777838 (2026-04-16)
               Volumen persistente: /app/output (audio, video, charts, models)
 
 ## Railway — Variables de entorno
@@ -159,14 +171,20 @@ YouTube 1920x1080: Ticker y=0/h=40 | Gráfico y=40/h=950 | Subs y=990/h=90
 Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ticker y=1860/h=60
 
 ## Próximos pasos (orden prioridad negocio)
-1. Verificar pipeline 2026-04-15 10:00 UTC — railway logs --tail 50
-   Esperar: SEO Score ≥ 70, "Motor: Coqui TTS", Short generado, youtube_url en DB
-2. RAPID/TikTok — subir cookies tiktok-uploader → publicación automática
-3. RECON — añadir YOUTUBE_API_KEY en Railway Dashboard (distinta del OAuth2)
-4. AGORA — añadir YOUTUBE_CLIENT_SECRETS_B64 en Railway (base64 del client_secret.json)
-5. Railway Pro plan → activar cron [[crons]] en railway.toml (actualmente Hobby)
-6. BOT TELEGRAM privado (comandos /estado, /forzar, /parar)
-7. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py
+1. [URGENTE] Dry-run local antes del próximo pipeline Railway — 4 bugs originales sin verificar:
+   a) Resolución 1920x1080 real (ffprobe confirma, no solo log)
+   b) Gráfico BTC con datos Binance actuales (no caché $74k)
+   c) Thumbnail upload (requiere canal verificado con teléfono en YouTube Studio)
+   d) Quality gate ejecutándose en orden correcto (antes de OLYMPUS)
+   Comando: python main.py --dry-run (o ejecutar pipeline sin --auto)
+2. Verificar pipeline 2026-04-16 10:00 UTC — railway logs --tail 100
+   Esperar: "PROTEUS: Twitter thread guardado", "ARGOS: on-chain signals", "Jaccard (pre-limpieza)"
+3. RAPID/TikTok — subir cookies tiktok-uploader → publicación automática
+4. RECON — añadir YOUTUBE_API_KEY en Railway Dashboard (distinta del OAuth2)
+5. AGORA — añadir YOUTUBE_CLIENT_SECRETS_B64 en Railway (base64 del client_secret.json)
+6. Railway Pro plan → activar cron [[crons]] en railway.toml (actualmente Hobby)
+7. BOT TELEGRAM privado (comandos /estado, /forzar, /parar)
+8. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py
 
 ## Notas críticas de implementación
 
@@ -178,9 +196,12 @@ Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ti
 
 ### ARGOS — CoinGecko en Railway
 - IPs Railway comparten rate limit → 429 frecuente
-- Orden: CoinGecko API → caché SQLite (5min) → fallback hardcoded (BTC 72k/ETH 2200/SOL 84)
+- Orden: CoinGecko API → caché SQLite (5min) → fallback hardcoded (BTC 74k/ETH 2340/SOL 130)
+  Fallback actualizado 2026-04-16 con precios Binance spot verificados
 - ORÁCULO no es fatal — sus errores no detienen el pipeline
 - 24h% calculado desde oracle_prices SQLite cuando CoinGecko devuelve 0.0
+- _fetch_onchain_signals(): mempool.space (congestión fees), blockchain.info (hash rate),
+  alternative.me (Fear & Greed) — sin API keys, fallback 50 neutral si cualquiera falla
 
 ### OLYMPUS — OAuth2 headless
 - NUNCA InstalledAppFlow.run_local_server() — incompatible con Railway
@@ -217,13 +238,83 @@ Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ti
 - YOUTUBE_TOKEN_B64 (el mismo OAuth2 de OLYMPUS) se reutiliza para leer el token
 - No necesita ningún archivo en disco — compatible Railway headless
 
+### DAEDALUS — Fuente OHLCV
+- Binance klines API primaria: api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=180
+  (180 velas de 4h = 30 días, sin API key, sin rate limit en Railway)
+- CoinGecko fallback si Binance falla
+- Caché SQLite 1h — invalidada si cierre más reciente ±10% del ctx.btc_price
+- generate_animated_chart_video(): FuncAnimation 24fps, velas progresivas + zoom + parpadeo precio
+
+### HEPHAESTUS — Crisis mode
+- ctx.crisis_mode = True → solo 3 escenas: [precio, analisis, prediccion]
+- _draw_lower_third(): slide-in ease-out cúbico, fondo semitransparente, borde acento #F7931A
+- Solo se activa en escenas "analisis" cuando ctx.support_levels no está vacío
+
+### PROTEUS — Content repurposing
+- Output: output/repurposed/{pipeline_id}/ (twitter_thread.txt, linkedin_post.txt, blog.html)
+- _extract_key_insights(): puntúa frases por densidad de datos ($X, %, años, énfasis)
+- Blog HTML incluye schema SEO, meta tags, embed YouTube, paleta #0A0A0A/#F7931A
+- Ejecutado en herald_agent.py inmediatamente después de OLYMPUS (y en run_urgent())
+
+### ALETHEIA — A/B real
+- ab_swap_queue tabla SQLite: pipeline_id, check_at (+2h), youtube_video_id, status
+- _select_ab_thumbnail(): si confidence < 0.3 → alterna A/B; si >= 0.3 → usa ganador histórico
+- KAIROS procesa cola pendiente en cada ciclo del scheduler
+
 ### DB — Esquema relevante
 - tabla pipelines: id, topic, mode, status, youtube_url, seo_score, created_at
-- tabla videos: id, pipeline_id, youtube_id, views, likes (actualizado cada 6h)
+- tabla videos: id, pipeline_id, youtube_id, views, likes,
+                avg_view_percentage, avg_duration_seconds, watch_time_minutes (añadido MNEME)
 - tabla oracle_prices: coin, price, recorded_at (base para 24h%)
 - tabla market_prices: coin_id, price, recorded_at
+- tabla ab_swap_queue: pipeline_id, check_at, youtube_video_id, status (añadido ALETHEIA)
 
 ## Historial de sesiones (resumen)
+
+### Sesión 2026-04-16 — Level-up: 18 mejoras en 5 equipos paralelos
+
+**Qué se hizo:**
+Deploy de 18 mejoras implementadas con 5 agentes paralelos (commit 5777838):
+
+FORGE (4): Jaccard fix real en CALÍOPE (script_raw pre-clean_script) · gráfico animado en
+DAEDALUS (FuncAnimation, velas progresivas, zoom, sinc audio) · lower thirds en HEPHAESTUS
+(slide-in ease-out cúbico) · thumbnails emocionales en IRIS (rojo si BTC<-3%, banner ALERTA
+si fear_greed<25 o caída>7%)
+
+ORÁCULO (3): PYTHIA scoring 7 capas + 10 RSS feeds + deduplicación · ARGOS _fetch_onchain_signals
+(mempool.space + blockchain.info + alternative.me, sin API keys) · THEMIS _generate_topic_from_news
+(LLM genera topic específico cuando el topic es genérico o vacío)
+
+HERALD (3): OLYMPUS _add_end_screens + _enrich_description_with_affiliates (Binance/Coinbase/Ledger) ·
+PROTEUS nuevo agente (Twitter thread 5 tweets + post LinkedIn + blog HTML schema SEO) ·
+AURORA upload con thumbnail cover + youtube_url explícito en caption
+
+MIND (3): ALETHEIA A/B real (_select_ab_thumbnail con confidence SQLite + ab_swap_queue) ·
+MNEME YouTube Analytics v2 (avg_view_percentage, watch_time → learning_context para CALÍOPE) ·
+KAIROS _process_ab_swap_queue en cada ciclo del scheduler
+
+CORE (5): _run_crisis_pipeline (>=5x volatilidad → 3 escenas, <90s) · context.py 12 nuevos
+campos (crisis_mode, event_type, onchain_signals, thumbnail_sentiment, chart_animated_path...) ·
+/pipeline/stream SSE en web/app.py · dashboard.html Alpine.js live status card ·
+mplfinance añadido a requirements.txt
+
+**Bugs originales detectados pero SIN verificar en producción:**
+- BUG 1 (resolución): ffprobe post-render añadido pero no confirmado con pipeline real
+- BUG 2 (gráfico BTC stale): Binance OHLCV implementado pero caché puede tener datos viejos
+- BUG 3 (thumbnails): thumbnails.set falla 403 si canal sin verificar teléfono — sin fix real
+- BUG 4 (quality gate): validate_before_publish implementado pero orden de ejecución sin probar
+
+**Errores y warnings de la sesión:**
+- UnicodeEncodeError en terminal Windows al imprimir emojis con cp1252 (no afecta Railway)
+- ffprobe no disponible en PATH local Windows (funciona en Railway Linux)
+- FORGE agent hizo `railway up --detach` antes de que completaran ORÁCULO/HERALD/MIND
+  → se hizo un segundo `railway up` final con todos los cambios (commit 5777838)
+- Hardcoded fallback en argos.py corregido: BTC $74k/ETH $2.34k/SOL $130 (Binance spot verificado)
+
+**Siguiente paso concreto:**
+Dry-run local para confirmar los 4 bugs antes del próximo pipeline Railway (10:00 UTC):
+  python main.py --dry-run  (o equivalente sin --auto)
+Luego: railway logs --tail 100 para buscar los nuevos logs de PROTEUS, ARGOS on-chain y Jaccard.
 
 ### Sesión 2026-04-15 — AGORA refactor + deploy verificado
 - AGORA: YOUTUBE_CLIENT_SECRET_PATH → YOUTUBE_CLIENT_SECRETS_B64 (base64, como OLYMPUS)
