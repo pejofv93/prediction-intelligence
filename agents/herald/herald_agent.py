@@ -45,6 +45,13 @@ class HeraldAgent:
             logger.warning(f"AURORA no disponible: {e}")
             self._aurora = None
 
+        try:
+            from agents.herald.proteus import PROTEUS as Proteus
+            self._proteus = Proteus(self.config, self.db)
+        except Exception as e:
+            logger.warning(f"PROTEUS no disponible: {e}")
+            self._proteus = None
+
     def run(self, ctx: Context) -> Context:
         logger.info("HERALD_AGENT iniciado")
 
@@ -55,6 +62,15 @@ class HeraldAgent:
             except Exception as e:
                 ctx.add_warning("OLYMPUS", str(e))
                 logger.error(f"OLYMPUS error: {e}")
+
+        # PROTEUS después de OLYMPUS para que youtube_url esté disponible en ctx
+        if self._proteus:
+            try:
+                ctx = self._proteus.run(ctx)
+                logger.info("PROTEUS completado")
+            except Exception as e:
+                ctx.add_warning("PROTEUS", str(e))
+                logger.error(f"PROTEUS error: {e}")
 
         if self._rapid:
             try:
@@ -97,6 +113,13 @@ class HeraldAgent:
                 logger.info("OLYMPUS (urgente) completado")
             except Exception as e:
                 ctx.add_warning("OLYMPUS", str(e))
+
+        if self._proteus:
+            try:
+                ctx = self._proteus.run(ctx)
+                logger.info("PROTEUS (urgente) completado")
+            except Exception as e:
+                ctx.add_warning("PROTEUS", str(e))
 
         if self._mercury:
             try:

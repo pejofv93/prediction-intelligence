@@ -108,7 +108,17 @@
       "Bash(du -sh /c/Users/Usuario/nexus/*/)",
       "Bash(head -10 echo \"---\" du -sh /c/Users/Usuario/nexus/assets/*)",
       "Bash(head -10 echo \"---\" du -sh /c/Users/Usuario/nexus/*.db /c/Users/Usuario/nexus/*.json)",
-      "Bash(awk '{print $1}')"
+      "Bash(awk '{print $1}')",
+      "Bash(curl:*)",
+      "Bash(ffprobe:*)",
+      "Bash(grep -n \"\\\\[PAUSA\\\\]\\\\|\\\\[PRECIO\\\\]\\\\|\\\\[SENALA\\\\]\\\\|bracket\\\\|\\\\\\\\\\\\[.*\\\\\\\\\\\\]\\\\|re\\\\.sub.*\\\\\\\\\\\\[\" agents/forge/echo.py)",
+      "Bash(awk NR>=790 && NR<=865:*)",
+      "Bash(xargs wc:*)",
+      "Bash(grep:*)",
+      "Bash(sqlite3 output/cryptoverdad.db ':*)",
+      "Bash(sqlite3:*)",
+      "Read(//tmp/**)",
+      "Read(//c/tmp/**)"
     ]
   }
 }

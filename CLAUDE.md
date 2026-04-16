@@ -57,7 +57,7 @@ CLI: rich (siempre)
   PROTEUS → proteus.py — Channel Manager
 
 🔴 SENTINEL:
-  AGORA    → agora.py    — Comentarios YouTube (requiere YOUTUBE_CLIENT_SECRET_PATH)
+  AGORA    → agora.py    — Comentarios YouTube (requiere YOUTUBE_CLIENT_SECRETS_B64)
   SCROLL   → scroll.py   — Newsletter Telegram lunes 10:00 UTC
   CROESUS  → croesus.py  — Monetización + afiliados
   ARGONAUT → argonaut.py — Auditor: huérfanos, vacuum SQLite, health score
@@ -138,7 +138,7 @@ HERALD:       [x] OLYMPUS (público, OAuth2 headless, youtube_url persistida en 
               [~] RAPID — Playwright falla sin cookies TikTok
               [x] MERCURY (Telegram canal)
 SENTINEL:     [x] AGORA · SCROLL · CROESUS · ARGONAUT — sentinel_agent.py integrado
-              [~] AGORA comentarios — requiere YOUTUBE_CLIENT_SECRET_PATH en Railway
+              [~] AGORA comentarios — requiere YOUTUBE_CLIENT_SECRETS_B64 en Railway
 MIND:         [x] MNEME (analytics cada 6h) · KAIROS (10:00 UTC + grace 3h) · ALETHEIA
 PANEL WEB:    [x] web/app.py + 5 templates + /force-pipeline endpoint (requiere CRON_SECRET)
 BOT TELEGRAM: [~] MERCURY cubre canal — bot privado pendiente
@@ -151,20 +151,19 @@ DEPLOY:       [x] LIVE en Railway — pipeline diario 10:00 UTC
 Configuradas: GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PEXELS_API_KEY,
               YOUTUBE_TOKEN_B64 (token.json en base64, refresh_token activo)
 Pendiente:    CRON_SECRET (para /force-pipeline), YOUTUBE_API_KEY (RECON),
-              YOUTUBE_CLIENT_SECRET_PATH (AGORA), COINGECKO_API_KEY (pro),
-              FAL_KEY con saldo (HELIOS v3)
+              YOUTUBE_CLIENT_SECRETS_B64 (AGORA — base64 del client_secret.json),
+              COINGECKO_API_KEY (pro), FAL_KEY con saldo (HELIOS v3)
 
 ## Layout pixel-perfect (constantes en hephaestus.py)
 YouTube 1920x1080: Ticker y=0/h=40 | Gráfico y=40/h=950 | Subs y=990/h=90
 Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ticker y=1860/h=60
 
 ## Próximos pasos (orden prioridad negocio)
-1. Verificar próximo pipeline 2026-04-15 10:00 UTC:
-   railway logs --tail 50 | grep -E "(SEO Score|Motor TTS|Short|youtube_url|Errores)"
-   Esperar: SEO Score ≥ 70 (fix keyword activo), "Motor: Coqui TTS", Short generado
+1. Verificar pipeline 2026-04-15 10:00 UTC — railway logs --tail 50
+   Esperar: SEO Score ≥ 70, "Motor: Coqui TTS", Short generado, youtube_url en DB
 2. RAPID/TikTok — subir cookies tiktok-uploader → publicación automática
 3. RECON — añadir YOUTUBE_API_KEY en Railway Dashboard (distinta del OAuth2)
-4. AGORA — configurar YOUTUBE_CLIENT_SECRET_PATH para responder comentarios
+4. AGORA — añadir YOUTUBE_CLIENT_SECRETS_B64 en Railway (base64 del client_secret.json)
 5. Railway Pro plan → activar cron [[crons]] en railway.toml (actualmente Hobby)
 6. BOT TELEGRAM privado (comandos /estado, /forzar, /parar)
 7. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py
@@ -213,6 +212,11 @@ Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ti
 - Limpieza nuclear: re.sub(r'\[.*?\]','') antes del TTS (ningún bracket llega)
 - ctx.tts_engine registra motor usado para diagnóstico
 
+### AGORA — Comentarios YouTube
+- YOUTUBE_CLIENT_SECRETS_B64: base64 del client_secret.json → decodifica a tempfile en runtime
+- YOUTUBE_TOKEN_B64 (el mismo OAuth2 de OLYMPUS) se reutiliza para leer el token
+- No necesita ningún archivo en disco — compatible Railway headless
+
 ### DB — Esquema relevante
 - tabla pipelines: id, topic, mode, status, youtube_url, seo_score, created_at
 - tabla videos: id, pipeline_id, youtube_id, views, likes (actualizado cada 6h)
@@ -220,6 +224,12 @@ Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ti
 - tabla market_prices: coin_id, price, recorded_at
 
 ## Historial de sesiones (resumen)
+
+### Sesión 2026-04-15 — AGORA refactor + deploy verificado
+- AGORA: YOUTUBE_CLIENT_SECRET_PATH → YOUTUBE_CLIENT_SECRETS_B64 (base64, como OLYMPUS)
+  agora.py decodifica a tempfile en runtime — sin archivos en disco, compatible Railway
+- Imports añadidos: base64, tempfile
+- Deploy Railway verificado 08:10 UTC — arranque limpio, KAIROS activo, próximo pipeline 10:00 UTC
 
 ### Sesión 2026-04-14 — Auditoría brutal + 12 fixes de producción
 - Auditoría reveló: KAIROS nunca ejecutaba en Railway (solo programaba futuro),

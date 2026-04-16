@@ -104,36 +104,89 @@ class DAEDALUS(BaseAgent):
 
     # ── Data fetchers ─────────────────────────────────────────────────────────
 
+    # Mapeo coin_id CoinGecko → símbolo Binance
+    _BINANCE_SYMBOL = {
+        "bitcoin":  "BTCUSDT",
+        "ethereum": "ETHUSDT",
+        "solana":   "SOLUSDT",
+    }
+
+    def _fetch_ohlcv_binance(self, coin_id: str, days: int = 30) -> list:
+        """
+        Obtiene datos OHLCV de Binance (sin rate limiting en Railway).
+        Usa velas 4h para ~30 días → 180 velas.
+        Retorna lista de [timestamp_ms, open, high, low, close].
+        """
+        import requests
+
+        symbol = self._BINANCE_SYMBOL.get(coin_id)
+        if not symbol:
+            return []
+
+        # 180 velas de 4h = 30 días
+        limit = min(180, days * 6)
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": "4h", "limit": limit}
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            raw = resp.json()
+            # Binance: [open_time, open, high, low, close, volume, ...]
+            data = [
+                [int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4])]
+                for k in raw
+            ]
+            if data:
+                self.logger.info(
+                    f"[DAEDALUS] Binance OHLCV: {len(data)} velas 4h para {symbol} "
+                    f"(último cierre: ${data[-1][4]:,.0f})"
+                )
+            return data
+        except Exception as e:
+            self.logger.warning(f"[DAEDALUS] Binance OHLCV fallo para {symbol}: {e}")
+            return []
+
     def _fetch_ohlcv(self, coin_id: str, days: int = 30) -> list:
         """
-        Obtiene datos OHLCV de CoinGecko con cache de 1 hora.
+        Obtiene datos OHLCV con Binance como fuente primaria (sin rate limit en Railway),
+        y CoinGecko como fallback. Cache de 4 horas.
         Retorna lista de [timestamp_ms, open, high, low, close].
         """
         import requests
 
         cache_key = f"ohlcv_{coin_id}_{days}"
-        cached = self._get_cached(cache_key)
+        cached = self._get_cached_with_ttl(cache_key, CACHE_TTL)
         if cached:
-            self.logger.info(f"OHLCV cache hit para {coin_id} {days}d")
+            self.logger.info(f"[DAEDALUS] OHLCV cache hit para {coin_id} {days}d")
             return cached
 
+        # Intento 1: Binance (sin rate limiting en IPs Railway)
+        data = self._fetch_ohlcv_binance(coin_id, days)
+        if data:
+            self._set_cached(cache_key, data)
+            return data
+
+        # Intento 2: CoinGecko (fallback)
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
         params = {"vs_currency": "usd", "days": days}
+        self.logger.info(f"[DAEDALUS] Binance no disponible — probando CoinGecko OHLCV")
         try:
             resp = requests.get(url, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()  # [[timestamp_ms, open, high, low, close], ...]
             if data:
                 self._set_cached(cache_key, data)
-                self.logger.info(f"CoinGecko OHLCV: {len(data)} velas para {coin_id}")
+                self.logger.info(f"[DAEDALUS] CoinGecko OHLCV: {len(data)} velas para {coin_id}")
             return data
         except Exception as e:
-            self.logger.warning(f"OHLCV fetch failed para {coin_id}: {e}")
+            self.logger.warning(f"[DAEDALUS] CoinGecko OHLCV fallo para {coin_id}: {e}")
             return []
 
-    def _fetch_price_history(self, coin_id: str, days: int = 30) -> list:
+    def _fetch_price_history(self, coin_id: str, days: int = 30,
+                             current_price: float = 0) -> list:
         """
         Obtiene precios de cierre de CoinGecko (market_chart) con cache.
+        Si falla, genera simulación anclada a current_price (no precio hardcodeado).
         Devuelve lista de floats.
         """
         import requests
@@ -164,17 +217,24 @@ class DAEDALUS(BaseAgent):
                 f"CoinGecko market_chart fallo para {coin_id}: {e}. Usando simulados."
             )
 
-        # Fallback simulado
-        bases = {"bitcoin": 68000, "ethereum": 2050, "solana": 130}
-        base = bases.get(coin_id, 100)
-        random.seed(42)
+        # Fallback simulado — anclar al precio actual real si está disponible
+        # NUNCA usar precio hardcodeado desactualizado
+        _defaults = {"bitcoin": 84000, "ethereum": 2340, "solana": 130}
+        base = current_price if current_price > 0 else _defaults.get(coin_id, 1000)
+        self.logger.warning(
+            f"[DAEDALUS] Simulando market_chart para {coin_id} anclado a ${base:,.0f}"
+        )
+        random.seed(int(base) % 9999)  # seed basada en precio real → reproducible pero no fija
         sim = [base]
         for _ in range(days * 24):
-            sim.append(sim[-1] * (1 + random.uniform(-0.02, 0.02)))
+            sim.append(sim[-1] * (1 + random.uniform(-0.015, 0.015)))
         return sim
 
     def _fetch_current_prices(self, coins: list = None) -> dict:
-        """Obtiene precios actuales de CoinGecko con cache de 5 min. Devuelve {coin_id: precio_usd}."""
+        """
+        Obtiene precios actuales con fallback a CryptoCompare.
+        Devuelve {coin_id: precio_usd} — nunca retorna precio 0 ni precio de otra moneda.
+        """
         import requests
 
         if coins is None:
@@ -187,20 +247,74 @@ class DAEDALUS(BaseAgent):
             self.logger.info(f"Precios actuales desde cache (< 5min): {cached}")
             return cached
 
+        result: dict = {}
+
+        # ── Intento 1: CoinGecko — una sola llamada con todos los ids ────────
+        cg_url = "https://api.coingecko.com/api/v3/simple/price"
+        cg_params = {"ids": ",".join(coins), "vs_currencies": "usd"}
+        self.logger.info(f"[DAEDALUS] CoinGecko request: {cg_url} params={cg_params}")
         try:
-            ids = ",".join(coins)
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {"ids": ids, "vs_currencies": "usd"}
-            resp = requests.get(url, params=params, timeout=10)
+            resp = requests.get(cg_url, params=cg_params, timeout=10)
+            self.logger.info(f"[DAEDALUS] CoinGecko HTTP {resp.status_code}")
             resp.raise_for_status()
             data = resp.json()
-            result = {k: v.get("usd", 0) for k, v in data.items()}
-            self._set_cached(cache_key, result)
-            self.logger.info(f"Precios actuales CoinGecko (tiempo real): {result}")
-            return result
+            self.logger.info(f"[DAEDALUS] CoinGecko respuesta raw: {data}")
+            # Mapear correctamente cada precio a su moneda — nunca precio 0
+            result = {
+                k: float(v["usd"])
+                for k, v in data.items()
+                if isinstance(v, dict) and v.get("usd") and float(v["usd"]) > 0
+            }
+            if result:
+                self._set_cached(cache_key, result)
+                self.logger.info(f"[DAEDALUS] Precios finales CoinGecko: {result}")
+                return result
+            self.logger.warning(
+                f"[DAEDALUS] CoinGecko devolvió precios vacíos (raw={data}) — probando CryptoCompare"
+            )
         except Exception as e:
-            self.logger.warning(f"Error precios actuales CoinGecko: {e} — devolviendo dict vacio")
-            return {}
+            self.logger.warning(
+                f"[DAEDALUS] CoinGecko FALLO ({type(e).__name__}: {e}) — probando CryptoCompare"
+            )
+
+        # ── Intento 2: CryptoCompare (API pública, sin key) ──────────────────
+        _CG_TO_CC = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL"}
+        _CC_TO_CG = {v: k for k, v in _CG_TO_CC.items()}
+        symbols = [_CG_TO_CC[c] for c in coins if c in _CG_TO_CC]
+        if symbols:
+            cc_url = "https://min-api.cryptocompare.com/data/pricemulti"
+            cc_params = {"fsyms": ",".join(symbols), "tsyms": "USD"}
+            self.logger.info(f"[DAEDALUS] CryptoCompare request: {cc_url} params={cc_params}")
+            try:
+                cc_resp = requests.get(cc_url, params=cc_params, timeout=10)
+                self.logger.info(f"[DAEDALUS] CryptoCompare HTTP {cc_resp.status_code}")
+                cc_resp.raise_for_status()
+                cc_data = cc_resp.json()
+                self.logger.info(f"[DAEDALUS] CryptoCompare respuesta raw: {cc_data}")
+                # cc_data: {"BTC": {"USD": 84000}, "ETH": {"USD": 2340}, "SOL": {"USD": 130}}
+                for sym, price_map in cc_data.items():
+                    cg_id = _CC_TO_CG.get(sym)
+                    if cg_id and isinstance(price_map, dict):
+                        usd = price_map.get("USD", 0)
+                        if usd and float(usd) > 0:
+                            result[cg_id] = float(usd)
+                if result:
+                    self._set_cached(cache_key, result)
+                    self.logger.info(f"[DAEDALUS] Precios finales CryptoCompare: {result}")
+                    return result
+                self.logger.warning(
+                    f"[DAEDALUS] CryptoCompare también devolvió precios vacíos (raw={cc_data})"
+                )
+            except Exception as e2:
+                self.logger.warning(
+                    f"[DAEDALUS] CryptoCompare FALLO ({type(e2).__name__}: {e2})"
+                )
+
+        self.logger.warning(
+            "[DAEDALUS] Todos los proveedores de precio fallaron — devolviendo dict vacío. "
+            "El ticker usará precios de ctx.prices (ARGOS)."
+        )
+        return result
 
     # ── Analisis tecnico ──────────────────────────────────────────────────────
 
@@ -266,6 +380,7 @@ class DAEDALUS(BaseAgent):
         coin_id: str = "bitcoin",
         days: int = 30,
         output_path: str = None,
+        current_price: float = 0,
     ) -> Tuple[str, dict]:
         """
         Genera grafico estilo TradingView profesional:
@@ -289,12 +404,38 @@ class DAEDALUS(BaseAgent):
         # Obtener datos OHLCV
         ohlcv = self._fetch_ohlcv(coin_id, days)
 
+        # Staleness check: si el último cierre difiere >10% del precio actual → refetch
+        if ohlcv and current_price > 0:
+            last_close = float(ohlcv[-1][4])
+            deviation = abs(last_close - current_price) / current_price
+            if deviation > 0.10:
+                self.logger.warning(
+                    f"⚠️ Datos OHLCV desactualizados: último cierre ${last_close:,.0f} "
+                    f"vs precio actual ${current_price:,.0f} ({deviation:.1%} desviación) — refetching"
+                )
+                # Invalidar cache y refetch
+                cache_key = f"ohlcv_{coin_id}_{days}"
+                cache_path = CACHE_DIR / f"{hashlib.md5(cache_key.encode()).hexdigest()}.json"
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                ohlcv = self._fetch_ohlcv(coin_id, days)
+                if ohlcv:
+                    new_close = float(ohlcv[-1][4])
+                    self.logger.info(f"OHLCV refetch OK — nuevo cierre: ${new_close:,.0f}")
+            else:
+                self.logger.info(
+                    f"✅ OHLCV frescos: último cierre ${last_close:,.0f} "
+                    f"vs actual ${current_price:,.0f} ({deviation:.1%})"
+                )
+
         if not ohlcv:
             # Fallback a market_chart construyendo OHLCV sintetico
             self.logger.warning(
                 "OHLCV vacio, construyendo OHLCV sintetico desde market_chart"
             )
-            raw_prices = self._fetch_price_history(coin_id, days)
+            raw_prices = self._fetch_price_history(coin_id, days, current_price=current_price)
             # Agrupar en bloques de 24 puntos horarios para simular velas diarias
             block = max(1, len(raw_prices) // max(days, 1))
             ohlcv = []
@@ -1242,6 +1383,168 @@ class DAEDALUS(BaseAgent):
         self.logger.info(f"Correlation table guardada: {output_path}")
         return output_path
 
+    # ── Gráfico animado MP4 ───────────────────────────────────────────────────
+
+    def generate_animated_chart_video(
+        self,
+        coin_id: str = "bitcoin",
+        days: int = 30,
+        output_path: str = None,
+        audio_duration: float = 60.0,
+        current_price: float = 0,
+    ) -> str:
+        """
+        Genera MP4 del gráfico animado: las velas se dibujan progresivamente
+        sincronizadas con el audio. La línea de precio naranja 'crece' de
+        izquierda a derecha durante los primeros 60% del vídeo.
+        Los últimos 40%: zoom en las últimas 30 velas con precio actual destacado.
+
+        Si falla: retorna "" (no es fatal, hephaestus usa el PNG estático).
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import matplotlib.animation as animation
+            import matplotlib.ticker as mticker
+            import numpy as np
+            from datetime import datetime
+
+            # Verificar disponibilidad del writer antes de comenzar
+            try:
+                writer_cls = animation.FFMpegWriter
+                _test_writer = writer_cls(fps=24, bitrate=1000)
+            except Exception as _we:
+                self.logger.warning(f"FFMpegWriter no disponible: {_we}")
+                return ""
+
+            ohlcv = self._fetch_ohlcv(coin_id, days)
+            if not ohlcv:
+                self.logger.warning("generate_animated_chart_video: sin datos OHLCV")
+                return ""
+
+            timestamps = [datetime.fromtimestamp(d[0] / 1000) for d in ohlcv]
+            opens  = [float(d[1]) for d in ohlcv]
+            highs  = [float(d[2]) for d in ohlcv]
+            lows   = [float(d[3]) for d in ohlcv]
+            closes = [float(d[4]) for d in ohlcv]
+            n_candles = len(closes)
+
+            FPS_ANIM   = 24
+            total_frames = max(48, int(audio_duration * FPS_ANIM))
+            reveal_frames = int(total_frames * 0.6)
+            zoom_frames   = total_frames - reveal_frames
+
+            # Precio actual para la segunda mitad
+            _current = current_price if current_price > 0 else closes[-1]
+
+            fig, ax = plt.subplots(figsize=(CHART_W_INCHES, CHART_H_INCHES), dpi=DPI)
+            fig.patch.set_facecolor(TV_BG)
+            ax.set_facecolor(TV_BG)
+            ax.grid(True, color=TV_GRID, linewidth=0.5, alpha=0.7)
+            ax.set_axisbelow(True)
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"${x:,.0f}"))
+            ax.tick_params(colors="#888888", labelsize=9)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color("#2A2A3A")
+            ax.spines["bottom"].set_color("#2A2A3A")
+
+            # Watermark
+            ax.text(0.99, 0.02, "CryptoVerdad", transform=ax.transAxes,
+                    fontsize=12, color=COLOR_BTC, alpha=0.30,
+                    ha="right", va="bottom", fontweight="bold")
+
+            # Línea de precio naranja (vacía al inicio)
+            price_line, = ax.plot([], [], color=COLOR_BTC, linewidth=1.6,
+                                  alpha=0.85, zorder=5, solid_capstyle="round")
+
+            # Precio actual (texto en vivo — solo segunda mitad)
+            price_text = ax.text(0, 0, "", color=COLOR_BTC, fontsize=11,
+                                 fontweight="bold", va="center", zorder=7, visible=False)
+
+            def _init():
+                ax.set_xlim(-0.5, n_candles - 0.5)
+                price_range = max(closes) - min(closes)
+                ax.set_ylim(min(closes) - price_range * 0.05,
+                            max(closes) + price_range * 0.12)
+                price_line.set_data([], [])
+                return price_line, price_text
+
+            def _update(frame: int):
+                if frame < reveal_frames:
+                    # Primera mitad: revelar velas progresivamente
+                    progress_r = frame / max(reveal_frames - 1, 1)
+                    candles_to_show = max(1, int(n_candles * progress_r))
+
+                    # Limpiar y redibujar solo velas necesarias
+                    while ax.patches:
+                        ax.patches[-1].remove()
+                    while len(ax.lines) > 1:
+                        ax.lines[-1].remove()
+
+                    for i in range(candles_to_show):
+                        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+                        color = TV_CANDLE_UP if c >= o else TV_CANDLE_DN
+                        ax.bar(i, abs(c - o), bottom=min(o, c),
+                               color=color, width=0.48, alpha=0.9, zorder=3)
+                        ax.plot([i, i], [l, h], color=color,
+                                linewidth=1.0, alpha=0.85, zorder=3)
+
+                    # Línea de precio hasta la vela mostrada
+                    price_line.set_data(range(candles_to_show),
+                                        closes[:candles_to_show])
+                    price_text.set_visible(False)
+                    ax.set_title(
+                        f"Bitcoin/USD — Últimos {days} días",
+                        color=COLOR_TEXT, fontsize=14, fontweight="bold", pad=15
+                    )
+                else:
+                    # Segunda mitad: zoom en últimas 30 velas + parpadeo precio
+                    progress_z = (frame - reveal_frames) / max(zoom_frames - 1, 1)
+                    zoom_start = max(0, n_candles - 30)
+                    zoom_closes = closes[zoom_start:]
+                    zoom_n = len(zoom_closes)
+
+                    price_range_z = max(zoom_closes) - min(zoom_closes)
+                    pad = price_range_z * 0.15
+                    ax.set_xlim(zoom_start - 0.5, n_candles - 0.5)
+                    ax.set_ylim(min(zoom_closes) - pad, max(zoom_closes) + pad * 2)
+
+                    # Parpadeo del precio actual (alterna visible/invisible a 2 Hz)
+                    blink = int(frame * 2 / FPS_ANIM) % 2 == 0
+                    price_text.set_visible(blink)
+                    price_text.set_position((n_candles - 1, _current))
+                    price_text.set_text(f"  ${_current:,.0f}")
+
+                    ax.set_title(
+                        f"Bitcoin/USD — Últimas 30 velas · ${_current:,.0f}",
+                        color=COLOR_TEXT, fontsize=14, fontweight="bold", pad=15
+                    )
+
+                return price_line, price_text
+
+            anim = animation.FuncAnimation(
+                fig, _update, frames=total_frames,
+                init_func=_init, blit=False, interval=1000 // FPS_ANIM
+            )
+
+            if not output_path:
+                output_path = str(OUTPUT_CHARTS_DIR / f"animated_{coin_id}_{days}d.mp4")
+
+            writer = animation.FFMpegWriter(fps=FPS_ANIM, bitrate=4000,
+                                            metadata={"title": "CryptoVerdad"})
+            anim.save(output_path, writer=writer, dpi=DPI,
+                      savefig_kwargs={"facecolor": TV_BG})
+            plt.close(fig)
+
+            self.logger.info(f"Gráfico animado generado: {output_path}")
+            return output_path
+
+        except Exception as e:
+            self.logger.warning(f"generate_animated_chart_video fallo: {e}")
+            return ""
+
     # ── Helpers legacy (compatibilidad con pipeline existente) ────────────────
 
     def _extract_history(
@@ -1380,11 +1683,20 @@ class DAEDALUS(BaseAgent):
                         ctx.prices[k] = v
 
             # Generar grafico TradingView principal (BTC, 30 dias)
-            console.print("[dim]DAEDALUS: generando grafico TradingView BTC 30d...[/]")
+            _btc_current = float(
+                getattr(ctx, "btc_price", 0) or
+                (ctx.prices or {}).get("BTC", {}).get("price", 0) or
+                (ctx.prices or {}).get("bitcoin", 0) or 0
+            )
+            console.print(
+                f"[dim]DAEDALUS: generando grafico TradingView BTC 30d "
+                f"(precio actual referencia: ${_btc_current:,.0f})...[/]"
+            )
             chart_path, levels = self.generate_tradingview_chart(
                 coin_id="bitcoin",
                 days=30,
                 output_path=output_path,
+                current_price=_btc_current,
             )
 
             if chart_path:
@@ -1506,5 +1818,24 @@ class DAEDALUS(BaseAgent):
                 console.print("[dim]chart_90d (BTC 90d) generado[/]")
         except Exception as e:
             self.logger.warning(f"chart_90d fallo: {e}")
+
+        # Intentar generar versión animada (opcional, no fatal)
+        try:
+            audio_dur = getattr(ctx, "audio_duration", 0) or 60.0
+            if audio_dur > 10:  # Solo si hay audio real
+                animated_path = str(OUTPUT_CHARTS_DIR / f"{ctx.pipeline_id}_chart_animated.mp4")
+                result = self.generate_animated_chart_video(
+                    coin_id="bitcoin",
+                    days=30,
+                    output_path=animated_path,
+                    audio_duration=audio_dur,
+                    current_price=_btc_current,
+                )
+                if result:
+                    ctx.chart_animated_path = result
+                    self.logger.info(f"Gráfico animado: {animated_path}")
+                    console.print("[dim]Gráfico animado generado[/]")
+        except Exception as e:
+            self.logger.warning(f"Gráfico animado omitido: {e}")
 
         return ctx

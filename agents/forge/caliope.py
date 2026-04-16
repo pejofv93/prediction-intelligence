@@ -37,6 +37,15 @@ LEGAL_DISCLAIMER = (
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
+# Palabras en inglés que NUNCA deben aparecer en el guion final
+ENGLISH_FORBIDDEN_WORDS: List[str] = [
+    "weeks", "market", "bullish", "bearish", "pump", "dump",
+    "wallet", "holders", "mining", "crash", "rally", "trend",
+    "support", "resistance", "trading", "staking", "yield",
+    "airdrop", "moon", "dip", "whale", "hodl", "hold",
+    "breaking", "swap", "fees", "leverage", "liquidation",
+]
+
 
 def clean_script(text: str) -> str:
     """
@@ -198,6 +207,21 @@ def _fix_punctuation(text: str) -> str:
     # Coma al inicio de línea (con espacios opcionales)
     text = re.sub(r'^\s*,\s*', '', text, flags=re.MULTILINE)
     return text
+
+
+def _detect_english_words(script: str) -> List[str]:
+    """
+    Detecta palabras en inglés prohibidas en el guion.
+    Usa word boundary para no marcar falsos positivos (p.ej. "marketing" no es "market").
+    Devuelve lista de palabras encontradas (vacía si el guion está limpio).
+    """
+    found = []
+    lower = script.lower()
+    for word in ENGLISH_FORBIDDEN_WORDS:
+        # \b para word boundary — evita marcar "marketing", "supporter", etc.
+        if re.search(r'\b' + re.escape(word) + r'\b', lower):
+            found.append(word)
+    return found
 
 
 def _check_block_uniqueness(script: str) -> list:
@@ -617,11 +641,69 @@ class CALIOPE(BaseAgent):
                 temperature=0.9,
             )
 
+            # FIX: verificar unicidad con el script RAW (antes de clean_script),
+            # que aún conserva las etiquetas [PRECIO], [ANALISIS], etc.
+            # clean_script() las elimina, dejando _check_block_uniqueness ciego.
+            script_raw = script
+            uniqueness_warnings_early = _check_block_uniqueness(script_raw)
+            if uniqueness_warnings_early:
+                for w in uniqueness_warnings_early:
+                    self.logger.warning(f"Unicidad (pre-limpieza): {w}")
+
             # Limpiar output del LLM: eliminar markdown, headers, emoticonos
             script = clean_script(script)
             script = _fix_english_words(script)  # sustituir anglicismos por español
             script = _fix_repetitions(script)     # eliminar patrones repetitivos
             self.logger.info("Guion limpiado (sin markdown, sin anglicismos)")
+
+            # ── Validación de idioma: detectar inglés residual y regenerar ────
+            for _lang_attempt in range(2):
+                english_found = _detect_english_words(script)
+                if not english_found:
+                    break
+                self.logger.warning(
+                    f"Inglés residual en guion (intento {_lang_attempt + 1}/2): "
+                    f"{english_found}"
+                )
+                console.print(
+                    f"[yellow]Inglés detectado en guion: {english_found}. "
+                    f"Regenerando (intento {_lang_attempt + 1}/2)...[/]"
+                )
+                lang_instruction = (
+                    "\n\nCRITICO — IDIOMA: El guion contiene palabras en inglés PROHIBIDAS: "
+                    + ", ".join(f'"{w}"' for w in english_found)
+                    + ".\nDebes reescribir el guion completo usando SOLO español. "
+                    "Traducciones obligatorias: "
+                    "weeks→semanas, market→mercado, bullish→alcista, bearish→bajista, "
+                    "pump→subida, dump→caída, wallet→cartera, holders→tenedores, "
+                    "mining→minería, crash→desplome, rally→remontada, trend→tendencia, "
+                    "support→soporte, resistance→resistencia, trading→operativa. "
+                    "NINGUNA palabra en inglés en el texto final."
+                )
+                try:
+                    script = self.llm.generate(
+                        prompt=user_prompt + lang_instruction,
+                        system=system_prompt,
+                        max_tokens=max_tokens,
+                        temperature=0.85,
+                    )
+                    script = clean_script(script)
+                    script = _fix_english_words(script)
+                    script = _fix_repetitions(script)
+                    self.logger.info(
+                        f"Guion regenerado por idioma — {len(script.split())} palabras"
+                    )
+                except Exception as _el:
+                    self.logger.warning(f"Regeneración por idioma fallida: {_el}")
+                    break
+
+            # Log final de palabras prohibidas restantes (no bloquea el pipeline)
+            remaining_english = _detect_english_words(script)
+            if remaining_english:
+                self.logger.warning(
+                    f"Inglés residual tras reintentos (aceptado): {remaining_english}"
+                )
+            # ─────────────────────────────────────────────────────────────────
 
             # Validación de gancho potente al inicio (solo log, no warning en ctx)
             if not _has_strong_hook(script):
@@ -748,10 +830,9 @@ class CALIOPE(BaseAgent):
                     script, ctx, ABSOLUTE_MIN - word_count_final
                 )
 
-            # Validacion de unicidad de bloques
-            uniqueness_warnings = _check_block_uniqueness(script)
-            for w in uniqueness_warnings:
-                self.logger.warning(f'Guion repetitivo: {w}')
+            # (La validación de unicidad de bloques se realizó sobre script_raw arriba,
+            #  antes de clean_script, cuando las etiquetas [PRECIO]/[ANALISIS] etc.
+            #  aún están presentes para que el segmentador funcione correctamente.)
 
             # Aviso legal automatico
             if self._detect_legal_trigger(script):

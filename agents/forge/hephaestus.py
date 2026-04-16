@@ -420,6 +420,34 @@ class HEPHAESTUS:
                     ctx.video_path = output_path
                     ctx.sadtalker_used = False  # SadTalker eliminado
                     progress.update(task, description="Video 1920x1080 exportado")
+
+                    # Post-render: verificar resolución real con ffprobe
+                    try:
+                        import subprocess as _sp
+                        _probe = _sp.run(
+                            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                             '-show_entries', 'stream=width,height', '-of', 'csv=p=0',
+                             output_path],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        if _probe.returncode == 0 and _probe.stdout.strip():
+                            _dims = _probe.stdout.strip().split(',')
+                            _rw, _rh = int(_dims[0]), int(_dims[1])
+                            if _rw == 1920 and _rh == 1080:
+                                self.logger.info(f"✅ Resolución verificada: 1920x1080")
+                                console.print("  [green]✅ Resolución verificada: 1920x1080[/]")
+                            else:
+                                self.logger.warning(
+                                    f"⚠️ HEPHAESTUS produjo {_rw}x{_rh} — "
+                                    f"nexus_core._force_1080p re-encodará antes de publicar"
+                                )
+                                ctx.add_warning(
+                                    "HEPHAESTUS",
+                                    f"Resolución {_rw}x{_rh} — se re-encodará a 1920x1080 en _run_herald",
+                                )
+                    except Exception as _pe:
+                        self.logger.warning(f"Post-render ffprobe falló: {_pe}")
+
                     console.print(
                         f"[green]Video horizontal:[/] output/video/{ctx.pipeline_id[:8]}....mp4"
                     )
@@ -546,9 +574,21 @@ class HEPHAESTUS:
 
         # Forzar resolución via filtro ffmpeg — más fiable que MoviePy clip.resize()
         # que en v1.0.3 puede perder el factor al pasar por CompositeVideoClip/set_audio.
+        # Para SHORT (9:16): scale-to-cover + crop para garantizar relleno total sin barras negras.
+        # Para MAIN (16:9): scale simple (el frame ya viene del tamaño correcto).
         ffmpeg_extra = []
         if force_size:
-            ffmpeg_extra = ["-vf", f"scale={force_size[0]}:{force_size[1]}"]
+            w_fs, h_fs = force_size
+            if w_fs < h_fs:
+                # Formato vertical (SHORT 1080x1920): cover + crop centrado — NUNCA letterbox
+                ffmpeg_extra = [
+                    "-vf",
+                    f"scale={w_fs}:{h_fs}:force_original_aspect_ratio=increase,"
+                    f"crop={w_fs}:{h_fs}",
+                ]
+            else:
+                # Formato horizontal (MAIN 1920x1080): scale directo
+                ffmpeg_extra = ["-vf", f"scale={w_fs}:{h_fs}"]
 
         clip.write_videofile(
             output_path,
@@ -570,6 +610,94 @@ class HEPHAESTUS:
                 _tmp.unlink()
         except Exception:
             pass
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Lower-third helpers — banners informativos animados
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _hex_to_rgb(hex_color: str) -> tuple:
+        """Convierte '#F7931A' a (247, 147, 26)."""
+        hex_color = hex_color.lstrip("#")
+        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+    @staticmethod
+    def _draw_lower_third(
+        frame: "Image.Image",
+        text: str,
+        progress: float,
+        y_base: int = None,
+        accent: str = "#F7931A",
+        bg_alpha: int = 200,
+    ) -> "Image.Image":
+        """
+        Dibuja un banner inferior animado que slide-in desde la izquierda.
+        progress=0.0: fuera de frame izquierda
+        progress=1.0: posición final
+
+        Usa para: niveles de soporte/resistencia, precio actual, alertas.
+        Devuelve el frame modificado (no modifica in-place).
+        """
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+
+            w, h = frame.size
+            bar_h = max(50, h // 18)
+            bar_w = min(int(w * 0.42), 800)
+            y_pos = y_base if y_base is not None else int(h * 0.84)
+
+            # Easing: ease-out cubic para suavizar la animación
+            p = 1 - (1 - min(max(progress, 0.0), 1.0)) ** 3
+            x_offset = int((1 - p) * (-bar_w - 20))
+
+            # Crear overlay RGBA
+            overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+
+            x0, y0 = x_offset, y_pos
+            x1, y1 = x_offset + bar_w, y_pos + bar_h
+
+            # Fondo semitransparente
+            draw.rectangle([x0, y0, x1, y1], fill=(10, 10, 10, bg_alpha))
+
+            # Borde izquierdo de acento
+            _rgb = HEPHAESTUS._hex_to_rgb(accent)
+            draw.rectangle([x0, y0, x0 + 5, y1], fill=(*_rgb, 255))
+
+            # Texto
+            try:
+                font_size = max(18, bar_h // 2)
+                font = None
+                for _fp in [
+                    "C:/Windows/Fonts/arialbd.ttf",
+                    "C:/Windows/Fonts/Arial Bold.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                ]:
+                    if Path(_fp).exists():
+                        try:
+                            font = ImageFont.truetype(_fp, font_size)
+                            break
+                        except Exception:
+                            continue
+                if font is None:
+                    font = ImageFont.load_default()
+                draw.text(
+                    (x0 + 14, y0 + bar_h // 2 - font_size // 2),
+                    text,
+                    font=font,
+                    fill=(255, 255, 255, 255),
+                )
+            except Exception:
+                pass
+
+            # Merge con frame original (paste + mask para compatibilidad Railway)
+            result = frame.convert("RGBA")
+            result.alpha_composite(overlay)
+            return result.convert("RGB")
+        except Exception:
+            # Si falla, devolver el frame original intacto
+            return frame
 
     # ══════════════════════════════════════════════════════════════════════════
     # CAPA 1 — Fondo de estudio
@@ -2125,6 +2253,21 @@ class HEPHAESTUS:
         except Exception as _em:
             self.logger.warning(f"Merge minimo escenas fallo (no critico): {_em}")
 
+        # ── Paso 5c-bis: Crisis mode — limitar a 3 escenas: precio, analisis, prediccion ──
+        if getattr(ctx, 'crisis_mode', False):
+            _crisis_order = ["precio", "analisis", "prediccion"]
+            _crisis_scenes = []
+            for _ct in _crisis_order:
+                for _seg in timed:
+                    if _seg.get("content_type") == _ct:
+                        _crisis_scenes.append(_seg)
+                        break
+            # Fallback: si no se encontraron suficientes, usar los primeros 3 disponibles
+            if len(_crisis_scenes) < 3:
+                _crisis_scenes = timed[:3]
+            timed = _crisis_scenes[:3]
+            self.logger.info(f"Crisis mode: escenas limitadas a {len(timed)} (precio/analisis/prediccion)")
+
         # ── Paso 5c: Modo educativo — convertir escenas "precio"/"analisis" ──
         # Los segmentos del guion que CALÍOPE etiquetó como "precio" o "analisis"
         # no tienen sentido en un video educativo. Los reemplazamos por tipos
@@ -2902,6 +3045,29 @@ class HEPHAESTUS:
             except Exception:
                 pass
 
+            # ── Lower-third: soporte/resistencia en escenas ANALISIS ─────────
+            # Muestra el primer nivel de soporte durante los primeros 5s de la
+            # escena con un slide-in animado de 0→1 en 0.5s.
+            try:
+                _ctype_lt = timed[active_idx].get("content_type", "")
+                _supports_lt = getattr(ctx, "support_levels", []) or []
+                if _ctype_lt == "analisis" and _supports_lt:
+                    _t_in_scene = t - timed[active_idx]["start_s"]
+                    if _t_in_scene <= 5.0:
+                        # progress: 0→1 en los primeros 0.5s, luego constante en 1
+                        _lt_progress = min(_t_in_scene / 0.5, 1.0)
+                        _lt_text = f"Soporte clave: ${_supports_lt[0]:,.0f}"
+                        frame = HEPHAESTUS._draw_lower_third(
+                            frame,
+                            _lt_text,
+                            _lt_progress,
+                            y_base=int(h * 0.84),
+                            accent="#F7931A",
+                        )
+                        draw = ImageDraw.Draw(frame)
+            except Exception:
+                pass
+
             # ── Subtítulos sincronizados ────────────────────────────────────
             try:
                 current_sub = ""
@@ -3246,56 +3412,80 @@ class HEPHAESTUS:
             except Exception as e:
                 self.logger.warning(f"Audio SHORT: {e}")
 
+        def _pil_crop_fill(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+            """
+            Escala img para CUBRIR target_w×target_h (sin barras negras), luego
+            crop centrado. Equivale a CSS background-size:cover.
+            Funciona tanto con imágenes landscape (Pexels, gráficos BTC) como portrait.
+            """
+            src_w, src_h = img.size
+            scale = max(target_w / src_w, target_h / src_h)
+            new_w = int(src_w * scale)
+            new_h = int(src_h * scale)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            x0 = (new_w - target_w) // 2
+            y0 = (new_h - target_h) // 2
+            return img.crop((x0, y0, x0 + target_w, y0 + target_h))
+
         def make_frame(t):
             frame = Image.new("RGB", (w, h), C_BG)
             draw = ImageDraw.Draw(frame)
 
-            # Gradiente de fondo
-            for y in range(0, h, 3):
-                g = int(10 + (y / h) * 6)
-                draw.line([(0, y), (w, y)], fill=(g, g, g + 4))
-                draw.line([(0, y + 1), (w, y + 1)], fill=(g, g, g + 4))
-                draw.line([(0, y + 2), (w, y + 2)], fill=(g, g, g + 4))
-
             # ── Layout Short 1080x1920 — usa constantes globales _SH_* ──────────
-            # Logo: y=10  h=68  → bottom=78
-            # Gráfico: y=80  h=1700 → bottom=1780
-            # Subs:   y=1780 h=80  → bottom=1860
-            # Ticker: y=1860 h=60  → bottom=1920  (total: 1920px exactos, 0 negro)
+            # Logo:   y=10   h=68  → bottom=78
+            # Subs:   70% de frame = y≈1344, h=100 (no al límite inferior para evitar ticker)
+            # Ticker: y=1860 h=60  → bottom=1920
             _LOGO_Y       = _SH_LOGO_Y            # 10
             _LOGO_H       = _SH_LOGO_H            # 68
-            _CHART_Y      = _SH_CONTENT_Y         # 80
-            _CHART_AVAIL  = _SH_CONTENT_H         # 1700
-            _SUB_Y        = _SH_SUB_Y             # 1780
-            _SUB_H_S      = _SH_SUB_H             # 80
             _TICKER_Y     = _SH_TICKER_Y          # 1860
             _TICKER_H_S   = _SH_TICKER_H          # 60
+            # Subtítulos al 70% de altura — fuera de los botones de TikTok/Shorts (lado derecho)
+            _SUB_Y        = int(h * 0.68)         # ~1306  (antes: 1780 — demasiado abajo)
+            _SUB_H_S      = 100
 
-            # Gráfico BTC — escala para llenar toda la zona disponible
-            # Estrategia: escalar por altura, crop derecha (muestra datos más recientes)
+            # ── Fondo: chart BTC crop-center para cubrir TODO el frame 1080×1920 ──
+            # Si el chart es horizontal (típico 1920×1080), se escala por HEIGHT=1920
+            # y se recorta horizontalmente al centro → sin barras negras.
+            bg_applied = False
             if chart_path and Path(chart_path).exists():
                 try:
                     chart_img = Image.open(chart_path).convert("RGB")
-                    ch_ratio = chart_img.width / max(chart_img.height, 1)
-                    _ch_h = _CHART_AVAIL
-                    _ch_w = int(_ch_h * ch_ratio)
-                    if _ch_w < w:
-                        # Chart portrait o muy estrecho — escalar por ancho
-                        _ch_w = w
-                        _ch_h = min(int(_ch_w / max(ch_ratio, 0.1)), _CHART_AVAIL)
-                    chart_img = chart_img.resize((_ch_w, _ch_h), Image.LANCZOS)
-                    # Crop: mostrar parte derecha (datos más recientes) y ajustar alto
-                    x_off = max(0, _ch_w - w)
-                    crop_h = min(_ch_h, _CHART_AVAIL)
-                    chart_img = chart_img.crop((x_off, 0, x_off + w, crop_h))
-                    frame.paste(chart_img, (0, _CHART_Y))
-                    draw = ImageDraw.Draw(frame)
-                    draw.rectangle(
-                        [(0, _CHART_Y), (w - 1, _CHART_Y + crop_h - 1)],
-                        outline=C_ACCENT, width=2
-                    )
+                    bg = _pil_crop_fill(chart_img, w, h)
+                    frame.paste(bg, (0, 0))
+                    bg_applied = True
                 except Exception:
                     pass
+
+            if not bg_applied:
+                # Gradiente de fondo cuando no hay chart
+                draw = ImageDraw.Draw(frame)
+                for _gy in range(0, h, 3):
+                    _g = int(10 + (_gy / h) * 6)
+                    draw.line([(0, _gy),     (w, _gy)],     fill=(_g, _g, _g + 4))
+                    draw.line([(0, _gy + 1), (w, _gy + 1)], fill=(_g, _g, _g + 4))
+                    draw.line([(0, _gy + 2), (w, _gy + 2)], fill=(_g, _g, _g + 4))
+
+            # ── Overlay semitransparente para legibilidad del chart en el SHORT ─
+            # Gradiente oscuro arriba (zona logo) + abajo (zona subs+ticker)
+            try:
+                from PIL import Image as _PILImg
+                ov = _PILImg.new("RGBA", (w, h), (0, 0, 0, 0))
+                ov_d = ImageDraw.Draw(ov)
+                # Zona superior (0 → 180px): oscurecer para que el logo se lea bien
+                for _y in range(0, 180):
+                    _a = int(200 * (1 - _y / 180))
+                    ov_d.line([(0, _y), (w, _y)], fill=(0, 0, 0, _a))
+                # Zona inferior (1700px → 1920px): oscurecer para subs y ticker
+                for _y in range(1700, h):
+                    _a = int(210 * (_y - 1700) / (h - 1700))
+                    ov_d.line([(0, _y), (w, _y)], fill=(0, 0, 0, _a))
+                frame = frame.convert("RGBA")
+                frame.paste(ov, (0, 0), mask=ov.split()[3])
+                frame = frame.convert("RGB")
+            except Exception:
+                pass
+
+            draw = ImageDraw.Draw(frame)
 
             # Logo CryptoVerdad — overlay arriba-izquierda con fondo semi-opaco
             try:

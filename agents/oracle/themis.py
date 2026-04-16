@@ -139,6 +139,62 @@ class THEMIS(BaseAgent):
             "estimated_views": str(data.get("estimated_views", "medio")),
         }
 
+    def _generate_topic_from_news(self, ctx: Context) -> str:
+        """
+        Genera un topic específico y de alto impacto desde las noticias disponibles.
+        Se usa cuando ctx.topic es vacío, genérico, o de baja especificidad.
+
+        Proceso:
+        1. Toma las 3 noticias con mayor score de ctx.news
+        2. Combina con precios actuales (BTC, cambio 24h)
+        3. Llama al LLM con prompt específico para generar título viral
+        4. El tema generado debe: ser específico, tener número/precio, ser accionable
+        """
+        if not ctx.news:
+            return ctx.topic or "Análisis Bitcoin hoy"
+
+        # Top 3 noticias por relevance/score
+        top_news = sorted(
+            ctx.news,
+            key=lambda x: x.get("relevance", x.get("score", 0)),
+            reverse=True
+        )[:3]
+
+        news_text = "\n".join([
+            f"- {n.get('title', '')}" for n in top_news
+        ])
+        btc_price  = getattr(ctx, "btc_price", 0) or 0
+        btc_change = (ctx.prices or {}).get("BTC", {}).get("change_24h", 0) or 0
+        if isinstance(btc_change, dict):
+            btc_change = 0  # Protección si prices está anidado de forma inesperada
+
+        prompt = (
+            "Eres un editor experto en canales de YouTube de criptomonedas hispanohablantes.\n\n"
+            f"Noticias más relevantes de hoy:\n{news_text}\n\n"
+            f"Bitcoin: ${btc_price:,.0f} ({btc_change:+.1f}% en 24h)\n\n"
+            "Genera UN SOLO título/tema para un vídeo de análisis que:\n"
+            "1. Sea específico (menciona el evento o precio concreto)\n"
+            "2. Genere urgencia o curiosidad (\"¿Por qué...\", \"Esto cambia todo\", \"El momento de...\")\n"
+            "3. No sea clickbait vacío — debe tener sustancia\n"
+            "4. Entre 6-12 palabras\n"
+            "5. En español\n\n"
+            "Responde SOLO con el título, sin explicaciones ni comillas."
+        )
+
+        try:
+            topic = self.llm.generate(prompt=prompt, max_tokens=50, temperature=0.7)
+            topic = topic.strip().strip('"').strip("'")
+            if len(topic) > 10:
+                self.logger.info(f"THEMIS auto-topic generado: {topic!r}")
+                return topic
+        except Exception as e:
+            self.logger.warning(f"THEMIS auto-topic LLM falló: {e}")
+
+        # Fallback: usar título de la noticia más relevante
+        if top_news:
+            return top_news[0].get("title", ctx.topic or "Análisis Bitcoin")[:80]
+        return ctx.topic or "Bitcoin análisis de mercado"
+
     # ── DB ────────────────────────────────────────────────────────────────
 
     def _ensure_table(self) -> None:
@@ -253,6 +309,35 @@ class THEMIS(BaseAgent):
         self.logger.info("THEMIS iniciado — elaborando estrategia editorial...")
         try:
             self._ensure_table()
+
+            # Detectar si el topic es genérico y necesita enriquecimiento
+            _generic_topics = {
+                "análisis crypto diario", "analisis crypto diario",
+                "análisis bitcoin hoy",   "analisis bitcoin hoy",
+                "test calidad", "crypto analysis", "",
+            }
+            topic_lower = (ctx.topic or "").lower().strip()
+            _has_specific_signal = any(
+                c.isdigit() or c in ("$", "%", "€")
+                for c in topic_lower
+            ) or any(
+                kw in topic_lower
+                for kw in ("bitcoin", "btc", "eth", "sol", "defi", "nft",
+                           "ethereum", "solana", "altcoin", "halving")
+            )
+            needs_topic = (
+                topic_lower in _generic_topics
+                or len(topic_lower) < 10
+                or not _has_specific_signal
+            )
+            if needs_topic and ctx.news:
+                new_topic = self._generate_topic_from_news(ctx)
+                if new_topic and new_topic != ctx.topic:
+                    ctx.original_topic = ctx.topic  # guardar original
+                    ctx.topic = new_topic
+                    self.logger.info(
+                        f"THEMIS mejoró el topic: {ctx.original_topic!r} → {ctx.topic!r}"
+                    )
 
             template = self._load_prompt_template()
             data_payload = self._build_data_payload(ctx)

@@ -83,6 +83,33 @@
         </div>
     </div>
 
+    <!-- SSE: estado en tiempo real del ultimo pipeline -->
+    <div class="card mb-6" x-show="liveStatus && liveStatus.topic">
+        <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold text-[#888] uppercase tracking-widest">Pipeline en Vivo</h2>
+            <span class="text-xs text-[#555]">SSE · actualiza cada 3s</span>
+        </div>
+        <div class="flex items-center gap-4 flex-wrap">
+            <span class="text-xs text-[#888]">Tema:</span>
+            <span class="text-sm text-white font-medium truncate max-w-xs" x-text="liveStatus.topic"></span>
+            <span class="text-xs text-[#888]">Estado:</span>
+            <span class="text-xs font-bold px-2 py-0.5 rounded"
+                  :class="{
+                    'bg-green-800 text-green-300': liveStatus.status === 'completed',
+                    'bg-yellow-800 text-yellow-300': liveStatus.status === 'running',
+                    'bg-red-800 text-red-300': liveStatus.status === 'error' || liveStatus.status === 'completed_with_errors',
+                    'bg-[#1A1A1A] text-[#888]': !['completed','running','error','completed_with_errors'].includes(liveStatus.status)
+                  }"
+                  x-text="liveStatus.status || 'idle'"></span>
+            <span class="text-xs text-[#888]">SEO:</span>
+            <span class="text-xs font-bold accent" x-text="liveStatus.seo_score ? liveStatus.seo_score + '/100' : '—'"></span>
+            <template x-if="liveStatus.youtube_url">
+                <a :href="liveStatus.youtube_url" target="_blank"
+                   class="text-xs text-[#F7931A] hover:underline">Ver en YouTube</a>
+            </template>
+        </div>
+    </div>
+
     <!-- Pipelines recientes -->
     <div class="card">
         <div class="flex items-center justify-between mb-4">
@@ -185,9 +212,21 @@ function dashboard() {
                 }
             } catch(e) {}
         },
+        liveStatus: { status: 'idle', topic: '', youtube_url: '', seo_score: 0 },
+        connectSSE() {
+            // SSE: actualiza el indicador de estado del ultimo pipeline en tiempo real
+            try {
+                const es = new EventSource('/pipeline/stream');
+                es.onmessage = (e) => {
+                    try { this.liveStatus = JSON.parse(e.data); } catch(_) {}
+                };
+                es.onerror = () => { es.close(); };
+            } catch(_) {}
+        },
         init() {
             this.fetchStatus();
             this.fetchPrices();
+            this.connectSSE();
             setInterval(() => this.fetchStatus(), 30000);
             setInterval(() => this.fetchPrices(), 30000);
         }

@@ -105,6 +105,10 @@ class NexusCore:
         except Exception:
             pass  # DB opcional en modo test
 
+        # ── Crisis mode: desviar a pipeline ultra-rapido antes del flujo normal ──
+        if ctx.is_urgent and getattr(ctx, 'event_type', '') == 'CRISIS':
+            return self._run_crisis_pipeline(ctx)
+
         steps = [
             ("ORACULO",   self._run_oracle,    "Analizando mercado y noticias..."),
             ("FORGE",     self._run_forge,     "Generando guión, audio y vídeo..."),
@@ -139,6 +143,77 @@ class NexusCore:
 
         self._save_pipeline(ctx, final=True)
         self._print_summary(ctx)
+        return ctx
+
+    # ── Pipeline de crisis (<=90s) ───────────────────────────────────────────
+    def _run_crisis_pipeline(self, ctx: Context) -> Context:
+        """
+        Pipeline ultra-rapido para eventos CRISIS (volatilidad >=5x BTC/ETH).
+        Solo corre: ORACULO → CALIOPE + ECHO + HEPHAESTUS (3 escenas) → HERALD.
+        DAEDALUS e IRIS son saltados para minimizar tiempo de render.
+        Target: publicar en menos de 90 segundos.
+        """
+        ctx.crisis_mode = True
+        console.print(
+            Panel(
+                f"[bold red]CRISIS PIPELINE ACTIVADO[/]\n"
+                f"[white]Topic:[/] {ctx.topic}\n"
+                f"[dim]Modo ultra-rapido: 3 escenas, sin DAEDALUS ni IRIS[/]",
+                border_style="red",
+                title="[bold white]NEXUS CRISIS[/]",
+            )
+        )
+        self.logger.warning(f"CRISIS pipeline: topic='{ctx.topic}' pipeline_id={ctx.pipeline_id[:8]}")
+
+        crisis_steps = [
+            ("ORACULO [crisis]",    self._run_oracle,         "Analisis rapido de mercado..."),
+            ("CALIOPE [crisis]",    self._run_crisis_forge,   "Generando guion de crisis..."),
+            ("HERALD [crisis]",     self._run_herald,         "Publicando en plataformas..."),
+        ]
+
+        for step_name, step_fn, description in crisis_steps:
+            console.print(f"[bold red]-> {description}[/]")
+            try:
+                ctx = step_fn(ctx)
+                console.print(f"  [green]OK[/] {step_name}")
+            except Exception as exc:
+                ctx.add_error(step_name, str(exc))
+                console.print(f"  [red]ERROR[/] {step_name}: {exc}")
+                self.logger.exception(f"Error en crisis step {step_name}")
+
+        self._save_pipeline(ctx, final=True)
+        return ctx
+
+    def _run_crisis_forge(self, ctx: Context) -> Context:
+        """
+        Ejecuta solo CALIOPE + ECHO + HEPHAESTUS en modo crisis.
+        Omite DAEDALUS (graficos animados) e IRIS (thumbnails A/B).
+        ctx.crisis_mode=True hace que HEPHAESTUS limite a 3 escenas.
+        """
+        if not self._forge:
+            ctx.add_warning("NEXUS_CORE", "ForgeAgent no cargado en crisis — saltando FORGE.")
+            return ctx
+        try:
+            # Llamar solo a los agentes criticos del forge
+            from agents.forge.caliope import CALIOPE
+            from agents.forge.echo import ECHO
+            from agents.forge.hephaestus import HEPHAESTUS
+
+            caliope = CALIOPE(self.config, self.db)
+            ctx = caliope.run(ctx)
+
+            echo = ECHO(self.config, self.db)
+            ctx = echo.run(ctx)
+
+            hephaestus = HEPHAESTUS(self.config, self.db)
+            ctx = hephaestus.run(ctx)
+
+        except ImportError as e:
+            self.logger.warning(f"Crisis forge: import fallido ({e}), usando ForgeAgent completo")
+            ctx = self._run_forge(ctx)
+        except Exception as e:
+            ctx.add_error("CRISIS_FORGE", str(e))
+            self.logger.error(f"Crisis forge error: {e}")
         return ctx
 
     # ── Pipeline urgente ─────────────────────────────────────────────────────
@@ -223,17 +298,8 @@ class NexusCore:
         return ctx
 
     @staticmethod
-    def _force_1080p(video_path: str) -> None:
-        """
-        Verifica la resolución del vídeo con ffprobe y re-encoda SOLO si no es 1920x1080.
-        Reemplaza el archivo original in-place.
-        No-op si el archivo no existe o ffmpeg falla.
-        """
-        if not video_path or not Path(video_path).exists():
-            logger.warning(f"force_1080p: archivo no encontrado: {video_path!r}")
-            return
-
-        # Verificar resolución actual con ffprobe antes de re-encodar
+    def _probe_resolution(video_path: str):
+        """Devuelve (width, height) del vídeo usando ffprobe. Retorna (0, 0) si falla."""
         try:
             probe = subprocess.run(
                 ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
@@ -243,20 +309,37 @@ class NexusCore:
             )
             if probe.returncode == 0 and probe.stdout.strip():
                 dims = probe.stdout.strip().split(',')
-                cur_w, cur_h = int(dims[0]), int(dims[1])
-                if cur_w == 1920 and cur_h == 1080:
-                    logger.info(f"force_1080p: ya es 1920x1080, sin re-encodar")
-                    return
-                logger.info(f"force_1080p: resolución actual {cur_w}x{cur_h} → re-encodando a 1920x1080")
+                return int(dims[0]), int(dims[1])
         except Exception as exc:
-            logger.warning(f"force_1080p ffprobe: {exc} — procediendo con re-encode preventivo")
+            logger.warning(f"ffprobe fallo: {exc}")
+        return 0, 0
+
+    @staticmethod
+    def _force_1080p(video_path: str) -> bool:
+        """
+        Verifica la resolución del vídeo con ffprobe y re-encoda SOLO si no es 1920x1080.
+        Reemplaza el archivo original in-place.
+        Devuelve True si ya era 1080p, False si fue re-encodado, None si falló.
+        """
+        if not video_path or not Path(video_path).exists():
+            logger.warning(f"force_1080p: archivo no encontrado: {video_path!r}")
+            return None
+
+        cur_w, cur_h = NexusCore._probe_resolution(video_path)
+        if cur_w > 0:
+            if cur_w == 1920 and cur_h == 1080:
+                logger.info(f"✅ Resolución verificada: 1920x1080 — sin re-encodar")
+                return True
+            logger.warning(f"⚠️ Resolución actual {cur_w}x{cur_h} — re-encodando a 1920x1080")
+        else:
+            logger.warning("force_1080p: ffprobe no pudo leer dimensiones — re-encode preventivo")
 
         output = video_path.replace('.mp4', '_1080p.mp4')
         try:
             result = subprocess.run(
                 [
                     'ffmpeg', '-y', '-i', video_path,
-                    '-vf', 'scale=1920:1080',
+                    '-vf', 'scale=1920:1080:force_original_aspect_ratio=disable',
                     '-c:v', 'libx264', '-b:v', '4000k',
                     '-maxrate', '5000k', '-bufsize', '10000k',
                     '-preset', 'fast',
@@ -266,8 +349,14 @@ class NexusCore:
                 capture_output=True, timeout=600,
             )
             if result.returncode == 0 and Path(output).exists():
+                # Verificar que el re-encode produjo realmente 1920x1080
+                rw, rh = NexusCore._probe_resolution(output)
                 os.replace(output, video_path)
-                logger.info(f"force_1080p: {Path(video_path).name} re-encodado a 1920x1080")
+                if rw == 1920 and rh == 1080:
+                    logger.info(f"✅ Re-encodado a 1080p correctamente: {Path(video_path).name}")
+                else:
+                    logger.warning(f"⚠️ Re-encode completado pero resolución inesperada: {rw}x{rh}")
+                return False
             else:
                 logger.warning(f"force_1080p ffmpeg error (rc={result.returncode}): "
                                f"{result.stderr[-400:].decode(errors='replace')!r}")
@@ -277,6 +366,122 @@ class NexusCore:
                     pass
         except Exception as exc:
             logger.warning(f"force_1080p falló: {exc}")
+        return None
+
+    def validate_before_publish(self, ctx: Context) -> tuple:
+        """
+        Quality gate pre-publicación. Verifica 5 condiciones críticas.
+        Devuelve (passed: bool, failures: list[str]).
+        Si falla: notifica Telegram y NO publica.
+        """
+        import requests as _req
+        failures = []
+
+        # 1. Resolución del MP4 == 1920x1080
+        video_path = getattr(ctx, "video_path", None)
+        if not video_path or not Path(video_path).exists():
+            failures.append("MP4 no existe en disco")
+        else:
+            vw, vh = self._probe_resolution(video_path)
+            if vw != 1920 or vh != 1080:
+                failures.append(f"Resolución incorrecta: {vw}x{vh} (esperado 1920x1080)")
+            else:
+                logger.info("✅ QG check 1 — Resolución 1920x1080 OK")
+
+        # 2. Precio BTC en ctx.btc_price dentro del ±15% del precio Binance en tiempo real
+        ctx_btc = getattr(ctx, "btc_price", 0) or 0
+        if ctx_btc <= 0:
+            failures.append("ctx.btc_price es 0 o nulo")
+        else:
+            try:
+                r = _req.get(
+                    "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+                    timeout=6,
+                )
+                binance_btc = float(r.json().get("price", 0))
+                if binance_btc > 0:
+                    deviation = abs(ctx_btc - binance_btc) / binance_btc
+                    if deviation > 0.15:
+                        failures.append(
+                            f"Precio BTC en ctx (${ctx_btc:,.0f}) difiere >15% del real "
+                            f"(${binance_btc:,.0f}, desviación {deviation:.1%})"
+                        )
+                    else:
+                        logger.info(
+                            f"✅ QG check 2 — BTC ctx=${ctx_btc:,.0f} "
+                            f"Binance=${binance_btc:,.0f} ({deviation:.1%}) OK"
+                        )
+            except Exception as _be:
+                logger.warning(f"QG check 2: Binance no disponible ({_be}) — saltando")
+
+        # 3. Thumbnail existe y pesa entre 50KB y 2MB
+        thumb = getattr(ctx, "thumbnail_a_path", "") or ""
+        if not thumb or not Path(thumb).exists():
+            failures.append(f"Thumbnail A no existe: {thumb!r}")
+        else:
+            size_bytes = Path(thumb).stat().st_size
+            if size_bytes < 50_000:
+                failures.append(f"Thumbnail muy pequeño: {size_bytes//1024}KB (<50KB)")
+            elif size_bytes > 2_000_000:
+                failures.append(f"Thumbnail muy grande: {size_bytes//1024}KB (>2MB)")
+            else:
+                logger.info(f"✅ QG check 3 — Thumbnail {size_bytes//1024}KB OK")
+
+        # 4. Guion tiene más de 800 palabras
+        script = getattr(ctx, "script", "") or ""
+        word_count = len(script.split())
+        if word_count < 800:
+            failures.append(f"Guion demasiado corto: {word_count} palabras (<800)")
+        else:
+            logger.info(f"✅ QG check 4 — Guion {word_count} palabras OK")
+
+        # 5. MP4 existe y dura más de 3 minutos (180s)
+        if video_path and Path(video_path).exists():
+            try:
+                dur_probe = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                     '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if dur_probe.returncode == 0 and dur_probe.stdout.strip():
+                    duration = float(dur_probe.stdout.strip())
+                    if duration < 180:
+                        failures.append(f"Vídeo demasiado corto: {duration:.0f}s (<180s/3min)")
+                    else:
+                        logger.info(f"✅ QG check 5 — Duración {duration:.0f}s OK")
+            except Exception as _de:
+                logger.warning(f"QG check 5: ffprobe duración falló ({_de}) — saltando")
+
+        passed = len(failures) == 0
+
+        if passed:
+            console.print("  [bold green]✅ Quality gate passed — publicando[/]")
+            logger.info("Quality gate passed — todos los checks OK")
+        else:
+            msg = "❌ Pipeline bloqueado por quality gate:\n" + "\n".join(f"  • {f}" for f in failures)
+            console.print(f"  [bold red]{msg}[/]")
+            logger.warning(msg)
+            ctx.add_warning("QUALITY_GATE", msg)
+            # Notificar Telegram
+            try:
+                tok = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                chat = os.getenv("TELEGRAM_CHAT_ID", "")
+                if tok and chat:
+                    tg_msg = (
+                        f"🚫 *NEXUS Quality Gate BLOQUEADO*\n"
+                        f"Pipeline: `{ctx.pipeline_id[:8]}`\n"
+                        f"Topic: {ctx.topic}\n\n"
+                        + "\n".join(f"• {f}" for f in failures)
+                    )
+                    _req.post(
+                        f"https://api.telegram.org/bot{tok}/sendMessage",
+                        json={"chat_id": chat, "text": tg_msg, "parse_mode": "Markdown"},
+                        timeout=8,
+                    )
+            except Exception as _te:
+                logger.warning(f"Telegram notificación QG falló: {_te}")
+
+        return passed, failures
 
     def _run_herald(self, ctx: Context) -> Context:
         if getattr(ctx, "dry_run", False):
@@ -296,7 +501,26 @@ class NexusCore:
         # Garantizar resolución 1920x1080 antes de subir
         if getattr(ctx, "video_path", None):
             console.print("  [dim]Verificando resolución 1920x1080...[/]")
-            self._force_1080p(ctx.video_path)
+            was_already_1080p = self._force_1080p(ctx.video_path)
+            if was_already_1080p is True:
+                console.print("  [green]✅ Resolución verificada: 1920x1080[/]")
+            elif was_already_1080p is False:
+                console.print("  [yellow]⚠️ Re-encodado a 1080p correctamente[/]")
+                ctx.add_warning("NEXUS_CORE", "Vídeo re-encodado a 1920x1080 (HEPHAESTUS no lo produjo directamente)")
+            else:
+                ctx.add_warning("NEXUS_CORE", "No se pudo verificar/forzar resolución 1920x1080")
+        # Validar thumbnail antes de publicar
+        thumb_a = getattr(ctx, "thumbnail_a_path", "") or ""
+        if not thumb_a or not Path(thumb_a).exists():
+            ctx.add_warning("NEXUS_CORE", f"Thumbnail A no encontrado: {thumb_a!r} — se publicará sin miniatura custom")
+            logger.warning(f"[bold yellow]THUMBNAIL FALTANTE:[/] {thumb_a!r}")
+        else:
+            size_kb = Path(thumb_a).stat().st_size // 1024
+            logger.info(f"Thumbnail A listo: {thumb_a!r} ({size_kb}KB)")
+        # Quality gate — bloquear publicación si falla algún check crítico
+        qg_passed, qg_failures = self.validate_before_publish(ctx)
+        if not qg_passed:
+            return ctx  # validate_before_publish ya logueó y notificó Telegram
         if self._herald:
             ctx = self._herald.run(ctx)
         else:
@@ -313,7 +537,9 @@ class NexusCore:
         # Garantizar resolución 1920x1080 antes de subir
         if getattr(ctx, "video_path", None):
             console.print("  [dim]Verificando resolución 1920x1080...[/]")
-            self._force_1080p(ctx.video_path)
+            was_1080p = self._force_1080p(ctx.video_path)
+            if was_1080p is False:
+                ctx.add_warning("NEXUS_CORE", "Vídeo urgente re-encodado a 1920x1080")
         if self._herald:
             ctx = self._herald.run_urgent(ctx)
         else:

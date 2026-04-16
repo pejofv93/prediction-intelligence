@@ -44,6 +44,16 @@ PALABRAS_INVERSION = {
 
 YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
+# ── Tabla de afiliados ────────────────────────────────────────────────────────
+# Sustituye los códigos de referido por los reales antes de producción
+_AFFILIATE_LINKS = {
+    "binance":  ("Binance",               "https://www.binance.com/es/register?ref=CRYPTOVERDAD"),
+    "coinbase": ("Coinbase",              "https://coinbase.com/join/CRYPTOVERDAD"),
+    "ledger":   ("Ledger Hardware Wallet","https://shop.ledger.com/?r=CRYPTOVERDAD"),
+    "kraken":   ("Kraken",               "https://www.kraken.com/sign-up?referral=CRYPTOVERDAD"),
+    "trezor":   ("Trezor",               "https://trezor.io/?offer_id=CRYPTOVERDAD"),
+}
+
 
 class OLYMPUS(BaseAgent):
     """
@@ -92,6 +102,10 @@ class OLYMPUS(BaseAgent):
                 getattr(ctx, "thumbnail_a_path", ""),
                 fallback_path=getattr(ctx, "thumbnail_b_path", ""),
             )
+
+            # 8b. Añadir end screens (últimos 20s)
+            video_duration = getattr(ctx, "video_duration", 0) or 240.0
+            self._add_end_screens(service, video_id, video_duration)
 
             # 9. Actualizar contexto con URL corta
             ctx.youtube_video_id = video_id
@@ -386,6 +400,11 @@ class OLYMPUS(BaseAgent):
         if any(p in contenido for p in PALABRAS_INVERSION):
             description += AVISO_LEGAL
 
+        # Enriquecer descripción con links de afiliado relevantes
+        description = self._enrich_description_with_affiliates(
+            description, getattr(ctx, "script", "")
+        )
+
         tags = ctx.seo_tags[:15] if ctx.seo_tags else []
 
         return {
@@ -529,6 +548,80 @@ class OLYMPUS(BaseAgent):
             self.logger.warning(
                 f"[yellow]OLYMPUS[/] no se pudo persistir en memoria_videos: {exc}"
             )
+
+    # ── end screens automáticos ───────────────────────────────────────────────
+    def _add_end_screens(self, service, video_id: str, duration_seconds: float) -> None:
+        """
+        Añade end screens en los últimos 20s del vídeo.
+        Si falla (p.ej. vídeo <25s o permisos insuficientes): warning, nunca excepción fatal.
+        """
+        if duration_seconds < 25:
+            self.logger.warning(
+                f"[yellow]OLYMPUS[/] vídeo muy corto ({duration_seconds:.0f}s) para end screens"
+            )
+            return
+
+        try:
+            start_ms = int((duration_seconds - 20) * 1000)
+            end_ms   = int(duration_seconds * 1000)
+
+            body = {
+                "kind": "youtube#videoEndscreen",
+                "items": [
+                    {
+                        "type": "SUBSCRIBE",
+                        "left": 4.0,
+                        "top": 72.0,
+                        "width": 30.0,
+                        "startOffsetMs": start_ms,
+                        "endOffsetMs": end_ms,
+                    },
+                    {
+                        "type": "RECENT_UPLOAD",
+                        "left": 66.0,
+                        "top": 12.0,
+                        "width": 30.0,
+                        "startOffsetMs": start_ms + 2000,
+                        "endOffsetMs": end_ms,
+                    },
+                ],
+            }
+            service.videoEndscreens().insert(
+                videoId=video_id, body=body
+            ).execute()
+            self.logger.info("[green]OLYMPUS[/] end screens añadidos correctamente")
+        except Exception as exc:
+            self.logger.warning(f"[yellow]OLYMPUS[/] end screens fallaron (no crítico): {exc}")
+
+    # ── afiliados en descripción ──────────────────────────────────────────────
+    def _enrich_description_with_affiliates(self, description: str, script: str) -> str:
+        """
+        Añade sección de recursos/afiliados al final de la descripción
+        basándose en menciones en el script. Máximo 3 links para no saturar.
+        """
+        script_lower = (script or "").lower()
+        relevant_links: list[str] = []
+
+        for keyword, (name, url) in _AFFILIATE_LINKS.items():
+            if keyword in script_lower:
+                relevant_links.append(f"► {name}: {url}")
+            if len(relevant_links) >= 3:
+                break
+
+        # Siempre incluir Binance si no hay ninguno detectado
+        if not relevant_links:
+            name, url = _AFFILIATE_LINKS["binance"]
+            relevant_links.append(f"► {name}: {url}")
+
+        affiliate_section = (
+            "\n\n─────────────────────────────\n"
+            "RECURSOS MENCIONADOS\n"
+            "─────────────────────────────\n"
+            + "\n".join(relevant_links)
+            + "\n\n⚠️ Links de afiliado: si te registras, CryptoVerdad recibe una pequeña "
+            "comisión sin coste adicional para ti."
+        )
+        return description + affiliate_section
 
     # ── notificación a MERCURY ────────────────────────────────────────────────
     def _notify_telegram(self, ctx: Context) -> None:

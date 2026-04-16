@@ -73,8 +73,97 @@ class ForgeAgent:
             logger.warning(f"IRIS no disponible: {e}")
             self._iris = None
 
+    # Fallback hardcodeado para precios — último recurso antes de CALÍOPE
+    # Actualizado: 2026-04-16 (verificado con Binance spot)
+    _PRICE_FALLBACK = {
+        "BTC": 74000.0,
+        "ETH": 2340.0,
+        "SOL": 130.0,
+    }
+
+    def _ensure_prices(self, ctx: Context) -> Context:
+        """
+        Verifica que ctx.prices tiene valores reales para BTC, ETH, SOL.
+        Si alguno es 0 o None: intenta CoinGecko directo, luego hardcoded.
+        Loguea WARNING si se usa fallback.
+        """
+        import requests
+
+        needed = {
+            "bitcoin":  "BTC",
+            "ethereum": "ETH",
+            "solana":   "SOL",
+        }
+        prices = getattr(ctx, "prices", {}) or {}
+
+        missing = [
+            (cg_id, sym)
+            for cg_id, sym in needed.items()
+            if not (prices.get(sym, {}) or {}).get("price", 0)
+        ]
+
+        if not missing:
+            # Todos los precios están bien — sincronizar attrs individuales por si acaso
+            for cg_id, sym in needed.items():
+                attr = f"{sym.lower()}_price"
+                if not getattr(ctx, attr, 0):
+                    setattr(ctx, attr, prices[sym]["price"])
+            return ctx
+
+        missing_syms = [sym for _, sym in missing]
+        logger.warning(
+            f"[FORGE] Precios faltantes en ctx antes de CALÍOPE: {missing_syms} — "
+            f"intentando CoinGecko directo"
+        )
+
+        # Intento CoinGecko directo
+        try:
+            ids = ",".join(cg_id for cg_id, _ in missing)
+            resp = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": ids, "vs_currencies": "usd"},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            logger.info(f"[FORGE] CoinGecko directo respuesta: {data}")
+            for cg_id, sym in missing:
+                usd = data.get(cg_id, {}).get("usd", 0)
+                if usd and float(usd) > 0:
+                    if sym not in prices:
+                        prices[sym] = {"price": 0.0, "change_24h": 0.0, "market_cap": 0.0, "volatility_p90": 0.0}
+                    prices[sym]["price"] = float(usd)
+                    setattr(ctx, f"{sym.lower()}_price", float(usd))
+                    logger.info(f"[FORGE] {sym} actualizado desde CoinGecko directo: ${usd:,.0f}")
+        except Exception as e:
+            logger.warning(f"[FORGE] CoinGecko directo falló: {e} — usando hardcoded fallback")
+
+        # Para los que sigan en 0: usar hardcoded
+        for cg_id, sym in missing:
+            current = (prices.get(sym, {}) or {}).get("price", 0)
+            if not current:
+                fallback_price = self._PRICE_FALLBACK.get(sym, 0)
+                if sym not in prices:
+                    prices[sym] = {"price": 0.0, "change_24h": 0.0, "market_cap": 0.0, "volatility_p90": 0.0}
+                prices[sym]["price"] = fallback_price
+                setattr(ctx, f"{sym.lower()}_price", fallback_price)
+                ctx.add_warning(
+                    "FORGE",
+                    f"Precio {sym} no disponible — usando hardcoded fallback ${fallback_price:,.0f} "
+                    f"(puede estar desactualizado)"
+                )
+                logger.warning(
+                    f"[FORGE] {sym} usando hardcoded fallback: ${fallback_price:,.0f}"
+                )
+
+        ctx.prices = prices
+        return ctx
+
     def run(self, ctx: Context) -> Context:
         logger.info("FORGE_AGENT iniciado")
+
+        # Garantizar precios válidos antes de que CALÍOPE los use en el guión
+        ctx = self._ensure_prices(ctx)
 
         if self._caliope:
             try:

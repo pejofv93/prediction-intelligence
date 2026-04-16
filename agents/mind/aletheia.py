@@ -81,6 +81,20 @@ class ALETHEIA(BaseAgent):
     def run(self, ctx: Context) -> Context:
         self.logger.info("[bold white]ALETHEIA[/] iniciado")
         try:
+            # A/B thumbnail selection (no crítico — nunca bloquea el pipeline)
+            try:
+                selected = self._select_ab_thumbnail(ctx)
+                ctx.thumbnail_selected = selected
+                if selected == "B" and getattr(ctx, 'thumbnail_b_path', ''):
+                    ctx.thumbnail_a_path, ctx.thumbnail_b_path = (
+                        ctx.thumbnail_b_path, ctx.thumbnail_a_path
+                    )
+                    self.logger.info("A/B: thumbnail B promovido a posición A para este vídeo")
+                if getattr(ctx, 'youtube_video_id', ''):
+                    self._schedule_thumbnail_swap_check(ctx)
+            except Exception as e:
+                self.logger.warning(f"A/B selection falló (no crítico): {e}")
+
             if not ctx.script:
                 self.logger.info("[yellow]ALETHEIA[/] guión vacío, nada que verificar")
                 return ctx
@@ -107,10 +121,159 @@ class ALETHEIA(BaseAgent):
                     f"[yellow]ALETHEIA[/] {len(inconsistencies)} inconsistencias graves — "
                     "nota añadida al guión"
                 )
+
+            # Mostrar estadísticas A/B históricas
+            try:
+                stats = self._get_thumbnail_ab_stats()
+                ab_table = Table(title="ALETHEIA A/B Stats", border_style="#F7931A")
+                ab_table.add_column("Thumbnail")
+                ab_table.add_column("Videos")
+                ab_table.add_column("Views promedio")
+                ab_table.add_column("Win rate")
+                for variant in ["A", "B"]:
+                    s = stats.get(variant, {})
+                    ab_table.add_row(
+                        variant,
+                        str(s.get("count", 0)),
+                        f"{s.get('avg_views', 0):,.0f}",
+                        f"{s.get('win_rate', 0):.1%}",
+                    )
+                console.print(ab_table)
+                console.print(
+                    f"[dim]Recomendado: [bold]{stats.get('recommended', 'A')}[/] "
+                    f"(confianza: {stats.get('confidence', 0):.0%})[/]"
+                )
+            except Exception:
+                pass
+
         except Exception as exc:
             self.logger.error(f"[red]ALETHEIA error:[/] {exc}")
             ctx.add_error("ALETHEIA", str(exc))
         return ctx
+
+    # ── A/B thumbnail testing ─────────────────────────────────────────────────
+    def _get_thumbnail_ab_stats(self) -> dict:
+        """
+        Lee el historial de rendimiento A/B desde SQLite.
+        Calcula CTR promedio de thumbnails A vs B usando datos de videos pasados.
+        Retorna: {"A": {"count": int, "avg_views": float, "win_rate": float},
+                  "B": {"count": int, "avg_views": float, "win_rate": float},
+                  "recommended": "A" o "B",
+                  "confidence": float (0-1)}
+        """
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db.db_path) as conn:
+                rows = conn.execute("""
+                    SELECT thumbnail_winner, views, likes
+                    FROM videos
+                    WHERE thumbnail_winner IS NOT NULL
+                      AND views > 100
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                """).fetchall()
+
+            if not rows or len(rows) < 3:
+                return {"A": {"count": 0, "avg_views": 0, "win_rate": 0.5},
+                        "B": {"count": 0, "avg_views": 0, "win_rate": 0.5},
+                        "recommended": "A", "confidence": 0.0}
+
+            a_views = [r[1] for r in rows if r[0] == 'A']
+            b_views = [r[1] for r in rows if r[0] == 'B']
+
+            avg_a = sum(a_views) / len(a_views) if a_views else 0
+            avg_b = sum(b_views) / len(b_views) if b_views else 0
+
+            total = len(a_views) + len(b_views)
+            recommended = "A" if avg_a >= avg_b else "B"
+
+            # Confidence basada en tamaño de muestra (20 videos = confianza completa)
+            confidence = min(1.0, total / 20)
+
+            return {
+                "A": {"count": len(a_views), "avg_views": avg_a,
+                      "win_rate": avg_a / max(avg_a + avg_b, 1)},
+                "B": {"count": len(b_views), "avg_views": avg_b,
+                      "win_rate": avg_b / max(avg_a + avg_b, 1)},
+                "recommended": recommended,
+                "confidence": confidence,
+            }
+        except Exception as e:
+            self.logger.warning(f"A/B stats error: {e}")
+            return {"recommended": "A", "confidence": 0.0}
+
+    def _select_ab_thumbnail(self, ctx: Context) -> str:
+        """
+        Decide qué thumbnail usar para el próximo vídeo basado en datos históricos.
+        - Si confidence < 0.3 (menos de 6 videos): alternar A/B (50/50)
+        - Si confidence >= 0.3: usar el ganador histórico
+        Guarda la selección en ctx.thumbnail_selected ("A" o "B").
+        """
+        stats = self._get_thumbnail_ab_stats()
+        confidence = stats.get("confidence", 0)
+        recommended = stats.get("recommended", "A")
+
+        if confidence < 0.3:
+            import sqlite3
+            try:
+                with sqlite3.connect(self.db.db_path) as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM videos WHERE thumbnail_winner IS NOT NULL"
+                    ).fetchone()[0]
+                selected = "B" if count % 2 == 0 else "A"
+            except Exception:
+                selected = "A"
+            reason = f"alternando (confianza baja: {confidence:.0%})"
+        else:
+            selected = recommended
+            a_stats = stats.get("A", {})
+            b_stats = stats.get("B", {})
+            reason = (f"ganador histórico: {recommended} "
+                      f"(A: {a_stats.get('avg_views', 0):.0f} vs "
+                      f"B: {b_stats.get('avg_views', 0):.0f} views avg)")
+
+        self.logger.info(f"ALETHEIA A/B selección: thumbnail {selected} — {reason}")
+        return selected
+
+    def _schedule_thumbnail_swap_check(self, ctx: Context) -> None:
+        """
+        Programa en SQLite una verificación de A/B en 2 horas.
+        KAIROS puede leer esta tabla y ejecutar el swap si B gana.
+        """
+        try:
+            import sqlite3
+            from datetime import datetime, timedelta
+            check_at = (datetime.utcnow() + timedelta(hours=2)).isoformat()
+            with sqlite3.connect(self.db.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS ab_swap_queue (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        pipeline_id TEXT,
+                        youtube_video_id TEXT,
+                        thumbnail_a_path TEXT,
+                        thumbnail_b_path TEXT,
+                        current_thumbnail TEXT,
+                        check_at TIMESTAMP,
+                        status TEXT DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO ab_swap_queue
+                        (pipeline_id, youtube_video_id, thumbnail_a_path, thumbnail_b_path,
+                         current_thumbnail, check_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    ctx.pipeline_id,
+                    getattr(ctx, 'youtube_video_id', '') or '',
+                    getattr(ctx, 'thumbnail_a_path', '') or '',
+                    getattr(ctx, 'thumbnail_b_path', '') or '',
+                    getattr(ctx, 'thumbnail_selected', 'A'),
+                    check_at,
+                ))
+            self.logger.info(f"A/B swap check programado para {check_at}")
+        except Exception as e:
+            self.logger.warning(f"A/B swap queue error: {e}")
 
     # ── normalización números españoles ──────────────────────────────────────
     @staticmethod

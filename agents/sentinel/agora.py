@@ -8,7 +8,9 @@ Monitorea comentarios de videos recientes, genera respuestas con Groq
 y las publica via YouTube Data API v3. Aumenta engagement sin spam.
 """
 
+import base64
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -184,12 +186,29 @@ class AGORA(BaseAgent):
             ctx.add_warning("AGORA", msg)
             return None
 
-        client_secret_path = os.getenv("YOUTUBE_CLIENT_SECRET_PATH", "")
-        if not client_secret_path or not Path(client_secret_path).exists():
+        # Reconstruir client_secret.json desde YOUTUBE_CLIENT_SECRETS_B64 (base64)
+        secrets_b64 = os.getenv("YOUTUBE_CLIENT_SECRETS_B64", "")
+        if not secrets_b64:
             self.logger.warning(
-                f"[yellow]AGORA:[/] YOUTUBE_CLIENT_SECRET_PATH no válido: {client_secret_path!r}"
+                "[yellow]AGORA:[/] YOUTUBE_CLIENT_SECRETS_B64 no configurada — skip comentarios"
             )
             return None
+        try:
+            secrets_json = base64.b64decode(secrets_b64).decode("utf-8")
+        except Exception as exc:
+            self.logger.warning(f"[yellow]AGORA:[/] error decodificando YOUTUBE_CLIENT_SECRETS_B64: {exc}")
+            return None
+
+        # Escribir a archivo temporal para que google-auth-oauthlib pueda leerlo
+        tmp_secrets = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        try:
+            tmp_secrets.write(secrets_json)
+            tmp_secrets.flush()
+            client_secret_path = tmp_secrets.name
+        finally:
+            tmp_secrets.close()
 
         token_path = self._find_token_path()
         creds = None

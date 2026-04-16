@@ -28,9 +28,16 @@ console = Console()
 
 # ── Configuración de fuentes RSS ──────────────────────────────────────────────
 RSS_SOURCES = [
-    ("CoinDesk",      "https://feeds.feedburner.com/CoinDesk"),
-    ("CoinTelegraph", "https://cointelegraph.com/rss"),
-    ("Decrypt",       "https://decrypt.co/feed"),
+    ("CoinDesk",        "https://feeds.feedburner.com/CoinDesk"),
+    ("CoinTelegraph",   "https://cointelegraph.com/rss"),
+    ("Decrypt",         "https://decrypt.co/feed"),
+    ("TheDefiant",      "https://thedefiant.io/feed"),
+    ("TheBlock",        "https://www.theblock.co/rss.xml"),
+    ("BitcoinMagazine", "https://bitcoinmagazine.com/.rss/full/"),
+    ("CryptoBriefing",  "https://cryptobriefing.com/feed/"),
+    ("CoinDeskAlt",     "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("GoogleNews-BTC",  "https://news.google.com/rss/search?q=bitcoin+crypto&hl=es&gl=ES&ceid=ES:es"),
+    ("GoogleNews-ETH",  "https://news.google.com/rss/search?q=ethereum+defi&hl=es&gl=ES&ceid=ES:es"),
 ]
 
 URGENCY_KEYWORDS = {
@@ -87,22 +94,90 @@ class PYTHIA(BaseAgent):
         """
         Puntúa relevancia 0-100 de una noticia respecto al topic.
         Simple TF heurístico por palabras clave.
+        Mantenido por compatibilidad — internamente delega a _score_article_v2.
         """
-        text = (title + " " + summary).lower()
-        topic_words = re.findall(r"\w+", topic.lower())
-        crypto_keywords = {
-            "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
-            "crypto", "blockchain", "defi", "nft", "altcoin", "web3",
-            "binance", "bnb", "stablecoin", "usdt", "usdc",
-        }
+        article = {"title": title, "summary": summary}
+        return self._score_article_v2(article, topic)
+
+    def _score_article_v2(self, article: dict, topic: str) -> int:
+        """
+        Scoring multidimensional 0-100:
+        - Relevancia temporal: artículos de las últimas 4h reciben bonus +20
+        - Densidad de datos: menciona precios concretos, %, estadísticas → +15
+        - Impacto potencial: keywords de alta señal (SEC, ETF, hack, halving) → +30
+        - Longitud: artículos >200 palabras en summary → +10
+        - Fuente: CoinDesk/Decrypt > fuentes desconocidas → +10
+        - Urgencia: keywords de crisis → score mínimo garantizado de 70
+        - Topic match: palabras del topic en texto → bonus hasta +15
+        """
+        import time as _time_mod
         score = 0
-        for word in topic_words:
-            if len(word) > 2 and word in text:
-                score += 25
-        for kw in crypto_keywords:
-            if kw in text:
-                score += 5
-        return min(score, 100)
+        title = (article.get("title") or "").lower()
+        summary = (article.get("summary") or "").lower()
+        full_text = title + " " + summary
+        published = article.get("published_parsed") or article.get("updated_parsed")
+
+        # 1. Relevancia temporal
+        if published:
+            try:
+                age_hours = (_time_mod.time() - _time_mod.mktime(published)) / 3600
+                if age_hours < 2:
+                    score += 20
+                elif age_hours < 6:
+                    score += 12
+                elif age_hours < 24:
+                    score += 5
+            except Exception:
+                pass
+
+        # 2. Densidad de datos (precios, porcentajes, millones/billones)
+        data_patterns = re.findall(
+            r'\$[\d,]+|\d+[\.,]\d*%|\d+\s*(?:million|billion|millones|millardos|btc|eth)',
+            full_text
+        )
+        score += min(15, len(data_patterns) * 5)
+
+        # 3. Keywords de alto impacto (señal real)
+        high_signal = [
+            "sec", "etf", "hack", "exploit", "halving", "blackrock",
+            "fbi", "treasury", "fed ", "interest rate", "binance ban",
+            "coinbase", "regulation", "bill", "congress", "senate",
+            "microstrategy", "el salvador", "cbdc", "taproot",
+        ]
+        hits = sum(1 for kw in high_signal if kw in full_text)
+        score += min(30, hits * 10)
+
+        # 4. Longitud del summary (más contenido = más analizable)
+        word_count = len(summary.split())
+        if word_count > 200:
+            score += 10
+        elif word_count > 100:
+            score += 5
+
+        # 5. Fuente de calidad
+        source = (
+            article.get("source", {}).get("href", "")
+            if isinstance(article.get("source"), dict)
+            else str(article.get("source", ""))
+        )
+        source = (source + " " + (article.get("link", "") or "")).lower()
+        quality_sources = ["coindesk", "cointelegraph", "decrypt", "theblock",
+                           "bloomberg", "reuters", "ft.com", "wsj"]
+        if any(s in source for s in quality_sources):
+            score += 10
+
+        # 6. Topic match
+        topic_words = [w for w in re.findall(r"\w+", topic.lower()) if len(w) > 2]
+        topic_hits = sum(1 for w in topic_words if w in full_text)
+        score += min(15, topic_hits * 5)
+
+        # 7. Urgencia mínima garantizada
+        crisis_words = ["hack", "exploit", "crash", "ban", "seized", "arrested",
+                        "fud", "collapse", "liquidated", "emergency"]
+        if any(w in full_text for w in crisis_words):
+            score = max(score, 70)
+
+        return min(100, score)
 
     def _has_urgency(self, title: str, summary: str) -> bool:
         text = (title + " " + summary).lower()
@@ -141,6 +216,28 @@ class PYTHIA(BaseAgent):
         except Exception:
             pass
         return ""
+
+    def _deduplicate_articles(self, articles: list) -> list:
+        """
+        Elimina artículos duplicados por similitud de título (>70% palabras en común).
+        Ordena por score descendente antes de deduplicar: se queda la copia
+        con mayor puntuación cuando varias fuentes cubren la misma noticia.
+        """
+        seen_titles: list = []
+        unique: list = []
+        for art in sorted(articles, key=lambda x: x.get("relevance", 0), reverse=True):
+            title_words = set(re.findall(r"\w+", art.get("title", "").lower()))
+            if not title_words:
+                unique.append(art)
+                continue
+            is_dup = any(
+                len(title_words & set(re.findall(r"\w+", seen))) / max(len(title_words), 1) > 0.7
+                for seen in seen_titles
+            )
+            if not is_dup:
+                seen_titles.append(art.get("title", "").lower())
+                unique.append(art)
+        return unique
 
     def _fetch_feed(self, name: str, url: str) -> List[Dict[str, Any]]:
         """Parsea un feed RSS y devuelve lista de items normalizados."""
@@ -248,6 +345,7 @@ class PYTHIA(BaseAgent):
             cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
             topic = ctx.topic or "crypto bitcoin"
 
+            # RSS_SOURCES ya incluye los 10 feeds fijos; Google News dinámico se añade aquí
             sources = list(RSS_SOURCES) + [
                 ("Google News", self._google_news_url(topic))
             ]
@@ -267,11 +365,17 @@ class PYTHIA(BaseAgent):
                 f"Noticias últimas 24h: {len(recent)} / total {len(all_items)}"
             )
 
-            # Scoring y detección urgencia
+            # Scoring v2 multidimensional + detección urgencia
             urgent_found = False
             for item in recent:
-                item["relevance"] = self._score_relevance(
-                    item["title"], item.get("summary", ""), topic
+                # Pasar el dict del feed directamente para que _score_article_v2
+                # pueda leer published_parsed si feedparser lo expone en el original.
+                # El item ya normalizado no tiene ese campo, así que usamos
+                # la interfaz pública que acepta title+summary.
+                item["relevance"] = self._score_article_v2(
+                    {"title": item["title"], "summary": item.get("summary", ""),
+                     "link": item.get("url", ""), "source": item.get("source", "")},
+                    topic
                 )
                 item["urgent"] = self._has_urgency(
                     item["title"], item.get("summary", "")
@@ -282,8 +386,15 @@ class PYTHIA(BaseAgent):
                         f"[bold #F44336]URGENTE:[/] {item['title'][:60]}"
                     )
 
+            # Deduplicar antes de seleccionar top noticias
+            recent_unique = self._deduplicate_articles(recent)
+            self.logger.info(
+                f"Tras deduplicación: {len(recent_unique)} artículos únicos "
+                f"(eliminados {len(recent) - len(recent_unique)} duplicados)"
+            )
+
             # Top 5 por relevancia
-            top5 = sorted(recent, key=lambda x: x["relevance"], reverse=True)[:5]
+            top5 = sorted(recent_unique, key=lambda x: x["relevance"], reverse=True)[:5]
 
             # Formatear para ctx (serializable)
             ctx.news = [

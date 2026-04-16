@@ -373,6 +373,41 @@ class IRIS(BaseAgent):
         font_logo = _load_font(_FONTS_BOLD, 22)
         draw.text((w - 250, 20), "CryptoVerdad", fill=COLOR_ACCENT, font=font_logo)
 
+    # ── Helpers de sentimiento ────────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_sentiment(ctx: Context) -> tuple:
+        """
+        Detecta el sentimiento de mercado a partir del contexto.
+        Retorna (change_24h: float, fear_greed: int, accent_color: tuple, show_alert: bool)
+        """
+        change_24h = (
+            getattr(ctx, "btc_24h_change", 0)
+            or (ctx.prices or {}).get("BTC", {}).get("change_24h", 0)
+            or 0
+        )
+        fear_greed = getattr(ctx, "fear_greed_value", 50) or 50
+
+        # Color de acento: rojo en mercado bajista fuerte, naranja en el resto
+        accent_rgb = COLOR_RED if change_24h < -3 else COLOR_ACCENT
+        # Alerta de mercado: miedo extremo o caída muy fuerte
+        show_alert = fear_greed < 25 or change_24h < -7
+
+        return float(change_24h), int(fear_greed), accent_rgb, bool(show_alert)
+
+    @staticmethod
+    def _draw_alert_band(draw, w: int) -> None:
+        """Dibuja banda roja de 40px en la parte superior con texto de alerta."""
+        draw.rectangle([(0, 0), (w, 40)], fill=COLOR_RED)
+        font_alert = _load_font(_FONTS_BOLD, 22)
+        draw.text(
+            (w // 2, 20),
+            "ALERTA DE MERCADO",
+            fill=COLOR_WHITE,
+            font=font_alert,
+            anchor="mm",
+        )
+
     # ── Version A ─────────────────────────────────────────────────────────────
 
     def _generate_version_a(self, ctx: Context) -> "Image":
@@ -380,8 +415,12 @@ class IRIS(BaseAgent):
         Version A — Frame del vídeo + overlay oscuro + texto ABAJO IZQUIERDA.
         Logo CryptoVerdad arriba izquierda. Precio BTC naranja arriba derecha.
         SIN avatar cartoon.
+        Variante de color según sentimiento (rojo si bajista fuerte).
         """
         from PIL import Image, ImageDraw
+
+        # Detectar sentimiento antes de dibujar
+        change_24h, fear_greed, accent_rgb, show_alert = self._detect_sentiment(ctx)
 
         # Base: frame del vídeo o fondo degradado como fallback
         img = self._extract_video_frame(ctx, second=5.0)
@@ -393,6 +432,10 @@ class IRIS(BaseAgent):
         # Overlay oscuro semitransparente
         img = self._apply_dark_overlay(img, alpha=150)
         draw = ImageDraw.Draw(img)
+
+        # Banda de alerta (mercado bajista extremo o miedo extremo)
+        if show_alert:
+            self._draw_alert_band(draw, THUMB_W)
 
         # Logo CryptoVerdad arriba izquierda
         self._draw_logo_topleft(draw)
@@ -411,12 +454,12 @@ class IRIS(BaseAgent):
             x=40, y=THUMB_H - 240,
             max_width=int(THUMB_W * 0.90),
             color_main=COLOR_WHITE,
-            shadow_color=COLOR_ACCENT,
+            shadow_color=accent_rgb,   # rojo o naranja según sentimiento
             size_range=(72, 60, 50, 42, 34),
         )
 
-        # Barra naranja en borde inferior
-        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=COLOR_ACCENT)
+        # Barra de acento en borde inferior (rojo o naranja)
+        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=accent_rgb)
 
         return img
 
@@ -427,8 +470,12 @@ class IRIS(BaseAgent):
         Version B — Frame del vídeo + overlay oscuro + texto CENTRADO.
         Logo CryptoVerdad arriba izquierda. Precio BTC naranja arriba derecha.
         SIN avatar cartoon.
+        Variante de color según sentimiento (rojo si bajista fuerte).
         """
         from PIL import Image, ImageDraw
+
+        # Detectar sentimiento antes de dibujar
+        change_24h, fear_greed, accent_rgb, show_alert = self._detect_sentiment(ctx)
 
         # Base: frame del vídeo o fondo degradado como fallback
         img = self._extract_video_frame(ctx, second=5.0)
@@ -440,6 +487,10 @@ class IRIS(BaseAgent):
         # Overlay más oscuro en el centro para que el texto destaque
         img = self._apply_dark_overlay(img, alpha=165)
         draw = ImageDraw.Draw(img)
+
+        # Banda de alerta (mercado bajista extremo o miedo extremo)
+        if show_alert:
+            self._draw_alert_band(draw, THUMB_W)
 
         # Logo CryptoVerdad arriba izquierda
         self._draw_logo_topleft(draw)
@@ -457,17 +508,17 @@ class IRIS(BaseAgent):
 
         for i, line in enumerate(lines):
             y = start_y + i * line_h
-            # Sombra
+            # Sombra con color de acento según sentimiento
             try:
                 lw = font_q.getlength(line) if hasattr(font_q, "getlength") else len(line) * 55
             except Exception:
                 lw = len(line) * 55
             x = (THUMB_W - lw) // 2
-            draw.text((x + 3, y + 3), line, fill=COLOR_ACCENT, font=font_q)
+            draw.text((x + 3, y + 3), line, fill=accent_rgb, font=font_q)
             draw.text((x, y), line, fill=COLOR_WHITE, font=font_q)
 
-        # Barra naranja en borde inferior
-        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=COLOR_ACCENT)
+        # Barra de acento en borde inferior (rojo o naranja)
+        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=accent_rgb)
 
         return img
 
@@ -493,13 +544,31 @@ class IRIS(BaseAgent):
             console.print("[dim]Generando thumbnail Version B (pregunta + flecha)...[/]")
             ctx.thumbnail_b_path = self._save_thumbnail(ctx, "B", path_b)
 
+            # Registrar sentimiento en ctx para diagnóstico y ALETHEIA A/B
+            try:
+                _chg, _, _, _ = self._detect_sentiment(ctx)
+                if _chg < -3:
+                    ctx.thumbnail_sentiment = "bearish"
+                elif _chg < 2:
+                    ctx.thumbnail_sentiment = "neutral"
+                else:
+                    ctx.thumbnail_sentiment = "bullish"
+                console.print(
+                    f"[dim]Sentimiento thumbnail: {ctx.thumbnail_sentiment} "
+                    f"(BTC 24h: {_chg:+.1f}%)[/]"
+                )
+            except Exception as _se:
+                self.logger.warning(f"Sentimiento thumbnail: {_se}")
+                ctx.thumbnail_sentiment = "neutral"
+
             console.print(
                 f"[green]Thumbnails generados:[/]\n"
                 f"  A: {path_a}\n"
                 f"  B: {path_b}"
             )
             self.logger.info(
-                f"Thumbnails A/B guardados para pipeline {ctx.pipeline_id[:8]}"
+                f"Thumbnails A/B guardados para pipeline {ctx.pipeline_id[:8]} "
+                f"· sentimiento: {getattr(ctx, 'thumbnail_sentiment', 'neutral')}"
             )
 
         except Exception as e:

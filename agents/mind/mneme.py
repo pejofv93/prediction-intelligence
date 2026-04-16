@@ -55,6 +55,12 @@ class MNEME(BaseAgent):
     def run(self, ctx: Context) -> Context:
         self.logger.info("[bold purple]MNEME[/] iniciado")
         try:
+            # Actualizar retención desde YouTube Analytics (silencioso si falla)
+            try:
+                self._update_retention_data()
+            except Exception as e:
+                self.logger.debug(f"Retención update: {e}")
+
             videos = self._get_historical_videos()
             if len(videos) < MIN_VIDEOS_TO_CONFIRM:
                 self.logger.info(
@@ -65,6 +71,20 @@ class MNEME(BaseAgent):
                 return ctx
 
             learning = self._compute_learning(videos)
+
+            # Añadir insights de retención al learning_context
+            try:
+                script_structure = self._get_best_script_structure()
+                if script_structure:
+                    learning["best_mode_for_retention"] = script_structure.get(
+                        "best_mode", "analisis"
+                    )
+                    learning["retention_by_mode"] = script_structure.get(
+                        "retention_by_mode", {}
+                    )
+            except Exception as e:
+                self.logger.debug(f"Retención insights: {e}")
+
             ctx.learning_context = learning
             self._log_summary(learning)
         except Exception as exc:
@@ -194,6 +214,161 @@ class MNEME(BaseAgent):
             return [dict(r) for r in rows]
         except Exception:
             return []
+
+    # ── YouTube Analytics: retención real ────────────────────────────────────
+    def _build_analytics_service(self):
+        """
+        Construye el cliente de YouTube Analytics API usando las credenciales OAuth2
+        ya disponibles (YOUTUBE_TOKEN_B64 — mismo token que usa OLYMPUS).
+        """
+        import base64, json, os
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        token_b64 = os.getenv("YOUTUBE_TOKEN_B64", "")
+        if not token_b64:
+            raise EnvironmentError("YOUTUBE_TOKEN_B64 no configurado")
+
+        token_data = json.loads(base64.b64decode(token_b64))
+        creds = Credentials(
+            token=token_data.get("token"),
+            refresh_token=token_data.get("refresh_token"),
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=token_data.get("client_id"),
+            client_secret=token_data.get("client_secret"),
+            scopes=[
+                "https://www.googleapis.com/auth/yt-analytics.readonly",
+                "https://www.googleapis.com/auth/youtube.readonly",
+            ],
+        )
+        return build("youtubeAnalytics", "v2", credentials=creds)
+
+    def _fetch_video_retention(self, youtube_video_id: str) -> dict:
+        """
+        Obtiene metricas de retención desde YouTube Analytics API.
+        Metricas: averageViewPercentage, averageViewDuration, views, estimatedMinutesWatched.
+        Retorna dict vacío si falla (no crítico).
+        """
+        if not youtube_video_id:
+            return {}
+        try:
+            service = self._build_analytics_service()
+            from datetime import datetime, timedelta
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+
+            response = service.reports().query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics="views,averageViewDuration,averageViewPercentage,estimatedMinutesWatched",
+                dimensions="video",
+                filters=f"video=={youtube_video_id}",
+            ).execute()
+
+            rows = response.get("rows", [])
+            if rows:
+                row = rows[0]
+                return {
+                    "views": int(row[1]),
+                    "avg_duration_seconds": float(row[2]),
+                    "avg_view_percentage": float(row[3]),
+                    "watch_time_minutes": float(row[4]),
+                }
+        except Exception as e:
+            self.logger.debug(f"YouTube Analytics para {youtube_video_id}: {e}")
+        return {}
+
+    def _update_retention_data(self) -> None:
+        """
+        Actualiza datos de retención para los últimos 10 vídeos publicados sin retención.
+        Guarda en tabla videos: avg_view_percentage, avg_duration_seconds, watch_time_minutes.
+        """
+        import sqlite3
+        try:
+            # Añadir columnas si no existen (idempotente)
+            with sqlite3.connect(self.db.db_path) as conn:
+                for col in ["avg_view_percentage REAL", "avg_duration_seconds REAL",
+                            "watch_time_minutes REAL"]:
+                    try:
+                        conn.execute(f"ALTER TABLE videos ADD COLUMN {col}")
+                    except Exception:
+                        pass  # La columna ya existe
+
+            # Vídeos sin datos de retención
+            with sqlite3.connect(self.db.db_path) as conn:
+                rows = conn.execute("""
+                    SELECT pipeline_id, youtube_id
+                    FROM videos
+                    WHERE youtube_id IS NOT NULL
+                      AND youtube_id != ''
+                      AND (avg_view_percentage IS NULL OR avg_view_percentage = 0)
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """).fetchall()
+
+            updated = 0
+            for pipeline_id, youtube_id in rows:
+                retention = self._fetch_video_retention(youtube_id)
+                if retention:
+                    with sqlite3.connect(self.db.db_path) as conn:
+                        conn.execute("""
+                            UPDATE videos SET
+                                views = ?,
+                                avg_view_percentage = ?,
+                                avg_duration_seconds = ?,
+                                watch_time_minutes = ?
+                            WHERE youtube_id = ?
+                        """, (
+                            retention.get("views", 0),
+                            retention.get("avg_view_percentage", 0),
+                            retention.get("avg_duration_seconds", 0),
+                            retention.get("watch_time_minutes", 0),
+                            youtube_id,
+                        ))
+                    updated += 1
+                    self.logger.info(
+                        f"Retención actualizada para {youtube_id}: "
+                        f"{retention.get('avg_view_percentage', 0):.1f}% avg"
+                    )
+
+            if updated:
+                self.logger.info(f"MNEME: {updated} vídeos con retención actualizada")
+        except Exception as e:
+            self.logger.warning(f"_update_retention_data error: {e}")
+
+    def _get_best_script_structure(self) -> dict:
+        """
+        Analiza qué estructuras de script generan mayor retención.
+        Compara avg_view_percentage por modo (analisis, noticia, etc.)
+        """
+        import sqlite3
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                rows = conn.execute("""
+                    SELECT p.mode,
+                           AVG(v.avg_view_percentage) as avg_retention,
+                           AVG(v.views) as avg_views,
+                           COUNT(*) as count
+                    FROM pipelines p
+                    JOIN videos v ON p.id = v.pipeline_id
+                    WHERE v.avg_view_percentage > 0
+                    GROUP BY p.mode
+                    ORDER BY avg_retention DESC
+                """).fetchall()
+
+            if rows:
+                best_mode = rows[0][0]
+                return {
+                    "best_mode": best_mode,
+                    "retention_by_mode": {
+                        r[0]: {"retention": r[1], "views": r[2], "count": r[3]}
+                        for r in rows
+                    },
+                }
+        except Exception as e:
+            self.logger.debug(f"_get_best_script_structure: {e}")
+        return {}
 
     # ── tabla creación ────────────────────────────────────────────────────────
     def _ensure_table(self) -> None:

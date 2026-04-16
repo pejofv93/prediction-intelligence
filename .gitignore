@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Modelos de IA pesados
 latsync/
 liveportrait/
@@ -42,3 +43,25 @@ Thumbs.db
 # Entornos virtuales
 .venv/
 venv/
+=======
+# Copias temporales de shared/ generadas por el Makefile durante deploy
+services/*/shared/
+
+# Entorno Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Variables de entorno — NUNCA commitear valores reales
+.env
+
+# Frontend
+services/dashboard/frontend/node_modules/
+services/dashboard/frontend/dist/
+
+# GCP
+.gcloud/
+gcloud-service-key.json
+>>>>>>> 0bf61cba17b414cbb6426d63eccff6d91e722d95

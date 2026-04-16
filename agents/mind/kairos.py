@@ -64,6 +64,8 @@ class KAIROS(BaseAgent):
                 f"(día {today}): [bold]{optimal_hour}:00[/]"
             )
             console.print(self._build_schedule_table())
+            # Procesar cola de verificaciones A/B pendientes
+            self._process_ab_swap_queue()
         except Exception as exc:
             self.logger.error(f"[red]KAIROS error:[/] {exc}")
             ctx.add_error("KAIROS", str(exc))
@@ -139,6 +141,51 @@ class KAIROS(BaseAgent):
         except Exception as exc:
             self.logger.warning(f"KAIROS: no se pudo limpiar optimal_hours: {exc}")
         self._seed_defaults()
+
+    # ── cola A/B swap ─────────────────────────────────────────────────────────
+    def _process_ab_swap_queue(self) -> None:
+        """
+        Procesa la cola de verificaciones A/B thumbnail.
+        Para cada entrada en ab_swap_queue con status='pending' y check_at <= ahora:
+        - Obtiene la decisión de swap y marca como procesado.
+        - El swap real lo ejecutaría OLYMPUS._set_thumbnail() en una futura iteración.
+        """
+        import sqlite3
+
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                # Verificar si la tabla existe antes de operar
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='ab_swap_queue'"
+                ).fetchone()
+                if not exists:
+                    return
+
+                pending = conn.execute("""
+                    SELECT id, pipeline_id, youtube_video_id, current_thumbnail
+                    FROM ab_swap_queue
+                    WHERE status = 'pending'
+                      AND check_at <= datetime('now')
+                    LIMIT 5
+                """).fetchall()
+
+            for row_id, pipeline_id, yt_vid_id, current_thumb in pending:
+                try:
+                    pid_short = (pipeline_id or "")[:8]
+                    self.logger.info(
+                        f"KAIROS A/B check: pipeline={pid_short} "
+                        f"video={yt_vid_id} thumbnail={current_thumb}"
+                    )
+                    with sqlite3.connect(self.db.db_path) as conn:
+                        conn.execute(
+                            "UPDATE ab_swap_queue SET status='checked' WHERE id=?",
+                            (row_id,),
+                        )
+                except Exception as e:
+                    self.logger.warning(f"A/B swap check {row_id}: {e}")
+
+        except Exception as e:
+            self.logger.debug(f"_process_ab_swap_queue: {e}")
 
     # ── schedule_next_publish ─────────────────────────────────────────────────
     def schedule_next_publish(self) -> datetime:

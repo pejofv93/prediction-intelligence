@@ -20,7 +20,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 import yaml
 from fastapi import Cookie, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from rich.console import Console
 
@@ -511,6 +511,124 @@ async def videos_gallery(
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "nexus"}
+
+
+# ── 10b. SSE — estado del pipeline en tiempo real ─────────────────────────────
+# Uso desde el dashboard HTML:
+#   const es = new EventSource('/pipeline/stream');
+#   es.onmessage = (e) => { const data = JSON.parse(e.data); /* actualizar UI */ };
+# Requiere autenticación via cookie nexus_auth (se valida en el generador).
+
+@app.get("/pipeline/stream")
+async def pipeline_stream(nexus_auth: Optional[str] = Cookie(default=None)):
+    """
+    Endpoint SSE que emite el estado del ultimo pipeline cada 3 segundos.
+    Formato: data: {"id": ..., "topic": ..., "status": ...,
+                    "youtube_url": ..., "seo_score": ...}
+
+    Se conecta al dashboard con:
+      const es = new EventSource('/pipeline/stream');
+      es.onmessage = (e) => updateStatusIndicator(JSON.parse(e.data));
+    """
+    if not _is_authenticated(nexus_auth):
+        raise HTTPException(status_code=401, detail="No autenticado")
+
+    async def _event_generator():
+        while True:
+            try:
+                db = _get_db()
+                rows = db.list_pipelines(limit=1)
+                if rows:
+                    p = rows[0]
+                    payload = {
+                        "id": str(p.get("id", "")),
+                        "topic": p.get("topic", ""),
+                        "status": p.get("status", ""),
+                        "youtube_url": p.get("youtube_url", "") or "",
+                        "seo_score": p.get("seo_score", 0) or 0,
+                    }
+                    # Sobreescribir status con el estado en memoria si esta activo
+                    pid = str(p.get("id", ""))
+                    if pid in _running_pipelines:
+                        payload["status"] = _running_pipelines[pid].get("status", payload["status"])
+                else:
+                    payload = {"id": "", "topic": "", "status": "idle",
+                               "youtube_url": "", "seo_score": 0}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            except Exception as _sse_err:
+                yield f"data: {json.dumps({'error': str(_sse_err)})}\n\n"
+            await asyncio.sleep(3)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── 10c. Analytics — rendimiento por modo de video ────────────────────────────
+
+@app.get("/analytics")
+async def analytics_page(nexus_auth: Optional[str] = Cookie(default=None)):
+    """
+    Devuelve metricas de rendimiento agrupadas por modo de video.
+    Consulta la tabla 'videos' (avg_view_percentage, avg_duration_seconds)
+    y la tabla 'pipelines' (seo_score, modo) como fallback.
+    """
+    if not _is_authenticated(nexus_auth):
+        raise HTTPException(status_code=401, detail="No autenticado")
+
+    result = []
+    try:
+        db = _get_db()
+        conn = db._connect()
+
+        # Intentar primero tabla videos (gestionada por MNEME)
+        try:
+            rows = conn.execute("""
+                SELECT p.mode,
+                       COUNT(*) AS total,
+                       AVG(v.avg_view_percentage) AS avg_retention,
+                       AVG(v.avg_duration_seconds) AS avg_duration
+                FROM videos v
+                JOIN pipelines p ON p.id = v.pipeline_id
+                GROUP BY p.mode
+                ORDER BY avg_retention DESC
+            """).fetchall()
+            for r in rows:
+                result.append({
+                    "mode": r["mode"] or "desconocido",
+                    "total": r["total"],
+                    "avg_retention_pct": round(float(r["avg_retention"] or 0), 1),
+                    "avg_duration_seconds": round(float(r["avg_duration"] or 0), 1),
+                })
+        except Exception:
+            # Fallback: solo desde pipelines (sin metricas de reproduccion)
+            rows = conn.execute("""
+                SELECT mode,
+                       COUNT(*) AS total,
+                       AVG(seo_score) AS avg_seo
+                FROM pipelines
+                WHERE status IN ('completed', 'completed_with_errors')
+                GROUP BY mode
+                ORDER BY total DESC
+            """).fetchall()
+            for r in rows:
+                result.append({
+                    "mode": r["mode"] or "desconocido",
+                    "total": r["total"],
+                    "avg_retention_pct": 0.0,
+                    "avg_duration_seconds": 0.0,
+                    "avg_seo_score": round(float(r["avg_seo"] or 0), 1),
+                })
+    except Exception as exc:
+        console.print(f"[red]Analytics DB error: {exc}[/]")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse(result)
 
 
 # ── 11. Pipeline status (24 agentes + logs) ───────────────────────────────────
