@@ -231,11 +231,15 @@ def action_system_status(config: dict, db) -> None:
 
     # Variables de entorno clave
     env_vars = [
-        ("GROQ_API_KEY",        "Groq API"),
-        ("PEXELS_API_KEY",      "Pexels"),
-        ("TELEGRAM_BOT_TOKEN",  "Telegram Bot"),
-        ("YOUTUBE_CLIENT_ID",   "YouTube OAuth"),
-        ("WEB_PIN",             "Web PIN"),
+        ("GROQ_API_KEY",           "Groq API"),
+        ("PEXELS_API_KEY",         "Pexels"),
+        ("TELEGRAM_BOT_TOKEN",     "Telegram Bot"),
+        ("TELEGRAM_ADMIN_ID",      "Telegram Admin ID"),
+        ("TIKTOK_SESSION_ID",      "TikTok Session ID"),
+        ("YOUTUBE_CLIENT_ID",      "YouTube OAuth"),
+        ("YOUTUBE_API_KEY",        "YouTube API Key (RECON)"),
+        ("YOUTUBE_CLIENT_SECRETS_B64", "YouTube Secrets (AGORA)"),
+        ("WEB_PIN",                "Web PIN"),
     ]
     for var, label in env_vars:
         val = os.getenv(var)
@@ -664,16 +668,19 @@ def _update_video_analytics(config: dict, db) -> None:
 
 
 def action_auto(config: dict, db) -> None:
-    """Modo servidor: panel web en hilo principal + KAIROS scheduler en background."""
+    """Modo servidor: panel web + KAIROS scheduler + bot Telegram en background."""
     import threading
     import time
     from datetime import datetime
+
+    stop_event = threading.Event()
 
     def _scheduler_loop() -> None:
         """
         Bucle KAIROS: lanza pipeline a la hora óptima del día.
         Comprueba al arrancar si la ventana de hoy se perdió por un reinicio
         reciente (grace period 3h) y lanza inmediatamente en ese caso.
+        Se detiene si stop_event queda activo (comando /parar del bot).
         """
         from agents.mind.kairos import KAIROS as Kairos
 
@@ -699,7 +706,7 @@ def action_auto(config: dict, db) -> None:
 
         _analytics_last_run = 0.0
 
-        while True:
+        while not stop_event.is_set():
             try:
                 next_run = kairos.schedule_next_publish()
                 now = datetime.now()
@@ -715,22 +722,40 @@ def action_auto(config: dict, db) -> None:
                         f"[dim]KAIROS: próximo pipeline {next_run.strftime('%Y-%m-%d %H:%M')} "
                         f"(en {wait_sec/3600:.1f}h)[/]"
                     )
-                    time.sleep(min(wait_sec - 60, 3600))
+                    # Sleep en trozos de 60s para responder al stop_event
+                    sleep_total = min(wait_sec - 60, 3600)
+                    slept = 0.0
+                    while slept < sleep_total and not stop_event.is_set():
+                        time.sleep(min(60, sleep_total - slept))
+                        slept += 60
                     continue
 
                 # Hora de producir
                 _run_auto_pipeline(config, db)
 
                 # Dormir 1h para no re-ejecutar el mismo slot
-                time.sleep(3600)
+                for _ in range(60):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(60)
 
             except Exception as exc:
                 console.print(f"[red]KAIROS error:[/] {exc}")
                 time.sleep(300)
 
-    # KAIROS en hilo daemon (muere si el proceso principal muere)
+        console.print("[yellow]KAIROS detenido por señal de parada.[/]")
+
+    # KAIROS en hilo daemon
     scheduler = threading.Thread(target=_scheduler_loop, daemon=True, name="kairos")
     scheduler.start()
+
+    # Bot Telegram privado en hilo daemon
+    try:
+        from telegram_bot import TelegramBot
+        bot = TelegramBot(config, db, stop_event=stop_event)
+        bot.start_in_thread()
+    except Exception as exc:
+        console.print(f"[yellow]BOT TELEGRAM no iniciado: {exc}[/]")
 
     # Panel web en hilo principal (bloquea; Railway detecta /health)
     action_web_panel(config)
