@@ -18,19 +18,32 @@ REGLAS DE DESCRIPCIÓN (mínimo 300 palabras):
 - Keyword principal en las PRIMERAS 2 líneas (antes del "ver más")
 - Primera línea: gancho + keyword
 - Segunda línea: aviso legal breve
-- Timestamps obligatorios (al menos 5), formato: 0:00 Introducción
+- OBLIGATORIO incluir sección de CAPÍTULOS con al menos 5 timestamps en formato 0:00, 1:30, etc.
+- Los timestamps deben corresponder aproximadamente a las secciones del guión
+- Plantilla de timestamps (ajustar tiempos según duración estimada):
+  0:00 Introducción y precio actual
+  1:30 Contexto histórico
+  3:30 Análisis técnico: soportes y resistencias
+  5:30 Sentimiento del mercado
+  7:00 Factores fundamentales
+  8:30 Escenarios y predicción
+  9:30 Conclusión y opinión
 - Párrafo de desarrollo con keywords secundarias naturales
 - Links a redes sociales al final
 - Call to action para suscripción y notificaciones
 - Hashtags al final: #Bitcoin #Crypto #CryptoVerdad + 2-3 específicos del tema
 
-REGLAS DE TAGS (entre 5 y 7 EXACTAMENTE):
+REGLAS DE TAGS (entre 8 y 25 tags, usando hasta 500 caracteres totales):
 - PRIMER TAG = título exacto del vídeo (regla inamovible)
 - Mix estratégico:
-  - 1-2 tags de alto volumen (Bitcoin, Ethereum, Crypto)
+  - 1-2 tags de alto volumen (Bitcoin, Ethereum, Crypto, Criptomonedas)
+  - 2-3 tags en inglés del mismo tema (YouTube es global: "bitcoin analysis", "bitcoin price", "crypto today")
   - 2-3 tags de nicho específico del tema
   - 1 tag del canal (CryptoVerdad)
-- Sin repeticiones, sin tags genéricos inútiles
+  - 2-3 variantes del keyword principal (con y sin precio, con y sin "análisis")
+  - 1-2 tags de tendencia (bitcoin hoy, ethereum precio, crypto España)
+- Total: entre 8 y 20 tags, máximo 500 caracteres
+- Sin repeticiones exactas
 
 FORMATO DE RESPUESTA (JSON puro, sin markdown, sin explicaciones):
 {
@@ -42,14 +55,14 @@ FORMATO DE RESPUESTA (JSON puro, sin markdown, sin explicaciones):
     {"title": "Título opción 5 (máx 60 chars)", "score": 71}
   ],
   "description": "descripción completa aquí... (mín 300 palabras)",
-  "tags": ["título exacto del mejor título", "tag2", "tag3", "tag4", "tag5"]
+  "tags": ["título exacto del mejor título", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8"]
 }
 
 REGLAS DE PUNTUACIÓN de título (0-100):
 - +25 si keyword en primeras 3 palabras
-- +20 si longitud <= 60 chars
-- +20 si incluye número concreto o precio
+- +20 si longitud 40-60 chars (sweet spot CTR)
+- +20 si incluye número concreto o precio en $ o %
 - +20 si incluye pregunta o emoción fuerte
-- +15 si incluye verbo de acción
+- +15 si incluye verbo de acción (explota, supera, cae, rompe, alcanza)
 
 IMPORTANTE: Devuelve SOLO el JSON. Sin texto antes ni después. Sin ```json```.

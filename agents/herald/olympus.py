@@ -12,7 +12,7 @@ import os
 import time
 import random
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from rich.console import Console
@@ -26,7 +26,7 @@ from utils.logger import get_logger
 console = Console()
 
 # ── Constantes ────────────────────────────────────────────────────────────────
-YOUTUBE_CATEGORY_ENTERTAINMENT = "24"
+YOUTUBE_CATEGORY_SCIENCE_TECH = "28"  # Science & Technology
 CHUNK_SIZE = 1024 * 1024 * 4  # 4 MB por chunk
 MAX_RETRIES = 5
 RETRY_BASE = 2  # segundos base para backoff exponencial
@@ -103,9 +103,11 @@ class OLYMPUS(BaseAgent):
                 fallback_path=getattr(ctx, "thumbnail_b_path", ""),
             )
 
-            # 8b. Añadir end screens (últimos 20s)
-            video_duration = getattr(ctx, "video_duration", 0) or 240.0
-            self._add_end_screens(service, video_id, video_duration)
+            # 8b. Subir captions SRT si existen
+            self._upload_captions(service, video_id, ctx)
+
+            # 8c. Fijar comentario inicial
+            self._pin_first_comment(service, video_id, ctx)
 
             # 9. Actualizar contexto con URL corta
             ctx.youtube_video_id = video_id
@@ -121,9 +123,6 @@ class OLYMPUS(BaseAgent):
                 self.db.update_pipeline_youtube_url(ctx.pipeline_id, ctx.youtube_url)
             except Exception as exc:
                 self.logger.warning(f"[yellow]OLYMPUS[/] no se pudo actualizar youtube_url en pipeline: {exc}")
-
-            # 11. Notificar a MERCURY
-            self._notify_telegram(ctx)
 
         except Exception as exc:
             self.logger.error(f"[red]OLYMPUS error:[/] {exc}")
@@ -292,6 +291,7 @@ class OLYMPUS(BaseAgent):
           3. token.json en disco (desarrollo local)
         Si no hay credenciales válidas → warning (no error) y retorna None.
         """
+        token_path = None  # FIX-01: inicializar antes de cualquier bloque condicional
         try:
             from googleapiclient.discovery import build
             from google.oauth2.credentials import Credentials
@@ -407,19 +407,32 @@ class OLYMPUS(BaseAgent):
 
         tags = ctx.seo_tags[:15] if ctx.seo_tags else []
 
+        # FIX-06: Publicación programada a las 15:00 UTC aprox. (ahora + 5h)
+        # YouTube requiere privacyStatus="private" cuando se usa publishAt
+        if privacy == "public":
+            publish_at = datetime.utcnow() + timedelta(hours=5)
+            publish_at_str = publish_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            status_block = {
+                "privacyStatus": "private",
+                "publishAt": publish_at_str,
+                "selfDeclaredMadeForKids": False,
+            }
+        else:
+            status_block = {
+                "privacyStatus": privacy,
+                "selfDeclaredMadeForKids": False,
+            }
+
         return {
             "snippet": {
                 "title": ctx.seo_title[:100],
                 "description": description[:5000],
                 "tags": tags,
-                "categoryId": YOUTUBE_CATEGORY_ENTERTAINMENT,
+                "categoryId": YOUTUBE_CATEGORY_SCIENCE_TECH,
                 "defaultLanguage": "es",
                 "defaultAudioLanguage": "es",
             },
-            "status": {
-                "privacyStatus": privacy,
-                "selfDeclaredMadeForKids": False,
-            },
+            "status": status_block,
         }
 
     # ── subida con retry exponencial ─────────────────────────────────────────
@@ -549,50 +562,6 @@ class OLYMPUS(BaseAgent):
                 f"[yellow]OLYMPUS[/] no se pudo persistir en memoria_videos: {exc}"
             )
 
-    # ── end screens automáticos ───────────────────────────────────────────────
-    def _add_end_screens(self, service, video_id: str, duration_seconds: float) -> None:
-        """
-        Añade end screens en los últimos 20s del vídeo.
-        Si falla (p.ej. vídeo <25s o permisos insuficientes): warning, nunca excepción fatal.
-        """
-        if duration_seconds < 25:
-            self.logger.warning(
-                f"[yellow]OLYMPUS[/] vídeo muy corto ({duration_seconds:.0f}s) para end screens"
-            )
-            return
-
-        try:
-            start_ms = int((duration_seconds - 20) * 1000)
-            end_ms   = int(duration_seconds * 1000)
-
-            body = {
-                "kind": "youtube#videoEndscreen",
-                "items": [
-                    {
-                        "type": "SUBSCRIBE",
-                        "left": 4.0,
-                        "top": 72.0,
-                        "width": 30.0,
-                        "startOffsetMs": start_ms,
-                        "endOffsetMs": end_ms,
-                    },
-                    {
-                        "type": "RECENT_UPLOAD",
-                        "left": 66.0,
-                        "top": 12.0,
-                        "width": 30.0,
-                        "startOffsetMs": start_ms + 2000,
-                        "endOffsetMs": end_ms,
-                    },
-                ],
-            }
-            service.videoEndscreens().insert(
-                videoId=video_id, body=body
-            ).execute()
-            self.logger.info("[green]OLYMPUS[/] end screens añadidos correctamente")
-        except Exception as exc:
-            self.logger.warning(f"[yellow]OLYMPUS[/] end screens fallaron (no crítico): {exc}")
-
     # ── afiliados en descripción ──────────────────────────────────────────────
     def _enrich_description_with_affiliates(self, description: str, script: str) -> str:
         """
@@ -623,17 +592,53 @@ class OLYMPUS(BaseAgent):
         )
         return description + affiliate_section
 
-    # ── notificación a MERCURY ────────────────────────────────────────────────
-    def _notify_telegram(self, ctx: Context) -> None:
+    # ── captions SRT ─────────────────────────────────────────────────────────
+    def _upload_captions(self, service, video_id: str, ctx: Context) -> None:
+        """FIX YT-04: Sube el archivo SRT de subtítulos si existe en ctx.srt_path."""
+        srt_path = getattr(ctx, "srt_path", "") or ""
+        if not srt_path or not Path(srt_path).exists():
+            return
         try:
-            from agents.herald.mercury import MERCURY
-            mercury = MERCURY(self.config, self.db)
-            ctx.telegram_message = (
-                f"Publicado en YouTube\n"
-                f"📺 {ctx.seo_title}\n"
-                f"🔗 {ctx.youtube_url}\n"
-                f"📊 SEO: {getattr(ctx, 'seo_score', 'N/A')}/100"
-            )
-            mercury.run(ctx)
+            from googleapiclient.http import MediaFileUpload
+            media = MediaFileUpload(srt_path, mimetype="text/plain")
+            service.captions().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "videoId": video_id,
+                        "language": "es",
+                        "name": "Español",
+                        "isDraft": False,
+                    }
+                },
+                media_body=media,
+            ).execute()
+            self.logger.info("[green]OLYMPUS[/] captions SRT subidos")
         except Exception as exc:
-            self.logger.error(f"[red]OLYMPUS[/] error notificando Telegram: {exc}")
+            self.logger.warning(f"[yellow]OLYMPUS[/] captions upload falló (no crítico): {exc}")
+
+    # ── comentario fijado ─────────────────────────────────────────────────────
+    def _pin_first_comment(self, service, video_id: str, ctx: Context) -> None:
+        """FIX YT-08: Publica y fija un comentario de debate en el vídeo."""
+        try:
+            comment_text = (
+                "📌 Debate del día: ¿Alcista o bajista esta semana?\n"
+                "¡Responde abajo! 👇\n\n"
+                "📱 Alertas en tiempo real → t.me/CryptoVerdad"
+            )
+            service.commentThreads().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "videoId": video_id,
+                        "topLevelComment": {
+                            "snippet": {
+                                "textOriginal": comment_text,
+                            }
+                        },
+                    }
+                },
+            ).execute()
+            self.logger.info("[green]OLYMPUS[/] comentario fijado publicado")
+        except Exception as exc:
+            self.logger.warning(f"[yellow]OLYMPUS[/] comentario fijado falló (no crítico): {exc}")

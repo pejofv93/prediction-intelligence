@@ -19,7 +19,7 @@ llm:
   fallback_model: llama3.2
 
 video:
-  youtube_resolution: [1280, 720]
+  youtube_resolution: [1920, 1080]
   shorts_resolution: [1080, 1920]
   fps: 30
 
@@ -28,7 +28,7 @@ seo:
   min_description_words: 300
   max_title_chars: 60
   tags_min: 5
-  tags_max: 7
+  tags_max: 25
 
 legal_trigger_words:
   - comprar

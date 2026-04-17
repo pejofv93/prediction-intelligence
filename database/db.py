@@ -37,7 +37,7 @@ class DBManager:
 
     # ── Inicialización del schema ─────────────────────────────────────────────
     def execute_schema(self) -> None:
-        """Crea las tablas si no existen."""
+        """Crea las tablas si no existen y aplica migraciones incrementales."""
         try:
             schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
             self._conn.executescript(schema_sql)
@@ -46,6 +46,22 @@ class DBManager:
         except Exception as exc:
             logger.error(f"Error ejecutando schema: {exc}")
             raise
+
+        # Añadir columnas nuevas a videos si no existen (migraciones incrementales).
+        # ALTER TABLE ADD COLUMN lanza error si la columna ya existe — usar try/except.
+        _video_migrations = [
+            "ALTER TABLE videos ADD COLUMN avg_view_percentage REAL",
+            "ALTER TABLE videos ADD COLUMN avg_duration_seconds REAL",
+            "ALTER TABLE videos ADD COLUMN watch_time_minutes REAL",
+            "ALTER TABLE videos ADD COLUMN impressions INTEGER DEFAULT 0",
+            "ALTER TABLE videos ADD COLUMN ctr REAL DEFAULT 0",
+        ]
+        for migration_sql in _video_migrations:
+            try:
+                self._conn.execute(migration_sql)
+                self._conn.commit()
+            except Exception:
+                pass  # columna ya existe — ignorar
 
     # ── Pipelines ─────────────────────────────────────────────────────────────
     def save_pipeline(self, ctx) -> None:

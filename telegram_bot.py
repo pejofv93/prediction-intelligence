@@ -42,6 +42,9 @@ class TelegramBot:
     Corre en un hilo daemon independiente del panel web y KAIROS.
     """
 
+    _last_forced: dict = {}  # user_id → datetime
+    _FORCE_COOLDOWN_MINUTES = 30
+
     def __init__(
         self,
         config: dict,
@@ -134,6 +137,19 @@ class TelegramBot:
             await update.message.reply_text("⛔ No autorizado.")
             return
 
+        # Rate limit: 30 min entre /forzar del mismo usuario
+        user_id = str(update.effective_user.id)
+        last = TelegramBot._last_forced.get(user_id)
+        if last:
+            elapsed = (datetime.now() - last).total_seconds() / 60
+            if elapsed < self._FORCE_COOLDOWN_MINUTES:
+                remaining = int(self._FORCE_COOLDOWN_MINUTES - elapsed)
+                await update.message.reply_text(
+                    f"⏳ Cooldown activo. Próximo /forzar disponible en {remaining} min."
+                )
+                return
+        TelegramBot._last_forced[user_id] = datetime.now()
+
         topic = " ".join(ctx.args).strip() if ctx.args else "análisis crypto diario"
 
         if _pipeline_lock.locked():
@@ -176,6 +192,19 @@ class TelegramBot:
         if not self._is_admin(update):
             await update.message.reply_text("⛔ No autorizado.")
             return
+
+        # Rate limit: 30 min entre /urgente del mismo usuario
+        user_id = str(update.effective_user.id)
+        last = TelegramBot._last_forced.get(user_id)
+        if last:
+            elapsed = (datetime.now() - last).total_seconds() / 60
+            if elapsed < self._FORCE_COOLDOWN_MINUTES:
+                remaining = int(self._FORCE_COOLDOWN_MINUTES - elapsed)
+                await update.message.reply_text(
+                    f"⏳ Cooldown activo. Próximo /urgente disponible en {remaining} min."
+                )
+                return
+        TelegramBot._last_forced[user_id] = datetime.now()
 
         topic = " ".join(ctx.args).strip() if ctx.args else ""
         if not topic:

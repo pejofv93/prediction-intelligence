@@ -106,6 +106,7 @@ class HERMES(BaseAgent):
         keyword: str,
     ) -> int:
         """Calcula score SEO de 0 a 100."""
+        import re as _re
         score = 0
 
         # Titulo: keyword en primeras 3 palabras (+20)
@@ -126,17 +127,21 @@ class HERMES(BaseAgent):
         if len(description.split()) >= 300:
             score += 15
 
-        # Tags: entre 5 y 7 (+15)
-        if 5 <= len(tags) <= 7:
+        # Tags: entre 8 y 25 (+15)
+        if 8 <= len(tags) <= 25:
             score += 15
 
         # Primer tag = titulo exacto (+10)
         if tags and tags[0].strip().lower() == title.strip().lower():
             score += 10
 
-        # Legibilidad del guion: longitud razonable (+15)
+        # Descripcion: contiene timestamps formato 0:00 o 00:00 (+10)
+        if _re.search(r'\b\d{1,2}:\d{2}\b', description):
+            score += 10
+
+        # Legibilidad del guion: longitud razonable (+5)
         if script and len(script.split()) >= 300:
-            score += 15
+            score += 5
 
         return min(score, 100)
 
@@ -153,22 +158,73 @@ class HERMES(BaseAgent):
         raise ValueError(f"No se encontro JSON valido en la respuesta LLM: {raw[:200]}")
 
     def _ensure_tag_limit(self, tags: list, title: str) -> list:
-        """Garantiza 5-7 tags con el titulo como primer elemento."""
+        """Garantiza 8-25 tags con el titulo como primer elemento."""
         # Asegurar titulo como primer tag
         clean_tags = [t for t in tags if t.strip().lower() != title.strip().lower()]
         result = [title] + clean_tags
 
-        # Recortar a 7 maximos
-        result = result[:7]
+        # Recortar a 25 maximos
+        result = result[:25]
 
-        # Padding si hay menos de 5
-        fallback = ["Bitcoin", "Crypto", "CryptoVerdad", "BTC", "Criptomonedas"]
-        while len(result) < 5:
+        # Padding si hay menos de 8
+        fallback = [
+            "Bitcoin", "Crypto", "CryptoVerdad", "BTC", "Criptomonedas",
+            "Ethereum", "ETH", "análisis crypto", "precio bitcoin",
+            "bitcoin hoy", "ethereum hoy", "criptomonedas España",
+            "bitcoin análisis", "crypto España", "inversión crypto",
+        ]
+        while len(result) < 8:
             candidate = fallback.pop(0) if fallback else f"crypto{len(result)}"
             if candidate not in result:
                 result.append(candidate)
 
         return result
+
+    def _generate_timestamps(self, script: str, wpm: int) -> str:
+        """Genera timestamps a partir de las secciones del guion."""
+        section_markers = [
+            ("[PRECIO]", "Precio actual del mercado"),
+            ("[ANALISIS]", "Análisis técnico"),
+            ("[SENTIMIENTO]", "Sentimiento del mercado"),
+            ("[ADOPCION]", "Factores fundamentales y adopción"),
+            ("[DOMINANCIA]", "Dominancia y altcoins"),
+            ("[PREDICCION]", "Escenarios y predicción"),
+        ]
+
+        lines = script.split("\n")
+        section_times = []
+        words_so_far = 0
+
+        for marker, label in section_markers:
+            for i, line in enumerate(lines):
+                if marker in line:
+                    total_seconds = int((words_so_far / wpm) * 60)
+                    minutes = total_seconds // 60
+                    seconds = total_seconds % 60
+                    section_times.append(f"{minutes}:{seconds:02d} {label}")
+                    # Count words from start to this point
+                    words_so_far = len(" ".join(lines[:i]).split())
+                    break
+
+        if not section_times:
+            # Distribucion uniforme en 6 partes si no hay marcadores de seccion
+            total_words = len(script.split())
+            generic_sections = [
+                "Introducción y precio actual",
+                "Contexto histórico",
+                "Análisis técnico",
+                "Sentimiento del mercado",
+                "Factores fundamentales",
+                "Escenarios y predicción",
+            ]
+            for idx, label in enumerate(generic_sections):
+                words_at = int((idx / len(generic_sections)) * total_words)
+                total_seconds = int((words_at / wpm) * 60)
+                minutes = total_seconds // 60
+                seconds = total_seconds % 60
+                section_times.append(f"{minutes}:{seconds:02d} {label}")
+
+        return "📌 CAPÍTULOS:\n" + "\n".join(section_times)
 
     # ── run() ─────────────────────────────────────────────────────────────────
 
@@ -254,6 +310,14 @@ class HERMES(BaseAgent):
             self.logger.info(
                 f"SEO generado — titulo: '{title}' | score: {score}/100 | tags: {len(tags)}"
             )
+
+            # Garantizar timestamps en descripcion
+            import re as _re
+            if not _re.search(r'\b\d{1,2}:\d{2}\b', ctx.seo_description):
+                wpm = 145  # velocidad media del narrador
+                timestamps = self._generate_timestamps(ctx.script or "", wpm)
+                ctx.seo_description = timestamps + "\n\n" + ctx.seo_description
+                self.logger.info("HERMES: timestamps generados automaticamente e inyectados en descripcion")
 
         except Exception as e:
             self.logger.error(f"Error en HERMES: {e}")

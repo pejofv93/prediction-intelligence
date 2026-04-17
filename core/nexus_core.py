@@ -42,6 +42,12 @@ class NexusCore:
         self.db = db
         self.logger = get_logger("NEXUS_CORE")
         self._urgency_detector = UrgencyDetector()
+        self._oracle = None
+        self._forge = None
+        self._herald = None
+        self._mind = None
+        self._sentinel = None
+        self._load_agents()  # ARCH-02: cargar agentes en __init__, no en cada run_pipeline
 
     # ── Lazy imports para evitar ciclos ──────────────────────────────────────
     def _load_agents(self):
@@ -98,16 +104,17 @@ class NexusCore:
         ctx.pipeline_start = datetime.now()
 
         self._print_banner(topic, mode)
-        self._load_agents()
+
+        # BUG-02: guardar pipeline en DB al inicio para tener registro desde el primer momento
+        try:
+            self.db.save_pipeline(ctx)
+        except Exception:
+            pass
 
         try:
             self.db.update_pipeline_status(ctx.pipeline_id, "running")
         except Exception:
             pass  # DB opcional en modo test
-
-        # ── Crisis mode: desviar a pipeline ultra-rapido antes del flujo normal ──
-        if ctx.is_urgent and getattr(ctx, 'event_type', '') == 'CRISIS':
-            return self._run_crisis_pipeline(ctx)
 
         steps = [
             ("ORACULO",   self._run_oracle,    "Analizando mercado y noticias..."),
@@ -136,6 +143,11 @@ class NexusCore:
                     progress.update(task, completed=True, total=1)
                     console.print(f"  [red]✗[/] {step_name} falló: {exc}")
                     logger.exception(f"Error en {step_name}")
+
+                # FIX-03: verificar crisis DESPUÉS de ORACULO (UrgencyDetector lo activa allí)
+                if step_name == "ORACULO" and getattr(ctx, 'crisis_mode', False):
+                    console.print("[bold red]CRISIS detectada tras ORACULO — desviando a pipeline de crisis[/]")
+                    return self._run_crisis_pipeline(ctx)
 
                 if ctx.has_errors() and step_name in ("FORGE",):
                     console.print("[red bold]Pipeline detenido por errores críticos.[/]")
@@ -235,8 +247,6 @@ class NexusCore:
                 title="NEXUS URGENT",
             )
         )
-
-        self._load_agents()
 
         urgent_steps = [
             ("ORACULO", self._run_oracle,        "Análisis rápido de mercado..."),

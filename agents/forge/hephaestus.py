@@ -594,7 +594,7 @@ class HEPHAESTUS:
             output_path,
             fps=fps,
             codec="libx264",
-            bitrate="4000k",
+            bitrate="8000k",
             audio_codec=audio_codec if audio else None,
             audio_bitrate="192k" if audio else None,
             audio=audio,

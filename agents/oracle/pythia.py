@@ -38,6 +38,18 @@ RSS_SOURCES = [
     ("CoinDeskAlt",     "https://www.coindesk.com/arc/outboundfeeds/rss/"),
     ("GoogleNews-BTC",  "https://news.google.com/rss/search?q=bitcoin+crypto&hl=es&gl=ES&ceid=ES:es"),
     ("GoogleNews-ETH",  "https://news.google.com/rss/search?q=ethereum+defi&hl=es&gl=ES&ceid=ES:es"),
+    # Nitter RSS — tweets de influencers clave crypto
+    # Nitter es un frontend open-source de Twitter que expone RSS sin autenticación
+    ("Nitter-Saylor",   "https://nitter.net/saylor/rss"),
+    ("Nitter-CZ",       "https://nitter.net/cz_binance/rss"),
+    ("Nitter-PlanB",    "https://nitter.net/100trillionusd/rss"),
+    ("Nitter-Pomp",     "https://nitter.net/APompliano/rss"),
+]
+
+# Palabras clave crypto mínimas para filtrar tweets de fuentes Nitter
+# (evita que tweets sobre política o deportes entren en el contexto del pipeline)
+_NITTER_CRYPTO_KEYWORDS = [
+    "bitcoin", "btc", "crypto", "ethereum", "eth", "market", "price", "análisis", "$",
 ]
 
 URGENCY_KEYWORDS = {
@@ -360,6 +372,17 @@ class PYTHIA(BaseAgent):
             recent = [
                 i for i in all_items
                 if i["published"] >= cutoff
+            ]
+
+            # Filtro Nitter: solo aceptar tweets que contengan al menos una
+            # palabra clave crypto (evita política, deportes, etc.)
+            def _is_nitter_relevant(item: dict) -> bool:
+                title = (item.get("title") or "").lower()
+                return any(kw in title for kw in _NITTER_CRYPTO_KEYWORDS)
+
+            recent = [
+                i for i in recent
+                if not i.get("source", "").startswith("Nitter") or _is_nitter_relevant(i)
             ]
             self.logger.info(
                 f"Noticias últimas 24h: {len(recent)} / total {len(all_items)}"

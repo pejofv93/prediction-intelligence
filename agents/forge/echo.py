@@ -29,7 +29,7 @@ console = Console()
 OUTPUT_AUDIO_DIR = Path(__file__).resolve().parents[2] / "output" / "audio"
 
 # Velocidad de lectura estimada en palabras por minuto
-WORDS_PER_MINUTE = 150
+WORDS_PER_MINUTE = 210  # Coqui a speed=1.45 produce ~210 WPM reales
 
 
 def _pct_decimal_to_words(m: re.Match) -> str:
@@ -130,7 +130,7 @@ def preprocess_script(text: str) -> str:
     10. Sustituye símbolos (@, *, .com, #, &, %, BTC, ETH, SOL).
     11. Elimina "dólares dólares" duplicados.
     12. Normaliza espacios y saltos de línea.
-    13. Limita oraciones a máximo 12 palabras.
+    13. Limita oraciones a máximo 12 palabras (max_words=12).
     """
 
     # ── 0. Aplicar pronunciacion espanola (anglicismos y acronimos) ──────────
@@ -319,8 +319,8 @@ def preprocess_script(text: str) -> str:
 
     text = text.strip()
 
-    # ── 13. Limitar oraciones a máximo 15 palabras ────────────────────────────
-    text = _limit_sentences(text, max_words=15)
+    # ── 13. Limitar oraciones a máximo 12 palabras ────────────────────────────
+    text = _limit_sentences(text, max_words=12)
 
     return text
 
@@ -601,7 +601,7 @@ class ECHO(BaseAgent):
                     "-af", (
                         "silenceremove="
                         "start_periods=1:start_duration=0.05:start_threshold=-40dB:"
-                        "stop_periods=-1:stop_duration=0.05:stop_threshold=-40dB"
+                        "stop_periods=1:stop_duration=0.05:stop_threshold=-40dB"
                     ),
                     clean_wav,
                 ],

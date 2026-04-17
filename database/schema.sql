@@ -90,3 +90,53 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 
 CREATE INDEX IF NOT EXISTS idx_llm_usage_provider_day
     ON llm_usage (provider, day);
+
+-- Tabla de precios históricos para calcular cambio 24h (ARGOS)
+CREATE TABLE IF NOT EXISTS oracle_prices (
+    id          INTEGER   PRIMARY KEY AUTOINCREMENT,
+    coin        TEXT      NOT NULL,
+    price       REAL      NOT NULL,
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_oracle_prices_coin_time
+    ON oracle_prices (coin, recorded_at);
+
+-- Noticias procesadas por PYTHIA
+CREATE TABLE IF NOT EXISTS oracle_news (
+    id          INTEGER   PRIMARY KEY AUTOINCREMENT,
+    title       TEXT      NOT NULL,
+    url         TEXT      UNIQUE,
+    source      TEXT,
+    published   TIMESTAMP,
+    score       REAL      DEFAULT 0,
+    topic       TEXT,
+    pipeline_id TEXT,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Cola A/B thumbnail swap (ALETHEIA + KAIROS)
+CREATE TABLE IF NOT EXISTS ab_swap_queue (
+    id               INTEGER   PRIMARY KEY AUTOINCREMENT,
+    pipeline_id      TEXT      NOT NULL,
+    youtube_video_id TEXT      NOT NULL,
+    check_at         TIMESTAMP NOT NULL,
+    status           TEXT      DEFAULT 'pending',
+    winner           TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla de migraciones de schema (para columnas añadidas incrementalmente)
+CREATE TABLE IF NOT EXISTS _schema_migrations (
+    id      INTEGER   PRIMARY KEY AUTOINCREMENT,
+    name    TEXT      UNIQUE,
+    applied TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- NOTA: Las siguientes columnas se añaden via db.py execute_schema()
+-- si aún no existen (compatibilidad con DBs antiguas):
+--   videos.avg_view_percentage REAL
+--   videos.avg_duration_seconds REAL
+--   videos.watch_time_minutes REAL
+--   videos.impressions INTEGER DEFAULT 0
+--   videos.ctr REAL DEFAULT 0
