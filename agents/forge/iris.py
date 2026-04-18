@@ -358,13 +358,21 @@ class IRIS(BaseAgent):
     # ── Fondo con degradado ───────────────────────────────────────────────────
 
     @staticmethod
-    def _draw_gradient_bg(draw, w: int, h: int):
-        """Gradiente diagonal #0A0A0A -> #1A1A2E."""
+    def _draw_gradient_bg(draw, w: int, h: int, accent: tuple = None):
+        """
+        Gradiente vertical adaptado al sentimiento del mercado.
+        Bajista → rojo oscuro a negro. Alcista → naranja oscuro a negro. Neutro → azul oscuro.
+        """
+        if accent is None:
+            accent = COLOR_ACCENT  # naranja por defecto
+        r0, g0, b0 = accent
         for y in range(h):
-            r = int(10 + (26 - 10) * y / h)
-            g = int(10 + (26 - 10) * y / h)
-            b = int(10 + (46 - 10) * y / h)
-            draw.line([(0, y), (w, y)], fill=(r, g, b))
+            t = y / h  # 0 arriba, 1 abajo
+            # Degradar hacia negro conforme bajamos
+            r = int(r0 * (1 - t) * 0.30)
+            g = int(g0 * (1 - t) * 0.15)
+            b = int(b0 * (1 - t) * 0.10 + 10)
+            draw.line([(0, y), (w, y)], fill=(max(5, r), max(5, g), max(5, b)))
 
     # ── Logo CryptoVerdad ─────────────────────────────────────────────────────
 
@@ -408,117 +416,330 @@ class IRIS(BaseAgent):
             anchor="mm",
         )
 
-    # ── Version A ─────────────────────────────────────────────────────────────
+    # ── Helpers de diseño profesional ────────────────────────────────────────
+
+    @staticmethod
+    def _draw_centered_text(draw, text: str, y: int, font, color, shadow_color=None,
+                             shadow_offset: int = 3):
+        """Dibuja texto centrado horizontalmente con sombra opcional."""
+        try:
+            lw = font.getlength(text) if hasattr(font, "getlength") else len(text) * (font.size if hasattr(font, 'size') else 40)
+        except Exception:
+            lw = len(text) * 40
+        x = max(0, (THUMB_W - int(lw)) // 2)
+        if shadow_color:
+            draw.text((x + shadow_offset, y + shadow_offset), text, fill=shadow_color, font=font)
+        draw.text((x, y), text, fill=color, font=font)
+
+    def _draw_stat_panel(self, draw, ctx: Context, x: int, y: int, w: int, h: int,
+                          accent_rgb: tuple, change_24h: float) -> None:
+        """
+        Dibuja el panel izquierdo de la versión A: flecha + % + precio + marca.
+        Es el elemento dominante del thumbnail — jerarquía visual clara.
+        """
+        # Fondo del panel levemente diferenciado
+        draw.rectangle([(x, y), (x + w, y + h)], fill=(0, 0, 0))
+
+        cx = x + w // 2
+        panel_top = y + 30
+
+        # ── Flecha direccional (el elemento más grande) ───────────────────
+        arrow = "▼" if change_24h < 0 else "▲"
+        arrow_color = COLOR_RED if change_24h < 0 else COLOR_GREEN
+        font_arrow = _load_font(_FONTS_IMPACT, 130) or _load_font(_FONTS_BOLD, 110)
+        if font_arrow:
+            try:
+                aw = font_arrow.getlength(arrow) if hasattr(font_arrow, "getlength") else 110
+            except Exception:
+                aw = 110
+            draw.text((cx - aw // 2 + 3, panel_top + 3), arrow, fill=(0, 0, 0), font=font_arrow)
+            draw.text((cx - aw // 2, panel_top), arrow, fill=arrow_color, font=font_arrow)
+
+        # ── Porcentaje de cambio ──────────────────────────────────────────
+        pct_str = f"{change_24h:+.1f}%" if change_24h != 0 else "AHORA"
+        font_pct = _load_font(_FONTS_IMPACT, 90) or _load_font(_FONTS_BOLD, 75)
+        if font_pct:
+            try:
+                pw = font_pct.getlength(pct_str) if hasattr(font_pct, "getlength") else len(pct_str) * 45
+            except Exception:
+                pw = len(pct_str) * 45
+            px = cx - int(pw) // 2
+            py = panel_top + 145
+            draw.text((px + 3, py + 3), pct_str, fill=(0, 0, 0), font=font_pct)
+            draw.text((px, py), pct_str, fill=arrow_color, font=font_pct)
+
+        # ── Precio BTC ────────────────────────────────────────────────────
+        btc = (ctx.prices or {}).get("BTC", {})
+        if isinstance(btc, dict) and btc.get("price"):
+            price_str = f"${btc['price']:,.0f}"
+            font_price = _load_font(_FONTS_BOLD, 46) or _load_font(_FONTS_REGULAR, 40)
+            if font_price:
+                try:
+                    prw = font_price.getlength(price_str) if hasattr(font_price, "getlength") else len(price_str) * 22
+                except Exception:
+                    prw = len(price_str) * 22
+                prx = cx - int(prw) // 2
+                pry = panel_top + 255
+                draw.text((prx + 2, pry + 2), price_str, fill=(0, 0, 0), font=font_price)
+                draw.text((prx, pry), price_str, fill=accent_rgb, font=font_price)
+
+        # ── Separador horizontal ──────────────────────────────────────────
+        sep_y = panel_top + 315
+        draw.rectangle([(x + 20, sep_y), (x + w - 20, sep_y + 3)], fill=accent_rgb)
+
+        # ── Branding: CryptoVerdad ────────────────────────────────────────
+        font_brand = _load_font(_FONTS_BOLD, 28)
+        if font_brand:
+            brand_y = sep_y + 15
+            try:
+                brw = font_brand.getlength("CryptoVerdad") if hasattr(font_brand, "getlength") else 220
+            except Exception:
+                brw = 220
+            draw.text((cx - int(brw) // 2 + 2, brand_y + 2), "CryptoVerdad",
+                      fill=(0, 0, 0), font=font_brand)
+            draw.text((cx - int(brw) // 2, brand_y), "CryptoVerdad",
+                      fill=accent_rgb, font=font_brand)
+
+    def _draw_fear_greed_badge(self, draw, fear_greed: int, x: int, y: int) -> None:
+        """Mini badge circular con el valor de Fear & Greed."""
+        # Color según zona
+        if fear_greed <= 25:
+            fg_color = COLOR_RED
+        elif fear_greed <= 45:
+            fg_color = (255, 140, 0)   # naranja oscuro
+        elif fear_greed <= 55:
+            fg_color = COLOR_GRAY
+        elif fear_greed <= 75:
+            fg_color = (100, 200, 100)  # verde claro
+        else:
+            fg_color = COLOR_GREEN
+
+        # Fondo del badge
+        r = 38
+        draw.ellipse([(x - r, y - r), (x + r, y + r)], fill=(20, 20, 20))
+        draw.ellipse([(x - r, y - r), (x + r, y + r)], outline=fg_color, width=3)
+
+        # Número
+        font_fg = _load_font(_FONTS_BOLD, 26)
+        if font_fg:
+            s = str(fear_greed)
+            try:
+                sw = font_fg.getlength(s) if hasattr(font_fg, "getlength") else len(s) * 14
+            except Exception:
+                sw = len(s) * 14
+            draw.text((x - int(sw) // 2, y - 18), s, fill=fg_color, font=font_fg)
+
+        # Label "F&G"
+        font_lbl = _load_font(_FONTS_REGULAR, 16)
+        if font_lbl:
+            draw.text((x - 14, y + 10), "F&G", fill=COLOR_GRAY, font=font_lbl)
+
+    # ── Version A — Layout dividido: STAT + CHART ─────────────────────────────
 
     def _generate_version_a(self, ctx: Context) -> "Image":
         """
-        Version A — Frame del vídeo + overlay oscuro + texto ABAJO IZQUIERDA.
-        Logo CryptoVerdad arriba izquierda. Precio BTC naranja arriba derecha.
-        SIN avatar cartoon.
-        Variante de color según sentimiento (rojo si bajista fuerte).
+        Version A — Layout dividido 50/50.
+        Lado izquierdo: panel negro con flecha + % + precio (jerarquía visual clara).
+        Lado derecho: gráfico BTC o fondo degradado con Fear & Greed badge.
+
+        Principio: el primer golpe de vista del espectador debe ser el %.
+        El segundo, el precio. El tercero, el gráfico.
         """
         from PIL import Image, ImageDraw
 
-        # Detectar sentimiento antes de dibujar
         change_24h, fear_greed, accent_rgb, show_alert = self._detect_sentiment(ctx)
 
-        # Base: frame del vídeo o fondo degradado como fallback
-        img = self._extract_video_frame(ctx, second=5.0)
-        if img is None:
-            img = Image.new("RGB", (THUMB_W, THUMB_H), COLOR_BG)
-            draw = ImageDraw.Draw(img)
-            self._draw_gradient_bg(draw, THUMB_W, THUMB_H)
+        # ── Base: fondo degradado adaptado al sentimiento ─────────────────
+        img = Image.new("RGB", (THUMB_W, THUMB_H), (5, 5, 5))
+        draw = ImageDraw.Draw(img)
+        self._draw_gradient_bg(draw, THUMB_W, THUMB_H, accent=accent_rgb)
 
-        # Overlay oscuro semitransparente
-        img = self._apply_dark_overlay(img, alpha=150)
+        # ── Panel izquierdo (50%): stat dominante ─────────────────────────
+        panel_w = THUMB_W // 2
+        # Fondo negro semisólido para contraste máximo
+        panel_bg = Image.new("RGB", (panel_w, THUMB_H), (4, 4, 4))
+        img.paste(panel_bg, (0, 0))
         draw = ImageDraw.Draw(img)
 
-        # Banda de alerta (mercado bajista extremo o miedo extremo)
-        if show_alert:
-            self._draw_alert_band(draw, THUMB_W)
+        # Borde vertical derecho del panel (accent color)
+        draw.rectangle([(panel_w - 4, 0), (panel_w, THUMB_H)], fill=accent_rgb)
 
-        # Logo CryptoVerdad arriba izquierda
-        self._draw_logo_topleft(draw)
+        # Dibujar stat (flecha + % + precio + marca)
+        self._draw_stat_panel(draw, ctx, x=0, y=0, w=panel_w, h=THUMB_H,
+                               accent_rgb=accent_rgb, change_24h=change_24h)
 
-        # Precio BTC arriba derecha
-        self._draw_btc_price(draw, ctx, x=THUMB_W - 420, y=18)
+        # ── Panel derecho (50%): gráfico o degradado ──────────────────────
+        chart_placed = False
+        chart_path = getattr(ctx, 'chart_path', None)
+        pipeline_id = getattr(ctx, 'pipeline_id', '')
+        if chart_path and pipeline_id and Path(chart_path).exists():
+            try:
+                chart_img = Image.open(chart_path).convert("RGB")
+                chart_img = chart_img.resize((panel_w, THUMB_H), Image.LANCZOS)
+                # Overlay oscuro sobre el gráfico para que el texto sea legible
+                overlay = Image.new("RGB", (panel_w, THUMB_H), (0, 0, 0))
+                mask = Image.new("L", (panel_w, THUMB_H), 70)
+                chart_img.paste(overlay, mask=mask)
+                img.paste(chart_img, (panel_w, 0))
+                chart_placed = True
+            except Exception as e:
+                self.logger.debug(f"Chart panel derecho falló: {e}")
 
-        # Título en blanco bold grande — ABAJO IZQUIERDA
+        if not chart_placed:
+            # Fondo degradado más oscuro en el panel derecho
+            draw.rectangle([(panel_w, 0), (THUMB_W, THUMB_H)], fill=(8, 8, 10))
+
+        draw = ImageDraw.Draw(img)
+
+        # ── Fear & Greed badge (esquina superior derecha) ─────────────────
+        if fear_greed and fear_greed != 50:
+            try:
+                self._draw_fear_greed_badge(draw, fear_greed,
+                                            x=THUMB_W - 55, y=55)
+            except Exception:
+                pass
+
+        # ── Título del vídeo (panel derecho, parte inferior) ─────────────
         title = (getattr(ctx, 'seo_title', None)
-                 or getattr(ctx, 'topic', None)
-                 or 'Bitcoin')
-        title_text = _fit_text(title.upper(), max_chars_per_line=18)
-
+                 or getattr(ctx, 'topic', None) or 'Bitcoin Análisis')
+        title_text = _fit_text(title.upper(), max_chars_per_line=16)
         _draw_impact_text(
             draw, title_text,
-            x=40, y=THUMB_H - 240,
-            max_width=int(THUMB_W * 0.90),
+            x=panel_w + 20, y=THUMB_H - 200,
+            max_width=panel_w - 30,
             color_main=COLOR_WHITE,
-            shadow_color=accent_rgb,   # rojo o naranja según sentimiento
-            size_range=(72, 60, 50, 42, 34),
+            shadow_color=accent_rgb,
+            size_range=(52, 44, 36, 28),
         )
 
-        # Barra de acento en borde inferior (rojo o naranja)
-        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=accent_rgb)
+        # ── Banda de alerta roja arriba (solo si mercado extremo) ─────────
+        if show_alert:
+            draw.rectangle([(0, 0), (THUMB_W, 36)], fill=COLOR_RED)
+            font_alert = _load_font(_FONTS_BOLD, 20)
+            if font_alert:
+                draw.text((THUMB_W // 2, 18), "⚠ ALERTA DE MERCADO ⚠",
+                          fill=COLOR_WHITE, font=font_alert, anchor="mm")
+
+        # ── Barra inferior de marca (acento) ──────────────────────────────
+        draw.rectangle([(0, THUMB_H - 7), (THUMB_W, THUMB_H)], fill=accent_rgb)
 
         return img
 
-    # ── Version B ─────────────────────────────────────────────────────────────
+    # ── Version B — Pregunta dramática full-width ─────────────────────────────
 
     def _generate_version_b(self, ctx: Context) -> "Image":
         """
-        Version B — Frame del vídeo + overlay oscuro + texto CENTRADO.
-        Logo CryptoVerdad arriba izquierda. Precio BTC naranja arriba derecha.
-        SIN avatar cartoon.
-        Variante de color según sentimiento (rojo si bajista fuerte).
+        Version B — Pregunta dramática a pantalla completa.
+        Fondo: gráfico desvanecido o degradado de sentimiento.
+        Texto: pregunta en dos líneas, letra masiva, alta legibilidad.
+        Precio y marca en banda inferior.
+
+        Principio: el espectador lee la pregunta → quiere saber la respuesta → clica.
         """
         from PIL import Image, ImageDraw
 
-        # Detectar sentimiento antes de dibujar
         change_24h, fear_greed, accent_rgb, show_alert = self._detect_sentiment(ctx)
 
-        # Base: frame del vídeo o fondo degradado como fallback
-        img = self._extract_video_frame(ctx, second=5.0)
-        if img is None:
-            img = Image.new("RGB", (THUMB_W, THUMB_H), COLOR_BG)
-            draw = ImageDraw.Draw(img)
-            self._draw_gradient_bg(draw, THUMB_W, THUMB_H)
+        # ── Base: frame del vídeo muy oscurecido, o degradado ────────────
+        base_img = self._extract_video_frame(ctx, second=8.0)
+        if base_img:
+            img = self._apply_dark_overlay(base_img, alpha=190)
+        else:
+            img = Image.new("RGB", (THUMB_W, THUMB_H), (5, 5, 5))
+            draw_bg = ImageDraw.Draw(img)
+            self._draw_gradient_bg(draw_bg, THUMB_W, THUMB_H, accent=accent_rgb)
 
-        # Overlay más oscuro en el centro para que el texto destaque
-        img = self._apply_dark_overlay(img, alpha=165)
         draw = ImageDraw.Draw(img)
 
-        # Banda de alerta (mercado bajista extremo o miedo extremo)
-        if show_alert:
-            self._draw_alert_band(draw, THUMB_W)
+        # ── Vignette (oscurecer bordes) ───────────────────────────────────
+        for i in range(60):
+            alpha = int(i * 2.5)
+            draw.rectangle([(i, i), (THUMB_W - i, THUMB_H - i)],
+                           outline=(0, 0, 0), width=1)
 
-        # Logo CryptoVerdad arriba izquierda
-        self._draw_logo_topleft(draw)
+        # ── Línea de acento superior ──────────────────────────────────────
+        draw.rectangle([(0, 0), (THUMB_W, 6)], fill=accent_rgb)
 
-        # Precio BTC arriba derecha
-        self._draw_btc_price(draw, ctx, x=THUMB_W - 420, y=18)
-
-        # Pregunta centrada en grandes
+        # ── Pregunta: el elemento dominante ──────────────────────────────
         question = _generate_question(ctx)
-        lines = question.split("\n")
-        font_q = (_load_font(_FONTS_IMPACT, 110) or _load_font(_FONTS_BOLD, 90))
-        line_h = 120
-        total_h = len(lines) * line_h
-        start_y = (THUMB_H - total_h) // 2 - 20
+        q_lines = question.split("\n")
 
-        for i, line in enumerate(lines):
-            y = start_y + i * line_h
-            # Sombra con color de acento según sentimiento
+        # Elegir tamaño de fuente que quepa en el ancho disponible
+        font_q = None
+        for size in (130, 110, 90, 72):
+            candidate = _load_font(_FONTS_IMPACT, size) or _load_font(_FONTS_BOLD, size - 10)
+            if candidate is None:
+                continue
             try:
-                lw = font_q.getlength(line) if hasattr(font_q, "getlength") else len(line) * 55
+                max_w = max(
+                    candidate.getlength(l) if hasattr(candidate, "getlength")
+                    else len(l) * size // 2
+                    for l in q_lines
+                )
             except Exception:
-                lw = len(line) * 55
-            x = (THUMB_W - lw) // 2
-            draw.text((x + 3, y + 3), line, fill=accent_rgb, font=font_q)
-            draw.text((x, y), line, fill=COLOR_WHITE, font=font_q)
+                max_w = THUMB_W + 1
+            if max_w <= THUMB_W - 60:
+                font_q = candidate
+                break
+        if font_q is None:
+            font_q = _load_font(_FONTS_BOLD, 60)
 
-        # Barra de acento en borde inferior (rojo o naranja)
-        draw.rectangle([(0, THUMB_H - 8), (THUMB_W, THUMB_H)], fill=accent_rgb)
+        # Centrar verticalmente dejando espacio para la banda inferior
+        line_h = 130
+        total_h = len(q_lines) * line_h
+        start_y = max(60, (THUMB_H - 120 - total_h) // 2)
+
+        for i, line in enumerate(q_lines):
+            ly = start_y + i * line_h
+            # Sombra de color acento
+            try:
+                lw = font_q.getlength(line) if hasattr(font_q, "getlength") else len(line) * 60
+            except Exception:
+                lw = len(line) * 60
+            lx = max(30, (THUMB_W - int(lw)) // 2)
+            # Sombra gruesa para legibilidad sobre cualquier fondo
+            for dx, dy in [(-4, -4), (4, -4), (-4, 4), (4, 4), (0, 5), (5, 0)]:
+                draw.text((lx + dx, ly + dy), line, fill=(0, 0, 0), font=font_q)
+            # Texto principal blanco
+            draw.text((lx, ly), line, fill=COLOR_WHITE, font=font_q)
+            # Subrayado de la última línea con acento
+            if i == len(q_lines) - 1:
+                ul_y = ly + line_h - 20
+                draw.rectangle([(lx, ul_y), (lx + int(lw), ul_y + 5)], fill=accent_rgb)
+
+        # ── Banda inferior: precio + CryptoVerdad ────────────────────────
+        band_y = THUMB_H - 80
+        draw.rectangle([(0, band_y), (THUMB_W, THUMB_H)], fill=(10, 10, 10))
+
+        # Precio BTC izquierda
+        btc = (ctx.prices or {}).get("BTC", {})
+        if isinstance(btc, dict) and btc.get("price"):
+            price_str = f"BTC ${btc['price']:,.0f}  ({change_24h:+.1f}%)"
+            font_price = _load_font(_FONTS_BOLD, 34)
+            if font_price:
+                price_color = COLOR_GREEN if change_24h >= 0 else COLOR_RED
+                draw.text((24, band_y + 12), price_str, fill=price_color, font=font_price)
+
+        # CryptoVerdad derecha
+        font_brand = _load_font(_FONTS_BOLD, 32)
+        if font_brand:
+            try:
+                brw = font_brand.getlength("CryptoVerdad") if hasattr(font_brand, "getlength") else 230
+            except Exception:
+                brw = 230
+            draw.text((THUMB_W - int(brw) - 24, band_y + 14),
+                      "CryptoVerdad", fill=accent_rgb, font=font_brand)
+
+        # Línea separadora de la banda
+        draw.rectangle([(0, band_y), (THUMB_W, band_y + 4)], fill=accent_rgb)
+
+        # ── Banda de alerta (si mercado extremo) ──────────────────────────
+        if show_alert:
+            draw.rectangle([(0, 6), (THUMB_W, 44)], fill=COLOR_RED)
+            font_alert = _load_font(_FONTS_BOLD, 20)
+            if font_alert:
+                draw.text((THUMB_W // 2, 25), "ALERTA MERCADO — VOLATILIDAD EXTREMA",
+                          fill=COLOR_WHITE, font=font_alert, anchor="mm")
 
         return img
 

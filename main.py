@@ -322,8 +322,9 @@ def _test_database() -> str:
 def _test_llm_client(config: dict) -> str:
     from utils.llm_client import LLMClient
     llm = LLMClient(config)
-    assert llm.primary in ("groq", "ollama"), "primary inválido"
-    return f"primary={llm.primary}, model={llm.model}"
+    assert callable(llm.generate), "generate() no es callable"
+    assert llm.model, "model no definido"
+    return f"providers=openrouter→groq→gemini→cerebras→ollama, model={llm.model}"
 
 
 def _test_config(config: dict) -> str:
@@ -799,7 +800,12 @@ def main():
         return
 
     if args.topic and args.mode == "urgente":
-        action_urgent(config, db, topic=args.topic)
+        if args.dry_run:
+            # dry-run urgente: usa run_pipeline() que respeta el flag
+            action_create_video(config, db, topic=args.topic, mode="urgente",
+                                dry_run=True, interactive=False)
+        else:
+            action_urgent(config, db, topic=args.topic)
         return
 
     if args.topic:

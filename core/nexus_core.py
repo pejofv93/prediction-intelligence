@@ -598,29 +598,48 @@ class NexusCore:
         )
 
     def _print_summary(self, ctx: Context) -> None:
+        elapsed = (datetime.now() - ctx.pipeline_start).seconds
+
         table = Table(title="Pipeline Summary", box=box.ROUNDED, border_style="#F7931A")
         table.add_column("Campo", style="dim")
         table.add_column("Valor", style="white")
 
-        table.add_row("Pipeline ID", ctx.pipeline_id[:8] + "...")
-        table.add_row("Topic", ctx.topic)
-        table.add_row("Mode", ctx.mode)
-        table.add_row("Urgente", "[red]Sí[/]" if ctx.is_urgent else "[green]No[/]")
-        table.add_row("SEO Score", str(ctx.seo_score))
-        table.add_row("Aprobado", "[green]Sí[/]" if ctx.approved else "[red]No[/]")
-        table.add_row("YouTube URL", ctx.youtube_url or "—")
-        table.add_row("TikTok URL", ctx.tiktok_url or "—")
-        table.add_row("Errores", str(len(ctx.errors)))
-        table.add_row("Warnings", str(len(ctx.warnings)))
-
-        elapsed = (datetime.now() - ctx.pipeline_start).seconds
-        table.add_row("Tiempo total", f"{elapsed}s")
-
+        table.add_row("Pipeline ID",    ctx.pipeline_id[:8] + "...")
+        table.add_row("Topic",          ctx.topic)
+        table.add_row("Mode",           ctx.mode)
+        table.add_row("Urgente",        "[red]Sí[/]" if ctx.is_urgent else "[green]No[/]")
+        table.add_row("SEO Score",      f"[{'green' if ctx.seo_score >= 70 else 'red'}]{ctx.seo_score}/100[/]")
+        table.add_row("Retention",      f"[{'green' if ctx.retention_score >= 75 else 'yellow'}]{ctx.retention_score}/100[/]" if ctx.retention_score else "—")
+        table.add_row("Aprobado",       "[green]Sí[/]" if ctx.approved else "[red]No[/]")
+        table.add_row("YouTube URL",    ctx.youtube_url or "—")
+        table.add_row("TikTok URL",     ctx.tiktok_url or "—")
+        table.add_row("Errores",        f"[{'red' if ctx.errors else 'green'}]{len(ctx.errors)}[/]")
+        table.add_row("Warnings",       str(len(ctx.warnings)))
+        table.add_row("Tiempo total",   f"{elapsed}s")
         console.print(table)
 
         if ctx.errors:
             console.print("[red bold]Errores:[/]")
             for err in ctx.errors:
                 console.print(f"  [red]• {err}[/]")
+
+        # Partner Program Progress
+        self._print_partner_progress()
+
+    def _print_partner_progress(self) -> None:
+        """Muestra el progreso hacia el YouTube Partner Program."""
+        try:
+            from utils.partner_tracker import PartnerTracker, render_partner_panel
+            tracker = PartnerTracker(db=self.db)
+            data = tracker.get_progress()
+            panel_text = render_partner_panel(data)
+            console.print(Panel(panel_text, border_style="yellow",
+                                title="[bold white]YouTube Partner Program[/]"))
+            if data.get("recommendations"):
+                console.print("[bold yellow]Recomendaciones:[/]")
+                for rec in data["recommendations"][:3]:
+                    console.print(f"  {rec}")
+        except Exception as e:
+            logger.debug(f"Partner tracker no disponible: {e}")
 
 

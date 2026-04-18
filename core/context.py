@@ -79,6 +79,11 @@ class Context:
     chart_animated_path: str = ""
     tts_engine: str = ""
 
+    # ── ARES — Retention Engine ────────────────────────────────────────────
+    retention_score: int = 0         # 0-100: puntuación de retención del guión
+    chapter_markers: str = ""        # "📌 CAPÍTULOS:\n0:00 Intro\n2:30 Análisis..."
+    keyword_suggestions: List[str] = field(default_factory=list)  # YouTube autocomplete
+
     # ── On-chain signals (ORACULO / extensiones futuras) ───────────────────
     onchain_signals: Dict[str, Any] = field(default_factory=dict)
     mempool_congestion: float = 50.0
