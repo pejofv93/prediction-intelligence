@@ -38,7 +38,9 @@ _THE_ODDS_LEAGUE_MAP = {
     "PL":  "soccer_england_premier_league",
     "PD":  "soccer_spain_la_liga",
     "BL1": "soccer_germany_bundesliga",
+    "BL2": "soccer_germany_bundesliga2",
     "SA":  "soccer_italy_serie_a",
+    "FL1": "soccer_france_ligue_one",
 }
 
 # Timeout para llamadas HTTP a API externa
@@ -545,21 +547,11 @@ async def generate_signal(enriched_match: dict) -> dict | None:
     # --- 3. Cuotas ---
     odds_data = await fetch_bookmaker_odds(match_id, home_team=str(home_team), away_team=str(away_team), league=league)
     if odds_data is None:
-        # Fallback a cuotas del enriched_match
-        odds_current = enriched_match.get("odds_current", {})
-        if odds_current.get("home") and odds_current.get("away"):
-            odds_data = {
-                "bookmaker": "unknown",
-                "home_odds": float(odds_current.get("home", 2.0)),
-                "draw_odds": float(odds_current.get("draw", 3.2)),
-                "away_odds": float(odds_current.get("away", 3.5)),
-                "opening_home_odds": float(enriched_match.get("odds_opening", {}).get("home", odds_current.get("home", 2.0))),
-            }
-        else:
-            logger.debug(
-                "generate_signal(%s): sin cuotas disponibles — omitiendo", match_id
-            )
-            return None
+        logger.warning(
+            "generate_signal(%s): sin cuotas reales de bookmaker — partido descartado (%s vs %s | %s)",
+            match_id, home_team, away_team, league,
+        )
+        return None
 
     home_odds = odds_data["home_odds"]
     away_odds = odds_data["away_odds"]

@@ -124,23 +124,33 @@ async def enrich_match(match: dict) -> dict:
             data_quality = "partial"
 
     # --- 4. Cuotas desde odds_cache ---
-    odds_opening: dict = {"home": 2.0, "draw": 3.2, "away": 3.5}
-    odds_current: dict = {"home": 2.0, "draw": 3.2, "away": 3.5}
+    # Vacío si no hay datos reales — generate_signal omitirá el partido sin cuotas reales.
+    odds_opening: dict = {}
+    odds_current: dict = {}
 
     try:
         odds_doc = col("odds_cache").document(match_id).get()
         if odds_doc.exists:
             od = odds_doc.to_dict()
-            odds_opening = {
-                "home": float(od.get("opening_home_odds") or 2.0),
-                "draw": float(od.get("opening_draw_odds") or 3.2),
-                "away": float(od.get("opening_away_odds") or 3.5),
-            }
-            odds_current = {
-                "home": float(od.get("home_odds") or 2.0),
-                "draw": float(od.get("draw_odds") or 3.2),
-                "away": float(od.get("away_odds") or 3.5),
-            }
+            home_c = od.get("home_odds")
+            draw_c = od.get("draw_odds")
+            away_c = od.get("away_odds")
+            home_o = od.get("opening_home_odds")
+            draw_o = od.get("opening_draw_odds")
+            away_o = od.get("opening_away_odds")
+            if home_c and away_c:
+                odds_opening = {
+                    "home": float(home_o or home_c),
+                    "draw": float(draw_o or draw_c or 3.2),
+                    "away": float(away_o or away_c),
+                }
+                odds_current = {
+                    "home": float(home_c),
+                    "draw": float(draw_c or 3.2),
+                    "away": float(away_c),
+                }
+            else:
+                data_quality = "partial"
         else:
             data_quality = "partial"
     except Exception:
