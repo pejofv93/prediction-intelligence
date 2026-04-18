@@ -337,9 +337,10 @@ class OLYMPUS(BaseAgent):
         token_data: dict = {}
 
         # 1. YOUTUBE_TOKEN_B64 — base64 del JSON (más seguro en env vars)
-        token_b64 = os.getenv("YOUTUBE_TOKEN_B64", "")
+        token_b64 = os.getenv("YOUTUBE_TOKEN_B64", "").strip()
         if token_b64:
             try:
+                token_b64 += "=" * (-len(token_b64) % 4)  # padding por si Railway lo eliminó
                 token_data = _json.loads(_b64.b64decode(token_b64).decode("utf-8"))
                 self.logger.info("[yellow]OLYMPUS[/] token desde YOUTUBE_TOKEN_B64")
             except Exception as exc:

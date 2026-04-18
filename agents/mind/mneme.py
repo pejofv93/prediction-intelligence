@@ -225,10 +225,12 @@ class MNEME(BaseAgent):
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
-        token_b64 = os.getenv("YOUTUBE_TOKEN_B64", "")
+        token_b64 = os.getenv("YOUTUBE_TOKEN_B64", "").strip()
         if not token_b64:
             raise EnvironmentError("YOUTUBE_TOKEN_B64 no configurado")
 
+        # Añadir padding si falta (Railway a veces lo elimina)
+        token_b64 += "=" * (-len(token_b64) % 4)
         token_data = json.loads(base64.b64decode(token_b64))
         creds = Credentials(
             token=token_data.get("token"),
