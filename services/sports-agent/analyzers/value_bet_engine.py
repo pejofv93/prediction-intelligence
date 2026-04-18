@@ -18,6 +18,7 @@ from shared.config import (
     CLOUD_RUN_TOKEN,
     DEFAULT_WEIGHTS,
     FOOTBALL_RAPID_API_KEY,
+    ODDS_API_KEY,
     SPORTS_ALERT_EDGE,
     SPORTS_MIN_CONFIDENCE,
     SPORTS_MIN_EDGE,
@@ -27,9 +28,18 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-# Host API-Football via RapidAPI para consulta de cuotas
+# API-Football via RapidAPI (fallback — free tier no incluye /odds)
 _ODDS_API_HOST = "api-football-v1.p.rapidapi.com"
-_ODDS_API_BASE = "https://v3.football.api-sports.io"
+_ODDS_API_BASE = "https://api-football-v1.p.rapidapi.com"
+
+# The Odds API — fuente primaria de cuotas
+_THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
+_THE_ODDS_LEAGUE_MAP = {
+    "PL":  "soccer_england_premier_league",
+    "PD":  "soccer_spain_la_liga",
+    "BL1": "soccer_germany_bundesliga",
+    "SA":  "soccer_italy_serie_a",
+}
 
 # Timeout para llamadas HTTP a API externa
 _HTTP_TIMEOUT = 15.0
@@ -120,13 +130,17 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
     }
 
 
-async def fetch_bookmaker_odds(match_id: str) -> dict | None:
+async def fetch_bookmaker_odds(
+    match_id: str,
+    home_team: str = "",
+    away_team: str = "",
+    league: str = "",
+) -> dict | None:
     """
-    Cache-first: verifica odds_cache en Firestore antes de llamar a la API.
-    TTL del cache: 4 horas.
-    1. Si existe en cache y es reciente → devuelve del cache
-    2. Si no existe o expirado → llama API-Football GET /odds?fixture={match_id}
-    3. Guarda resultado en odds_cache (opening_* solo si es la primera vez)
+    Obtiene cuotas 1X2 para un partido. Orden de prioridad:
+    1. Cache Firestore (TTL 4h) — evita llamadas redundantes
+    2. The Odds API (fuente primaria — free tier incluye cuotas reales)
+    3. API-Football via RapidAPI (fallback — free tier no incluye /odds, devuelve 403)
     Devuelve {bookmaker, home_odds, draw_odds, away_odds, opening_home_odds} o None.
     """
     now = datetime.now(timezone.utc)
@@ -138,11 +152,9 @@ async def fetch_bookmaker_odds(match_id: str) -> dict | None:
         if doc.exists:
             data = doc.to_dict()
             fetched_at = data.get("fetched_at")
-            # Normalizar timezone si es naive
             if fetched_at and hasattr(fetched_at, "tzinfo") and fetched_at.tzinfo is None:
                 fetched_at = fetched_at.replace(tzinfo=timezone.utc)
             if fetched_at and (now - fetched_at) < cache_ttl:
-                # Cache valido — devolver sin llamar API
                 return {
                     "bookmaker": data.get("bookmaker", "bet365"),
                     "home_odds": float(data.get("home_odds", 2.0)),
@@ -153,9 +165,15 @@ async def fetch_bookmaker_odds(match_id: str) -> dict | None:
     except Exception:
         logger.error("fetch_bookmaker_odds(%s): error leyendo odds_cache", match_id, exc_info=True)
 
-    # --- 2. Llamar API-Football si la key esta disponible ---
+    # --- 2. The Odds API (fuente primaria) ---
+    if ODDS_API_KEY and home_team and away_team and league in _THE_ODDS_LEAGUE_MAP:
+        odds_result = await _fetch_the_odds_api(match_id, home_team, away_team, league, now)
+        if odds_result:
+            return odds_result
+
+    # --- 3. API-Football via RapidAPI (fallback) ---
     if not FOOTBALL_RAPID_API_KEY:
-        logger.debug("fetch_bookmaker_odds: FOOTBALL_RAPID_API_KEY no configurada — omitiendo")
+        logger.debug("fetch_bookmaker_odds(%s): sin API keys disponibles", match_id)
         return None
 
     try:
@@ -172,17 +190,12 @@ async def fetch_bookmaker_odds(match_id: str) -> dict | None:
 
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", 60))
-            logger.warning(
-                "fetch_bookmaker_odds(%s): rate limit 429 — esperando %ds",
-                match_id, retry_after,
-            )
+            logger.warning("fetch_bookmaker_odds(%s): rate limit 429 — esperando %ds", match_id, retry_after)
             await asyncio.sleep(retry_after)
             return None
 
         if resp.status_code != 200:
-            logger.warning(
-                "fetch_bookmaker_odds(%s): API respondio %d", match_id, resp.status_code
-            )
+            logger.warning("fetch_bookmaker_odds(%s): RapidAPI respondio %d", match_id, resp.status_code)
             return None
 
         data = resp.json()
@@ -190,17 +203,150 @@ async def fetch_bookmaker_odds(match_id: str) -> dict | None:
         if not fixtures:
             return None
 
-        # Buscar cuotas 1X2 (Match Winner) en el primer bookmaker disponible
         odds_result = _parse_odds_response(fixtures[0])
         if not odds_result:
             return None
 
-        # --- 3. Guardar en odds_cache ---
         await _save_odds_cache(match_id, odds_result, now)
         return odds_result
 
     except Exception:
-        logger.error("fetch_bookmaker_odds(%s): error llamando API", match_id, exc_info=True)
+        logger.error("fetch_bookmaker_odds(%s): error llamando RapidAPI", match_id, exc_info=True)
+        return None
+
+
+_GENERIC_WORDS = {"fc", "cf", "ac", "sc", "ss", "ca", "cd", "ud", "sd", "rc", "rcd",
+                  "afc", "fk", "sk", "bv", "sv", "vfb", "fsv", "tsg", "rb", "us"}
+
+
+def _normalize_team(name: str) -> str:
+    """Minusculas, sin acentos, sin prefijos/sufijos genericos."""
+    import re, unicodedata
+    # Eliminar acentos (é→e, ü→u, etc.) antes de filtrar caracteres
+    n = unicodedata.normalize("NFD", name.lower().strip())
+    n = n.encode("ascii", "ignore").decode()
+    n = re.sub(r"[^a-z0-9 ]", "", n)
+    words = [w for w in n.split() if w not in _GENERIC_WORDS]
+    return " ".join(words)
+
+
+def _teams_match(our_name: str, api_name: str) -> bool:
+    """
+    True si los nombres de equipo son el mismo club.
+    Estrategias en orden:
+    1. Coincidencia exacta tras normalizar
+    2. Uno contiene al otro (min 5 chars)
+    3. Primera palabra significativa coincide en ambos (cubre Athletic Club / Athletic Bilbao)
+    """
+    a = _normalize_team(our_name)
+    b = _normalize_team(api_name)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(a) >= 5 and a in b:
+        return True
+    if len(b) >= 5 and b in a:
+        return True
+    # Comparar primera palabra significativa (min 4 chars)
+    first_a = a.split()[0] if a.split() else ""
+    first_b = b.split()[0] if b.split() else ""
+    if len(first_a) >= 4 and len(first_b) >= 4 and first_a == first_b:
+        return True
+    return False
+
+
+async def _fetch_the_odds_api(
+    match_id: str, home_team: str, away_team: str, league: str, now: datetime
+) -> dict | None:
+    """
+    Llama a The Odds API para buscar cuotas del partido por nombre de equipo.
+    Busca en el sport correspondiente a la liga y hace matching por nombre.
+    """
+    sport_key = _THE_ODDS_LEAGUE_MAP[league]
+    url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
+
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.get(url, params={
+                "apiKey": ODDS_API_KEY,
+                "regions": "eu",
+                "markets": "h2h",
+                "bookmakers": "bet365,pinnacle,unibet",
+                "oddsFormat": "decimal",
+            })
+
+        if resp.status_code == 401:
+            logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida", match_id)
+            return None
+        if resp.status_code == 422:
+            logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota de requests agotada", match_id)
+            return None
+        if resp.status_code != 200:
+            logger.warning("fetch_bookmaker_odds(%s): The Odds API respondio %d", match_id, resp.status_code)
+            return None
+
+        events = resp.json()
+        remaining = resp.headers.get("x-requests-remaining", "?")
+        logger.debug("fetch_bookmaker_odds(%s): The Odds API — %s requests restantes", match_id, remaining)
+
+        # Buscar el evento que coincida con home_team y away_team
+        for event in events:
+            api_home = event.get("home_team", "")
+            api_away = event.get("away_team", "")
+            if _teams_match(home_team, api_home) and _teams_match(away_team, api_away):
+                odds_result = _parse_the_odds_event(event)
+                if odds_result:
+                    logger.info(
+                        "fetch_bookmaker_odds(%s): The Odds API — %s @ home=%.2f draw=%.2f away=%.2f",
+                        match_id, odds_result["bookmaker"],
+                        odds_result["home_odds"], odds_result["draw_odds"], odds_result["away_odds"],
+                    )
+                    await _save_odds_cache(match_id, odds_result, now)
+                    return odds_result
+
+        logger.info("fetch_bookmaker_odds(%s): The Odds API — partido no encontrado (%s vs %s)", match_id, home_team, away_team)
+        return None
+
+    except Exception:
+        logger.error("fetch_bookmaker_odds(%s): error llamando The Odds API", match_id, exc_info=True)
+        return None
+
+
+def _parse_the_odds_event(event: dict) -> dict | None:
+    """Extrae cuotas h2h de un evento de The Odds API."""
+    try:
+        bookmakers = event.get("bookmakers", [])
+        if not bookmakers:
+            return None
+
+        home_team = event.get("home_team", "")
+
+        for bk in bookmakers:
+            for market in bk.get("markets", []):
+                if market.get("key") != "h2h":
+                    continue
+                home_odds = draw_odds = away_odds = None
+                for outcome in market.get("outcomes", []):
+                    name = outcome.get("name", "")
+                    price = float(outcome.get("price", 0))
+                    if name == home_team:
+                        home_odds = price
+                    elif name == "Draw":
+                        draw_odds = price
+                    else:
+                        away_odds = price
+                if home_odds and away_odds:
+                    return {
+                        "bookmaker": bk.get("key", "bet365"),
+                        "home_odds": home_odds,
+                        "draw_odds": draw_odds or 3.2,
+                        "away_odds": away_odds,
+                        "opening_home_odds": home_odds,
+                    }
+        return None
+    except Exception:
+        logger.error("_parse_the_odds_event: error", exc_info=True)
         return None
 
 
@@ -397,7 +543,7 @@ async def generate_signal(enriched_match: dict) -> dict | None:
     result_away = ensemble_probability(enriched_match, weights, team="away")
 
     # --- 3. Cuotas ---
-    odds_data = await fetch_bookmaker_odds(match_id)
+    odds_data = await fetch_bookmaker_odds(match_id, home_team=str(home_team), away_team=str(away_team), league=league)
     if odds_data is None:
         # Fallback a cuotas del enriched_match
         odds_current = enriched_match.get("odds_current", {})

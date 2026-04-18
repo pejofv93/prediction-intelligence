@@ -17,6 +17,7 @@ COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY")            # polymarket-
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER")        # solo dashboard
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS")        # solo dashboard
 CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")  # token inter-servicios
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")       # The Odds API — cuotas reales
 COLLECTION_PREFIX = os.environ.get("FIRESTORE_COLLECTION_PREFIX", "")
 
 # IA
