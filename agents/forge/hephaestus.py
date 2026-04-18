@@ -1683,33 +1683,36 @@ class HEPHAESTUS:
 
                 if current_sub:
                     clean_sub = self._clean_text_for_display(current_sub)
-                    lines_sub = textwrap.wrap(clean_sub, width=100)[:2]
+                    lines_sub = textwrap.wrap(clean_sub, width=38)[:2]
 
                     from PIL import Image as PILImg
-                    sub_bar = PILImg.new("RGBA", (w, _SUB_H * len(lines_sub)),
-                                        (0, 0, 0, 178))
+                    sub_bar = PILImg.new("RGBA", (w, _SUB_H), (0, 0, 0, 200))
                     sub_draw = ImageDraw.Draw(sub_bar)
                     font_sub = None
-                    for _fp in ["C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/segoeui.ttf",
-                                "C:/Windows/Fonts/verdana.ttf", "C:/Windows/Fonts/calibri.ttf"]:
+                    font_size = 22 if len(lines_sub) == 2 else 24
+                    for _fp in ["C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/arial.ttf",
+                                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]:
                         try:
-                            font_sub = ImageFont.truetype(_fp, 24)
+                            font_sub = ImageFont.truetype(_fp, font_size)
                             break
                         except Exception:
                             continue
                     if font_sub is None:
                         font_sub = ImageFont.load_default()
 
+                    line_h = _SUB_H // max(len(lines_sub), 1)
                     for i, line in enumerate(lines_sub):
                         sub_draw.text(
-                            (w // 2, _SUB_H // 2 + i * _SUB_H),
+                            (w // 2, line_h // 2 + i * line_h),
                             line,
                             fill=C_TEXT, font=font_sub, anchor="mm"
                         )
 
                     sub_rgb = PILImg.new("RGB", sub_bar.size, C_BG)
                     sub_rgb.paste(sub_bar, mask=sub_bar.split()[3])
-                    frame.paste(sub_rgb, (0, _SUB_Y - (_SUB_H * (len(lines_sub) - 1))))
+                    # Posición fija — siempre al fondo, nunca sube al gráfico
+                    frame.paste(sub_rgb, (0, _SUB_Y))
             except Exception:
                 pass
 
@@ -3069,6 +3072,8 @@ class HEPHAESTUS:
                 pass
 
             # ── Subtítulos sincronizados ────────────────────────────────────
+            # Siempre en la franja inferior fija (_SUB_Y a h).
+            # Máximo 2 líneas de 38 chars — fuente se reduce si el texto es largo.
             try:
                 current_sub = ""
                 for start_s, end_s, text in subtitle_entries:
@@ -3077,20 +3082,34 @@ class HEPHAESTUS:
                         break
                 if current_sub:
                     clean = self._clean_text_for_display(current_sub)
-                    lines = textwrap.wrap(clean, width=88)[:2]
-                    bar_h = _SUB_H * len(lines)
-                    sub_bar = PILImg.new("RGBA", (w, bar_h), (0, 0, 0, 190))
+                    # Wrap ajustado al ancho real de pantalla (38 chars ≈ 1700px a 32px)
+                    lines = textwrap.wrap(clean, width=38)[:2]
+                    bar_h = _SUB_H  # altura fija — siempre ocupa solo la franja inferior
+                    sub_bar = PILImg.new("RGBA", (w, bar_h), (0, 0, 0, 200))
                     sd = ImageDraw.Draw(sub_bar)
+                    # Fuente dinámica: reduce tamaño si hay 2 líneas
+                    font_sub = F.get("sub")
+                    if len(lines) == 2 and font_sub:
+                        # Intentar fuente más pequeña para que quepan 2 líneas en el espacio
+                        for fp in ["C:/Windows/Fonts/arialbd.ttf",
+                                   "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                                   "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]:
+                            try:
+                                font_sub = ImageFont.truetype(fp, 26)
+                                break
+                            except Exception:
+                                continue
+                    line_h = bar_h // max(len(lines), 1)
                     for i, line in enumerate(lines):
-                        cy = _SUB_H // 2 + i * _SUB_H
-                        # Sombra
+                        cy = line_h // 2 + i * line_h
                         sd.text((w // 2 + 2, cy + 2), line,
-                                fill=(0, 0, 0, 220), font=F["sub"], anchor="mm")
+                                fill=(0, 0, 0, 220), font=font_sub, anchor="mm")
                         sd.text((w // 2, cy), line,
-                                fill=(*C_TEXT, 255), font=F["sub"], anchor="mm")
+                                fill=(*C_TEXT, 255), font=font_sub, anchor="mm")
                     sub_rgb = PILImg.new("RGB", sub_bar.size, C_BG)
                     sub_rgb.paste(sub_bar, mask=sub_bar.split()[3])
-                    frame.paste(sub_rgb, (0, _SUB_Y - (bar_h - _SUB_H)))
+                    # Posición fija en la franja inferior — NUNCA sube al área del gráfico
+                    frame.paste(sub_rgb, (0, _SUB_Y))
             except Exception:
                 pass
 
