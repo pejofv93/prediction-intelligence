@@ -490,7 +490,7 @@ async def generate_signal(enriched_match: dict) -> dict | None:
     try:
         col("predictions").document(match_id).set(prediction)
         logger.info(
-            "generate_signal(%s): %s @ %.2f | edge=%.1%% conf=%.0%% kelly=%.1%%",
+            "generate_signal(%s): %s @ %.2f | edge=%.1f%% conf=%.0f%% kelly=%.1f%%",
             match_id, team_to_back, best_odds,
             best_edge * 100, best_confidence * 100, kelly * 100,
         )
