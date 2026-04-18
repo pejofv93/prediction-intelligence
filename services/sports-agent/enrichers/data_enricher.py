@@ -208,6 +208,11 @@ async def enrich_match(match: dict) -> dict:
         "sport": sport,
         "home_team_id": home_id,
         "away_team_id": away_id,
+        # Nombres e info del partido — copiados desde upcoming_matches
+        "home_team": match.get("home_team", match.get("home_team_name", "")),
+        "away_team": match.get("away_team", match.get("away_team_name", "")),
+        "league": match.get("league", ""),
+        "match_date": match.get("match_date", match.get("date")),
         # Campos futbol (None para otros deportes)
         "poisson_home_win": poisson_home_win,
         "poisson_draw": poisson_draw,

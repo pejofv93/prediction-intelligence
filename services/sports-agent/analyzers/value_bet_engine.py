@@ -345,6 +345,35 @@ async def generate_signal(enriched_match: dict) -> dict | None:
     match_date = enriched_match.get("match_date") or enriched_match.get("date")
     data_quality = enriched_match.get("data_quality", "partial")
 
+    # Si faltan nombres o liga (docs enriquecidos antes del fix), leerlos de upcoming_matches
+    if not home_team or not away_team or not league:
+        try:
+            um_doc = col("upcoming_matches").document(match_id).get()
+            if um_doc.exists:
+                um = um_doc.to_dict()
+                home_team = home_team or um.get("home_team", str(enriched_match.get("home_team_id", "")))
+                away_team = away_team or um.get("away_team", str(enriched_match.get("away_team_id", "")))
+                league = league or um.get("league", "")
+                match_date = match_date or um.get("match_date") or um.get("date")
+        except Exception:
+            logger.warning("generate_signal(%s): no se pudo resolver nombre de equipo desde upcoming_matches", match_id)
+
+    # --- Guardia de calidad: omitir partidos sin datos reales ---
+    poisson_none = enriched_match.get("poisson_home_win") is None
+    form_default = (
+        enriched_match.get("home_form_score", 50.0) == 50.0
+        and enriched_match.get("away_form_score", 50.0) == 50.0
+    )
+    h2h_neutral = enriched_match.get("h2h_advantage", 0.0) == 0.0
+    if poisson_none and form_default and h2h_neutral:
+        logger.warning(
+            "generate_signal(%s): omitido por datos insuficientes "
+            "(poisson=None, form=50/50 default, h2h=0)",
+            match_id,
+        )
+        return None
+
+
     # Determinar data_source segun si hay modelo estadistico
     has_statistical_model = (
         enriched_match.get("poisson_home_win") is not None
@@ -449,6 +478,7 @@ async def generate_signal(enriched_match: dict) -> dict | None:
         "confidence": best_confidence,
         "kelly_fraction": kelly,
         "factors": factors,
+        "signals": best_signals,  # siempre presente: poisson/elo/form/h2h reales
         "weights_version": weights_version,
         "created_at": datetime.now(timezone.utc),
         "result": None,
@@ -487,10 +517,11 @@ def _get_weights_version() -> int:
 
 def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:
     """Construye el payload de alerta con los campos del formato Telegram."""
-    signals = prediction.get("factors", {})
+    # signals siempre contiene poisson/elo/form/h2h del ensemble_probability,
+    # independientemente de si data_source es statistical_model o groq_ai.
+    signals = prediction.get("signals", prediction.get("factors", {}))
     return {
         **prediction,
-        # Campos extras para el formato del mensaje
         "home_team": prediction.get("home_team", ""),
         "away_team": prediction.get("away_team", ""),
         "match_date": str(prediction.get("match_date", "")),
@@ -498,6 +529,5 @@ def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:
         "elo": signals.get("elo"),
         "form": signals.get("form"),
         "h2h": signals.get("h2h"),
-        # Serializar fechas como string
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -71,11 +71,12 @@ def _format_sports_alert(prediction: dict) -> str:
     confidence = float(prediction.get("confidence", 0))
     kelly = float(prediction.get("kelly_fraction", 0))
 
-    factors = prediction.get("factors", {})
-    poisson = float(factors.get("poisson", 0))
-    elo = float(factors.get("elo", 0))
-    form = float(factors.get("form", 0))
-    h2h = float(factors.get("h2h", 0))
+    # signals tiene siempre poisson/elo/form/h2h; factors solo en statistical_model path
+    signals = prediction.get("signals", prediction.get("factors", {}))
+    poisson = float(signals.get("poisson") or 0)
+    elo     = float(signals.get("elo")     or 0)
+    form    = float(signals.get("form")    or 0)
+    h2h     = float(signals.get("h2h")    or 0)
 
     return (
         f"⚽ SEÑAL DETECTADA\n\n"
