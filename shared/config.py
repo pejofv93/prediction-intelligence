@@ -16,6 +16,7 @@ FOOTBALL_RAPID_API_KEY = os.environ.get("FOOTBALL_RAPID_API_KEY")  # solo sports
 COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY")            # polymarket-agent (opcional)
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER")        # solo dashboard
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS")        # solo dashboard
+CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")  # token inter-servicios
 COLLECTION_PREFIX = os.environ.get("FIRESTORE_COLLECTION_PREFIX", "")
 
 # IA
