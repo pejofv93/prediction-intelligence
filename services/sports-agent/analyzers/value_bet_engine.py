@@ -294,31 +294,38 @@ def kelly_criterion(edge: float, decimal_odds: float) -> float:
     return round(max(0.0, min(0.25, fraction)), 4)
 
 
-async def _send_telegram_alert(prediction: dict) -> None:
+async def _send_telegram_alert(prediction: dict) -> bool:
     """
     Envia alerta al telegram-bot via POST /send-alert.
-    Si falla → loggear y continuar (no bloquear pipeline).
+    Devuelve True si el bot confirma sent=True (mensaje entregado al usuario).
+    Devuelve False si deduplicado, error HTTP o excepcion.
     """
     if not TELEGRAM_BOT_URL or not CLOUD_RUN_TOKEN:
         logger.debug("_send_telegram_alert: TELEGRAM_BOT_URL o CLOUD_RUN_TOKEN no configurados")
-        return
+        return False
 
     try:
         payload = {"type": "sports", "data": prediction}
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{TELEGRAM_BOT_URL}/send-alert",
                 json=payload,
                 headers={"x-cloud-token": CLOUD_RUN_TOKEN},
             )
         if resp.status_code not in (200, 202):
-            logger.warning(
-                "_send_telegram_alert: bot respondio %d", resp.status_code
-            )
+            logger.warning("_send_telegram_alert: bot respondio %d", resp.status_code)
+            return False
+
+        sent = resp.json().get("sent", False)
+        if sent:
+            logger.info("_send_telegram_alert: alerta entregada al usuario")
         else:
-            logger.info("_send_telegram_alert: alerta enviada correctamente")
+            logger.info("_send_telegram_alert: deduplicada por el bot (sent=False)")
+        return bool(sent)
+
     except Exception:
         logger.error("_send_telegram_alert: error al enviar alerta — continuando", exc_info=True)
+        return False
 
 
 async def generate_signal(enriched_match: dict) -> dict | None:
@@ -499,7 +506,12 @@ async def generate_signal(enriched_match: dict) -> dict | None:
 
     # --- Alerta Telegram si edge alto ---
     if best_edge > SPORTS_ALERT_EDGE:
-        await _send_telegram_alert(_build_alert_payload(prediction, enriched_match))
+        actually_sent = await _send_telegram_alert(_build_alert_payload(prediction, enriched_match))
+        if actually_sent:
+            try:
+                col("predictions").document(match_id).update({"alerted": True})
+            except Exception:
+                logger.error("generate_signal(%s): error marcando alerted=True", match_id, exc_info=True)
 
     return prediction
 
