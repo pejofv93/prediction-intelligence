@@ -831,8 +831,25 @@ class ECHO(BaseAgent):
                 f"destino: output/audio/{ctx.pipeline_id[:8]}...mp3[/]"
             )
 
-            # ── Cadena TTS: Coqui → edge-tts → pyttsx3 → silencio-ffmpeg
+            # ── Cadena TTS: Coqui → silencio-ffmpeg (en Railway)
+            # En Railway: edge-tts está bloqueado y pyttsx3/espeak da voz robótica
+            # que supera el quality gate y se sube a YouTube. Si Coqui falla en
+            # Railway → silencio → quality gate bloquea → no se sube nada.
+            # En local: cadena completa Coqui → edge-tts → pyttsx3 → silencio.
+            _on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PUBLIC_DOMAIN"))
             mode_str = getattr(ctx, "mode", "") or ""
+
+            def _fallback_silence():
+                duration_secs = max(30, int(self._estimate_duration(clean_script) * 60))
+                import subprocess as _sp
+                _sp.run(
+                    ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                     "-t", str(duration_secs), "-q:a", "9", "-acodec", "libmp3lame", output_path],
+                    check=True, capture_output=True,
+                )
+                self.logger.warning(f"Audio silencioso ({duration_secs}s) — quality gate bloqueará si Coqui falla")
+                return "silencio-ffmpeg"
+
             try:
                 console.print("[dim]Sintetizando con Coqui TTS (voz española natural)...[/]")
                 model_used = self._synthesize_coqui(clean_script, output_path, mode=mode_str)
@@ -840,50 +857,28 @@ class ECHO(BaseAgent):
                 engine_used = f"Coqui TTS ({model_used})"
                 console.print(f"[green]Coqui TTS OK:[/] modelo={model_used}")
             except Exception as coqui_err:
-                self.logger.warning(
-                    f"Coqui TTS fallo ({coqui_err}) — probando edge-tts..."
-                )
-                console.print("[yellow]Coqui TTS no disponible. Probando edge-tts...[/]")
-                try:
-                    voice_used = self._synthesize_edge_with_retry(
-                        clean_script, output_path, rate, pitch
-                    )
-                    self.logger.info(f"Audio generado con edge-tts [{voice_used}]")
-                    engine_used = f"edge-tts ({voice_used})"
-                except Exception as edge_err:
-                    self.logger.warning(
-                        f"edge-tts (3 voces) fallaron: {edge_err} — probando pyttsx3..."
-                    )
-                    console.print("[yellow]edge-tts no disponible. Probando pyttsx3 (espeak-ng)...[/]")
+                self.logger.warning(f"Coqui TTS fallo: {coqui_err}")
+                if _on_railway:
+                    # En Railway no usamos pyttsx3 (voz robótica) ni edge-tts (bloqueado)
+                    console.print("[red]Coqui falló en Railway — audio silencioso (quality gate bloqueará)[/]")
+                    engine_used = _fallback_silence()
+                else:
+                    # En local: intentar edge-tts → pyttsx3 → silencio
+                    console.print("[yellow]Coqui no disponible. Probando edge-tts...[/]")
                     try:
-                        voice_id = self._synthesize_pyttsx3(clean_script, output_path, mode=mode_str)
-                        self.logger.info(f"Audio generado con pyttsx3 [{voice_id}]")
-                        engine_used = f"pyttsx3 ({voice_id})"
-                        console.print(f"[green]pyttsx3 OK:[/] voz={voice_id}")
-                    except Exception as pyttsx_err:
-                        self.logger.warning(
-                            f"pyttsx3 fallo ({pyttsx_err}) — generando audio silencioso de emergencia"
-                        )
-                        console.print("[yellow]pyttsx3 no disponible. Audio silencioso (emergencia)...[/]")
-                        duration_secs = max(30, int(self._estimate_duration(clean_script) * 60))
-                        import subprocess
-                        subprocess.run(
-                            [
-                                "ffmpeg", "-y",
-                                "-f", "lavfi",
-                                "-i", "anullsrc=r=44100:cl=stereo",
-                                "-t", str(duration_secs),
-                                "-q:a", "9",
-                                "-acodec", "libmp3lame",
-                                output_path,
-                            ],
-                            check=True,
-                            capture_output=True,
-                        )
-                        self.logger.warning(
-                            f"Audio silencioso generado ({duration_secs}s) — el vídeo se generará sin voz"
-                        )
-                        engine_used = "silencio-ffmpeg"
+                        voice_used = self._synthesize_edge_with_retry(clean_script, output_path, rate, pitch)
+                        self.logger.info(f"Audio generado con edge-tts [{voice_used}]")
+                        engine_used = f"edge-tts ({voice_used})"
+                    except Exception as edge_err:
+                        self.logger.warning(f"edge-tts falló: {edge_err} — probando pyttsx3...")
+                        console.print("[yellow]edge-tts no disponible. Probando pyttsx3...[/]")
+                        try:
+                            voice_id = self._synthesize_pyttsx3(clean_script, output_path, mode=mode_str)
+                            self.logger.info(f"Audio generado con pyttsx3 [{voice_id}]")
+                            engine_used = f"pyttsx3 ({voice_id})"
+                            console.print(f"[green]pyttsx3 OK:[/] voz={voice_id}")
+                        except Exception:
+                            engine_used = _fallback_silence()
 
             ctx.audio_path = output_path
             # Guardar motor usado en Context para auditoría y MNEME
