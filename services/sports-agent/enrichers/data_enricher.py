@@ -10,6 +10,7 @@ Flujo por partido:
   5. odds_cache → odds_opening, odds_current, odds_movement
   6. Escribe enriched_matches en Firestore
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -71,32 +72,43 @@ async def enrich_match(match: dict) -> dict:
 
     logger.debug("enrich_match: %s (%s) — %s vs %s", match_id, sport, home_id, away_id)
 
-    # --- 1. Cargar team_stats de Firestore ---
+    # --- 1-4. Reads en paralelo: team_stats ×2 + h2h_data + odds_cache ---
+    canonical_t1 = min(home_id, away_id) if home_id and away_id else 0
+    canonical_t2 = max(home_id, away_id) if home_id and away_id else 0
+    pair_key = f"{canonical_t1}_{canonical_t2}"
+
+    loop = asyncio.get_event_loop()
+
+    def _get(collection: str, doc_id: str):
+        return col(collection).document(doc_id).get()
+
+    try:
+        home_doc, away_doc, h2h_doc, odds_doc = await asyncio.gather(
+            loop.run_in_executor(None, _get, "team_stats", str(home_id) if home_id else ""),
+            loop.run_in_executor(None, _get, "team_stats", str(away_id) if away_id else ""),
+            loop.run_in_executor(None, _get, "h2h_data", pair_key),
+            loop.run_in_executor(None, _get, "odds_cache", match_id),
+        )
+    except Exception:
+        logger.error("enrich_match(%s): error en reads paralelos", match_id, exc_info=True)
+        home_doc = away_doc = h2h_doc = odds_doc = None
+
+    # --- 1. team_stats ---
     home_stats: dict = {}
     away_stats: dict = {}
 
-    if home_id:
-        try:
-            doc = col("team_stats").document(str(home_id)).get()
-            if doc.exists:
-                home_stats = doc.to_dict() or {}
-            else:
-                logger.warning("enrich_match(%s): sin team_stats para home_id=%d", match_id, home_id)
-                data_quality = "partial"
-        except Exception:
-            logger.error("enrich_match(%s): error leyendo home team_stats", match_id, exc_info=True)
+    if home_doc is not None:
+        if home_doc.exists:
+            home_stats = home_doc.to_dict() or {}
+        elif home_id:
+            logger.warning("enrich_match(%s): sin team_stats para home_id=%d", match_id, home_id)
             data_quality = "partial"
 
-    if away_id:
-        try:
-            doc = col("team_stats").document(str(away_id)).get()
-            if doc.exists:
-                away_stats = doc.to_dict() or {}
-            else:
-                logger.warning("enrich_match(%s): sin team_stats para away_id=%d", match_id, away_id)
-                data_quality = "partial"
-        except Exception:
-            logger.error("enrich_match(%s): error leyendo away team_stats", match_id, exc_info=True)
+    if away_doc is not None:
+        if away_doc.exists:
+            away_stats = away_doc.to_dict() or {}
+        elif away_id:
+            logger.warning("enrich_match(%s): sin team_stats para away_id=%d", match_id, away_id)
             data_quality = "partial"
 
     # --- 2. Form score y racha ---
@@ -107,33 +119,20 @@ async def enrich_match(match: dict) -> dict:
 
     # --- 3. H2H advantage ---
     h2h_advantage = 0.0
-    if home_id and away_id:
+    if h2h_doc is not None and h2h_doc.exists and home_id and away_id:
         try:
-            canonical_t1 = min(home_id, away_id)
-            canonical_t2 = max(home_id, away_id)
-            pair_key = f"{canonical_t1}_{canonical_t2}"
-
-            doc = col("h2h_data").document(pair_key).get()
-            if doc.exists:
-                stored_advantage = doc.to_dict().get("h2h_advantage", 0.0)
-                # h2h_advantage almacenado es relativo a canonical_t1 (equipo con menor ID)
-                # Si el local tiene mayor ID → la ventaja es del visitante → invertir
-                if home_id == canonical_t1:
-                    h2h_advantage = float(stored_advantage)
-                else:
-                    h2h_advantage = -float(stored_advantage)
+            stored_advantage = h2h_doc.to_dict().get("h2h_advantage", 0.0)
+            h2h_advantage = float(stored_advantage) if home_id == canonical_t1 else -float(stored_advantage)
         except Exception:
-            logger.error("enrich_match(%s): error leyendo h2h_data", match_id, exc_info=True)
+            logger.error("enrich_match(%s): error procesando h2h_data", match_id, exc_info=True)
             data_quality = "partial"
 
     # --- 4. Cuotas desde odds_cache ---
-    # Vacío si no hay datos reales — generate_signal omitirá el partido sin cuotas reales.
     odds_opening: dict = {}
     odds_current: dict = {}
 
-    try:
-        odds_doc = col("odds_cache").document(match_id).get()
-        if odds_doc.exists:
+    if odds_doc is not None and odds_doc.exists:
+        try:
             od = odds_doc.to_dict()
             home_c = od.get("home_odds")
             draw_c = od.get("draw_odds")
@@ -154,18 +153,23 @@ async def enrich_match(match: dict) -> dict:
                 }
             else:
                 data_quality = "partial"
-        else:
+        except Exception:
+            logger.error("enrich_match(%s): error procesando odds_cache", match_id, exc_info=True)
             data_quality = "partial"
-    except Exception:
-        logger.error("enrich_match(%s): error leyendo odds_cache", match_id, exc_info=True)
+    else:
         data_quality = "partial"
 
-    # --- 5. Movimiento de cuotas ---
+    # --- 5. Movimiento de cuotas (derivado del odds_doc ya leído — sin read adicional) ---
     odds_movement = 0.0
     try:
-        odds_movement = await get_odds_movement(match_id)
+        if odds_doc is not None and odds_doc.exists:
+            od = odds_doc.to_dict()
+            home_odds = od.get("home_odds")
+            opening_home_odds = od.get("opening_home_odds")
+            if home_odds and opening_home_odds and opening_home_odds != 0:
+                odds_movement = round((home_odds - opening_home_odds) / opening_home_odds, 4)
     except Exception:
-        logger.error("enrich_match(%s): error en odds_movement", match_id, exc_info=True)
+        logger.error("enrich_match(%s): error calculando odds_movement", match_id, exc_info=True)
 
     # --- 6. Poisson + ELO (solo futbol) ---
     poisson_home_win: float | None = None

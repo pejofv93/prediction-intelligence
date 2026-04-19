@@ -8,7 +8,7 @@ Cloud Run timeout=900s para /run-collect (puede tardar hasta 15min por rate limi
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -121,10 +121,27 @@ async def _bg_collect() -> None:
         logger.error("collect: error no controlado — %s", e, exc_info=True)
 
 
+async def _is_stats_fresh(collection: str, doc_id: str, ttl_hours: int) -> bool:
+    """True si el doc existe en Firestore y updated_at tiene menos de ttl_hours."""
+    from shared.firestore_client import col
+    try:
+        doc = col(collection).document(doc_id).get()
+        if not doc.exists:
+            return False
+        updated_at = doc.to_dict().get("updated_at")
+        if not updated_at:
+            return False
+        if hasattr(updated_at, "tzinfo") and updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - updated_at) < timedelta(hours=ttl_hours)
+    except Exception:
+        return False
+
+
 async def _collect_football() -> None:
     """
-    Recolecta partidos de futbol europeo (PL, PD, BL1, SA) via football-data.org.
-    Flujo: upcoming_matches → team_stats (local + visitante) → h2h → save todo.
+    Recolecta partidos de futbol europeo via football-data.org.
+    Caché TTL 6h: si team_stats o h2h_data tienen menos de 6h → omite llamada API.
     Rate limit: RATE_LIMIT_DELAY=6.5s ya integrado en cada llamada HTTP.
     """
     from collectors.football_api import get_upcoming_matches, get_team_stats, get_h2h
@@ -140,9 +157,10 @@ async def _collect_football() -> None:
     await save_upcoming_matches(matches)
     logger.info("collect.football: %d partidos guardados", len(matches))
 
-    # Deduplicar equipos para no hacer peticiones repetidas
     team_ids_seen: set[int] = set()
     h2h_pairs_seen: set[tuple[int, int]] = set()
+    skipped_teams = 0
+    skipped_h2h = 0
 
     for match in matches:
         home_id = match.get("home_team_id")
@@ -151,20 +169,28 @@ async def _collect_football() -> None:
         if not home_id or not away_id:
             continue
 
-        # Stats del equipo local
+        # Stats equipo local
         if home_id not in team_ids_seen:
             try:
-                raw_home = await get_team_stats(home_id)
-                await save_team_stats(home_id, raw_home)
+                if await _is_stats_fresh("team_stats", str(home_id), ttl_hours=6):
+                    logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", home_id)
+                    skipped_teams += 1
+                else:
+                    raw_home = await get_team_stats(home_id)
+                    await save_team_stats(home_id, raw_home)
                 team_ids_seen.add(home_id)
             except Exception:
                 logger.error("collect.football: error stats equipo %d", home_id, exc_info=True)
 
-        # Stats del equipo visitante
+        # Stats equipo visitante
         if away_id not in team_ids_seen:
             try:
-                raw_away = await get_team_stats(away_id)
-                await save_team_stats(away_id, raw_away)
+                if await _is_stats_fresh("team_stats", str(away_id), ttl_hours=6):
+                    logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", away_id)
+                    skipped_teams += 1
+                else:
+                    raw_away = await get_team_stats(away_id)
+                    await save_team_stats(away_id, raw_away)
                 team_ids_seen.add(away_id)
             except Exception:
                 logger.error("collect.football: error stats equipo %d", away_id, exc_info=True)
@@ -173,8 +199,13 @@ async def _collect_football() -> None:
         pair = (min(home_id, away_id), max(home_id, away_id))
         if pair not in h2h_pairs_seen:
             try:
-                h2h_matches = await get_h2h(home_id, away_id)
-                await save_h2h(home_id, away_id, h2h_matches)
+                pair_key = f"{pair[0]}_{pair[1]}"
+                if await _is_stats_fresh("h2h_data", pair_key, ttl_hours=6):
+                    logger.debug("collect.football: h2h(%s) cache vigente — omitiendo", pair_key)
+                    skipped_h2h += 1
+                else:
+                    h2h_matches = await get_h2h(home_id, away_id)
+                    await save_h2h(home_id, away_id, h2h_matches)
                 h2h_pairs_seen.add(pair)
             except Exception:
                 logger.error(
@@ -182,8 +213,8 @@ async def _collect_football() -> None:
                 )
 
     logger.info(
-        "collect.football: %d equipos, %d pares H2H procesados",
-        len(team_ids_seen), len(h2h_pairs_seen),
+        "collect.football: %d equipos (%d cache), %d H2H (%d cache)",
+        len(team_ids_seen), skipped_teams, len(h2h_pairs_seen), skipped_h2h,
     )
 
 
