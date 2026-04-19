@@ -35,13 +35,18 @@ _ODDS_API_BASE = "https://api-football-v1.p.rapidapi.com"
 # The Odds API — fuente primaria de cuotas
 _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 _THE_ODDS_LEAGUE_MAP = {
-    "PL":  "soccer_england_premier_league",
+    # PL eliminada: temporada 24/25 terminada, The Odds API devuelve 404
     "PD":  "soccer_spain_la_liga",
     "BL1": "soccer_germany_bundesliga",
     "BL2": "soccer_germany_bundesliga2",
     "SA":  "soccer_italy_serie_a",
     "FL1": "soccer_france_ligue_one",
 }
+
+# Cache en memoria de odds por liga: {sport_key: (fetched_at, [events])}
+# TTL 1h — evita N llamadas a The Odds API para N fixtures de la misma liga en un run
+_LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
+_LEAGUE_CACHE_TTL = timedelta(hours=1)
 
 # Timeout para llamadas HTTP a API externa
 _HTTP_TIMEOUT = 15.0
@@ -262,12 +267,51 @@ async def _fetch_the_odds_api(
     match_id: str, home_team: str, away_team: str, league: str, now: datetime
 ) -> dict | None:
     """
-    Llama a The Odds API para buscar cuotas del partido por nombre de equipo.
-    Busca en el sport correspondiente a la liga y hace matching por nombre.
+    Obtiene cuotas de The Odds API para un partido.
+    Cache en memoria por liga (TTL 1h): un run con N fixtures de la misma liga
+    hace 1 sola llamada HTTP en vez de N.
     """
     sport_key = _THE_ODDS_LEAGUE_MAP[league]
-    url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
 
+    # --- Cache en memoria por liga ---
+    events = await _get_league_events(sport_key, match_id, now)
+    if events is None:
+        return None
+
+    # Buscar el evento que coincida con home_team y away_team
+    for event in events:
+        api_home = event.get("home_team", "")
+        api_away = event.get("away_team", "")
+        if _teams_match(home_team, api_home) and _teams_match(away_team, api_away):
+            odds_result = _parse_the_odds_event(event)
+            if odds_result:
+                logger.info(
+                    "fetch_bookmaker_odds(%s): The Odds API — %s @ home=%.2f draw=%.2f away=%.2f",
+                    match_id, odds_result["bookmaker"],
+                    odds_result["home_odds"], odds_result["draw_odds"], odds_result["away_odds"],
+                )
+                await _save_odds_cache(match_id, odds_result, now)
+                return odds_result
+
+    logger.info("fetch_bookmaker_odds(%s): The Odds API — partido no encontrado (%s vs %s)", match_id, home_team, away_team)
+    return None
+
+
+async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> list | None:
+    """
+    Devuelve todos los eventos de una liga desde cache en memoria (TTL 1h).
+    Si el cache expiró o no existe, llama a The Odds API y actualiza el cache.
+    Devuelve None si la API devuelve error no recuperable.
+    """
+    cached = _LEAGUE_ODDS_CACHE.get(sport_key)
+    if cached is not None:
+        fetched_at, events = cached
+        if (now - fetched_at) < _LEAGUE_CACHE_TTL:
+            logger.debug("fetch_bookmaker_odds(%s): cache de liga '%s' vigente (%d eventos)", match_id, sport_key, len(events))
+            return events
+
+    # Cache ausente o expirado — llamar a la API
+    url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url, params={
@@ -290,25 +334,9 @@ async def _fetch_the_odds_api(
 
         events = resp.json()
         remaining = resp.headers.get("x-requests-remaining", "?")
-        logger.debug("fetch_bookmaker_odds(%s): The Odds API — %s requests restantes", match_id, remaining)
-
-        # Buscar el evento que coincida con home_team y away_team
-        for event in events:
-            api_home = event.get("home_team", "")
-            api_away = event.get("away_team", "")
-            if _teams_match(home_team, api_home) and _teams_match(away_team, api_away):
-                odds_result = _parse_the_odds_event(event)
-                if odds_result:
-                    logger.info(
-                        "fetch_bookmaker_odds(%s): The Odds API — %s @ home=%.2f draw=%.2f away=%.2f",
-                        match_id, odds_result["bookmaker"],
-                        odds_result["home_odds"], odds_result["draw_odds"], odds_result["away_odds"],
-                    )
-                    await _save_odds_cache(match_id, odds_result, now)
-                    return odds_result
-
-        logger.info("fetch_bookmaker_odds(%s): The Odds API — partido no encontrado (%s vs %s)", match_id, home_team, away_team)
-        return None
+        logger.info("The Odds API: '%s' — %d eventos cargados, %s requests restantes", sport_key, len(events), remaining)
+        _LEAGUE_ODDS_CACHE[sport_key] = (now, events)
+        return events
 
     except Exception:
         logger.error("fetch_bookmaker_odds(%s): error llamando The Odds API", match_id, exc_info=True)
