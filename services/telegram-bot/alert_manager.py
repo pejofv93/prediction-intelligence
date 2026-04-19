@@ -53,44 +53,82 @@ async def send_message(text: str, chat_id: str | int | None = None, parse_mode: 
         logger.error("send_message: error enviando mensaje", exc_info=True)
 
 
+_SPORT_EMOJI = {
+    "football": "⚽",
+    "nba": "🏀",
+    "basketball": "🏀",
+    "euroleague": "🏀",
+    "tennis": "🎾",
+}
+
+_LEAGUE_LABEL = {
+    "SA": "Serie A", "PD": "La Liga", "BL1": "Bundesliga", "FL1": "Ligue 1",
+    "BL2": "2. Bundesliga", "FL2": "Ligue 2", "CL": "Champions League",
+    "EL": "Europa League", "ECL": "Conference League", "PPL": "Primeira Liga",
+    "DED": "Eredivisie", "SD": "Segunda División", "SB": "Serie B",
+    "TU1": "Süper Lig", "NBA": "NBA", "EUROLEAGUE": "EuroLeague",
+}
+
+
 def _format_sports_alert(prediction: dict) -> str:
-    """Formatea prediccion deportiva segun el formato del spec."""
+    """Formatea predicción deportiva. Soporta market_type h2h y totals."""
     home = _escape_md(prediction.get("home_team", "?"))
     away = _escape_md(prediction.get("away_team", "?"))
-    league = _escape_md(prediction.get("league", "?"))
-    team_to_back = _escape_md(prediction.get("team_to_back", "?"))
+    league_code = prediction.get("league", "?")
+    league = _escape_md(_LEAGUE_LABEL.get(league_code, league_code))
+    sport = prediction.get("sport", "football")
+    market_type = prediction.get("market_type", "h2h")
+    emoji = _SPORT_EMOJI.get(sport, "🏟")
 
     match_date = prediction.get("match_date")
     if hasattr(match_date, "strftime"):
-        date_str = match_date.strftime("%d/%m/%Y %H:%M UTC")
+        date_str = match_date.strftime("%d/%m %H:%M UTC")
     else:
-        date_str = str(match_date)[:16] if match_date else "?"
+        raw = str(match_date or "")
+        date_str = raw[:16].replace("T", " ") if raw else "?"
 
     odds = float(prediction.get("odds", 0))
     edge = float(prediction.get("edge", 0))
     confidence = float(prediction.get("confidence", 0))
     kelly = float(prediction.get("kelly_fraction", 0))
 
-    # signals tiene siempre poisson/elo/form/h2h; factors solo en statistical_model path
-    signals = prediction.get("signals", prediction.get("factors", {}))
-    poisson = float(signals.get("poisson") or 0)
-    elo     = float(signals.get("elo")     or 0)
-    form    = float(signals.get("form")    or 0)
-    h2h     = float(signals.get("h2h")    or 0)
+    header = f"{emoji} SEÑAL DETECTADA\n\n"
+    match_line = f"🏟 {home} vs {away}\n🏆 {league} | 📅 {date_str}\n\n"
 
-    return (
-        f"⚽ SEÑAL DETECTADA\n\n"
-        f"🏟 {home} vs {away}\n"
-        f"🏆 {league} | 📅 {date_str}\n\n"
-        f"✅ Apostar a: *{team_to_back}*\n"
-        f"💰 Cuota: *{odds:.2f}*\n"
-        f"📊 Edge: *+{edge:.1%}* | Confianza: *{confidence:.0%}*\n\n"
-        f"Señales del modelo:\n"
-        f"• Poisson: {poisson:.0%} | ELO: {elo:.0%}\n"
-        f"• Forma: {form:.0%} | H2H: {h2h:.0%}\n\n"
-        f"🧮 Kelly sugerido: {kelly:.1%} del bankroll\n\n"
-        f"⚠️ Apuesta responsablemente. No es asesoramiento financiero."
-    )
+    if market_type == "totals":
+        selection = _escape_md(prediction.get("selection", "Over 2.5"))
+        factors = prediction.get("factors", {})
+        xg_total = factors.get("expected_total", "?")
+        home_xg = factors.get("home_xg")
+        away_xg = factors.get("away_xg")
+        xg_line = ""
+        if home_xg is not None and away_xg is not None:
+            xg_line = f"• xG: {float(home_xg):.2f} + {float(away_xg):.2f} = {float(xg_total):.2f} esp.\n"
+        bet_line = f"✅ Apostar: *{selection} goles @ {odds:.2f}*\n"
+        stats_block = (
+            f"📊 Edge: *+{edge:.1%}* | Confianza: *{confidence:.0%}*\n\n"
+            f"Modelo Poisson:\n"
+            f"{xg_line}"
+        )
+    else:
+        team_to_back = _escape_md(prediction.get("team_to_back", "?"))
+        signals = prediction.get("signals", prediction.get("factors", {}))
+        poisson = float(signals.get("poisson") or 0)
+        elo = float(signals.get("elo") or 0)
+        form = float(signals.get("form") or 0)
+        h2h_sig = float(signals.get("h2h") or 0)
+        bet_line = f"✅ Apostar a: *{team_to_back}* a ganar @ *{odds:.2f}*\n"
+        stats_block = (
+            f"📊 Edge: *+{edge:.1%}* | Confianza: *{confidence:.0%}*\n\n"
+            f"Señales del modelo:\n"
+            f"• Poisson: {poisson:.0%} | ELO: {elo:.0%}\n"
+            f"• Forma: {form:.0%} | H2H: {h2h_sig:.0%}\n"
+        )
+
+    kelly_line = f"\n🧮 Kelly sugerido: {kelly:.1%} del bankroll\n\n"
+    footer = "⚠️ Apuesta responsablemente. No es asesoramiento financiero."
+
+    return header + match_line + bet_line + stats_block + kelly_line + footer
 
 
 def _format_poly_alert(analysis: dict) -> str:

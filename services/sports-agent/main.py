@@ -296,9 +296,8 @@ async def _bg_analyze() -> None:
         for doc in docs:
             enriched = doc.to_dict()
             try:
-                signal = await generate_signal(enriched)
-                if signal is not None:
-                    signals_generated += 1
+                signals = await generate_signal(enriched)
+                signals_generated += len(signals)
             except Exception:
                 logger.error(
                     "analyze: error en generate_signal para %s",

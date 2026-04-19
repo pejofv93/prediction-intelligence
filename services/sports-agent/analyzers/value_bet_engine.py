@@ -34,17 +34,54 @@ _ODDS_API_BASE = "https://api-football-v1.p.rapidapi.com"
 
 # The Odds API — fuente primaria de cuotas
 _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
-_THE_ODDS_LEAGUE_MAP = {
-    # PL eliminada: temporada 24/25 terminada, The Odds API devuelve 404
+
+# The Odds API — sport key map (league field in Firestore → The Odds API sport key)
+# PL eliminada: temporada 24/25 terminada, The Odds API devuelve 404
+_ODDS_SPORT_MAP: dict[str, str] = {
+    # Football — football-data.org competition codes
     "PD":  "soccer_spain_la_liga",
     "BL1": "soccer_germany_bundesliga",
     "BL2": "soccer_germany_bundesliga2",
     "SA":  "soccer_italy_serie_a",
     "FL1": "soccer_france_ligue_one",
+    "FL2": "soccer_france_ligue_two",
+    "CL":  "soccer_uefa_champs_league",
+    "EL":  "soccer_uefa_europa_league",
+    "ECL": "soccer_uefa_europa_conference_league",
+    "PPL": "soccer_portugal_primeira_liga",
+    "DED": "soccer_netherlands_eredivisie",
+    "SD":  "soccer_spain_segunda_division",
+    "SB":  "soccer_italy_serie_b",
+    "TU1": "soccer_turkey_super_league",
+    # Basketball — league strings from api_sports_client.py _SPORT_TO_LEAGUE
+    "NBA":        "basketball_nba",
+    "EUROLEAGUE": "basketball_euroleague",
+    # Tennis — tournament strings (pre-mapped; activate when collector added)
+    "ATP_FRENCH_OPEN": "tennis_atp_french_open",
+    "WTA_FRENCH_OPEN": "tennis_wta_french_open",
+    "ATP_WIMBLEDON":   "tennis_atp_wimbledon",
+    "WTA_WIMBLEDON":   "tennis_wta_wimbledon",
+    "ATP_US_OPEN":     "tennis_atp_us_open",
+    "WTA_US_OPEN":     "tennis_wta_us_open",
+    "ATP_BARCELONA":   "tennis_atp_barcelona_open",
+    "ATP_MUNICH":      "tennis_atp_munich",
+    "WTA_STUTTGART":   "tennis_wta_stuttgart_open",
 }
 
+# Football sport keys where Poisson totals model is applicable
+_FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
+    "soccer_spain_la_liga", "soccer_germany_bundesliga", "soccer_germany_bundesliga2",
+    "soccer_italy_serie_a", "soccer_france_ligue_one", "soccer_france_ligue_two",
+    "soccer_uefa_champs_league", "soccer_uefa_europa_league",
+    "soccer_uefa_europa_conference_league", "soccer_portugal_primeira_liga",
+    "soccer_netherlands_eredivisie", "soccer_spain_segunda_division",
+    "soccer_italy_serie_b", "soccer_turkey_super_league",
+})
+
+_FOOTBALL_TOTALS_LINE: float = 2.5
+
 # Cache en memoria de odds por liga: {sport_key: (fetched_at, [events])}
-# TTL 1h — evita N llamadas a The Odds API para N fixtures de la misma liga en un run
+# Un request obtiene markets=h2h,totals juntos — TTL 1h por liga
 _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
 _LEAGUE_CACHE_TTL = timedelta(hours=1)
 
@@ -173,7 +210,7 @@ async def fetch_bookmaker_odds(
         logger.error("fetch_bookmaker_odds(%s): error leyendo odds_cache", match_id, exc_info=True)
 
     # --- 2. The Odds API (fuente primaria) ---
-    if ODDS_API_KEY and home_team and away_team and league in _THE_ODDS_LEAGUE_MAP:
+    if ODDS_API_KEY and home_team and away_team and league in _ODDS_SPORT_MAP:
         odds_result = await _fetch_the_odds_api(match_id, home_team, away_team, league, now)
         if odds_result:
             return odds_result
@@ -271,7 +308,7 @@ async def _fetch_the_odds_api(
     Cache en memoria por liga (TTL 1h): un run con N fixtures de la misma liga
     hace 1 sola llamada HTTP en vez de N.
     """
-    sport_key = _THE_ODDS_LEAGUE_MAP[league]
+    sport_key = _ODDS_SPORT_MAP[league]
 
     # --- Cache en memoria por liga ---
     events = await _get_league_events(sport_key, match_id, now)
@@ -317,7 +354,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             resp = await client.get(url, params={
                 "apiKey": ODDS_API_KEY,
                 "regions": "eu",
-                "markets": "h2h",
+                "markets": "h2h,totals",
                 "bookmakers": "bet365,pinnacle,unibet",
                 "oddsFormat": "decimal",
             })
@@ -377,6 +414,75 @@ def _parse_the_odds_event(event: dict) -> dict | None:
         return None
     except Exception:
         logger.error("_parse_the_odds_event: error", exc_info=True)
+        return None
+
+
+def _parse_totals_event(event: dict, line: float = _FOOTBALL_TOTALS_LINE) -> dict | None:
+    """Extrae cuotas over/under para una línea específica de un evento de The Odds API."""
+    try:
+        bookmakers = event.get("bookmakers", [])
+        if not bookmakers:
+            return None
+        for bk in bookmakers:
+            for market in bk.get("markets", []):
+                if market.get("key") != "totals":
+                    continue
+                over_odds = under_odds = None
+                actual_line = line
+                for outcome in market.get("outcomes", []):
+                    name = outcome.get("name", "")
+                    # The Odds API usa "point" para la línea en totals
+                    pt = outcome.get("point") or outcome.get("description")
+                    try:
+                        pt_val = float(pt) if pt is not None else None
+                    except (TypeError, ValueError):
+                        pt_val = None
+                    price = float(outcome.get("price", 0))
+                    if pt_val is not None and abs(pt_val - line) < 0.26:
+                        if name == "Over":
+                            over_odds = price
+                            actual_line = pt_val
+                        elif name == "Under":
+                            under_odds = price
+                if over_odds and under_odds:
+                    return {
+                        "bookmaker": bk.get("key", "pinnacle"),
+                        "line": actual_line,
+                        "over_odds": over_odds,
+                        "under_odds": under_odds,
+                    }
+        return None
+    except Exception:
+        logger.error("_parse_totals_event: error", exc_info=True)
+        return None
+
+
+def _calculate_totals_prob(enriched_match: dict, line: float = _FOOTBALL_TOTALS_LINE) -> dict | None:
+    """
+    Calcula P(over/under line goles) usando el modelo Poisson bivariado.
+    Requiere home_xg y away_xg del enriquecedor (solo fútbol con modelo Poisson completo).
+    """
+    from scipy.stats import poisson as _poisson
+    home_xg = enriched_match.get("home_xg")
+    away_xg = enriched_match.get("away_xg")
+    if home_xg is None or away_xg is None:
+        return None
+    try:
+        expected_total = float(home_xg) + float(away_xg)
+        if expected_total <= 0:
+            return None
+        floor_line = int(line)  # 2 para línea 2.5
+        prob_under_or_equal = sum(_poisson.pmf(k, expected_total) for k in range(floor_line + 1))
+        over_prob = max(0.0, min(1.0, 1.0 - prob_under_or_equal))
+        under_prob = max(0.0, min(1.0, prob_under_or_equal))
+        return {
+            "over_prob": round(over_prob, 4),
+            "under_prob": round(under_prob, 4),
+            "expected_total": round(expected_total, 2),
+            "line": line,
+        }
+    except Exception:
+        logger.error("_calculate_totals_prob: error", exc_info=True)
         return None
 
 
@@ -504,7 +610,7 @@ async def _send_telegram_alert(prediction: dict) -> bool:
         return False
 
 
-async def generate_signal(enriched_match: dict) -> dict | None:
+async def generate_signal(enriched_match: dict) -> list[dict]:
     """
     Pipeline completo de generacion de senal para un partido enriquecido.
     Analiza home y away por separado y elige el mejor edge.
@@ -518,7 +624,7 @@ async def generate_signal(enriched_match: dict) -> dict | None:
        - kelly_criterion()
        - Guarda en Firestore predictions
        - Si edge > SPORTS_ALERT_EDGE: envia alerta Telegram
-    7. Devuelve prediction dict o None si no hay edge suficiente
+    7. Devuelve lista de predictions (h2h y/o totals); lista vacia si no hay edge suficiente
     """
     match_id = str(enriched_match.get("match_id", ""))
     sport = enriched_match.get("sport", "football")
@@ -554,7 +660,7 @@ async def generate_signal(enriched_match: dict) -> dict | None:
             "(poisson=None, form=50/50 default, h2h=0)",
             match_id,
         )
-        return None
+        return []
 
 
     # Determinar data_source segun si hay modelo estadistico
@@ -579,7 +685,7 @@ async def generate_signal(enriched_match: dict) -> dict | None:
             "generate_signal(%s): sin cuotas reales de bookmaker — partido descartado (%s vs %s | %s)",
             match_id, home_team, away_team, league,
         )
-        return None
+        return []
 
     home_odds = odds_data["home_odds"]
     away_odds = odds_data["away_odds"]
@@ -610,15 +716,16 @@ async def generate_signal(enriched_match: dict) -> dict | None:
             "generate_signal(%s): edge=%.3f conf=%.3f — debajo del umbral",
             match_id, best_edge, best_confidence,
         )
-        return None
+        return []
 
     # Calidad de datos: si es partial, reducir confianza un 10%
     if data_quality == "partial":
         best_confidence = round(max(0.0, best_confidence * 0.9), 4)
         if best_confidence <= SPORTS_MIN_CONFIDENCE:
-            return None
+            return []
 
     kelly = kelly_criterion(best_edge, best_odds)
+    results: list[dict] = []
 
     # Construir factors segun data_source
     if data_source == "statistical_model":
@@ -641,6 +748,7 @@ async def generate_signal(enriched_match: dict) -> dict | None:
         "away_team": str(away_team),
         "sport": sport,
         "league": league,
+        "market_type": "h2h",
         "data_source": data_source,
         "match_date": match_date,
         "team_to_back": team_to_back,
@@ -679,7 +787,94 @@ async def generate_signal(enriched_match: dict) -> dict | None:
             except Exception:
                 logger.error("generate_signal(%s): error marcando alerted=True", match_id, exc_info=True)
 
-    return prediction
+    results.append(prediction)
+
+    # --- Señal de totals (solo fútbol con modelo Poisson) ---
+    sport_key = _ODDS_SPORT_MAP.get(league, "")
+    if sport_key in _FOOTBALL_SPORT_KEYS:
+        totals_probs = _calculate_totals_prob(enriched_match)
+        if totals_probs:
+            totals_odds = None
+            # Buscar totals en el evento cacheado de The Odds API
+            cached_league = _LEAGUE_ODDS_CACHE.get(sport_key)
+            if cached_league:
+                _, events = cached_league
+                for ev in events:
+                    ah = ev.get("home_team", "")
+                    aa = ev.get("away_team", "")
+                    if _teams_match(str(home_team), ah) and _teams_match(str(away_team), aa):
+                        totals_odds = _parse_totals_event(ev)
+                        break
+
+            if totals_odds:
+                line = totals_odds["line"]
+                over_p = totals_probs["over_prob"]
+                under_p = totals_probs["under_prob"]
+                over_edge = calculate_edge(over_p, totals_odds["over_odds"])
+                under_edge = calculate_edge(under_p, totals_odds["under_odds"])
+
+                if over_edge >= under_edge and over_edge > SPORTS_MIN_EDGE:
+                    sel, sel_prob, sel_odds, sel_edge = "Over", over_p, totals_odds["over_odds"], over_edge
+                elif under_edge > over_edge and under_edge > SPORTS_MIN_EDGE:
+                    sel, sel_prob, sel_odds, sel_edge = "Under", under_p, totals_odds["under_odds"], under_edge
+                else:
+                    sel = None
+
+                if sel:
+                    sel_confidence = max(0.0, 1.0 - abs(over_p - 0.5) * 2) if sel == "Over" else max(0.0, 1.0 - abs(under_p - 0.5) * 2)
+                    sel_confidence = round(max(0.0, min(1.0, sel_confidence)), 4)
+                    if sel_confidence > SPORTS_MIN_CONFIDENCE:
+                        sel_kelly = kelly_criterion(sel_edge, sel_odds)
+                        totals_pred = {
+                            "match_id": f"{match_id}_totals",
+                            "home_team": str(home_team),
+                            "away_team": str(away_team),
+                            "sport": sport,
+                            "league": league,
+                            "market_type": "totals",
+                            "selection": f"{sel} {line}",
+                            "line": line,
+                            "bookmaker": totals_odds["bookmaker"],
+                            "odds": sel_odds,
+                            "calculated_prob": sel_prob,
+                            "edge": sel_edge,
+                            "confidence": sel_confidence,
+                            "kelly_fraction": sel_kelly,
+                            "factors": {
+                                "expected_total": totals_probs["expected_total"],
+                                "home_xg": enriched_match.get("home_xg"),
+                                "away_xg": enriched_match.get("away_xg"),
+                            },
+                            "signals": {},
+                            "data_source": "poisson_totals",
+                            "match_date": match_date,
+                            "weights_version": weights_version,
+                            "created_at": datetime.now(timezone.utc),
+                            "result": None,
+                            "correct": None,
+                            "error_type": None,
+                        }
+                        try:
+                            col("predictions").document(f"{match_id}_totals").set(totals_pred)
+                            logger.info(
+                                "generate_signal(%s): %s %.1f @ %.2f | edge=%.1f%% conf=%.0f%%",
+                                match_id, sel, line, sel_odds, sel_edge * 100, sel_confidence * 100,
+                            )
+                        except Exception:
+                            logger.error("generate_signal(%s): error guardando totals prediction", match_id, exc_info=True)
+
+                        if sel_edge > SPORTS_ALERT_EDGE:
+                            totals_payload = {**totals_pred, "match_date": str(totals_pred.get("match_date", "")[:16] if totals_pred.get("match_date") else "?")}
+                            actually_sent = await _send_telegram_alert(totals_payload)
+                            if actually_sent:
+                                try:
+                                    col("predictions").document(f"{match_id}_totals").update({"alerted": True})
+                                except Exception:
+                                    pass
+
+                        results.append(totals_pred)
+
+    return results
 
 
 def _get_weights_version() -> int:
@@ -702,7 +897,9 @@ def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:
         **prediction,
         "home_team": prediction.get("home_team", ""),
         "away_team": prediction.get("away_team", ""),
-        "match_date": str(prediction.get("match_date", "")),
+        "match_date": str(prediction.get("match_date", ""))[:16],
+        "sport": prediction.get("sport", "football"),
+        "market_type": prediction.get("market_type", "h2h"),
         "poisson": signals.get("poisson"),
         "elo": signals.get("elo"),
         "form": signals.get("form"),
