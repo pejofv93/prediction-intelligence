@@ -83,7 +83,7 @@ async def _bg_scan() -> None:
         from scanner import fetch_active_markets
         from price_tracker import save_price_snapshot
 
-        markets = await fetch_active_markets(limit=50, min_volume=10000)
+        markets = await fetch_active_markets(limit=50, min_volume=1000)
         if not markets:
             logger.warning("scan: ningun mercado obtenido")
             return
