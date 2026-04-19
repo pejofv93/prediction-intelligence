@@ -10,13 +10,22 @@ from shared.groq_client import GROQ_CALL_DELAY
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "Eres un analista experto en mercados de prediccion. "
-    "Se te proporciona un mercado de Polymarket con datos estadisticos completos: "
-    "historial de precios, order book, smart money, correlaciones y sentiment de noticias. "
-    "Integra TODOS los datos. Responde SOLO en JSON: "
+    "Eres un analista cuantitativo especializado en encontrar ineficiencias en mercados de prediccion. "
+    "Tu objetivo es detectar DIVERGENCIAS entre el precio de mercado y la probabilidad real. "
+    "Los mercados de Polymarket son frecuentemente INEFICIENTES: "
+    "el precio YES no refleja correctamente la probabilidad real por sesgos cognitivos, "
+    "baja liquidez, reaccion exagerada a noticias recientes o manipulacion de order book. "
+    "BUSCA ACTIVAMENTE estas ineficiencias. "
+    "Si el precio YES es 0.30 pero los fundamentales apuntan a 0.45, edge = +0.15 — es una oportunidad. "
+    "Si el precio YES es 0.70 pero la evidencia es debil, edge = -0.15 — es oportunidad en NO. "
+    "No seas conservador: los mercados eficientes no existen en Polymarket. "
+    "Analiza: (1) buy_pressure del orderbook vs precio, (2) momentum del precio, "
+    "(3) smart money, (4) sentiment de noticias vs precio, (5) arbitrage signals. "
+    "Responde SOLO en JSON valido: "
     '{"real_prob": float, "edge": float, "confidence": float, '
     '"trend": "RISING|FALLING|STABLE", "recommendation": "BUY_YES|BUY_NO|PASS|WATCH", '
-    '"key_factors": list[str], "reasoning": string}'
+    '"key_factors": list[str], "reasoning": string} '
+    "donde edge = real_prob - market_price_yes (positivo = comprar YES, negativo = comprar NO)."
 )
 
 
@@ -93,8 +102,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"Sentiment noticias: score={news.get('score', 0):.2f}, "
         f"trend={news.get('trend', 'NO_DATA')}, "
         f"titulares={news.get('headlines', [])[:2]}\n"
-        f"\nAnaliza todos estos datos y estima la probabilidad real de YES. "
-        f"Proporciona edge = real_prob - {price_yes:.3f}."
+        f"\nEl precio de mercado YES = {price_yes:.3f}. "
+        f"Estima la probabilidad REAL de YES basandote en todos los datos. "
+        f"Si buy_pressure > 0.6 y momentum es RISING, el mercado puede estar subvaluado. "
+        f"Si buy_pressure < 0.4 y momentum es FALLING, puede estar sobrevaluado. "
+        f"Si smart_money = True, hay informacion privilegiada — ajusta real_prob significativamente. "
+        f"Si arbitrage.detected = True, hay ineficiencia confirmada — usa inefficiency como lower bound del edge. "
+        f"Sé explícito sobre la divergencia: edge = real_prob - {price_yes:.3f}. "
+        f"Un edge de 0.00 o cercano a cero indica mercado eficiente — justificalo con argumentos solidos."
     )
 
     # Llamada a Groq con manejo de JSON mal formateado

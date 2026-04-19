@@ -18,7 +18,7 @@ _HTTP_TIMEOUT = 20.0
 
 
 async def fetch_active_markets(
-    limit: int = 50, min_volume: float = 10000
+    limit: int = 50, min_volume: float = 1000
 ) -> list[dict]:
     """
     GET /markets?active=true&order=volume24hr&limit={limit}
