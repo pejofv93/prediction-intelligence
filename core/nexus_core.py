@@ -462,6 +462,26 @@ class NexusCore:
             except Exception as _de:
                 logger.warning(f"QG check 5: ffprobe duración falló ({_de}) — saltando")
 
+        # 6. Audio del vídeo no es silencio (detecta Coqui truncado + fallback silencioso)
+        audio_path = getattr(ctx, "audio_path", "") or ""
+        if audio_path and Path(audio_path).exists():
+            try:
+                vol_probe = subprocess.run(
+                    ['ffmpeg', '-i', audio_path, '-af', 'volumedetect', '-f', 'null', '/dev/null'],
+                    capture_output=True, text=True, timeout=30,
+                )
+                output = vol_probe.stderr
+                import re as _re
+                m = _re.search(r'mean_volume:\s*([-\d.]+)\s*dB', output)
+                if m:
+                    mean_vol = float(m.group(1))
+                    if mean_vol < -50.0:
+                        failures.append(f"Audio silencioso: {mean_vol:.1f}dB — TTS falló, no se publica")
+                    else:
+                        logger.info(f"✅ QG check 6 — Audio nivel {mean_vol:.1f}dB OK")
+            except Exception as _ve:
+                logger.warning(f"QG check 6: volumedetect falló ({_ve}) — saltando")
+
         passed = len(failures) == 0
 
         if passed:

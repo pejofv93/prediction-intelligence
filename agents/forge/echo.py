@@ -750,6 +750,26 @@ class ECHO(BaseAgent):
 
         return voice_id
 
+    # ── gTTS (Google TTS — fallback Railway, voz española decente) ────────────
+
+    def _synthesize_gtts(self, text: str, output_path: str) -> str:
+        """
+        Síntesis con gTTS (Google TTS). Funciona desde IPs Railway.
+        Voz española estándar de Google — mejor que pyttsx3/espeak.
+        gTTS no soporta velocidad variable; acepta texto largo sin límite.
+        """
+        from gtts import gTTS
+
+        tts = gTTS(text=text, lang='es', slow=False)
+        tts.save(output_path)
+
+        out = Path(output_path)
+        if not out.exists() or out.stat().st_size < 1024:
+            raise RuntimeError(
+                f"gTTS: MP3 vacío (size={out.stat().st_size if out.exists() else 0})"
+            )
+        return "gTTS (es)"
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _estimate_duration(self, script: str) -> float:
@@ -832,10 +852,10 @@ class ECHO(BaseAgent):
             )
 
             # ── Cadena TTS: Coqui → silencio-ffmpeg (en Railway)
-            # En Railway: edge-tts está bloqueado y pyttsx3/espeak da voz robótica
-            # que supera el quality gate y se sube a YouTube. Si Coqui falla en
-            # Railway → silencio → quality gate bloquea → no se sube nada.
-            # En local: cadena completa Coqui → edge-tts → pyttsx3 → silencio.
+            # Cadena TTS: Coqui → gTTS → silencio
+            # En Railway: edge-tts bloqueado (403), pyttsx3 robótico.
+            # gTTS (Google TTS) funciona desde IPs Railway y da voz española decente.
+            # En local: Coqui → edge-tts → pyttsx3 → silencio.
             _on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PUBLIC_DOMAIN"))
             mode_str = getattr(ctx, "mode", "") or ""
 
@@ -847,7 +867,7 @@ class ECHO(BaseAgent):
                      "-t", str(duration_secs), "-q:a", "9", "-acodec", "libmp3lame", output_path],
                     check=True, capture_output=True,
                 )
-                self.logger.warning(f"Audio silencioso ({duration_secs}s) — quality gate bloqueará si Coqui falla")
+                self.logger.warning(f"Audio silencioso ({duration_secs}s) — quality gate detectará y bloqueará")
                 return "silencio-ffmpeg"
 
             try:
@@ -859,11 +879,19 @@ class ECHO(BaseAgent):
             except Exception as coqui_err:
                 self.logger.warning(f"Coqui TTS fallo: {coqui_err}")
                 if _on_railway:
-                    # En Railway no usamos pyttsx3 (voz robótica) ni edge-tts (bloqueado)
-                    console.print("[red]Coqui falló en Railway — audio silencioso (quality gate bloqueará)[/]")
-                    engine_used = _fallback_silence()
+                    # En Railway: Coqui falla → gTTS (voz española Google, sin censura IP)
+                    console.print("[yellow]Coqui falló en Railway — probando gTTS (Google)...[/]")
+                    try:
+                        gtts_engine = self._synthesize_gtts(clean_script, output_path)
+                        self.logger.info(f"Audio generado con gTTS")
+                        engine_used = gtts_engine
+                        console.print(f"[green]gTTS OK:[/] voz española Google")
+                    except Exception as gtts_err:
+                        self.logger.warning(f"gTTS falló: {gtts_err} — audio silencioso")
+                        console.print("[red]gTTS falló — audio silencioso (quality gate bloqueará)[/]")
+                        engine_used = _fallback_silence()
                 else:
-                    # En local: intentar edge-tts → pyttsx3 → silencio
+                    # En local: edge-tts → pyttsx3 → silencio
                     console.print("[yellow]Coqui no disponible. Probando edge-tts...[/]")
                     try:
                         voice_used = self._synthesize_edge_with_retry(clean_script, output_path, rate, pitch)
