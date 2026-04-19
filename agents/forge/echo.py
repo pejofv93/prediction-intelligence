@@ -526,20 +526,58 @@ class ECHO(BaseAgent):
                 check=True, capture_output=True,
             )
 
+        # Coqui VITS tiene un límite de ~400 chars por llamada — textos más
+        # largos se truncan silenciosamente a 1-2s sin lanzar excepción.
+        # _chunk_text() divide al límite de oración más cercano.
+        def _chunk_text(long_text: str, max_chars: int = 400) -> list:
+            sentences = re.split(r'(?<=[.!?])\s+', long_text.strip())
+            chunks, current = [], ""
+            for sent in sentences:
+                if len(current) + len(sent) + 1 <= max_chars:
+                    current = (current + " " + sent).strip()
+                else:
+                    if current:
+                        chunks.append(current)
+                    if len(sent) > max_chars:
+                        words = sent.split()
+                        sub = ""
+                        for w in words:
+                            if len(sub) + len(w) + 1 <= max_chars:
+                                sub = (sub + " " + w).strip()
+                            else:
+                                if sub:
+                                    chunks.append(sub)
+                                sub = w
+                        current = sub
+                    else:
+                        current = sent
+            if current:
+                chunks.append(current)
+            return chunks or [long_text[:max_chars]]
+
+        def _synth_text_chunked(seg_text: str) -> list:
+            """Sintetiza un segmento, chunkeando si supera 400 chars. Devuelve WAVs."""
+            chunks = _chunk_text(seg_text) if len(seg_text) > 400 else [seg_text]
+            result = []
+            for chunk in chunks:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
+                ) as tmp:
+                    chunk_path = tmp.name
+                tmp_files.append(chunk_path)
+                _synth_segment(chunk, chunk_path)
+                if Path(chunk_path).exists() and Path(chunk_path).stat().st_size > 0:
+                    result.append(chunk_path)
+            return result
+
         try:
             # Dividir texto en segmentos separados por pausas
             pattern = re.compile(r'(\|\|P\|\||\|\|PL\|\|)')
             parts = pattern.split(text)
 
             if len(parts) == 1:
-                # Sin pausas: síntesis directa
-                with tempfile.NamedTemporaryFile(
-                    suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
-                ) as tmp:
-                    tmp_wav = tmp.name
-                tmp_files.append(tmp_wav)
-                _synth_segment(text, tmp_wav)
-                wav_to_concat = [tmp_wav]
+                # Sin pausas: síntesis directa con chunking
+                wav_to_concat = _synth_text_chunked(text)
             else:
                 # Con pausas: sintetizar segmentos e intercalar silencios
                 wav_to_concat = []
@@ -554,14 +592,7 @@ class ECHO(BaseAgent):
                         _make_silence(dur, sil_path)
                         wav_to_concat.append(sil_path)
                     elif part.strip():
-                        with tempfile.NamedTemporaryFile(
-                            suffix=".wav", delete=False, dir=OUTPUT_AUDIO_DIR
-                        ) as tmp:
-                            seg_path = tmp.name
-                        tmp_files.append(seg_path)
-                        _synth_segment(part, seg_path)
-                        if Path(seg_path).exists() and Path(seg_path).stat().st_size > 0:
-                            wav_to_concat.append(seg_path)
+                        wav_to_concat.extend(_synth_text_chunked(part))
 
             if not wav_to_concat:
                 raise RuntimeError("Coqui: ningún segmento sintetizado")
@@ -631,6 +662,27 @@ class ECHO(BaseAgent):
                 f"Coqui: MP3 vacío tras conversión "
                 f"(size={out.stat().st_size if out.exists() else 0})"
             )
+
+        # Guard: verificar duración real del MP3 generado.
+        # Si Coqui truncó silenciosamente (VITS max-length), el audio será
+        # muy corto (≤10s) aunque el script tenga 800+ palabras.
+        try:
+            _dur_check = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'default=noprint_wrappers=1:nokey=1', output_path],
+                capture_output=True, text=True, timeout=15,
+            )
+            if _dur_check.returncode == 0 and _dur_check.stdout.strip():
+                _audio_dur = float(_dur_check.stdout.strip())
+                _word_count = len(text.split())
+                _min_expected = max(10.0, _word_count / 6.0)  # ~6 palabras/s mínimo
+                if _audio_dur < _min_expected:
+                    raise RuntimeError(
+                        f"Coqui: audio truncado ({_audio_dur:.1f}s) para {_word_count} palabras "
+                        f"— esperado ≥{_min_expected:.0f}s. Posible límite VITS superado."
+                    )
+        except (FileNotFoundError, ValueError):
+            pass  # ffprobe no disponible localmente — Railway lo tiene
 
         return self._COQUI_MODEL_NAME
 
