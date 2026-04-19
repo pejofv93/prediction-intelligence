@@ -1205,15 +1205,33 @@ async def force_pipeline(request: Request):
     if provided != cron_secret:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
+    # Topic y modo opcionales en el body JSON o query params
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    forced_topic = (
+        body.get("topic", "")
+        or request.query_params.get("topic", "")
+        or ""
+    )
+    forced_mode = (
+        body.get("mode", "")
+        or request.query_params.get("mode", "")
+        or "analisis"
+    )
+
     # Lanzar pipeline en background (no bloquear la respuesta HTTP)
-    def _bg():
+    def _bg(topic: str, mode: str):
         try:
             cfg = _load_config()
             db = _get_db()
             sys.path.insert(0, str(BASE_DIR))
             from core.nexus_core import NexusCore
             nexus = NexusCore(cfg, db)
-            ctx = nexus.run_pipeline("análisis crypto diario", "analisis", dry_run=False)
+            # Si no se pasa topic, THEMIS lo elige desde noticias del día
+            ctx = nexus.run_pipeline(topic or "análisis crypto diario", mode, dry_run=False)
             console.print(
                 f"[green]force-pipeline completado: {ctx.pipeline_id[:8]} "
                 f"errores={len(ctx.errors)}[/]"
@@ -1221,6 +1239,11 @@ async def force_pipeline(request: Request):
         except Exception as exc:
             console.print(f"[red]force-pipeline error: {exc}[/]")
 
-    t = threading.Thread(target=_bg, daemon=True)
+    t = threading.Thread(target=_bg, args=(forced_topic, forced_mode), daemon=True)
     t.start()
-    return JSONResponse({"status": "launched", "msg": "Pipeline starting in background"})
+    return JSONResponse({
+        "status": "launched",
+        "topic": forced_topic or "(THEMIS elige desde noticias)",
+        "mode": forced_mode,
+        "msg": "Pipeline starting in background",
+    })
