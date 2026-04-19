@@ -34,11 +34,18 @@ POLY_MIN_CONFIDENCE = 0.65
 
 # Ligas de futbol — football-data.org (modelo Poisson+ELO completo)
 SUPPORTED_FOOTBALL_LEAGUES = {
-    "PL": 2021,    # Premier League
-    "PD": 2014,    # La Liga
+    "PL":  2021,   # Premier League
+    "PD":  2014,   # La Liga
     "BL1": 2002,   # Bundesliga
-    "SA": 2019,    # Serie A
-    # CL: no disponible en free tier de football-data.org
+    "SA":  2019,   # Serie A
+    # Tier gratuito adicional
+    "CL":  2001,   # UEFA Champions League
+    "DED": 2003,   # Eredivisie
+    "EC":  2018,   # European Championship
+    "WC":  2000,   # FIFA World Cup
+    "ELC": 2016,   # Championship
+    "BSA": 2013,   # Brasileirao Serie A
+    "CLI": 2152,   # Copa Libertadores
 }
 
 # Deportes adicionales — API-Sports (misma key FOOTBALL_RAPID_API_KEY) + Groq (analisis IA)
@@ -56,6 +63,35 @@ SUPPORTED_SPORTS_APISPORTS = {
 # Ensemble: stats_score (0.60) + groq_estimate (0.40)
 
 MIN_MATCHES_TO_FIT = 5  # futbol: free tier da 10 partidos; 5 es minimo para Poisson
+
+# football-data.org: competiciones gratuitas adicionales (IDs oficiales)
+SUPPORTED_FOOTBALL_LEAGUES_EXTRA = {
+    "CL":  2001,   # UEFA Champions League
+    "DED": 2003,   # Eredivisie
+    "EC":  2018,   # European Championship
+    "WC":  2000,   # FIFA World Cup
+    "ELC": 2016,   # Championship
+    "BSA": 2013,   # Brasileirao Serie A
+    "CLI": 2152,   # Copa Libertadores
+}
+
+# AllSportsApi — fútbol de selecciones y sudamérica
+# host: allsportsapi2.p.rapidapi.com
+ALLSPORTS_FOOTBALL_LEAGUES = {
+    "NL":   1014,  # UEFA Nations League
+    "WCQ":  1182,  # WC 2026 Qualifiers Europe
+    "ARG":   307,  # Liga Argentina
+    "CSUD":   11,  # Copa Sudamericana
+    "CAM":     9,  # Copa America
+}
+# Mapeo código interno → nombre en Firestore league field
+ALLSPORTS_LEAGUE_NAMES = {
+    "NL":   "NL",
+    "WCQ":  "WCQ",
+    "ARG":  "ARG",
+    "CSUD": "CSUD",
+    "CAM":  "CAM",
+}
 
 LEARNING_RATE = 0.05
 DEFAULT_WEIGHTS = {

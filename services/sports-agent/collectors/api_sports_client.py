@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Base URLs por deporte (todas requieren X-RapidAPI-Key y X-RapidAPI-Host)
 API_SPORTS_HOSTS = {
-    "basketball": "api-basketball.p.rapidapi.com",
+    "basketball": "basketball-arbitrage.p.rapidapi.com",
     "american-football": "api-american-football.p.rapidapi.com",
     "baseball": "api-baseball.p.rapidapi.com",
     "hockey": "api-hockey.p.rapidapi.com",

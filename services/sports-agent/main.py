@@ -104,7 +104,13 @@ async def _bg_collect() -> None:
         # --- 1. Futbol (football-data.org) ---
         await _collect_football()
 
-        # --- 2. Otros deportes (API-Sports) ---
+        # --- 2. Futbol extra (AllSportsApi: NL, WCQ, Argentina, Copa Sud, Copa Am) ---
+        await _collect_allsports_football()
+
+        # --- 3. Tenis (Tennis API ATP/WTA ITF) ---
+        await _collect_tennis()
+
+        # --- 4. Otros deportes (Basketball API, NFL, etc.) ---
         await _collect_other_sports()
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
@@ -179,6 +185,46 @@ async def _collect_football() -> None:
         "collect.football: %d equipos, %d pares H2H procesados",
         len(team_ids_seen), len(h2h_pairs_seen),
     )
+
+
+async def _collect_allsports_football() -> None:
+    """Recolecta fútbol de selecciones y sudamérica via AllSportsApi."""
+    try:
+        from collectors.allsports_client import get_upcoming_matches
+        from collectors.firestore_writer import save_upcoming_matches
+
+        if not os.environ.get("FOOTBALL_RAPID_API_KEY"):
+            logger.warning("collect.allsports: FOOTBALL_RAPID_API_KEY no configurada")
+            return
+
+        matches = await get_upcoming_matches(days=7)
+        if matches:
+            await save_upcoming_matches(matches)
+            logger.info("collect.allsports: %d partidos guardados", len(matches))
+        else:
+            logger.info("collect.allsports: sin partidos próximos")
+    except Exception:
+        logger.error("collect.allsports: error no controlado", exc_info=True)
+
+
+async def _collect_tennis() -> None:
+    """Recolecta partidos de tenis ATP/WTA via Tennis API."""
+    try:
+        from collectors.tennis_collector import collect_tennis_matches
+        from collectors.firestore_writer import save_upcoming_matches
+
+        if not os.environ.get("FOOTBALL_RAPID_API_KEY"):
+            logger.warning("collect.tennis: FOOTBALL_RAPID_API_KEY no configurada")
+            return
+
+        matches = await collect_tennis_matches(days=7)
+        if matches:
+            await save_upcoming_matches(matches)
+            logger.info("collect.tennis: %d partidos guardados", len(matches))
+        else:
+            logger.info("collect.tennis: sin torneos activos o sin partidos")
+    except Exception:
+        logger.error("collect.tennis: error no controlado", exc_info=True)
 
 
 async def _collect_other_sports() -> None:

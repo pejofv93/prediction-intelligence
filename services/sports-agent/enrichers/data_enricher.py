@@ -33,6 +33,9 @@ _LEAGUE_SPORT_MAP = {
     "NHL": "nhl",
     "UFC": "mma",
     "MMA": "mma",
+    "ATP": "tennis",
+    "WTA": "tennis",
+    "TENNIS": "tennis",
 }
 
 
