@@ -27,30 +27,29 @@ jobs:
         run: |
           python - <<'EOF'
           from google.cloud import firestore
+          PREFIX = "prod"
           db = firestore.Client(project="prediction-intelligence")
-          docs = list(db.collection("alerts_sent").stream())
+          docs = list(db.collection(f"{PREFIX}alerts_sent").stream())
           for doc in docs:
               doc.reference.delete()
-          print(f"alerts_sent: {len(docs)} documentos borrados")
+          print(f"{PREFIX}alerts_sent: {len(docs)} documentos borrados")
           EOF
 
-      - name: Trigger run-analyze
+      - name: Trigger run-analyze (sync — espera completion)
         run: |
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-analyze" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 30 --retry 3 --retry-delay 5 \
+            --max-time 300 \
+            --no-buffer \
             --fail --silent --show-error
-          echo "  → run-analyze aceptado (202)"
-
-      - name: Wait for analyze to complete
-        run: sleep 45
 
       - name: Count signals in predictions
         run: |
           python - <<'EOF'
           from google.cloud import firestore
+          PREFIX = "prod"
           db = firestore.Client(project="prediction-intelligence")
-          docs = list(db.collection("predictions").stream())
+          docs = list(db.collection(f"{PREFIX}predictions").stream())
 
           total = len(docs)
           by_sport = {}
@@ -63,7 +62,7 @@ jobs:
               if "h2h" not in d.get("signals", {}):
                   h2h_excluido += 1
 
-          print(f"\n=== SEÑALES EN PREDICTIONS ({total} total) ===")
+          print(f"\n=== SEÑALES EN {PREFIX}predictions ({total} total) ===")
           for sport, count in sorted(by_sport.items(), key=lambda x: -x[1]):
               print(f"  {sport:15s}: {count}")
           print(f"\nH2H excluido del ensemble : {h2h_excluido} / {total}")

@@ -28,18 +28,21 @@ jobs:
 
           PROJECT = "prediction-intelligence"
           db = firestore.Client(project=PROJECT)
+          PREFIX = "prod"   # FIRESTORE_COLLECTION_PREFIX en Cloud Run
 
           DEFAULT_WEIGHTS = {"poisson": 0.40, "elo": 0.25, "form": 0.20, "h2h": 0.15}
           MIN_EDGE    = 0.08
           MIN_CONF    = 0.65
           DEFAULT_ELO = 1500.0
 
+          def col(name): return db.collection(f"{PREFIX}{name}")
+
           # ── 1. team_stats: distribución de raw_matches ──────────────────────
           print("\n" + "="*60)
-          print("1. TEAM_STATS — raw_matches por equipo")
+          print(f"1. {PREFIX}team_stats — raw_matches por equipo")
           print("="*60)
 
-          team_docs  = list(db.collection("team_stats").stream())
+          team_docs  = list(col("team_stats").stream())
           buckets    = {0: 0, "1-2": 0, "3-4": 0, "5-9": 0, "10+": 0}
           team_rm    = {}   # team_id → raw_matches count
 
@@ -69,7 +72,7 @@ jobs:
           print("2. ENRICHED_MATCHES — cobertura con distintos umbrales")
           print("="*60)
 
-          enriched_docs = list(db.collection("enriched_matches").stream())
+          enriched_docs = list(col("enriched_matches").stream())
           total_em      = len(enriched_docs)
 
           both5 = both3 = both1 = poisson_not_none = 0

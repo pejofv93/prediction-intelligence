@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,39 +51,62 @@ async def status() -> dict:
     }
 
 
+async def _stream_job(coro_func, job_name: str):
+    """
+    Ejecuta coro_func() manteniendo la conexion HTTP abierta hasta completion.
+    Emite 'ping Xs' cada 30s para que Cloud Run no mate el proceso (min-instances=0).
+    El caller recibe 200 con stream de texto; la ultima linea es 'done Xs' o 'error: ...'.
+    """
+    task = asyncio.create_task(coro_func())
+    start = datetime.now(timezone.utc)
+    yield f"started: {job_name}\n"
+
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
+        except asyncio.TimeoutError:
+            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+            yield f"ping {elapsed:.0f}s\n"
+        except Exception as exc:
+            yield f"error: {exc}\n"
+            return
+
+    elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+    exc = task.exception()
+    if exc:
+        yield f"error: {exc}\n"
+    else:
+        yield f"done {elapsed:.0f}s\n"
+
+
 @app.post("/run-collect", dependencies=[Depends(verify_token)])
-async def run_collect() -> JSONResponse:
-    """202 inmediato → background: collectors/ → Firestore."""
-    asyncio.create_task(_bg_collect())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "collect"})
+async def run_collect() -> StreamingResponse:
+    """Sincrono: mantiene conexion hasta completion (~10min con rate limit). Pings cada 30s."""
+    return StreamingResponse(_stream_job(_bg_collect, "collect"), media_type="text/plain")
 
 
 @app.post("/run-enrich", dependencies=[Depends(verify_token)])
-async def run_enrich() -> JSONResponse:
-    """202 inmediato → background: enrichers/ → Firestore."""
-    asyncio.create_task(_bg_enrich())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "enrich"})
+async def run_enrich() -> StreamingResponse:
+    """Sincrono: mantiene conexion hasta completion. Pings cada 30s."""
+    return StreamingResponse(_stream_job(_bg_enrich, "enrich"), media_type="text/plain")
 
 
 @app.post("/run-analyze", dependencies=[Depends(verify_token)])
-async def run_analyze() -> JSONResponse:
-    """202 inmediato → background: value_bet_engine → Firestore."""
-    asyncio.create_task(_bg_analyze())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "analyze"})
+async def run_analyze() -> StreamingResponse:
+    """Sincrono: mantiene conexion hasta completion. Pings cada 30s."""
+    return StreamingResponse(_stream_job(_bg_analyze, "analyze"), media_type="text/plain")
 
 
 @app.post("/run-learning", dependencies=[Depends(verify_token)])
-async def run_learning() -> JSONResponse:
-    """202 inmediato → background: learning_engine → Firestore."""
-    asyncio.create_task(_bg_learning())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "learning"})
+async def run_learning() -> StreamingResponse:
+    """Sincrono: mantiene conexion hasta completion. Pings cada 30s."""
+    return StreamingResponse(_stream_job(_bg_learning, "learning"), media_type="text/plain")
 
 
 @app.post("/run-backtest", dependencies=[Depends(verify_token)])
-async def run_backtest() -> JSONResponse:
-    """202 inmediato → background: backtester/backtest.py. Ejecutar UNA SOLA VEZ al arrancar."""
-    asyncio.create_task(_bg_backtest())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "backtest"})
+async def run_backtest() -> StreamingResponse:
+    """Sincrono: ejecutar UNA SOLA VEZ. Puede tardar 30-60min."""
+    return StreamingResponse(_stream_job(_bg_backtest, "backtest"), media_type="text/plain")
 
 
 # ---------------------------------------------------------------------------
