@@ -60,6 +60,14 @@ async def fetch_pending_results() -> list[dict]:
             if match_date is None:
                 continue
 
+            # Parsear string ISO si Firestore lo devuelve como str en lugar de timestamp
+            if isinstance(match_date, str):
+                try:
+                    match_date = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+                except ValueError:
+                    logger.warning("fetch_pending_results: match_date no parseable: %s", match_date)
+                    continue
+
             # Normalizar timezone si es naive
             if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
                 match_date = match_date.replace(tzinfo=timezone.utc)
