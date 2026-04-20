@@ -116,18 +116,20 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
 
     Senales base:
       poisson = poisson_home/away_win  (o 0.5 si None — no-football)
-      elo     = elo_home_win_prob      (o 0.5 si None)
+      elo     = elo_home_win_prob      — SOLO si elo_sufficient=True
       form    = form_score / 100
       h2h     = (h2h_advantage + 1) / 2  — SOLO si h2h_sufficient=True
 
-    Ajustes de calidad:
-      - H2H excluido si h2h_sufficient=False: pesos renormalizados entre las senales restantes.
-      - elo_is_default=True si ambos ELOs son DEFAULT_ELO: señal al caller para penalizar confianza.
+    Señales excluidas cuando no hay datos reales (patrón uniforme):
+      - ELO excluido si ambos equipos tienen ELO=DEFAULT_ELO (1500): nunca actualizado,
+        infla probabilidades de visitantes débiles contra equipos de élite.
+      - H2H excluido si h2h_sufficient=False: lista de partidos directos vacía.
+      En ambos casos los pesos se renormalizan sobre las señales activas.
 
     final_prob = sum(signal * norm_weight) sobre senales activas
     confidence = max(0.0, 1 - std(senales activas))
 
-    Devuelve {"prob", "confidence", "signals", "elo_is_default", "h2h_used"}
+    Devuelve {"prob", "confidence", "signals", "elo_sufficient", "h2h_used"}
     """
     poisson_home = enriched_match.get("poisson_home_win")
     poisson_away = enriched_match.get("poisson_away_win")
@@ -137,10 +139,10 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
     h2h_adv = enriched_match.get("h2h_advantage", 0.0)
     h2h_sufficient = enriched_match.get("h2h_sufficient", True)
 
-    # Fix 2: detectar ELO default (ambos en 1500 → sin información real)
+    # ELO solo aporta información real si al menos uno difiere del default
     home_elo_val = enriched_match.get("home_elo")
     away_elo_val = enriched_match.get("away_elo")
-    elo_is_default = (
+    elo_sufficient = not (
         home_elo_val is not None
         and away_elo_val is not None
         and abs(float(home_elo_val) - DEFAULT_ELO) < 1.0
@@ -153,27 +155,22 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
     elo_home_s = float(elo_home) if elo_home is not None else 0.5
 
     if team == "home":
-        signals = {
-            "poisson": poisson_home_s,
-            "elo":     elo_home_s,
-            "form":    float(home_form) / 100.0,
-        }
-        # Fix 3: H2H solo cuando hay datos reales — si no, se excluye del ensemble
+        signals = {"poisson": poisson_home_s, "form": float(home_form) / 100.0}
+        if elo_sufficient:
+            signals["elo"] = elo_home_s
         if h2h_sufficient:
             signals["h2h"] = (float(h2h_adv) + 1.0) / 2.0
     else:  # away
-        signals = {
-            "poisson": poisson_away_s,
-            "elo":     1.0 - elo_home_s,
-            "form":    float(away_form) / 100.0,
-        }
+        signals = {"poisson": poisson_away_s, "form": float(away_form) / 100.0}
+        if elo_sufficient:
+            signals["elo"] = 1.0 - elo_home_s
         if h2h_sufficient:
             signals["h2h"] = 1.0 - (float(h2h_adv) + 1.0) / 2.0
 
     # Clampear todas las senales al rango [0.0, 1.0]
     signals = {k: max(0.0, min(1.0, v)) for k, v in signals.items()}
 
-    # Normalizar pesos a las senales activas (H2H puede estar ausente)
+    # Renormalizar pesos sobre señales activas (ELO y/o H2H pueden estar ausentes)
     raw_weights = {k: weights.get(k, 0.25) for k in signals}
     total_w = sum(raw_weights.values())
     norm_weights = (
@@ -193,7 +190,7 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
         "prob": round(final_prob, 4),
         "confidence": round(confidence, 4),
         "signals": {k: round(v, 4) for k, v in signals.items()},
-        "elo_is_default": elo_is_default,
+        "elo_sufficient": elo_sufficient,
         "h2h_used": h2h_sufficient,
     }
 
@@ -711,14 +708,12 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     result_home = ensemble_probability(enriched_match, weights, team="home")
     result_away = ensemble_probability(enriched_match, weights, team="away")
 
-    # Fix 2: penalizar confianza 20% si ambos ELOs son DEFAULT (sin historial real)
-    if result_home.get("elo_is_default", False):
+    elo_sufficient = result_home.get("elo_sufficient", True)
+    if not elo_sufficient:
         logger.info(
-            "generate_signal(%s): ambos ELOs en DEFAULT (%d) — confianza reducida 20%%",
-            match_id, DEFAULT_ELO,
+            "generate_signal(%s): ELO en DEFAULT para ambos equipos — señal ELO excluida del ensemble",
+            match_id,
         )
-        result_home["confidence"] = round(max(0.0, result_home["confidence"] * 0.80), 4)
-        result_away["confidence"] = round(max(0.0, result_away["confidence"] * 0.80), 4)
 
     # --- 3. Cuotas ---
     odds_data = await fetch_bookmaker_odds(match_id, home_team=str(home_team), away_team=str(away_team), league=league)
@@ -801,7 +796,9 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         "confidence": best_confidence,
         "kelly_fraction": kelly,
         "factors": factors,
-        "signals": best_signals,  # siempre presente: poisson/elo/form/h2h reales
+        "signals": best_signals,
+        "elo_sufficient": elo_sufficient,
+        "h2h_sufficient": enriched_match.get("h2h_sufficient", True),
         "weights_version": weights_version,
         "created_at": datetime.now(timezone.utc),
         "result": None,
