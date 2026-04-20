@@ -39,9 +39,9 @@ jobs:
         run: |
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-analyze" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 300 \
+            --max-time 600 \
             --no-buffer \
-            --fail --silent --show-error
+            --silent --show-error || true
 
       - name: Count signals in predictions
         run: |
