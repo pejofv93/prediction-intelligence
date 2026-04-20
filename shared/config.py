@@ -62,7 +62,7 @@ SUPPORTED_SPORTS_APISPORTS = {
 # Groq analiza esas stats + noticias Tavily para estimar probabilidades
 # Ensemble: stats_score (0.60) + groq_estimate (0.40)
 
-MIN_MATCHES_TO_FIT = 5  # futbol: free tier da 10 partidos; 5 es minimo para Poisson
+MIN_MATCHES_TO_FIT = 3  # minimo real para Poisson con datos escasos; 5 descartaba demasiados equipos
 
 # football-data.org: competiciones gratuitas adicionales (IDs oficiales)
 SUPPORTED_FOOTBALL_LEAGUES_EXTRA = {

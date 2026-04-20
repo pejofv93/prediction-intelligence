@@ -1,0 +1,190 @@
+name: diagnose-data
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install google-cloud-firestore numpy
+
+      - name: Authenticate GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Diagnose data quality
+        run: |
+          python - <<'EOF'
+          import numpy as np
+          from google.cloud import firestore
+
+          PROJECT = "prediction-intelligence"
+          db = firestore.Client(project=PROJECT)
+
+          DEFAULT_WEIGHTS = {"poisson": 0.40, "elo": 0.25, "form": 0.20, "h2h": 0.15}
+          MIN_EDGE    = 0.08
+          MIN_CONF    = 0.65
+          DEFAULT_ELO = 1500.0
+
+          # ── 1. team_stats: distribución de raw_matches ──────────────────────
+          print("\n" + "="*60)
+          print("1. TEAM_STATS — raw_matches por equipo")
+          print("="*60)
+
+          team_docs  = list(db.collection("team_stats").stream())
+          buckets    = {0: 0, "1-2": 0, "3-4": 0, "5-9": 0, "10+": 0}
+          team_rm    = {}   # team_id → raw_matches count
+
+          for doc in team_docs:
+              d     = doc.to_dict()
+              tid   = str(d.get("team_id", doc.id))
+              count = len(d.get("raw_matches", []))
+              team_rm[tid] = count
+              if   count == 0:        buckets[0]     += 1
+              elif count <= 2:        buckets["1-2"] += 1
+              elif count <= 4:        buckets["3-4"] += 1
+              elif count <= 9:        buckets["5-9"] += 1
+              else:                   buckets["10+"] += 1
+
+          total_teams = len(team_docs)
+          ge5 = sum(1 for v in team_rm.values() if v >= 5)
+          ge3 = sum(1 for v in team_rm.values() if v >= 3)
+
+          print(f"Total equipos en team_stats : {total_teams}")
+          for label, cnt in buckets.items():
+              print(f"  raw_matches = {str(label):5s}: {cnt:3d} equipos")
+          print(f"\n  >= 5 raw_matches (umbral anterior) : {ge5}")
+          print(f"  >= 3 raw_matches (umbral nuevo)    : {ge3}")
+
+          # ── 2. enriched_matches: ¿cuántos tienen ambos equipos con >= N? ───
+          print("\n" + "="*60)
+          print("2. ENRICHED_MATCHES — cobertura con distintos umbrales")
+          print("="*60)
+
+          enriched_docs = list(db.collection("enriched_matches").stream())
+          total_em      = len(enriched_docs)
+
+          both5 = both3 = both1 = poisson_not_none = 0
+          valid_for_signal = []
+
+          for doc in enriched_docs:
+              d     = doc.to_dict()
+              hid   = str(d.get("home_team_id", ""))
+              aid   = str(d.get("away_team_id", ""))
+              h_rm  = team_rm.get(hid, 0)
+              a_rm  = team_rm.get(aid, 0)
+
+              if min(h_rm, a_rm) >= 5: both5 += 1
+              if min(h_rm, a_rm) >= 3: both3 += 1
+              if min(h_rm, a_rm) >= 1: both1 += 1
+              if d.get("poisson_home_win") is not None:
+                  poisson_not_none += 1
+
+              valid_for_signal.append((d, h_rm, a_rm))
+
+          print(f"Total enriched_matches     : {total_em}")
+          print(f"  Ambos >= 5 (umbral ant.)  : {both5}")
+          print(f"  Ambos >= 3 (umbral nuevo) : {both3}")
+          print(f"  Ambos >= 1                : {both1}")
+          print(f"  poisson_home_win != None  : {poisson_not_none}  (partidos ya enriquecidos con Poisson)")
+
+          # ── 3. edge/confianza simulando ensemble con umbral = 3 ─────────────
+          print("\n" + "="*60)
+          print("3. SEÑALES ESPERADAS con umbral=3, edge>8%, conf>65%")
+          print("="*60)
+
+          def ensemble(d, team):
+              ph  = d.get("poisson_home_win")
+              pa  = d.get("poisson_away_win")
+              elo = d.get("elo_home_win_prob")
+              hf  = d.get("home_form_score", 50.0)
+              af  = d.get("away_form_score", 50.0)
+              h2h = d.get("h2h_advantage",   0.0)
+              ok  = d.get("h2h_sufficient",  False)
+              helo= d.get("home_elo")
+              aelo= d.get("away_elo")
+
+              ps  = float(ph)  if ph  is not None else 0.5
+              pas = float(pa)  if pa  is not None else 0.5
+              es  = float(elo) if elo is not None else 0.5
+
+              if team == "home":
+                  sigs = {"poisson": ps, "elo": es, "form": hf/100.0}
+                  if ok: sigs["h2h"] = (h2h + 1.0) / 2.0
+              else:
+                  sigs = {"poisson": pas, "elo": 1.0-es, "form": af/100.0}
+                  if ok: sigs["h2h"] = 1.0 - (h2h + 1.0) / 2.0
+
+              sigs = {k: max(0.0, min(1.0, v)) for k, v in sigs.items()}
+              rw   = {k: DEFAULT_WEIGHTS.get(k, 0.25) for k in sigs}
+              tw   = sum(rw.values())
+              nw   = {k: v/tw for k, v in rw.items()} if tw > 0 else {k: 1/len(sigs) for k in sigs}
+              prob = sum(sigs[k] * nw[k] for k in sigs)
+              conf = max(0.0, 1.0 - float(np.std(list(sigs.values()))))
+
+              # penalizar si ELO default
+              if (helo is not None and aelo is not None and
+                  abs(float(helo) - DEFAULT_ELO) < 1.0 and
+                  abs(float(aelo) - DEFAULT_ELO) < 1.0):
+                  conf *= 0.80
+
+              return round(prob, 4), round(conf, 4), ok
+
+          signals_passing = []
+          skipped_no_poisson = skipped_no_odds = 0
+
+          for d, h_rm, a_rm in valid_for_signal:
+              # simular umbral = 3
+              if min(h_rm, a_rm) < 3:
+                  continue
+              if d.get("poisson_home_win") is None:
+                  skipped_no_poisson += 1
+                  continue
+              odds_c = d.get("odds_current", {})
+              ho = odds_c.get("home")
+              ao = odds_c.get("away")
+              if not ho or not ao:
+                  skipped_no_odds += 1
+                  continue
+
+              for team, odds in [("home", ho), ("away", ao)]:
+                  prob, conf, h2h_used = ensemble(d, team)
+                  edge = prob - 1.0/odds
+                  if edge > MIN_EDGE and conf > MIN_CONF:
+                      signals_passing.append({
+                          "match": f"{d.get('home_team','?')} vs {d.get('away_team','?')}",
+                          "sport": d.get("sport","?"),
+                          "team":  team,
+                          "odds":  odds,
+                          "prob":  prob,
+                          "edge":  edge,
+                          "conf":  conf,
+                          "h2h":   h2h_used,
+                      })
+
+          print(f"Partidos con ambos >= 3 y Poisson listo : {both3 - skipped_no_poisson}")
+          print(f"  Sin cuotas en Firestore               : {skipped_no_odds}")
+          print(f"  Sin Poisson (h2h enriquecido aún)     : {skipped_no_poisson}")
+          print(f"\nSeñales que pasan edge>{MIN_EDGE:.0%} y conf>{MIN_CONF:.0%}: {len(signals_passing)}")
+
+          if signals_passing:
+              print("\nDetalle:")
+              for s in sorted(signals_passing, key=lambda x: -x["edge"]):
+                  h2h_tag = "(H2H activo)" if s["h2h"] else "(H2H excluido)"
+                  print(f"  {s['sport']:10s} {s['match'][:38]:38s} {s['team']:5s}"
+                        f" @ {s['odds']:.2f}  edge={s['edge']:.1%}  conf={s['conf']:.0%}  {h2h_tag}")
+          else:
+              print("  → Ninguna señal pasa los umbrales con los datos actuales.")
+              print("     Causas probables: equipos aún sin re-enriquecer (re-run enrich)")
+              print("     o cuotas no disponibles en odds_current.")
+
+          print()
+          EOF
