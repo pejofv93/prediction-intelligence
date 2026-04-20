@@ -136,6 +136,9 @@ async def _bg_collect() -> None:
         # --- 4. Otros deportes (Basketball API, NFL, etc.) ---
         await _collect_other_sports()
 
+        # --- 5. Baloncesto enriquecido (team stats para basketball_analyzer) ---
+        await _collect_basketball_enhanced()
+
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         _status["last_collect"] = datetime.now(timezone.utc).isoformat()
         logger.info("collect: completado en %.1fs", elapsed)
@@ -339,6 +342,23 @@ async def _collect_other_sports() -> None:
     )
 
 
+async def _collect_basketball_enhanced() -> None:
+    """Recopila partidos NBA/Euroleague y guarda team_stats enriquecido."""
+    try:
+        from collectors.basketball_collector import collect_basketball_games, collect_basketball_team_stats
+        from collectors.firestore_writer import save_upcoming_matches
+
+        games = await collect_basketball_games()
+        if games:
+            await save_upcoming_matches(games)
+            await collect_basketball_team_stats(games)
+            logger.info("collect.basketball_enhanced: %d partidos procesados", len(games))
+        else:
+            logger.info("collect.basketball_enhanced: sin partidos hoy")
+    except Exception:
+        logger.error("collect.basketball_enhanced: error no controlado", exc_info=True)
+
+
 async def _bg_enrich() -> None:
     """
     Pipeline de enriquecimiento:
@@ -392,7 +412,16 @@ async def _bg_analyze() -> None:
             logger.error("analyze: error leyendo enriched_matches", exc_info=True)
             return
 
+        weights_version = 0
+        try:
+            from analyzers.value_bet_engine import _get_weights_version
+            weights_version = _get_weights_version()
+        except Exception:
+            pass
+
         signals_generated = 0
+
+        # --- Fútbol (via enriched_matches con Poisson) ---
         for doc in docs:
             enriched = doc.to_dict()
             try:
@@ -404,10 +433,50 @@ async def _bg_analyze() -> None:
                     enriched.get("match_id"), exc_info=True,
                 )
 
+        # --- Tenis (directo desde upcoming_matches sport=tennis) ---
+        try:
+            from analyzers.tennis_analyzer import generate_tennis_signals
+            tennis_docs = list(
+                col("upcoming_matches")
+                .where("sport", "==", "tennis")
+                .where("status", "in", ["SCHEDULED", "TIMED"])
+                .stream()
+            )
+            logger.info("analyze: %d partidos de tenis a analizar", len(tennis_docs))
+            for tdoc in tennis_docs:
+                match = tdoc.to_dict()
+                try:
+                    sigs = await generate_tennis_signals(match, weights_version)
+                    signals_generated += len(sigs)
+                except Exception:
+                    logger.error("analyze: error tennis %s", match.get("match_id"), exc_info=True)
+        except Exception:
+            logger.error("analyze: error cargando tennis_analyzer", exc_info=True)
+
+        # --- Baloncesto (directo desde upcoming_matches sport=nba/basketball) ---
+        try:
+            from analyzers.basketball_analyzer import generate_basketball_signals
+            bball_docs = list(
+                col("upcoming_matches")
+                .where("sport", "in", ["nba", "basketball"])
+                .where("status", "in", ["SCHEDULED", "TIMED"])
+                .stream()
+            )
+            logger.info("analyze: %d partidos de baloncesto a analizar", len(bball_docs))
+            for bdoc in bball_docs:
+                game = bdoc.to_dict()
+                try:
+                    sigs = await generate_basketball_signals(game, weights_version)
+                    signals_generated += len(sigs)
+                except Exception:
+                    logger.error("analyze: error basketball %s", game.get("match_id"), exc_info=True)
+        except Exception:
+            logger.error("analyze: error cargando basketball_analyzer", exc_info=True)
+
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         _status["last_analyze"] = datetime.now(timezone.utc).isoformat()
         logger.info(
-            "analyze: %d senales generadas de %d partidos en %.1fs",
+            "analyze: %d senales generadas de %d enriquecidos en %.1fs",
             signals_generated, len(docs), elapsed,
         )
 

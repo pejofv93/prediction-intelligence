@@ -375,7 +375,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             resp = await client.get(url, params={
                 "apiKey": ODDS_API_KEY,
                 "regions": "eu",
-                "markets": "h2h,totals",
+                "markets": "h2h,totals,btts,double_chance,spreads",
                 "bookmakers": "bet365,pinnacle,unibet",
                 "oddsFormat": "decimal",
             })
@@ -912,6 +912,21 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                                     pass
 
                         results.append(totals_pred)
+
+    # --- Señales extra de fútbol (BTTS, Double Chance, AH, Totals 3.5) ---
+    if sport_key in _FOOTBALL_SPORT_KEYS:
+        try:
+            from analyzers.football_markets import generate_football_extra_signals
+            cached_league = _LEAGUE_ODDS_CACHE.get(sport_key)
+            cached_events = cached_league[1] if cached_league else []
+            extra = await generate_football_extra_signals(
+                enriched_match, cached_events,
+                str(home_team), str(away_team),
+                league, match_id, match_date, weights_version,
+            )
+            results.extend(extra)
+        except Exception:
+            logger.error("generate_signal(%s): error en football_markets", match_id, exc_info=True)
 
     return results
 

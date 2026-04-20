@@ -17,7 +17,8 @@ COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY")            # polymarket-
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER")        # solo dashboard
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS")        # solo dashboard
 CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")  # token inter-servicios
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")       # The Odds API — cuotas reales
+ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")      # The Odds API — cuotas reales
+ODDSPAPI_KEY   = os.environ.get("ODDSPAPI_KEY", "")      # OddsPapi — PENDING (BTTS/AH cuando activo)
 COLLECTION_PREFIX = os.environ.get("FIRESTORE_COLLECTION_PREFIX", "")
 
 # IA
@@ -92,6 +93,14 @@ ALLSPORTS_LEAGUE_NAMES = {
     "CSUD": "CSUD",
     "CAM":  "CAM",
 }
+
+# Baloncesto
+BASKETBALL_HOME_ADV_NBA  = 3.2   # pts de ventaja local histórica NBA
+BASKETBALL_HOME_ADV_EURO = 2.8   # pts de ventaja local Euroleague
+BASKETBALL_SPREAD_SIGMA  = 12.0  # desviación estándar del margen (distribución normal)
+
+# Tenis — pesos del ensemble
+TENNIS_WEIGHTS = {"form": 0.30, "surface": 0.30, "ranking": 0.25, "h2h": 0.15}
 
 LEARNING_RATE = 0.05
 DEFAULT_WEIGHTS = {

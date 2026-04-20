@@ -81,11 +81,8 @@ async def send_message(text: str, chat_id: str | int | None = None, parse_mode: 
 
 
 _SPORT_EMOJI = {
-    "football": "⚽",
-    "nba": "🏀",
-    "basketball": "🏀",
-    "euroleague": "🏀",
-    "tennis": "🎾",
+    "football": "⚽", "nba": "🏀", "basketball": "🏀",
+    "euroleague": "🏀", "tennis": "🎾",
 }
 
 _LEAGUE_LABEL = {
@@ -94,7 +91,65 @@ _LEAGUE_LABEL = {
     "EL": "Europa League", "ECL": "Conference League", "PPL": "Primeira Liga",
     "DED": "Eredivisie", "SD": "Segunda División", "SB": "Serie B",
     "TU1": "Süper Lig", "NBA": "NBA", "EUROLEAGUE": "EuroLeague",
+    "ATP_FRENCH_OPEN": "ATP Roland Garros", "WTA_FRENCH_OPEN": "WTA Roland Garros",
+    "ATP_WIMBLEDON": "ATP Wimbledon", "WTA_WIMBLEDON": "WTA Wimbledon",
+    "ATP_US_OPEN": "ATP US Open", "WTA_US_OPEN": "WTA US Open",
+    "ATP_BARCELONA": "ATP Barcelona", "ATP_MUNICH": "ATP Munich",
+    "WTA_STUTTGART": "WTA Stuttgart",
 }
+
+_MARKET_LABEL = {
+    "h2h": "1X2", "totals": "Goles O/U", "btts": "Ambos marcan",
+    "double_chance": "Doble oportunidad", "asian_handicap": "Hándicap asiático",
+    "totals_3.5": "Goles O/U 3.5", "set_handicap": "Hándicap sets",
+    "total_sets": "Total sets", "total_games": "Total games",
+    "spread": "Hándicap puntos", "player_points": "Puntos jugador",
+    "player_rebounds": "Rebotes jugador", "player_assists": "Asistencias jugador",
+}
+
+
+def _format_alert_unified(prediction: dict) -> str:
+    """Formato unificado para todos los deportes y mercados."""
+    sport = prediction.get("sport", "football")
+    market_type = prediction.get("market_type", "h2h")
+    edge = float(prediction.get("edge", 0))
+    conf = float(prediction.get("confidence", 0))
+    odds = float(prediction.get("odds", 0))
+    kelly = float(prediction.get("kelly_fraction", 0))
+    league_code = prediction.get("league", "?")
+
+    # Intensidad
+    if edge >= 0.15:
+        intensity = "🔥 SEÑAL FUERTE"
+    elif edge >= 0.10:
+        intensity = "✅ SEÑAL DETECTADA"
+    else:
+        intensity = "📊 SEÑAL MODERADA"
+
+    sport_emoji = _SPORT_EMOJI.get(sport, "🏟")
+    league_label = _escape_md(_LEAGUE_LABEL.get(league_code, league_code))
+    home = _escape_md(prediction.get("home_team", "?"))
+    away = _escape_md(prediction.get("away_team", "?"))
+
+    market_label = _escape_md(_MARKET_LABEL.get(market_type, market_type.replace("_", " ").title()))
+
+    selection = prediction.get("selection") or prediction.get("team_to_back", "?")
+    selection = _escape_md(str(selection))
+
+    # Top 3 factores por valor absoluto
+    signals = prediction.get("signals") or prediction.get("factors") or {}
+    top3 = sorted(signals.items(), key=lambda x: -abs(float(x[1])))[:3]
+    factors_text = ", ".join(f"{k.replace('_', ' ')} {float(v):.2f}" for k, v in top3) or "—"
+
+    return (
+        f"{intensity} | {sport_emoji} {league_label}\n"
+        f"{home} vs {away}\n"
+        f"Mercado: {market_label} | Selección: *{selection}*\n"
+        f"Cuota: *{odds:.2f}* | Edge: *+{edge:.1%}* | Confianza: *{conf:.0%}*\n"
+        f"Factores: {factors_text}\n"
+        f"🧮 Kelly: {kelly:.1%} del bankroll\n\n"
+        f"⚠️ Apuesta responsablemente. No es asesoramiento financiero."
+    )
 
 
 def _format_sports_alert(prediction: dict) -> str:
@@ -218,7 +273,7 @@ async def send_sports_alert(prediction: dict) -> bool:
     except Exception:
         logger.error("send_sports_alert: error comprobando dedup", exc_info=True)
 
-    text = _format_sports_alert(prediction)
+    text = _format_alert_unified(prediction)
     sent = await send_message(text)
 
     if not sent:
@@ -258,7 +313,7 @@ async def send_poly_alert(analysis: dict) -> bool:
     except Exception:
         logger.error("send_poly_alert: error comprobando dedup", exc_info=True)
 
-    text = _format_poly_alert(analysis)
+    text = _format_alert_unified(analysis) if analysis.get("sport") else _format_poly_alert(analysis)
     sent = await send_message(text)
 
     if not sent:
