@@ -92,7 +92,13 @@ def _format_sports_alert(prediction: dict) -> str:
     confidence = float(prediction.get("confidence", 0))
     kelly = float(prediction.get("kelly_fraction", 0))
 
-    header = f"{emoji} SEÑAL DETECTADA\n\n"
+    if edge >= 0.15:
+        label = "🔥 SEÑAL FUERTE"
+    elif edge >= 0.10:
+        label = "✅ SEÑAL DETECTADA"
+    else:
+        label = "📊 SEÑAL MODERADA"
+    header = f"{emoji} {label}\n\n"
     match_line = f"🏟 {home} vs {away}\n🏆 {league} | 📅 {date_str}\n\n"
 
     if market_type == "totals":

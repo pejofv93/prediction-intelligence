@@ -28,7 +28,7 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"  # compatible con openai SDK
 # Thresholds
 SPORTS_MIN_EDGE = 0.08
 SPORTS_MIN_CONFIDENCE = 0.65
-SPORTS_ALERT_EDGE = 0.10
+SPORTS_ALERT_EDGE = 0.08
 POLY_MIN_EDGE = 0.08
 POLY_MIN_CONFIDENCE = 0.65
 
