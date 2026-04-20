@@ -1,7 +1,11 @@
 """
 Mercados extra de fútbol usando el modelo Poisson existente (home_xg / away_xg).
-No requiere llamadas API adicionales — usa los xG del enriched_match y
-las cuotas ya cacheadas en _LEAGUE_ODDS_CACHE de value_bet_engine.
+
+Fuentes de cuotas (en orden de prioridad):
+  1. OddsPapi (ODDSPAPI_KEY) — BTTS y Asian Handicap
+     https://api.oddspapi.com/odds?sport=football&market=btts|asian_handicap
+  2. The Odds API (ODDS_API_KEY) — fallback para todos los mercados
+     (btts, double_chance, spreads via markets= en el mismo request que h2h)
 
 Mercados:
   btts          — Ambos marcan (Sí/No)
@@ -9,19 +13,173 @@ Mercados:
   asian_handicap — AH -0.5 / -1.0 / -1.5 / +0.5 / +1.0 / +1.5
   totals_3.5    — Goles Over/Under 3.5
 """
+import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import httpx
 import numpy as np
 from scipy.stats import poisson as _poisson
 
-from shared.config import SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE
+from shared.config import (
+    ODDSPAPI_KEY, SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE,
+)
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
 # Líneas de AH que buscamos (negativas = home da ventaja)
 _AH_LINES = (-0.5, -1.0, -1.5, 0.5, 1.0, 1.5)
+
+# ── OddsPapi client ────────────────────────────────────────────────────────────
+_ODDSPAPI_BASE = "https://api.oddspapi.com"
+_ODDSPAPI_CACHE: dict[str, tuple[datetime, list]] = {}
+_ODDSPAPI_TTL = timedelta(hours=1)
+_HTTP_TIMEOUT = 15.0
+
+# Mapeo de league code Firestore → sport/competition en OddsPapi
+_ODDSPAPI_LEAGUE_MAP = {
+    "PD":  "LaLiga",
+    "BL1": "Bundesliga",
+    "SA":  "SerieA",
+    "FL1": "Ligue1",
+    "CL":  "ChampionsLeague",
+    "EL":  "EuropaLeague",
+    "PPL": "PrimeiraLiga",
+    "DED": "Eredivisie",
+    "BL2": "Bundesliga2",
+    "SD":  "Segunda",
+    "SB":  "SerieB",
+    "TU1": "SuperLig",
+}
+
+
+async def _fetch_oddspapi(market: str, league: str) -> list:
+    """
+    Obtiene cuotas de OddsPapi para un mercado y liga.
+    Cachea por market+league durante 1h.
+    Devuelve lista de eventos con odds o [] si falla/no configurada.
+    """
+    if not ODDSPAPI_KEY:
+        return []
+
+    cache_key = f"{market}_{league}"
+    now = datetime.now(timezone.utc)
+    cached = _ODDSPAPI_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _ODDSPAPI_TTL:
+        return cached[1]
+
+    competition = _ODDSPAPI_LEAGUE_MAP.get(league, "")
+    params: dict = {"apiKey": ODDSPAPI_KEY, "market": market, "sport": "football"}
+    if competition:
+        params["competition"] = competition
+
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.get(f"{_ODDSPAPI_BASE}/odds", params=params)
+
+        if resp.status_code == 401:
+            logger.warning("OddsPapi: clave inválida (401)")
+            return []
+        if resp.status_code == 429:
+            logger.warning("OddsPapi: rate limit (429)")
+            return []
+        if resp.status_code != 200:
+            logger.warning("OddsPapi: HTTP %d para %s/%s", resp.status_code, market, league)
+            return []
+
+        data = resp.json()
+        # OddsPapi puede devolver {"data": [...]} o directamente una lista
+        events = data if isinstance(data, list) else data.get("data", data.get("events", []))
+        if not isinstance(events, list):
+            events = []
+
+        logger.info("OddsPapi: %s/%s → %d eventos", market, league, len(events))
+        _ODDSPAPI_CACHE[cache_key] = (now, events)
+        return events
+
+    except Exception:
+        logger.error("OddsPapi: error fetching %s/%s", market, league, exc_info=True)
+        return []
+
+
+def _oddspapi_find_event(events: list, home: str, away: str) -> dict | None:
+    """Busca un evento en la respuesta de OddsPapi por nombre de equipos."""
+    from analyzers.value_bet_engine import _normalize_team
+    h_norm = _normalize_team(home)
+    a_norm = _normalize_team(away)
+    for ev in events:
+        # OddsPapi usa diferentes keys según versión de API
+        ev_home = ev.get("home_team", ev.get("home", ev.get("homeTeam", "")))
+        ev_away = ev.get("away_team", ev.get("away", ev.get("awayTeam", "")))
+        from analyzers.value_bet_engine import _teams_match
+        if _teams_match(home, ev_home) and _teams_match(away, ev_away):
+            return ev
+    return None
+
+
+def _parse_oddspapi_btts(event: dict) -> dict | None:
+    """Extrae odds BTTS de un evento OddsPapi."""
+    odds = event.get("odds", event.get("markets", event))
+    # Formatos comunes de OddsPapi
+    for yes_key in ("btts_yes", "yes", "both_teams_to_score_yes"):
+        for no_key in ("btts_no", "no", "both_teams_to_score_no"):
+            if yes_key in odds and no_key in odds:
+                try:
+                    return {
+                        "yes_odds": float(odds[yes_key]),
+                        "no_odds":  float(odds[no_key]),
+                        "bookmaker": "oddspapi",
+                    }
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
+def _parse_oddspapi_ah(event: dict) -> list[dict]:
+    """Extrae líneas de Asian Handicap de un evento OddsPapi."""
+    odds = event.get("odds", event.get("markets", {}))
+    lines = []
+
+    # Formato 1: {"asian_handicap": [{"line": -1.5, "home": 1.95, "away": 1.85}]}
+    ah_data = odds.get("asian_handicap", odds.get("handicap", []))
+    if isinstance(ah_data, list):
+        for entry in ah_data:
+            try:
+                line = float(entry.get("line", entry.get("handicap", 0)))
+                ho = float(entry.get("home", entry.get("home_odds", 0)))
+                ao = float(entry.get("away", entry.get("away_odds", 0)))
+                if ho > 1 and ao > 1:
+                    lines.append({"home_line": line, "home_odds": ho,
+                                  "away_line": -line, "away_odds": ao,
+                                  "bookmaker": "oddspapi"})
+            except (TypeError, ValueError):
+                continue
+
+    # Formato 2: {"ah_-1.5_home": 1.95, "ah_-1.5_away": 1.85}
+    if not lines:
+        line_map: dict = {}
+        for k, v in odds.items():
+            if k.startswith("ah_"):
+                parts = k.split("_")
+                if len(parts) >= 3:
+                    try:
+                        line_val = float(parts[1])
+                        side = parts[2]
+                        if line_val not in line_map:
+                            line_map[line_val] = {}
+                        line_map[line_val][side] = float(v)
+                    except (ValueError, TypeError):
+                        continue
+        for line_val, sides in line_map.items():
+            if "home" in sides and "away" in sides:
+                lines.append({
+                    "home_line": line_val, "home_odds": sides["home"],
+                    "away_line": -line_val, "away_odds": sides["away"],
+                    "bookmaker": "oddspapi",
+                })
+
+    return lines
 
 
 # ── Probabilidades ────────────────────────────────────────────────────────────
@@ -164,9 +322,6 @@ def _make_prediction(base: dict, market_type: str, selection: str,
                      odds: float, prob: float, factors: dict,
                      match_date, weights_version: int) -> dict | None:
     """Construye el dict de predicción si supera thresholds."""
-    from shared.config import SPORTS_MIN_EDGE, SPORTS_MIN_CONFIDENCE
-    from collectors.stats_processor import calculate_edge_simple  # noqa — inline below
-
     edge = round(prob - 1.0 / odds, 4) if odds > 1 else 0.0
     if edge <= SPORTS_MIN_EDGE:
         return None
@@ -250,35 +405,41 @@ async def generate_football_extra_signals(
     signals_out: list[dict] = []
     xg_factor = round(min(home_xg, away_xg) / max(home_xg, away_xg, 0.1), 4)
 
+    # Fuentes de cuotas: OddsPapi primero (BTTS/AH), The Odds API como fallback
+    op_btts_events = await _fetch_oddspapi("btts", league)
+    op_ah_events   = await _fetch_oddspapi("asian_handicap", league)
+    op_btts_ev = _oddspapi_find_event(op_btts_events, home_team, away_team) if op_btts_events else None
+    op_ah_ev   = _oddspapi_find_event(op_ah_events,   home_team, away_team) if op_ah_events else None
+
     # ── BTTS ─────────────────────────────────────────────────────────────────
-    if event:
-        btts_odds = parse_btts_event(event)
-        if btts_odds:
-            btts_probs = calc_btts(home_xg, away_xg)
-            if btts_probs:
-                for sel, prob, odds_key in [("Sí", btts_probs["yes"], "yes_odds"),
-                                             ("No", btts_probs["no"],  "no_odds")]:
-                    odds = btts_odds.get(odds_key, 0)
-                    if odds <= 1:
-                        continue
-                    factors = {"xg_home": round(home_xg, 3),
-                               "xg_away": round(away_xg, 3),
-                               "xg_balance": xg_factor}
-                    pred = _make_prediction(
-                        {**base, "bookmaker": btts_odds["bookmaker"]},
-                        "btts", f"BTTS {sel}", odds, prob, factors,
-                        match_date, weights_version
-                    )
-                    if pred:
-                        doc_id = f"{match_id}_btts_{sel.lower().replace(' ','_')}"
-                        pred["match_id"] = doc_id
-                        try:
-                            col("predictions").document(doc_id).set(pred)
-                        except Exception:
-                            logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
-                        if pred["edge"] > SPORTS_ALERT_EDGE:
-                            await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
-                        signals_out.append(pred)
+    btts_odds = ((_parse_oddspapi_btts(op_btts_ev) if op_btts_ev else None)
+                 or (parse_btts_event(event) if event else None))
+    if btts_odds:
+        btts_probs = calc_btts(home_xg, away_xg)
+        if btts_probs:
+            for sel, prob, odds_key in [("Sí", btts_probs["yes"], "yes_odds"),
+                                         ("No", btts_probs["no"],  "no_odds")]:
+                odds = btts_odds.get(odds_key, 0)
+                if odds <= 1:
+                    continue
+                factors = {"xg_home": round(home_xg, 3),
+                           "xg_away": round(away_xg, 3),
+                           "xg_balance": xg_factor}
+                pred = _make_prediction(
+                    {**base, "bookmaker": btts_odds.get("bookmaker", "bet365")},
+                    "btts", f"BTTS {sel}", odds, prob, factors,
+                    match_date, weights_version
+                )
+                if pred:
+                    doc_id = f"{match_id}_btts_{sel.lower().replace(' ','_')}"
+                    pred["match_id"] = doc_id
+                    try:
+                        col("predictions").document(doc_id).set(pred)
+                    except Exception:
+                        logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
+                    if pred["edge"] > SPORTS_ALERT_EDGE:
+                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+                    signals_out.append(pred)
 
     # ── DOUBLE CHANCE ─────────────────────────────────────────────────────────
     if event and hw is not None and d is not None and aw is not None:
@@ -310,49 +471,50 @@ async def generate_football_extra_signals(
                     signals_out.append(pred)
 
     # ── ASIAN HANDICAP ────────────────────────────────────────────────────────
-    if event:
-        spread_lines = parse_spreads_event(event)
-        if spread_lines:
-            ah_probs = calc_asian_handicap(home_xg, away_xg)
-            for spread in spread_lines:
-                line = spread.get("home_line", spread.get("line", 0))
+    # OddsPapi primario; The Odds API spreads como fallback
+    op_ah_lines = _parse_oddspapi_ah(op_ah_ev) if op_ah_ev else []
+    the_odds_ah = parse_spreads_event(event) if event else []
+    spread_lines = op_ah_lines or the_odds_ah
+    if spread_lines:
+        ah_probs = calc_asian_handicap(home_xg, away_xg)
+        for spread in spread_lines:
+            line = spread.get("home_line", spread.get("line", 0))
+            try:
+                line_f = float(line)
+            except (TypeError, ValueError):
+                continue
+            closest = min(_AH_LINES, key=lambda l: abs(l - line_f))
+            prob = ah_probs.get(closest)
+            if prob is None:
+                continue
+            if line_f < 0:
+                odds = spread.get("home_odds", 0)
+                sel = f"{home_team} {line_f:+.1f}"
+            else:
+                odds = spread.get("away_odds", 0)
+                prob = 1.0 - prob  # AH positivo = away cubre
+                sel = f"{away_team} {line_f:+.1f}"
+            if odds <= 1:
+                continue
+            factors = {"xg_home": round(home_xg, 3),
+                       "xg_away": round(away_xg, 3),
+                       "ah_line": round(line_f, 1)}
+            pred = _make_prediction(
+                {**base, "bookmaker": spread.get("bookmaker", "bet365")},
+                "asian_handicap", sel, odds, prob, factors,
+                match_date, weights_version
+            )
+            if pred:
+                tag = str(line_f).replace("-", "m").replace(".", "_").replace("+", "p")
+                doc_id = f"{match_id}_ah_{tag}"
+                pred["match_id"] = doc_id
                 try:
-                    line_f = float(line)
-                except (TypeError, ValueError):
-                    continue
-                # Mapear la línea al prob más cercano calculado
-                closest = min(_AH_LINES, key=lambda l: abs(l - line_f))
-                prob = ah_probs.get(closest)
-                if prob is None:
-                    continue
-                if line_f < 0:
-                    odds = spread.get("home_odds", 0)
-                    sel = f"{home_team} {line_f:+.1f}"
-                else:
-                    odds = spread.get("away_odds", 0)
-                    prob = 1.0 - prob  # AH positivo = away cubre
-                    sel = f"{away_team} {line_f:+.1f}"
-                if odds <= 1:
-                    continue
-                factors = {"xg_home": round(home_xg, 3),
-                           "xg_away": round(away_xg, 3),
-                           "ah_line": round(line_f, 1)}
-                pred = _make_prediction(
-                    {**base, "bookmaker": spread.get("bookmaker", "bet365")},
-                    "asian_handicap", sel, odds, prob, factors,
-                    match_date, weights_version
-                )
-                if pred:
-                    tag = str(line_f).replace("-", "m").replace(".", "_").replace("+", "p")
-                    doc_id = f"{match_id}_ah_{tag}"
-                    pred["match_id"] = doc_id
-                    try:
-                        col("predictions").document(doc_id).set(pred)
-                    except Exception:
-                        logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
-                    if pred["edge"] > SPORTS_ALERT_EDGE:
-                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
-                    signals_out.append(pred)
+                    col("predictions").document(doc_id).set(pred)
+                except Exception:
+                    logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
+                if pred["edge"] > SPORTS_ALERT_EDGE:
+                    await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+                signals_out.append(pred)
 
     # ── TOTALS 3.5 ────────────────────────────────────────────────────────────
     t35 = calc_totals_n(home_xg, away_xg, 3.5)
