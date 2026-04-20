@@ -30,21 +30,22 @@ def _serialize(doc: dict) -> dict:
 @router.get("/predictions")
 async def get_predictions() -> list[dict]:
     """
-    Ultimas 20 predicciones ordenadas por created_at DESC.
-    Campos: match_id, home_team, away_team, league, match_date,
-            team_to_back, odds, edge, confidence, factors, result, correct.
+    Ultimas 50 predicciones ordenadas por created_at DESC.
+    Incluye todos los campos necesarios para mercados múltiples.
     """
     try:
         docs = (
             col("predictions")
             .order_by("created_at", direction="DESCENDING")
-            .limit(20)
+            .limit(50)
             .stream()
         )
         fields = {
             "match_id", "home_team", "away_team", "league", "match_date",
-            "team_to_back", "odds", "edge", "confidence", "factors",
+            "team_to_back", "odds", "edge", "confidence", "factors", "signals",
             "result", "correct", "sport", "kelly_fraction",
+            "market_type", "selection", "bookmaker", "line",
+            "elo_sufficient", "h2h_sufficient", "data_source",
         }
         result = []
         for d in docs:
