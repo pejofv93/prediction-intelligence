@@ -14,7 +14,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from shared.config import SUPPORTED_FOOTBALL_LEAGUES
+from shared.config import MIN_MATCHES_TO_FIT, SUPPORTED_FOOTBALL_LEAGUES
 from shared.firestore_client import col
 
 from enrichers.poisson_model import fit_attack_defense, predict_match_probs
@@ -119,10 +119,19 @@ async def enrich_match(match: dict) -> dict:
 
     # --- 3. H2H advantage ---
     h2h_advantage = 0.0
+    h2h_sufficient = False  # True solo si hay partidos H2H reales almacenados
     if h2h_doc is not None and h2h_doc.exists and home_id and away_id:
         try:
-            stored_advantage = h2h_doc.to_dict().get("h2h_advantage", 0.0)
+            h2h_doc_data = h2h_doc.to_dict()
+            stored_advantage = h2h_doc_data.get("h2h_advantage", 0.0)
+            h2h_matches_stored = h2h_doc_data.get("matches", [])
+            h2h_sufficient = len(h2h_matches_stored) > 0
             h2h_advantage = float(stored_advantage) if home_id == canonical_t1 else -float(stored_advantage)
+            if not h2h_sufficient:
+                logger.debug(
+                    "enrich_match(%s): h2h_data existe pero sin partidos reales — h2h_insufficient",
+                    match_id,
+                )
         except Exception:
             logger.error("enrich_match(%s): error procesando h2h_data", match_id, exc_info=True)
             data_quality = "partial"
@@ -182,13 +191,22 @@ async def enrich_match(match: dict) -> dict:
     away_elo: float | None = None
 
     if is_football and home_id and away_id:
-        # Poisson bivariado
+        # Poisson bivariado — solo si ambos equipos tienen datos reales suficientes
         try:
             home_raw = home_stats.get("raw_matches", [])
             away_raw = away_stats.get("raw_matches", [])
-            all_raw = home_raw + away_raw
+            home_raw_count = len(home_raw)
+            away_raw_count = len(away_raw)
 
-            if all_raw:
+            if home_raw_count < MIN_MATCHES_TO_FIT or away_raw_count < MIN_MATCHES_TO_FIT:
+                logger.warning(
+                    "enrich_match(%s): datos insuficientes para Poisson "
+                    "(home=%d away=%d raw_matches, minimo=%d) — Poisson omitido",
+                    match_id, home_raw_count, away_raw_count, MIN_MATCHES_TO_FIT,
+                )
+                data_quality = "partial"
+            else:
+                all_raw = home_raw + away_raw
                 team_params = fit_attack_defense(all_raw)
                 probs = predict_match_probs(home_id, away_id, team_params)
                 poisson_home_win = probs["home_win"]
@@ -196,12 +214,6 @@ async def enrich_match(match: dict) -> dict:
                 poisson_away_win = probs["away_win"]
                 home_xg = probs["home_xg"]
                 away_xg = probs["away_xg"]
-            else:
-                logger.warning(
-                    "enrich_match(%s): sin raw_matches para Poisson — marca partial",
-                    match_id,
-                )
-                data_quality = "partial"
         except Exception:
             logger.error(
                 "enrich_match(%s): error en modelo Poisson", match_id, exc_info=True
@@ -243,6 +255,7 @@ async def enrich_match(match: dict) -> dict:
         "home_form_score": home_form_score,
         "away_form_score": away_form_score,
         "h2h_advantage": h2h_advantage,
+        "h2h_sufficient": h2h_sufficient,
         "home_streak": home_streak,
         "away_streak": away_streak,
         "odds_opening": odds_opening,
