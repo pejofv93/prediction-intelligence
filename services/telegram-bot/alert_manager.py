@@ -3,6 +3,7 @@ Formateador y sender de alertas Telegram.
 Flujo: sports-agent/polymarket-agent llaman POST /send-alert → alert_manager formatea y envia.
 on_snapshot ELIMINADO — incompatible con min-instances=0.
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -25,32 +26,58 @@ def _escape_md(text: str) -> str:
     return str(text).replace("_", "\\_").replace("`", "\\`")
 
 
-async def send_message(text: str, chat_id: str | int | None = None, parse_mode: str = "Markdown") -> None:
-    """Envia mensaje a chat_id (o TELEGRAM_CHAT_ID si no se especifica) via Bot API."""
+async def send_message(text: str, chat_id: str | int | None = None, parse_mode: str = "Markdown") -> bool:
+    """
+    Envia mensaje a chat_id via Bot API. Devuelve True si el envio fue exitoso.
+    Reintenta hasta 3 veces en 429 usando retry_after del response body.
+    Devuelve False sin reintentar en cualquier otro error.
+    """
     if not TELEGRAM_TOKEN:
-        logger.warning("send_message: TELEGRAM_TOKEN no configurado — mensaje no enviado")
-        return
+        logger.warning("send_message: TELEGRAM_TOKEN no configurado")
+        return False
 
     target = str(chat_id) if chat_id is not None else str(TELEGRAM_CHAT_ID or "")
     if not target:
-        logger.warning("send_message: sin chat_id destino — mensaje no enviado")
-        return
+        logger.warning("send_message: sin chat_id destino")
+        return False
 
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.post(
-                _bot_url("sendMessage"),
-                json={
-                    "chat_id": target,
-                    "text": text,
-                    "parse_mode": parse_mode,
-                    "disable_web_page_preview": True,
-                },
-            )
-        if resp.status_code != 200:
+    payload = {
+        "chat_id": target,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                resp = await client.post(_bot_url("sendMessage"), json=payload)
+
+            if resp.status_code == 200:
+                return True
+
+            if resp.status_code == 429:
+                try:
+                    retry_after = int(resp.json().get("parameters", {}).get("retry_after", 5))
+                except Exception:
+                    retry_after = 5
+                logger.warning(
+                    "send_message: 429 Too Many Requests — esperando %ds (intento %d/3)",
+                    retry_after, attempt + 1,
+                )
+                await asyncio.sleep(retry_after)
+                continue
+
             logger.error("send_message: Bot API respondio %d — %s", resp.status_code, resp.text[:200])
-    except Exception:
-        logger.error("send_message: error enviando mensaje", exc_info=True)
+            return False
+
+        except Exception:
+            logger.error("send_message: error en intento %d/3", attempt + 1, exc_info=True)
+            if attempt < 2:
+                await asyncio.sleep(2)
+
+    logger.error("send_message: todos los reintentos fallaron")
+    return False
 
 
 _SPORT_EMOJI = {
@@ -192,7 +219,13 @@ async def send_sports_alert(prediction: dict) -> bool:
         logger.error("send_sports_alert: error comprobando dedup", exc_info=True)
 
     text = _format_sports_alert(prediction)
-    await send_message(text)
+    sent = await send_message(text)
+
+    if not sent:
+        logger.error("send_sports_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
+        return False
+
+    await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
 
     try:
         col("alerts_sent").add({
@@ -226,7 +259,13 @@ async def send_poly_alert(analysis: dict) -> bool:
         logger.error("send_poly_alert: error comprobando dedup", exc_info=True)
 
     text = _format_poly_alert(analysis)
-    await send_message(text)
+    sent = await send_message(text)
+
+    if not sent:
+        logger.error("send_poly_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
+        return False
+
+    await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
 
     try:
         col("alerts_sent").add({
