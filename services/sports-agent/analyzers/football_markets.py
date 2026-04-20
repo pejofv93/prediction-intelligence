@@ -33,11 +33,12 @@ _AH_LINES = (-0.5, -1.0, -1.5, 0.5, 1.0, 1.5)
 
 # ── OddsPapi client ────────────────────────────────────────────────────────────
 _ODDSPAPI_BASE = "https://api.oddspapi.com"
-_ODDSPAPI_CACHE: dict[str, tuple[datetime, list]] = {}
+# Cache por liga (una sola llamada devuelve TODOS los mercados) — TTL 1h
+_ODDSPAPI_LEAGUE_CACHE: dict[str, tuple[datetime, list]] = {}
 _ODDSPAPI_TTL = timedelta(hours=1)
 _HTTP_TIMEOUT = 15.0
 
-# Mapeo de league code Firestore → sport/competition en OddsPapi
+# Mapeo de league code Firestore → competition en OddsPapi
 _ODDSPAPI_LEAGUE_MAP = {
     "PD":  "LaLiga",
     "BL1": "Bundesliga",
@@ -54,23 +55,31 @@ _ODDSPAPI_LEAGUE_MAP = {
 }
 
 
-async def _fetch_oddspapi(market: str, league: str) -> list:
+def _safe_float(v) -> float | None:
+    try:
+        f = float(v)
+        return f if f > 1.0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _fetch_oddspapi_league(league: str) -> list:
     """
-    Obtiene cuotas de OddsPapi para un mercado y liga.
-    Cachea por market+league durante 1h.
-    Devuelve lista de eventos con odds o [] si falla/no configurada.
+    Una sola llamada por liga que devuelve TODOS los mercados para todos los fixtures.
+    Cache TTL 1h — evita llamadas repetidas para btts/ah/h2h del mismo partido.
     """
     if not ODDSPAPI_KEY:
         return []
 
-    cache_key = f"{market}_{league}"
+    cache_key = f"league_{league}"
     now = datetime.now(timezone.utc)
-    cached = _ODDSPAPI_CACHE.get(cache_key)
+    cached = _ODDSPAPI_LEAGUE_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _ODDSPAPI_TTL:
         return cached[1]
 
     competition = _ODDSPAPI_LEAGUE_MAP.get(league, "")
-    params: dict = {"apiKey": ODDSPAPI_KEY, "market": market, "sport": "football"}
+    # Sin parámetro market → OddsPapi devuelve todos los mercados disponibles
+    params: dict = {"apiKey": ODDSPAPI_KEY, "sport": "football"}
     if competition:
         params["competition"] = competition
 
@@ -85,22 +94,81 @@ async def _fetch_oddspapi(market: str, league: str) -> list:
             logger.warning("OddsPapi: rate limit (429)")
             return []
         if resp.status_code != 200:
-            logger.warning("OddsPapi: HTTP %d para %s/%s", resp.status_code, market, league)
+            logger.warning("OddsPapi: HTTP %d para liga %s", resp.status_code, league)
             return []
 
         data = resp.json()
-        # OddsPapi puede devolver {"data": [...]} o directamente una lista
         events = data if isinstance(data, list) else data.get("data", data.get("events", []))
         if not isinstance(events, list):
             events = []
 
-        logger.info("OddsPapi: %s/%s → %d eventos", market, league, len(events))
-        _ODDSPAPI_CACHE[cache_key] = (now, events)
+        logger.info("OddsPapi: %s → %d fixtures (todos los mercados)", league, len(events))
+        _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, events)
         return events
 
     except Exception:
-        logger.error("OddsPapi: error fetching %s/%s", market, league, exc_info=True)
+        logger.error("OddsPapi: error fetching liga %s", league, exc_info=True)
         return []
+
+
+async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> dict | None:
+    """
+    Exportado: usado por value_bet_engine como fallback h2h cuando The Odds API está agotada.
+    Usa el mismo cache por-liga → sin coste adicional si ya hay datos.
+    """
+    events = await _fetch_oddspapi_league(league)
+    ev = _oddspapi_find_event(events, home_team, away_team)
+    if not ev:
+        return None
+
+    odds = ev.get("odds", ev)
+
+    # Formato plano: {home_odds: X, draw_odds: Y, away_odds: Z}
+    for h_k in ("match_winner_home", "home_odds", "home", "1"):
+        for d_k in ("match_winner_draw", "draw_odds", "draw", "X"):
+            for a_k in ("match_winner_away", "away_odds", "away", "2"):
+                ho = _safe_float(odds.get(h_k))
+                do = _safe_float(odds.get(d_k))
+                ao = _safe_float(odds.get(a_k))
+                if ho and ao:
+                    return {
+                        "bookmaker": "oddspapi",
+                        "home_odds": ho,
+                        "draw_odds": do or 3.2,
+                        "away_odds": ao,
+                        "opening_home_odds": ho,
+                        "source": "oddspapi",
+                    }
+
+    # Formato The Odds API embebido: {bookmakers: [{markets: [{key: "h2h", ...}]}]}
+    home_t = ev.get("home_team", "")
+    for bk in ev.get("bookmakers", []):
+        for mkt in bk.get("markets", []):
+            if mkt.get("key") not in ("h2h", "match_winner"):
+                continue
+            ho = do = ao = None
+            for o in mkt.get("outcomes", []):
+                nm = o.get("name", "")
+                pr = _safe_float(o.get("price", o.get("odds", 0)))
+                if not pr:
+                    continue
+                nm_l = nm.lower()
+                if nm_l == "draw":
+                    do = pr
+                elif home_t[:5].lower() in nm_l or nm_l == "home":
+                    ho = pr
+                else:
+                    ao = pr
+            if ho and ao:
+                return {
+                    "bookmaker": bk.get("key", "oddspapi"),
+                    "home_odds": ho,
+                    "draw_odds": do or 3.2,
+                    "away_odds": ao,
+                    "opening_home_odds": ho,
+                    "source": "oddspapi",
+                }
+    return None
 
 
 def _oddspapi_find_event(events: list, home: str, away: str) -> dict | None:
@@ -333,6 +401,7 @@ def _make_prediction(base: dict, market_type: str, selection: str,
     from analyzers.value_bet_engine import kelly_criterion
     kelly = kelly_criterion(edge, odds)
 
+    bkm = base.get("bookmaker", "")
     return {
         **base,
         "market_type": market_type,
@@ -345,6 +414,7 @@ def _make_prediction(base: dict, market_type: str, selection: str,
         "factors": {k: round(float(v), 4) for k, v in factors.items()},
         "signals": {},
         "data_source": "poisson_extras",
+        "odds_source": "oddspapi" if bkm == "oddspapi" else "theoddsapi",
         "match_date": match_date,
         "weights_version": weights_version,
         "created_at": datetime.now(timezone.utc),
@@ -405,11 +475,11 @@ async def generate_football_extra_signals(
     signals_out: list[dict] = []
     xg_factor = round(min(home_xg, away_xg) / max(home_xg, away_xg, 0.1), 4)
 
-    # Fuentes de cuotas: OddsPapi primero (BTTS/AH), The Odds API como fallback
-    op_btts_events = await _fetch_oddspapi("btts", league)
-    op_ah_events   = await _fetch_oddspapi("asian_handicap", league)
-    op_btts_ev = _oddspapi_find_event(op_btts_events, home_team, away_team) if op_btts_events else None
-    op_ah_ev   = _oddspapi_find_event(op_ah_events,   home_team, away_team) if op_ah_events else None
+    # OddsPapi: una sola llamada por liga (todos los mercados) — reutiliza la caché si ya existe
+    op_league_events = await _fetch_oddspapi_league(league)
+    op_ev = _oddspapi_find_event(op_league_events, home_team, away_team) if op_league_events else None
+    op_btts_ev = op_ev
+    op_ah_ev   = op_ev
 
     # ── BTTS ─────────────────────────────────────────────────────────────────
     btts_odds = ((_parse_oddspapi_btts(op_btts_ev) if op_btts_ev else None)
