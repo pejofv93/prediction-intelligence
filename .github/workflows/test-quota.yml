@@ -1,0 +1,13 @@
+name: test-quota
+on: workflow_dispatch
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check API quota
+        run: |
+          curl -s "${{ secrets.SPORTS_AGENT_URL }}/api/quota" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30 | python3 -m json.tool
