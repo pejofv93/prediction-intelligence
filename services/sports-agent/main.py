@@ -448,24 +448,49 @@ async def _bg_analyze() -> None:
         from analyzers.value_bet_engine import generate_signal
         from shared.firestore_client import col
 
-        # Leer solo enriched_matches de partidos próximos (status SCHEDULED/TIMED)
-        # Sin este filtro se procesan miles de matches históricos → timeout garantizado
+        # Leer enriched_matches de partidos en las próximas 48h con status SCHEDULED/TIMED.
+        # El Firestore Admin SDK es SÍNCRONO: 200 partidos × 7 ops × 300ms = 420s → timeout.
+        # Limitando a 48h: ~30-40 partidos × 7 ops × 300ms = ~85s → dentro del budget.
+        # TODO largo plazo: migrar a AsyncClient de Firestore para eliminar el bloqueo.
         try:
-            upcoming_ids = {
-                str(d.to_dict().get("match_id", ""))
-                for d in col("upcoming_matches")
+            from datetime import timedelta as _td
+            _now_utc = datetime.now(timezone.utc)
+            _cutoff_48h = (_now_utc + _td(hours=48)).isoformat()
+            _today_str = _now_utc.date().isoformat()
+
+            upcoming_docs_raw = list(
+                col("upcoming_matches")
                     .where("status", "in", ["SCHEDULED", "TIMED"])
                     .stream()
-                if d.to_dict().get("match_id")
-            }
+            )
+            # Solo IDs de partidos en las próximas 48h
+            upcoming_ids_48h: set[str] = set()
+            for d in upcoming_docs_raw:
+                data = d.to_dict()
+                mid = str(data.get("match_id", ""))
+                if not mid:
+                    continue
+                md = data.get("match_date") or data.get("date")
+                if md is None:
+                    upcoming_ids_48h.add(mid)  # sin fecha → incluir por si acaso
+                    continue
+                if isinstance(md, str):
+                    md_str = md[:10]
+                elif hasattr(md, "date"):
+                    md_str = md.date().isoformat()
+                else:
+                    md_str = str(md)[:10]
+                if _today_str <= md_str <= _cutoff_48h[:10]:
+                    upcoming_ids_48h.add(mid)
+
             all_enriched = list(col("enriched_matches").stream())
             docs = [
                 d for d in all_enriched
-                if str(d.to_dict().get("match_id", "")) in upcoming_ids
+                if str(d.to_dict().get("match_id", "")) in upcoming_ids_48h
             ]
             logger.info(
-                "analyze: %d enriched de %d upcoming (%d total en enriched_matches)",
-                len(docs), len(upcoming_ids), len(all_enriched),
+                "analyze: %d enriched (48h) de %d upcoming SCHEDULED (%d total enriched)",
+                len(docs), len(upcoming_ids_48h), len(all_enriched),
             )
         except Exception:
             logger.error("analyze: error leyendo enriched_matches", exc_info=True)
@@ -579,16 +604,15 @@ async def _bg_analyze() -> None:
             except Exception:
                 logger.error("analyze: error corners_bookings %s", enriched.get("match_id"), exc_info=True)
 
-        # --- Tenis (directo desde upcoming_matches sport=tennis) ---
+        # --- Tenis — solo partidos en las próximas 48h ---
         try:
             from analyzers.tennis_analyzer import generate_tennis_signals
-            tennis_docs = list(
-                col("upcoming_matches")
-                .where("sport", "==", "tennis")
-                .where("status", "in", ["SCHEDULED", "TIMED"])
-                .stream()
-            )
-            logger.info("analyze: %d partidos de tenis a analizar", len(tennis_docs))
+            tennis_docs = [
+                d for d in upcoming_docs_raw
+                if d.to_dict().get("sport") == "tennis"
+                and str(d.to_dict().get("match_id", "")) in upcoming_ids_48h
+            ]
+            logger.info("analyze: %d partidos de tenis (48h) a analizar", len(tennis_docs))
             for tdoc in tennis_docs:
                 match = tdoc.to_dict()
                 try:
@@ -599,16 +623,15 @@ async def _bg_analyze() -> None:
         except Exception:
             logger.error("analyze: error cargando tennis_analyzer", exc_info=True)
 
-        # --- Baloncesto (directo desde upcoming_matches sport=nba/basketball) ---
+        # --- Baloncesto — solo partidos en las próximas 48h ---
         try:
             from analyzers.basketball_analyzer import generate_basketball_signals
-            bball_docs = list(
-                col("upcoming_matches")
-                .where("sport", "in", ["nba", "basketball"])
-                .where("status", "in", ["SCHEDULED", "TIMED"])
-                .stream()
-            )
-            logger.info("analyze: %d partidos de baloncesto a analizar", len(bball_docs))
+            bball_docs = [
+                d for d in upcoming_docs_raw
+                if d.to_dict().get("sport") in ("nba", "basketball")
+                and str(d.to_dict().get("match_id", "")) in upcoming_ids_48h
+            ]
+            logger.info("analyze: %d partidos de baloncesto (48h) a analizar", len(bball_docs))
             for bdoc in bball_docs:
                 game = bdoc.to_dict()
                 try:
