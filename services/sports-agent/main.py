@@ -457,7 +457,7 @@ async def _bg_analyze() -> None:
             from shared.config import COLLECTION_PREFIX as _COL_PFX
 
             _now_utc = datetime.now(timezone.utc)
-            _cutoff_24h = (_now_utc + _td(hours=24)).isoformat()
+            _cutoff_24h = (_now_utc + _td(days=7)).isoformat()
             _today_str = _now_utc.date().isoformat()
             _fs = _get_fs_client2()
 
@@ -494,7 +494,7 @@ async def _bg_analyze() -> None:
             docs_raw = list(_fs.get_all(enriched_refs)) if enriched_refs else []
             docs = [d for d in docs_raw if d.exists]
             logger.info(
-                "analyze: %d enriched (24h) de %d upcoming SCHEDULED (get_all %d refs)",
+                "analyze: %d enriched (7d) de %d upcoming SCHEDULED (get_all %d refs)",
                 len(docs), len(upcoming_ids_48h), len(enriched_refs),
             )
         except Exception:
