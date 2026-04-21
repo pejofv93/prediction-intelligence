@@ -179,12 +179,11 @@ async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> 
         logger.warning("get_oddspapi_h2h_odds: 0 fixtures v4 — quota agotada o API error")
         return None
 
-    # DEBUG: mostrar estructura real del primer fixture para entender keys de nombres
-    import json as _json
-    sample = fixtures[0]
-    logger.info("DEBUG oddspapi fixture sample: %s", _json.dumps(sample, default=str)[:500])
+    # Filtrar por tournamentId antes del name-matching para mayor precisión
+    from analyzers.corners_bookings import _TOURNAMENT_IDS
+    tid = _TOURNAMENT_IDS.get(league)
 
-    fixture = _find_fixture(fixtures, home_team, away_team)
+    fixture = _find_fixture(fixtures, home_team, away_team, tournament_id=tid)
     if not fixture:
         logger.info("get_oddspapi_h2h_odds: fixture no encontrado en %d fixtures (%s vs %s)", len(fixtures), home_team, away_team)
         return None

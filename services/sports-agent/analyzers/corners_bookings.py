@@ -130,32 +130,57 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
         return []
 
 
-def _find_fixture(fixtures: list[dict], home_team: str, away_team: str) -> dict | None:
+def _find_fixture(fixtures: list[dict], home_team: str, away_team: str,
+                  tournament_id: int | None = None) -> dict | None:
     """
-    Busca fixture por nombre de equipo (fuzzy bidireccional).
-    OddsPapi v4 usa nombres cortos ("Milan" en vez de "AC Milan") —
-    por eso comprobamos tanto h in fh como fh in h (substring en ambas direcciones).
+    Busca fixture por nombre de equipo (fuzzy bidireccional, sin acentos).
+    Estrategia: prueba múltiples campos de nombre porque OddsPapi v4 varía la estructura.
+    Si se pasa tournament_id, filtra primero por tournamentId para mayor precisión.
     """
+    import unicodedata, re
+
     def _norm(s) -> str:
         if isinstance(s, dict):
-            s = s.get("name", s.get("shortName", ""))
-        return str(s).lower().replace(" ", "").replace("-", "").replace(".", "")
+            s = s.get("name", s.get("shortName", s.get("fullName", "")))
+        s = str(s)
+        # Eliminar acentos (ü→u, é→e, ñ→n …)
+        s = unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode()
+        return re.sub(r"[^a-z0-9]", "", s.lower())
 
-    def _teams_match(our: str, api: str) -> bool:
-        if not our or not api:
+    def _match(our: str, api_str: str) -> bool:
+        if not our or not api_str or len(api_str) < 3:
             return False
-        return our in api or api in our
+        return our in api_str or api_str in our
 
     h = _norm(home_team)
     a = _norm(away_team)
-    for f in fixtures:
-        p1 = f.get("participant1Id")
-        p2 = f.get("participant2Id")
-        fh = _norm(p1 if isinstance(p1, (str, dict)) else
-                   f.get("home_team", f.get("homeTeam", f.get("homeName", ""))))
-        fa = _norm(p2 if isinstance(p2, (str, dict)) else
-                   f.get("away_team", f.get("awayTeam", f.get("awayName", ""))))
-        if _teams_match(h, fh) and _teams_match(a, fa):
+
+    # Campos candidatos donde OddsPapi puede poner el nombre (en orden de preferencia)
+    HOME_KEYS = ("participant1Name", "homeTeamName", "homeName",
+                 "participant1", "home_team", "homeTeam", "home", "team1")
+    AWAY_KEYS = ("participant2Name", "awayTeamName", "awayName",
+                 "participant2", "away_team", "awayTeam", "away", "team2")
+
+    pool = fixtures
+    if tournament_id is not None:
+        tid_str = str(tournament_id)
+        pool = [f for f in fixtures
+                if str(f.get("tournamentId", f.get("leagueId", f.get("competitionId", "")))) == tid_str]
+        if not pool:
+            pool = fixtures  # fallback: sin filtro si el torneoId no matchea
+
+    for f in pool:
+        # Intentar cada campo de nombre de equipo conocido
+        fh = next((_norm(f[k]) for k in HOME_KEYS if k in f and f[k]), "")
+        fa = next((_norm(f[k]) for k in AWAY_KEYS if k in f and f[k]), "")
+
+        # Si no encontramos por los campos conocidos, buscar en TODOS los strings del fixture
+        if not fh and not fa:
+            str_vals = [_norm(v) for v in f.values() if isinstance(v, (str, dict)) and v != f.get("bookmakerOdds")]
+            fh = next((v for v in str_vals if _match(h, v)), "")
+            fa = next((v for v in str_vals if _match(a, v) and v != fh), "")
+
+        if fh and fa and _match(h, fh) and _match(a, fa):
             return f
     return None
 
