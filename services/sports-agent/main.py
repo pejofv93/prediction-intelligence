@@ -455,7 +455,7 @@ async def _bg_analyze() -> None:
         try:
             from datetime import timedelta as _td
             _now_utc = datetime.now(timezone.utc)
-            _cutoff_48h = (_now_utc + _td(hours=48)).isoformat()
+            _cutoff_48h = (_now_utc + _td(hours=24)).isoformat()
             _today_str = _now_utc.date().isoformat()
 
             upcoming_docs_raw = list(
@@ -489,7 +489,7 @@ async def _bg_analyze() -> None:
                 if str(d.to_dict().get("match_id", "")) in upcoming_ids_48h
             ]
             logger.info(
-                "analyze: %d enriched (48h) de %d upcoming SCHEDULED (%d total enriched)",
+                "analyze: %d enriched (24h) de %d upcoming SCHEDULED (%d total enriched)",
                 len(docs), len(upcoming_ids_48h), len(all_enriched),
             )
         except Exception:
