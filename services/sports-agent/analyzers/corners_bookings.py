@@ -131,20 +131,31 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
 
 
 def _find_fixture(fixtures: list[dict], home_team: str, away_team: str) -> dict | None:
-    """Busca fixture por nombre de equipo (fuzzy)."""
-    def _norm(s: str) -> str:
-        return s.lower().replace(" ", "").replace("-", "")
+    """
+    Busca fixture por nombre de equipo (fuzzy bidireccional).
+    OddsPapi v4 usa nombres cortos ("Milan" en vez de "AC Milan") —
+    por eso comprobamos tanto h in fh como fh in h (substring en ambas direcciones).
+    """
+    def _norm(s) -> str:
+        if isinstance(s, dict):
+            s = s.get("name", s.get("shortName", ""))
+        return str(s).lower().replace(" ", "").replace("-", "").replace(".", "")
+
+    def _teams_match(our: str, api: str) -> bool:
+        if not our or not api:
+            return False
+        return our in api or api in our
 
     h = _norm(home_team)
     a = _norm(away_team)
     for f in fixtures:
-        fh = _norm(f.get("participant1Id", "") if isinstance(f.get("participant1Id"), str)
-                   else f.get("home_team", f.get("homeTeam", "")))
-        fa = _norm(f.get("away_team", f.get("awayTeam", "")))
-        # Intentar con nombres embebidos si existen
-        bk_odds = f.get("bookmakerOdds", {})
-        # Match por tournamentId y startTime como último recurso
-        if h in fh and a in fa:
+        p1 = f.get("participant1Id")
+        p2 = f.get("participant2Id")
+        fh = _norm(p1 if isinstance(p1, (str, dict)) else
+                   f.get("home_team", f.get("homeTeam", f.get("homeName", ""))))
+        fa = _norm(p2 if isinstance(p2, (str, dict)) else
+                   f.get("away_team", f.get("awayTeam", f.get("awayName", ""))))
+        if _teams_match(h, fh) and _teams_match(a, fa):
             return f
     return None
 
