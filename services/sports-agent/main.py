@@ -102,6 +102,17 @@ async def run_enrich() -> StreamingResponse:
     return StreamingResponse(_stream_job(_bg_enrich, "enrich"), media_type="text/plain")
 
 
+@app.get("/api/fixtures-sample", dependencies=[Depends(verify_token)])
+async def fixtures_sample(date: str = "", n: int = 2) -> dict:
+    """Debug: devuelve los primeros N fixtures de OddsPapi v4 para inspeccionar estructura."""
+    from analyzers.corners_bookings import _fetch_fixtures_for_date
+    from datetime import date as _date, timedelta
+    target = _date.fromisoformat(date) if date else _date.today()
+    week_end = target + timedelta(days=7)
+    fixtures = await _fetch_fixtures_for_date(target, to_date=week_end)
+    return {"total": len(fixtures), "sample": fixtures[:n]}
+
+
 @app.post("/run-analyze", dependencies=[Depends(verify_token)])
 async def run_analyze() -> StreamingResponse:
     """Sincrono: mantiene conexion hasta completion. Pings cada 30s."""
