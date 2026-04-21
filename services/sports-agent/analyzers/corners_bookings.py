@@ -74,15 +74,17 @@ _CACHE_TTL = timedelta(hours=1)
 
 # ── Fetch fixtures OddsPapi v4 ─────────────────────────────────────────────────
 
-async def _fetch_fixtures_for_date(target_date: date) -> list[dict]:
+async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = None) -> list[dict]:
     """
     GET /v4/fixtures?sportId=10&from=DATE&to=DATE
-    Devuelve todos los fixtures de fútbol del día con bookmakerOdds embebidos.
+    Devuelve todos los fixtures de fútbol del rango con bookmakerOdds embebidos.
+    to_date=None → solo el día target_date.
     """
     if not ODDSPAPI_KEY:
         return []
 
-    cache_key = str(target_date)
+    end_date = to_date or target_date
+    cache_key = f"{target_date}_{end_date}"
     now = datetime.now(timezone.utc)
     cached = _FIXTURES_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _CACHE_TTL:
@@ -92,11 +94,10 @@ async def _fetch_fixtures_for_date(target_date: date) -> list[dict]:
         logger.warning("corners_bookings: oddspapi cuota agotada, saltando fetch")
         return []
 
-    date_str = target_date.isoformat()
     params = {
         "sportId": "10",
-        "from": date_str,
-        "to": date_str,
+        "from": target_date.isoformat(),
+        "to": end_date.isoformat(),
         "apiKey": ODDSPAPI_KEY,
     }
 
@@ -118,7 +119,10 @@ async def _fetch_fixtures_for_date(target_date: date) -> list[dict]:
             fixtures = []
 
         _FIXTURES_CACHE[cache_key] = (now, fixtures)
-        logger.info("corners_bookings: %d fixtures cargados para %s", len(fixtures), date_str)
+        logger.info(
+            "corners_bookings: %d fixtures cargados (%s → %s)",
+            len(fixtures), target_date.isoformat(), end_date.isoformat(),
+        )
         return fixtures
 
     except Exception:

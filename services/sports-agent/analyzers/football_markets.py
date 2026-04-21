@@ -160,13 +160,15 @@ async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> 
     fixtures con bookmakerOdds embebidos. Auto-detectamos el mercado 1X2 buscando el que
     tiene exactamente 3 outcomes activos con cuotas típicas de resultado de partido.
     """
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
     from analyzers.corners_bookings import _fetch_fixtures_for_date, _find_fixture
 
-    # Reutilizar el cache de fixtures v4 — 0 llamadas adicionales si ya prefetcheado
+    # Buscar en rango hoy+7 días — los matches del Firestore pueden ser este fin de semana.
+    # _fetch_fixtures_for_date usa cache TTL 1h, así que solo 1 llamada HTTP por rango.
     try:
         today = _date.today()
-        fixtures = await _fetch_fixtures_for_date(today)
+        week_end = today + _td(days=7)
+        fixtures = await _fetch_fixtures_for_date(today, to_date=week_end)
     except Exception:
         logger.error("get_oddspapi_h2h_odds: error obteniendo fixtures v4", exc_info=True)
         return None
