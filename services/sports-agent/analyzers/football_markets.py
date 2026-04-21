@@ -154,61 +154,103 @@ async def _fetch_oddspapi_league(league: str) -> list:
 async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> dict | None:
     """
     Exportado: usado por value_bet_engine como fallback h2h cuando The Odds API está agotada.
-    Usa el mismo cache por-liga → sin coste adicional si ya hay datos.
+    Usa OddsPapi v4 fixtures (mismo cache que corners_bookings) — sin coste adicional.
+
+    La API v1 (api.oddspapi.com) está deprecada. Usamos v4 (api.oddspapi.io) que devuelve
+    fixtures con bookmakerOdds embebidos. Auto-detectamos el mercado 1X2 buscando el que
+    tiene exactamente 3 outcomes activos con cuotas típicas de resultado de partido.
     """
-    events = await _fetch_oddspapi_league(league)
-    ev = _oddspapi_find_event(events, home_team, away_team)
-    if not ev:
+    from datetime import date as _date
+    from analyzers.corners_bookings import _fetch_fixtures_for_date, _find_fixture
+
+    # Reutilizar el cache de fixtures v4 — 0 llamadas adicionales si ya prefetcheado
+    try:
+        today = _date.today()
+        fixtures = await _fetch_fixtures_for_date(today)
+    except Exception:
+        logger.error("get_oddspapi_h2h_odds: error obteniendo fixtures v4", exc_info=True)
         return None
 
-    odds = ev.get("odds", ev)
+    if not fixtures:
+        return None
 
-    # Formato plano: {home_odds: X, draw_odds: Y, away_odds: Z}
-    for h_k in ("match_winner_home", "home_odds", "home", "1"):
-        for d_k in ("match_winner_draw", "draw_odds", "draw", "X"):
-            for a_k in ("match_winner_away", "away_odds", "away", "2"):
-                ho = _safe_float(odds.get(h_k))
-                do = _safe_float(odds.get(d_k))
-                ao = _safe_float(odds.get(a_k))
-                if ho and ao:
-                    return {
-                        "bookmaker": "oddspapi",
-                        "home_odds": ho,
-                        "draw_odds": do or 3.2,
-                        "away_odds": ao,
-                        "opening_home_odds": ho,
-                        "source": "oddspapi",
-                    }
+    fixture = _find_fixture(fixtures, home_team, away_team)
+    if not fixture:
+        logger.debug("get_oddspapi_h2h_odds: fixture no encontrado (%s vs %s)", home_team, away_team)
+        return None
 
-    # Formato The Odds API embebido: {bookmakers: [{markets: [{key: "h2h", ...}]}]}
-    home_t = ev.get("home_team", "")
-    for bk in ev.get("bookmakers", []):
-        for mkt in bk.get("markets", []):
-            if mkt.get("key") not in ("h2h", "match_winner"):
-                continue
-            ho = do = ao = None
-            for o in mkt.get("outcomes", []):
-                nm = o.get("name", "")
-                pr = _safe_float(o.get("price", o.get("odds", 0)))
-                if not pr:
-                    continue
-                nm_l = nm.lower()
-                if nm_l == "draw":
-                    do = pr
-                elif home_t[:5].lower() in nm_l or nm_l == "home":
-                    ho = pr
-                else:
-                    ao = pr
-            if ho and ao:
-                return {
-                    "bookmaker": bk.get("key", "oddspapi"),
-                    "home_odds": ho,
-                    "draw_odds": do or 3.2,
-                    "away_odds": ao,
-                    "opening_home_odds": ho,
-                    "source": "oddspapi",
-                }
-    return None
+    return _extract_h2h_from_v4_fixture(fixture)
+
+
+def _extract_h2h_from_v4_fixture(fixture: dict) -> dict | None:
+    """
+    Extrae cuotas 1X2 del formato bookmakerOdds de OddsPapi v4.
+    Auto-detecta el mercado 1X2 buscando el que tiene exactamente 3 outcomes activos
+    con cuotas en rango típico de resultado de partido (1.10 – 15.0) y el mayor número
+    de bookmakers. Funciona independientemente del marketId concreto.
+    """
+    bk_odds = fixture.get("bookmakerOdds", {})
+    if not bk_odds:
+        return None
+
+    # Acumular candidatos: {market_id: [(bkm, ho, do, ao), ...]}
+    candidates: dict[str, list[tuple]] = {}
+
+    for bk_name, bk_data in bk_odds.items():
+        markets = bk_data.get("markets", {}) if isinstance(bk_data, dict) else {}
+        for market_id, mkt_data in markets.items():
+            outcomes = mkt_data.get("outcomes", {}) if isinstance(mkt_data, dict) else {}
+            # Recoger precios activos
+            prices: list[float] = []
+            for oid, odata in outcomes.items():
+                players = odata.get("players", {}) if isinstance(odata, dict) else {}
+                p0 = players.get("0", {}) if isinstance(players, dict) else {}
+                price = _safe_float(p0.get("price")) if isinstance(p0, dict) else None
+                active = p0.get("active", True) if isinstance(p0, dict) else True
+                if price and active and 1.05 <= price <= 15.0:
+                    prices.append(price)
+
+            # Un mercado 1X2 tiene exactamente 3 outcomes activos en rango
+            if len(prices) == 3:
+                prices_sorted = sorted(prices)
+                # Heurística: cuota media < 3.5 (partidos equilibrados) y min > 1.1
+                if prices_sorted[0] > 1.1 and sum(prices_sorted) / 3 < 5.0:
+                    if market_id not in candidates:
+                        candidates[market_id] = []
+                    candidates[market_id].append((bk_name, prices_sorted[0], prices_sorted[1], prices_sorted[2]))
+
+    if not candidates:
+        logger.debug("_extract_h2h_from_v4_fixture: sin mercado 1X2 detectado")
+        return None
+
+    # Elegir el market_id con más bookmakers (el más cubierto es el principal 1X2)
+    best_mid = max(candidates, key=lambda k: len(candidates[k]))
+    entries = candidates[best_mid]
+
+    # Usar el bookmaker con cuota home más alta (mejor valor) como referencia
+    # y calcular mediana de todos para mayor robustez
+    all_home  = sorted(e[1] for e in entries)
+    all_draw  = sorted(e[2] for e in entries)
+    all_away  = sorted(e[3] for e in entries)
+    mid_idx = len(all_home) // 2
+
+    home_odds = all_home[mid_idx]
+    draw_odds = all_draw[mid_idx]
+    away_odds = all_away[mid_idx]
+    bookmaker = entries[mid_idx][0] if entries else "oddspapi"
+
+    logger.info(
+        "get_oddspapi_h2h_odds: v4 market=%s bkm=%s home=%.2f draw=%.2f away=%.2f (%d bkms)",
+        best_mid, bookmaker, home_odds, draw_odds, away_odds, len(entries),
+    )
+    return {
+        "bookmaker": bookmaker,
+        "home_odds": home_odds,
+        "draw_odds": draw_odds,
+        "away_odds": away_odds,
+        "opening_home_odds": home_odds,
+        "source": "oddspapi_v4",
+    }
 
 
 def _oddspapi_find_event(events: list, home: str, away: str) -> dict | None:
