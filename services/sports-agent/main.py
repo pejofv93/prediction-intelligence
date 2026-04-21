@@ -448,9 +448,25 @@ async def _bg_analyze() -> None:
         from analyzers.value_bet_engine import generate_signal
         from shared.firestore_client import col
 
-        # Leer todos los enriched_matches disponibles
+        # Leer solo enriched_matches de partidos próximos (status SCHEDULED/TIMED)
+        # Sin este filtro se procesan miles de matches históricos → timeout garantizado
         try:
-            docs = list(col("enriched_matches").stream())
+            upcoming_ids = {
+                str(d.to_dict().get("match_id", ""))
+                for d in col("upcoming_matches")
+                    .where("status", "in", ["SCHEDULED", "TIMED"])
+                    .stream()
+                if d.to_dict().get("match_id")
+            }
+            all_enriched = list(col("enriched_matches").stream())
+            docs = [
+                d for d in all_enriched
+                if str(d.to_dict().get("match_id", "")) in upcoming_ids
+            ]
+            logger.info(
+                "analyze: %d enriched de %d upcoming (%d total en enriched_matches)",
+                len(docs), len(upcoming_ids), len(all_enriched),
+            )
         except Exception:
             logger.error("analyze: error leyendo enriched_matches", exc_info=True)
             return
@@ -468,7 +484,7 @@ async def _bg_analyze() -> None:
         # Sin esto: N ligas × 15s secuencial → timeout. Con esto: ~15s en paralelo.
         try:
             from analyzers.value_bet_engine import _ODDS_SPORT_MAP, _get_league_events
-            from analyzers.football_markets import _fetch_oddspapi_league
+            from analyzers.football_markets import _fetch_oddspapi_league, _ODDSPAPI_LEAGUE_MAP as _OP_MAP
             from analyzers.basketball_analyzer import _fetch_basketball_odds
             from analyzers.tennis_analyzer import _fetch_tennis_odds, _TENNIS_SPORT_KEYS
             from analyzers.corners_bookings import _fetch_fixtures_for_date
@@ -477,6 +493,8 @@ async def _bg_analyze() -> None:
             _now = datetime.now(timezone.utc)
             _today = _date_pf.today()
             _active_leagues = {d.to_dict().get("league", "") for d in docs}
+            # Solo ligas de fútbol con mapeado en OddsPapi (las demás harían un request sin filtro)
+            _active_football_leagues = _active_leagues & set(_OP_MAP.keys())
 
             # Torneos de tenis con partidos programados
             try:
@@ -500,8 +518,8 @@ async def _bg_analyze() -> None:
                 # The Odds API: ligas de fútbol activas
                 [_get_league_events(sk, "prefetch", _now)
                  for lg, sk in _ODDS_SPORT_MAP.items() if lg in _active_leagues]
-                # OddsPapi v1: BTTS/AH para ligas de fútbol activas
-                + [_fetch_oddspapi_league(lg) for lg in _active_leagues]
+                # OddsPapi v1: BTTS/AH — solo ligas mapeadas (evita requests sin filtro)
+                + [_fetch_oddspapi_league(lg) for lg in _active_football_leagues]
                 # OddsPapi v4: fixtures de corners/tarjetas del día
                 + [_fetch_fixtures_for_date(_today)]
                 # The Odds API: baloncesto (NBA + Euroleague)
