@@ -464,25 +464,55 @@ async def _bg_analyze() -> None:
 
         signals_generated = 0
 
-        # --- Pre-fetch odds en paralelo (evita N×15s secuenciales por liga) ---
+        # --- Pre-fetch odds en paralelo (cubre TODAS las fuentes HTTP) ---
+        # Sin esto: N ligas × 15s secuencial → timeout. Con esto: ~15s en paralelo.
         try:
             from analyzers.value_bet_engine import _ODDS_SPORT_MAP, _get_league_events
+            from analyzers.football_markets import _fetch_oddspapi_league
             from analyzers.basketball_analyzer import _fetch_basketball_odds
+            from analyzers.tennis_analyzer import _fetch_tennis_odds, _TENNIS_SPORT_KEYS
+            from analyzers.corners_bookings import _fetch_fixtures_for_date
+            from datetime import date as _date_pf
 
             _now = datetime.now(timezone.utc)
+            _today = _date_pf.today()
             _active_leagues = {d.to_dict().get("league", "") for d in docs}
-            _prefetch_coros = [
-                _get_league_events(sk, "prefetch", _now)
-                for lg, sk in _ODDS_SPORT_MAP.items()
-                if lg in _active_leagues
-            ] + [
-                _fetch_basketball_odds("basketball_nba"),
-                _fetch_basketball_odds("basketball_euroleague"),
-            ]
-            if _prefetch_coros:
-                logger.info("analyze: pre-fetching %d sport keys en paralelo", len(_prefetch_coros))
-                await asyncio.gather(*_prefetch_coros, return_exceptions=True)
-                logger.info("analyze: pre-fetch completado — cache warm")
+
+            # Torneos de tenis con partidos programados
+            try:
+                _tennis_raw = list(
+                    col("upcoming_matches")
+                    .where("sport", "==", "tennis")
+                    .where("status", "in", ["SCHEDULED", "TIMED"])
+                    .limit(100)
+                    .stream()
+                )
+                _tennis_sks = {
+                    _TENNIS_SPORT_KEYS.get(
+                        d.to_dict().get("tournament", "") or d.to_dict().get("league", "")
+                    )
+                    for d in _tennis_raw
+                } - {None}
+            except Exception:
+                _tennis_sks = set()
+
+            _prefetch_coros = (
+                # The Odds API: ligas de fútbol activas
+                [_get_league_events(sk, "prefetch", _now)
+                 for lg, sk in _ODDS_SPORT_MAP.items() if lg in _active_leagues]
+                # OddsPapi v1: BTTS/AH para ligas de fútbol activas
+                + [_fetch_oddspapi_league(lg) for lg in _active_leagues]
+                # OddsPapi v4: fixtures de corners/tarjetas del día
+                + [_fetch_fixtures_for_date(_today)]
+                # The Odds API: baloncesto (NBA + Euroleague)
+                + [_fetch_basketball_odds("basketball_nba"),
+                   _fetch_basketball_odds("basketball_euroleague")]
+                # The Odds API: torneos de tenis activos
+                + [_fetch_tennis_odds(sk, "prefetch") for sk in _tennis_sks]
+            )
+            logger.info("analyze: pre-fetching %d coroutines en paralelo", len(_prefetch_coros))
+            await asyncio.gather(*_prefetch_coros, return_exceptions=True)
+            logger.info("analyze: pre-fetch completado — todas las fuentes en cache")
         except Exception:
             logger.warning("analyze: error en pre-fetch odds — continuando sin cache", exc_info=True)
 
