@@ -168,20 +168,26 @@ async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> 
     try:
         today = _date.today()
         week_end = today + _td(days=7)
+        logger.info("get_oddspapi_h2h_odds: buscando %s vs %s en %s → %s", home_team, away_team, today, week_end)
         fixtures = await _fetch_fixtures_for_date(today, to_date=week_end)
+        logger.info("get_oddspapi_h2h_odds: %d fixtures v4 obtenidos (%s → %s)", len(fixtures), today, week_end)
     except Exception:
         logger.error("get_oddspapi_h2h_odds: error obteniendo fixtures v4", exc_info=True)
         return None
 
     if not fixtures:
+        logger.warning("get_oddspapi_h2h_odds: 0 fixtures v4 — quota agotada o API error")
         return None
 
     fixture = _find_fixture(fixtures, home_team, away_team)
     if not fixture:
-        logger.debug("get_oddspapi_h2h_odds: fixture no encontrado (%s vs %s)", home_team, away_team)
+        logger.info("get_oddspapi_h2h_odds: fixture no encontrado en %d fixtures (%s vs %s)", len(fixtures), home_team, away_team)
         return None
 
-    return _extract_h2h_from_v4_fixture(fixture)
+    result = _extract_h2h_from_v4_fixture(fixture)
+    if not result:
+        logger.info("get_oddspapi_h2h_odds: fixture encontrado pero sin mercado 1X2 detectado")
+    return result
 
 
 def _extract_h2h_from_v4_fixture(fixture: dict) -> dict | None:
