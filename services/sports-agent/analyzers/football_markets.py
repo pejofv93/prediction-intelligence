@@ -179,20 +179,10 @@ async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> 
         logger.warning("get_oddspapi_h2h_odds: 0 fixtures v4 — quota agotada o API error")
         return None
 
-    # DEBUG temporal: mostrar estructura del primer fixture (solo 1 vez por sesion)
-    if not getattr(get_oddspapi_h2h_odds, "_logged_sample", False):
-        try:
-            sample = fixtures[0]
-            keys = list(sample.keys())
-            p1 = sample.get("participant1Id"); p2 = sample.get("participant2Id")
-            ht = sample.get("homeTeam"); at = sample.get("awayTeam")
-            logger.info("DEBUG fixture keys: %s | p1=%s(%s) p2=%s(%s) ht=%s at=%s",
-                        keys[:8], type(p1).__name__, str(p1)[:30],
-                        type(p2).__name__, str(p2)[:30],
-                        str(ht)[:40], str(at)[:40])
-            get_oddspapi_h2h_odds._logged_sample = True
-        except Exception:
-            pass
+    # DEBUG: mostrar estructura real del primer fixture para entender keys de nombres
+    import json as _json
+    sample = fixtures[0]
+    logger.info("DEBUG oddspapi fixture sample: %s", _json.dumps(sample, default=str)[:500])
 
     fixture = _find_fixture(fixtures, home_team, away_team)
     if not fixture:
