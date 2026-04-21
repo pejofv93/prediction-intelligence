@@ -141,6 +141,10 @@ async def _fetch_player_stats(fixture_id: int) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url, headers=headers, params={"fixture": fixture_id})
+        if resp.status_code in (403, 429):
+            # 403: free tier sin acceso a /fixtures/players; 429: rate limit. Ambos no fatales.
+            logger.debug("player_props: RapidAPI %d para fixture %s — saltando", resp.status_code, fixture_id)
+            return []
         if resp.status_code != 200:
             return []
         players = []

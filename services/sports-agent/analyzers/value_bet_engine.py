@@ -236,26 +236,37 @@ async def fetch_bookmaker_odds(
         logger.error("fetch_bookmaker_odds(%s): error leyendo odds_cache", match_id, exc_info=True)
 
     # --- 2. The Odds API (fuente primaria para h2h cuando quota disponible) ---
+    _theodds_tried = False
     if ODDS_API_KEY and not _THE_ODDS_API_EXHAUSTED and home_team and away_team and league in _ODDS_SPORT_MAP:
+        _theodds_tried = True
         odds_result = await _fetch_the_odds_api(match_id, home_team, away_team, league, now)
         if odds_result:
             return {**odds_result, "source": "theoddsapi"}
 
-    # --- 2b. OddsPapi fallback h2h (cuando quota de The Odds API agotada) ---
-    if _THE_ODDS_API_EXHAUSTED and home_team and away_team and league in _ODDS_SPORT_MAP:
+    # --- 2b. OddsPapi fallback h2h ---
+    # Activa cuando la liga está en OddsPapi Y al menos uno de:
+    #   (A) _theodds_tried=True: The Odds API buscó pero no encontró el partido
+    #   (B) _THE_ODDS_API_EXHAUSTED: quota mensual agotada (422)
+    #   (C) liga no está en _ODDS_SPORT_MAP (ej. DED, ECL) → The Odds API nunca fue intentada
+    if home_team and away_team:
         try:
-            from analyzers.football_markets import get_oddspapi_h2h_odds
-            op_result = await get_oddspapi_h2h_odds(league, home_team, away_team)
-            if op_result:
-                await _save_odds_cache(match_id, op_result, now)
-                logger.info("fetch_bookmaker_odds(%s): OddsPapi fallback — %s @ home=%.2f away=%.2f",
-                            match_id, op_result.get("bookmaker", "oddspapi"),
-                            op_result.get("home_odds", 0), op_result.get("away_odds", 0))
-                return op_result
+            from analyzers.football_markets import get_oddspapi_h2h_odds, _ODDSPAPI_LEAGUE_MAP as _op_map
+            _needs_oddspapi = (
+                league in _op_map
+                and (_THE_ODDS_API_EXHAUSTED or _theodds_tried or league not in _ODDS_SPORT_MAP)
+            )
+            if _needs_oddspapi:
+                op_result = await get_oddspapi_h2h_odds(league, home_team, away_team)
+                if op_result:
+                    await _save_odds_cache(match_id, op_result, now)
+                    logger.info("fetch_bookmaker_odds(%s): OddsPapi h2h — %s @ home=%.2f away=%.2f",
+                                match_id, op_result.get("bookmaker", "oddspapi"),
+                                op_result.get("home_odds", 0), op_result.get("away_odds", 0))
+                    return op_result
         except Exception:
             logger.error("fetch_bookmaker_odds(%s): error en OddsPapi fallback", match_id, exc_info=True)
 
-    # --- 3. API-Football via RapidAPI (fallback) ---
+    # --- 3. API-Football via RapidAPI (fallback final) ---
     if not FOOTBALL_RAPID_API_KEY:
         logger.debug("fetch_bookmaker_odds(%s): sin API keys disponibles", match_id)
         return None
@@ -277,9 +288,8 @@ async def fetch_bookmaker_odds(
             )
 
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 60))
-            logger.warning("fetch_bookmaker_odds(%s): rate limit 429 — esperando %ds", match_id, retry_after)
-            await asyncio.sleep(retry_after)
+            # No dormir 60s por partido: RapidAPI free tier no incluye /odds de todos modos.
+            logger.warning("fetch_bookmaker_odds(%s): RapidAPI 429 — saltando sin espera", match_id)
             return None
 
         if resp.status_code != 200:
