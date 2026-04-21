@@ -212,21 +212,20 @@ def _extract_h2h_from_v4_fixture(fixture: dict) -> dict | None:
         markets = bk_data.get("markets", {}) if isinstance(bk_data, dict) else {}
         for market_id, mkt_data in markets.items():
             outcomes = mkt_data.get("outcomes", {}) if isinstance(mkt_data, dict) else {}
-            # Recoger precios activos
+            # Recoger precios activos — límite 50.0 para grandes outsiders (ej PEC Zwolle)
             prices: list[float] = []
             for oid, odata in outcomes.items():
                 players = odata.get("players", {}) if isinstance(odata, dict) else {}
                 p0 = players.get("0", {}) if isinstance(players, dict) else {}
                 price = _safe_float(p0.get("price")) if isinstance(p0, dict) else None
                 active = p0.get("active", True) if isinstance(p0, dict) else True
-                if price and active and 1.05 <= price <= 15.0:
+                if price and active and 1.01 <= price <= 50.0:
                     prices.append(price)
 
-            # Un mercado 1X2 tiene exactamente 3 outcomes activos en rango
+            # 1X2 tiene 3 outcomes: home/draw/away. Heurística: min < 10.0 (home no es 10-to-1)
             if len(prices) == 3:
                 prices_sorted = sorted(prices)
-                # Heurística: cuota media < 3.5 (partidos equilibrados) y min > 1.1
-                if prices_sorted[0] > 1.1 and sum(prices_sorted) / 3 < 5.0:
+                if prices_sorted[0] < 10.0:  # la cuota más baja es el favorito
                     if market_id not in candidates:
                         candidates[market_id] = []
                     candidates[market_id].append((bk_name, prices_sorted[0], prices_sorted[1], prices_sorted[2]))
