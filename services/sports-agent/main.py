@@ -448,22 +448,25 @@ async def _bg_analyze() -> None:
         from analyzers.value_bet_engine import generate_signal
         from shared.firestore_client import col
 
-        # Leer enriched_matches de partidos en las próximas 48h con status SCHEDULED/TIMED.
-        # El Firestore Admin SDK es SÍNCRONO: 200 partidos × 7 ops × 300ms = 420s → timeout.
-        # Limitando a 48h: ~30-40 partidos × 7 ops × 300ms = ~85s → dentro del budget.
-        # TODO largo plazo: migrar a AsyncClient de Firestore para eliminar el bloqueo.
+        # Leer enriched_matches usando db.get_all() para SOLO los IDs que necesitamos.
+        # ANTES: list(col("enriched_matches").stream()) leía 5000+ docs históricos → lento.
+        # AHORA: db.get_all(refs) = 1 RPC con los N IDs del día → N × 1ms en vez de 5000 × Xms.
         try:
             from datetime import timedelta as _td
+            from shared.firestore_client import get_client as _get_fs_client2
+            from shared.config import COLLECTION_PREFIX as _COL_PFX
+
             _now_utc = datetime.now(timezone.utc)
-            _cutoff_48h = (_now_utc + _td(hours=24)).isoformat()
+            _cutoff_24h = (_now_utc + _td(hours=24)).isoformat()
             _today_str = _now_utc.date().isoformat()
+            _fs = _get_fs_client2()
 
             upcoming_docs_raw = list(
                 col("upcoming_matches")
                     .where("status", "in", ["SCHEDULED", "TIMED"])
                     .stream()
             )
-            # Solo IDs de partidos en las próximas 48h
+            # Solo IDs de partidos en las próximas 24h
             upcoming_ids_48h: set[str] = set()
             for d in upcoming_docs_raw:
                 data = d.to_dict()
@@ -472,7 +475,7 @@ async def _bg_analyze() -> None:
                     continue
                 md = data.get("match_date") or data.get("date")
                 if md is None:
-                    upcoming_ids_48h.add(mid)  # sin fecha → incluir por si acaso
+                    upcoming_ids_48h.add(mid)
                     continue
                 if isinstance(md, str):
                     md_str = md[:10]
@@ -480,17 +483,19 @@ async def _bg_analyze() -> None:
                     md_str = md.date().isoformat()
                 else:
                     md_str = str(md)[:10]
-                if _today_str <= md_str <= _cutoff_48h[:10]:
+                if _today_str <= md_str <= _cutoff_24h[:10]:
                     upcoming_ids_48h.add(mid)
 
-            all_enriched = list(col("enriched_matches").stream())
-            docs = [
-                d for d in all_enriched
-                if str(d.to_dict().get("match_id", "")) in upcoming_ids_48h
+            # db.get_all(): 1 sola RPC para N documentos específicos (sin leer toda la colección)
+            enriched_refs = [
+                _fs.collection(f"{_COL_PFX}enriched_matches").document(mid)
+                for mid in upcoming_ids_48h
             ]
+            docs_raw = list(_fs.get_all(enriched_refs)) if enriched_refs else []
+            docs = [d for d in docs_raw if d.exists]
             logger.info(
-                "analyze: %d enriched (24h) de %d upcoming SCHEDULED (%d total enriched)",
-                len(docs), len(upcoming_ids_48h), len(all_enriched),
+                "analyze: %d enriched (24h) de %d upcoming SCHEDULED (get_all %d refs)",
+                len(docs), len(upcoming_ids_48h), len(enriched_refs),
             )
         except Exception:
             logger.error("analyze: error leyendo enriched_matches", exc_info=True)
