@@ -259,8 +259,10 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
     Genera señales para un partido de tenis.
     Lee team_stats de Firestore para ambos jugadores.
     Devuelve lista de predictions guardadas.
+    Usa WriteBatch: todas las writes del partido en 1 sola RPC.
     """
     from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
+    from shared.firestore_client import get_client as _get_fs_client
 
     match_id = str(match.get("match_id", ""))
     p1_name  = match.get("home_team", "")
@@ -319,6 +321,7 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
     }
 
     predictions: list[dict] = []
+    _fs_batch = _get_fs_client().batch()  # WriteBatch: todas las writes en 1 RPC
 
     # ── H2H (ganador del partido) ─────────────────────────────────────────────
     if event:
@@ -331,7 +334,7 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
             if pred:
                 doc_id = f"{match_id}_h2h_p1"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, base, event)
+                _save_and_alert(pred, doc_id, base, event, batch=_fs_batch)
                 predictions.append(pred)
 
             # p2 victoria
@@ -341,7 +344,7 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
             if pred2:
                 doc_id = f"{match_id}_h2h_p2"
                 pred2["match_id"] = doc_id
-                _save_and_alert(pred2, doc_id, base, event)
+                _save_and_alert(pred2, doc_id, base, event, batch=_fs_batch)
                 predictions.append(pred2)
 
     # ── SET HANDICAP -1.5 para favorito ──────────────────────────────────────
@@ -359,7 +362,7 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
             if pred:
                 doc_id = f"{match_id}_sh"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, base, event)
+                _save_and_alert(pred, doc_id, base, event, batch=_fs_batch)
                 predictions.append(pred)
 
     # ── TOTAL SETS over/under 2.5 ─────────────────────────────────────────────
@@ -416,7 +419,7 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
                 tag = ("over" if "Over" in sel else "under") + str(games_line).replace(".", "_")
                 doc_id = f"{match_id}_tg_{tag}"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, base, event)
+                _save_and_alert(pred, doc_id, base, event, batch=_fs_batch)
                 predictions.append(pred)
 
     # ── GAME HANDICAP ─────────────────────────────────────────────────────────
@@ -464,6 +467,11 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
             _save_and_alert(pred, doc_id, base, event)
             predictions.append(pred)
 
+    try:
+        _fs_batch.commit()
+    except Exception:
+        logger.error("tennis_analyzer(%s): error en batch commit", match_id, exc_info=True)
+
     if predictions:
         logger.info("tennis_analyzer(%s): %d señales — %s vs %s",
                     match_id, len(predictions), p1_name, p2_name)
@@ -483,11 +491,16 @@ def _bo5_set_prob(k: int, p: float) -> float:
     return 0.0
 
 
-def _save_and_alert(pred: dict, doc_id: str, base: dict, enriched: dict) -> None:
+def _save_and_alert(pred: dict, doc_id: str, base: dict, enriched: dict,
+                    batch=None) -> None:
+    """batch: Firestore WriteBatch opcional. Si se pasa, acumula el write sin hacerlo."""
     from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
     import asyncio
     try:
-        col("predictions").document(doc_id).set(pred)
+        if batch is not None:
+            batch.set(col("predictions").document(doc_id), pred)
+        else:
+            col("predictions").document(doc_id).set(pred)
     except Exception:
         logger.error("tennis_analyzer: error guardando %s", doc_id, exc_info=True)
     if pred["edge"] > SPORTS_ALERT_EDGE:

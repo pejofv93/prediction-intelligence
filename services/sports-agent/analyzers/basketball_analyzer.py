@@ -234,11 +234,14 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
     }
 
 
-def _save_and_alert(pred: dict, doc_id: str, enriched: dict) -> None:
+def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -> None:
     from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
     import asyncio
     try:
-        col("predictions").document(doc_id).set(pred)
+        if batch is not None:
+            batch.set(col("predictions").document(doc_id), pred)
+        else:
+            col("predictions").document(doc_id).set(pred)
     except Exception:
         logger.error("basketball_analyzer: error guardando %s", doc_id, exc_info=True)
     if pred["edge"] > SPORTS_ALERT_EDGE:
@@ -299,6 +302,8 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     }
 
     predictions: list[dict] = []
+    from shared.firestore_client import get_client as _get_fs_client
+    _fs_batch = _get_fs_client().batch()  # WriteBatch: todas las writes en 1 RPC
 
     # ── Moneyline ─────────────────────────────────────────────────────────────
     if event:
@@ -313,7 +318,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 if pred:
                     doc_id = f"{match_id}_ml_{tag}"
                     pred["match_id"] = doc_id
-                    _save_and_alert(pred, doc_id, game)
+                    _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                     predictions.append(pred)
 
     # ── Spread ────────────────────────────────────────────────────────────────
@@ -331,7 +336,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
             if pred:
                 doc_id = f"{match_id}_spread"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, game)
+                _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                 predictions.append(pred)
 
     # ── Totals ────────────────────────────────────────────────────────────────
@@ -355,7 +360,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                     tag = "over" if "Over" in sel else "under"
                     doc_id = f"{match_id}_tot_{tag}"
                     pred["match_id"] = doc_id
-                    _save_and_alert(pred, doc_id, game)
+                    _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                     predictions.append(pred)
 
     # ── PRIMERA MITAD — SPREAD y TOTALS ──────────────────────────────────────
@@ -392,7 +397,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         if pred:
             doc_id = f"{match_id}_h1_spread"
             pred["match_id"] = doc_id
-            _save_and_alert(pred, doc_id, game)
+            _save_and_alert(pred, doc_id, game, batch=_fs_batch)
             predictions.append(pred)
 
     # H1 totals
@@ -416,7 +421,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 tag = "over" if "Over" in sel else "under"
                 doc_id = f"{match_id}_h1_tot_{tag}"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, game)
+                _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                 predictions.append(pred)
 
     # ── PRIMER CUARTO TOTALS ──────────────────────────────────────────────────
@@ -443,8 +448,13 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 tag = "over" if "Over" in sel else "under"
                 doc_id = f"{match_id}_q1_tot_{tag}"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, game)
+                _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                 predictions.append(pred)
+
+    try:
+        _fs_batch.commit()
+    except Exception:
+        logger.error("basketball_analyzer(%s): error en batch commit", match_id, exc_info=True)
 
     if predictions:
         logger.info("basketball_analyzer(%s): %d señales — %s vs %s",

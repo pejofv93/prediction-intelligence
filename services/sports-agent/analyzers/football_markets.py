@@ -701,10 +701,12 @@ async def generate_football_extra_signals(
     """
     Genera señales para BTTS, Double Chance, Asian Handicap y Over 3.5.
     cached_events: lista de eventos ya obtenida de The Odds API para esta liga.
+    Usa WriteBatch: todos los writes de este partido en 1 sola RPC (de N×300ms → 1×300ms).
     """
     from analyzers.value_bet_engine import (
         _teams_match, _send_telegram_alert, _build_alert_payload
     )
+    from shared.firestore_client import get_client as _get_fs_client
 
     home_xg = enriched_match.get("home_xg")
     away_xg = enriched_match.get("away_xg")
@@ -717,6 +719,11 @@ async def generate_football_extra_signals(
 
     home_xg = float(home_xg)
     away_xg = float(away_xg)
+
+    # WriteBatch: agrupa todos los writes del partido en 1 sola RPC
+    _fs = _get_fs_client()
+    _batch = _fs.batch()
+    _pending_alerts: list[dict] = []  # alerts se envían después del commit
 
     # Encontrar evento en caché
     event = None
@@ -768,7 +775,7 @@ async def generate_football_extra_signals(
                     doc_id = f"{match_id}_btts_{sel.lower().replace(' ','_')}"
                     pred["match_id"] = doc_id
                     try:
-                        col("predictions").document(doc_id).set(pred)
+                        _batch.set(col("predictions").document(doc_id), pred)
                     except Exception:
                         logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                     if pred["edge"] > SPORTS_ALERT_EDGE:
@@ -797,7 +804,7 @@ async def generate_football_extra_signals(
                     doc_id = f"{match_id}_dc_{sel}"
                     pred["match_id"] = doc_id
                     try:
-                        col("predictions").document(doc_id).set(pred)
+                        _batch.set(col("predictions").document(doc_id), pred)
                     except Exception:
                         logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                     if pred["edge"] > SPORTS_ALERT_EDGE:
@@ -843,7 +850,7 @@ async def generate_football_extra_signals(
                 doc_id = f"{match_id}_ah_{tag}"
                 pred["match_id"] = doc_id
                 try:
-                    col("predictions").document(doc_id).set(pred)
+                    _batch.set(col("predictions").document(doc_id), pred)
                 except Exception:
                     logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                 if pred["edge"] > SPORTS_ALERT_EDGE:
@@ -876,7 +883,7 @@ async def generate_football_extra_signals(
                     doc_id = f"{match_id}_t35_{tag}"
                     pred["match_id"] = doc_id
                     try:
-                        col("predictions").document(doc_id).set(pred)
+                        _batch.set(col("predictions").document(doc_id), pred)
                     except Exception:
                         logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                     if pred["edge"] > SPORTS_ALERT_EDGE:
@@ -905,7 +912,7 @@ async def generate_football_extra_signals(
                     tag = "home" if "Home" in sel else "away"
                     doc_id = f"{match_id}_dnb_{tag}"
                     pred["match_id"] = doc_id
-                    try: col("predictions").document(doc_id).set(pred)
+                    try: _batch.set(col("predictions").document(doc_id), pred)
                     except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                     if pred["edge"] > SPORTS_ALERT_EDGE:
                         payload = _build_alert_payload(pred, enriched_match)
@@ -968,7 +975,7 @@ async def generate_football_extra_signals(
                     if pred:
                         doc_id = f"{match_id}_eh_{str(pt).replace('-','m').replace('.','_')}"
                         pred["match_id"] = doc_id
-                        try: col("predictions").document(doc_id).set(pred)
+                        try: _batch.set(col("predictions").document(doc_id), pred)
                         except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                         if pred["edge"] > SPORTS_ALERT_EDGE:
                             payload = _build_alert_payload(pred, enriched_match)
@@ -1003,7 +1010,7 @@ async def generate_football_extra_signals(
                 tag = "over" if "Over" in sel else "under"
                 doc_id = f"{match_id}_{market_key.replace('.','_')}_{tag}"
                 pred["match_id"] = doc_id
-                try: col("predictions").document(doc_id).set(pred)
+                try: _batch.set(col("predictions").document(doc_id), pred)
                 except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                 if pred["edge"] > SPORTS_ALERT_EDGE:
                     payload = _build_alert_payload(pred, enriched_match)
@@ -1059,7 +1066,7 @@ async def generate_football_extra_signals(
                         tag = "over" if "Over" in sel else "under"
                         doc_id = f"{match_id}_{side}_goals_{str(line).replace('.','_')}_{tag}"
                         pred["match_id"] = doc_id
-                        try: col("predictions").document(doc_id).set(pred)
+                        try: _batch.set(col("predictions").document(doc_id), pred)
                         except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
                         if pred["edge"] > SPORTS_ALERT_EDGE:
                             payload = _build_alert_payload(pred, enriched_match)
@@ -1089,6 +1096,12 @@ async def generate_football_extra_signals(
                     # Esto es informacional — edge real requeriría mapeo exacto de outomeId
                     logger.debug("football_markets(%s): htft %s p=%.3f implied_ref=%.3f",
                                  match_id, combo, prob, best_implied)
+
+    # Commit todas las writes del partido en una sola RPC (N×300ms → 1×300ms)
+    try:
+        _batch.commit()
+    except Exception:
+        logger.error("football_markets(%s): error en batch commit", match_id, exc_info=True)
 
     if signals_out:
         logger.info("football_markets(%s): %d señales extra",
