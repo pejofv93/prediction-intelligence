@@ -7,13 +7,13 @@ on:
 jobs:
   trigger:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Trigger Cloud Run (sync)
         run: |
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-analyze" \
             -H "Content-Type: application/json" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 300 \
+            --max-time 600 \
             --no-buffer \
             --fail --silent --show-error

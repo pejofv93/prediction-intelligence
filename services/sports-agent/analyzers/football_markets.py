@@ -25,6 +25,41 @@ from shared.config import (
     ODDSPAPI_KEY, SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE,
 )
 from shared.firestore_client import col
+from shared.api_quota_manager import quota
+
+# ── Emojis por mercado ────────────────────────────────────────────────────────
+_MARKET_EMOJI: dict[str, str] = {
+    "btts":               "🔄",
+    "double_chance":      "🎯",
+    "asian_handicap":     "📐",
+    "result_and_goals":   "🔢",
+    "draw_no_bet":        "🚫",
+    "european_handicap":  "📏",
+    "totals_1.5":         "📊",
+    "totals_3.5":         "📊",
+    "totals_4.5":         "📊",
+    "ht_totals_0.5":      "⏱️",
+    "ht_totals_1.5":      "⏱️",
+    "ht_ft":              "⏱️",
+    "home_team_goals":    "⚽",
+    "away_team_goals":    "⚽",
+    "first_scorer":       "🥅",
+    "anytime_scorer":     "🥅",
+    "anytime_assist":     "🎯",
+    "corners_1x2":        "📐",
+    "bookings_1x2":       "🟨",
+    "tennis_total_games": "🎾",
+    "tennis_game_handicap": "🎾",
+    "basketball_h1_spread": "🏀",
+    "basketball_h1_totals": "🏀",
+    "basketball_q1_totals": "🏀",
+    "h2h":                "⚽",
+}
+
+def _intensity(edge: float) -> str:
+    if edge > 0.15: return "🔥"
+    if edge > 0.08: return "✅"
+    return "📊"
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +106,10 @@ async def _fetch_oddspapi_league(league: str) -> list:
     if not ODDSPAPI_KEY:
         return []
 
+    if not quota.can_call("oddspapi"):
+        logger.warning("OddsPapi: cuota diaria agotada para liga %s, saltando", league)
+        return []
+
     cache_key = f"league_{league}"
     now = datetime.now(timezone.utc)
     cached = _ODDSPAPI_LEAGUE_CACHE.get(cache_key)
@@ -97,6 +136,7 @@ async def _fetch_oddspapi_league(league: str) -> list:
             logger.warning("OddsPapi: HTTP %d para liga %s", resp.status_code, league)
             return []
 
+        quota.track_call("oddspapi")
         data = resp.json()
         events = data if isinstance(data, list) else data.get("data", data.get("events", []))
         if not isinstance(events, list):
@@ -308,6 +348,230 @@ def calc_totals_n(home_xg: float, away_xg: float, line: float) -> dict | None:
                 "expected_total": round(expected, 2)}
     except Exception:
         return None
+
+
+# ── Nuevas funciones de cálculo ───────────────────────────────────────────────
+
+def calc_draw_no_bet(hw: float, aw: float) -> dict[str, float]:
+    """P(home win) y P(away win) renormalizadas sin empate."""
+    total = hw + aw
+    if total <= 0:
+        return {"home": 0.5, "away": 0.5}
+    return {"home": round(hw / total, 4), "away": round(aw / total, 4)}
+
+
+def calc_result_goals(hw: float, d: float, aw: float,
+                      over_p: float, under_p: float) -> dict[str, float]:
+    """Probabilidades combinadas resultado × goles (no independientes pero aproximadas)."""
+    return {
+        "home_over":  round(hw * over_p, 4),
+        "home_under": round(hw * under_p, 4),
+        "draw_under": round(d  * under_p, 4),
+        "away_over":  round(aw * over_p, 4),
+        "away_under": round(aw * under_p, 4),
+    }
+
+
+def calc_european_handicap(home_xg: float, away_xg: float) -> dict[str, float]:
+    """P(home cubre handicap europeo -1/0/+1). Push = devuelve apuesta."""
+    MAX = 12
+    lh, la = max(0.1, home_xg), max(0.1, away_xg)
+    matrix = np.zeros((MAX, MAX))
+    for i in range(MAX):
+        for j in range(MAX):
+            matrix[i, j] = float(_poisson.pmf(i, lh)) * float(_poisson.pmf(j, la))
+
+    def _covers(line: int) -> tuple[float, float]:
+        p_win = p_push = 0.0
+        for i in range(MAX):
+            for j in range(MAX):
+                diff = i - j + line
+                if diff > 0:   p_win  += matrix[i, j]
+                elif diff == 0: p_push += matrix[i, j]
+        return round(p_win, 4), round(p_push, 4)
+
+    w_m1, push_m1 = _covers(-1)
+    w_0,  push_0  = _covers(0)
+    w_p1, _       = _covers(1)
+    return {
+        "home_minus1":  w_m1,   "push_minus1": push_m1,
+        "home_zero":    w_0,    "push_zero":   push_0,
+        "home_plus1":   w_p1,
+    }
+
+
+def calc_ht_totals(home_xg: float, away_xg: float, line: float = 0.5) -> dict | None:
+    """P(over/under N goles en primera mitad). Factor 0.45 del total."""
+    ht_lh = home_xg * 0.45
+    ht_la = away_xg * 0.45
+    return calc_totals_n(ht_lh, ht_la, line)
+
+
+def calc_team_goals_ou(team_xg: float, line: float = 0.5) -> dict[str, float]:
+    """P(equipo marca over/under N goles)."""
+    lam = max(0.1, team_xg)
+    if line == 0.5:
+        p_over = round(1.0 - float(_poisson.pmf(0, lam)), 4)
+    elif line == 1.5:
+        p_over = round(1.0 - float(_poisson.pmf(0, lam)) - float(_poisson.pmf(1, lam)), 4)
+    else:
+        p_over = calc_totals_n(lam, 0.0, line).get("over", 0.5)  # type: ignore
+    return {"over": p_over, "under": round(1.0 - p_over, 4)}
+
+
+def calc_ht_ft(hw: float, d: float, aw: float,
+               home_xg: float, away_xg: float) -> dict[str, float]:
+    """Probabilidades de las 9 combinaciones HT/FT."""
+    MAX = 8
+    ht_lh = max(0.1, home_xg * 0.45)
+    ht_la = max(0.1, away_xg * 0.45)
+    ht_hw = ht_d = ht_aw = 0.0
+    for i in range(MAX):
+        for j in range(MAX):
+            p = float(_poisson.pmf(i, ht_lh)) * float(_poisson.pmf(j, ht_la))
+            if i > j:   ht_hw += p
+            elif i == j: ht_d  += p
+            else:        ht_aw += p
+    return {
+        "H/H": round(ht_hw * hw, 4), "H/D": round(ht_hw * d, 4),  "H/A": round(ht_hw * aw, 4),
+        "D/H": round(ht_d  * hw, 4), "D/D": round(ht_d  * d, 4),  "D/A": round(ht_d  * aw, 4),
+        "A/H": round(ht_aw * hw, 4), "A/D": round(ht_aw * d, 4),  "A/A": round(ht_aw * aw, 4),
+    }
+
+
+# ── Parsers nuevos — The Odds API ─────────────────────────────────────────────
+
+def parse_draw_no_bet_event(event: dict) -> dict | None:
+    """Extrae cuotas draw_no_bet de un evento The Odds API."""
+    home_team = event.get("home_team", "")
+    for bk in event.get("bookmakers", []):
+        for mkt in bk.get("markets", []):
+            if mkt.get("key") != "draw_no_bet":
+                continue
+            home_odds = away_odds = None
+            for o in mkt.get("outcomes", []):
+                nm  = o.get("name", "")
+                pr  = float(o.get("price", 0))
+                if pr <= 1:
+                    continue
+                if home_team[:5].lower() in nm.lower() or nm.lower() == "home":
+                    home_odds = pr
+                else:
+                    away_odds = pr
+            if home_odds and away_odds:
+                return {"bookmaker": bk.get("key", "bet365"),
+                        "home_odds": home_odds, "away_odds": away_odds}
+    return None
+
+
+def parse_alternate_totals_event(event: dict, line: float) -> dict | None:
+    """Extrae cuotas alternate_totals para una línea específica."""
+    for bk in event.get("bookmakers", []):
+        for mkt in bk.get("markets", []):
+            if mkt.get("key") != "alternate_totals":
+                continue
+            over_odds = under_odds = actual_line = None
+            for o in mkt.get("outcomes", []):
+                try:
+                    pt = float(o.get("point", o.get("description", 0)))
+                except (TypeError, ValueError):
+                    continue
+                if abs(pt - line) < 0.26:
+                    pr = float(o.get("price", 0))
+                    if pr <= 1:
+                        continue
+                    if o.get("name") == "Over":
+                        over_odds   = pr
+                        actual_line = pt
+                    elif o.get("name") == "Under":
+                        under_odds  = pr
+            if over_odds and under_odds:
+                return {"bookmaker": bk.get("key", "pinnacle"),
+                        "line": actual_line or line,
+                        "over_odds": over_odds, "under_odds": under_odds}
+    return None
+
+
+def parse_team_totals_event(event: dict, home_team: str, line: float = 0.5) -> dict | None:
+    """Extrae cuotas team_totals para home y away en una línea dada."""
+    result: dict = {}
+    for bk in event.get("bookmakers", []):
+        for mkt in bk.get("markets", []):
+            if mkt.get("key") != "team_totals":
+                continue
+            for o in mkt.get("outcomes", []):
+                try:
+                    pt = float(o.get("point", 0))
+                except (TypeError, ValueError):
+                    continue
+                if abs(pt - line) >= 0.26:
+                    continue
+                pr   = float(o.get("price", 0))
+                nm   = o.get("name", "")
+                desc = o.get("description", "")
+                side = "home" if home_team[:5].lower() in desc.lower() else "away"
+                key  = f"{side}_{nm.lower().replace(' ', '_')}"
+                result[key]    = pr
+                result["bookmaker"] = bk.get("key", "bet365")
+                result["line"] = pt
+    return result if "home_over" in result or "away_over" in result else None
+
+
+# ── Parser OddsPapi v4 — HT/FT ────────────────────────────────────────────────
+
+_ODDSPAPI_V4_BASE = "https://api.oddspapi.io/v4"
+_HTFT_MARKET_ID  = "101919"
+_HTFT_CACHE: dict[str, tuple[datetime, list]] = {}
+_HTFT_CACHE_TTL = timedelta(hours=1)
+
+
+async def _fetch_htft_fixtures(match_date: date | None = None) -> list[dict]:
+    """Fetch OddsPapi v4 fixtures para hoy (reutiliza cache de corners_bookings si existe)."""
+    from analyzers.corners_bookings import _fetch_fixtures_for_date
+    from datetime import date as _date
+    target = match_date or _date.today()
+    return await _fetch_fixtures_for_date(target)
+
+
+def _parse_htft_from_fixture(fixture: dict) -> dict[str, float]:
+    """
+    Extrae implied probs de HT/FT (marketId=101919) del fixture OddsPapi v4.
+    Outcome IDs mapeados dinámicamente por nombre (OddsPapi los varía).
+    """
+    bk_odds = fixture.get("bookmakerOdds", {})
+    # Acumular precios por nombre de outcome
+    price_sums: dict[str, list[float]] = {}
+    count = 0
+    for bk_data in bk_odds.values():
+        if not isinstance(bk_data, dict):
+            continue
+        mkt = bk_data.get("markets", {}).get(_HTFT_MARKET_ID)
+        if not mkt:
+            continue
+        for oid, outcome in mkt.get("outcomes", {}).items():
+            for player in outcome.get("players", {}).values():
+                if not player.get("active"):
+                    continue
+                price = player.get("price", 0)
+                if isinstance(price, (int, float)) and price > 1.05:
+                    label = player.get("bookmakerOutcomeId", oid)
+                    price_sums.setdefault(label, []).append(float(price))
+        count += 1
+
+    if not price_sums or count < 3:
+        return {}
+
+    # Implied probs promedio por combinación
+    implied: dict[str, float] = {}
+    for label, prices in price_sums.items():
+        avg_price = sum(prices) / len(prices)
+        implied[label] = round(1.0 / avg_price, 4) if avg_price > 1 else 0.0
+
+    # Normalizar
+    total = sum(implied.values())
+    if total <= 0:
+        return {}
+    return {k: round(v / total, 4) for k, v in implied.items()}
 
 
 # ── Parsers de The Odds API ───────────────────────────────────────────────────
@@ -619,7 +883,214 @@ async def generate_football_extra_signals(
                         await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                     signals_out.append(pred)
 
+    # ── DRAW NO BET ───────────────────────────────────────────────────────────
+    if hw is not None and aw is not None:
+        dnb_odds = parse_draw_no_bet_event(event) if event else None
+        if dnb_odds:
+            dnb_probs = calc_draw_no_bet(float(hw), float(aw))
+            for sel, prob, odds_key in [
+                ("Home DNB", dnb_probs["home"], "home_odds"),
+                ("Away DNB", dnb_probs["away"], "away_odds"),
+            ]:
+                odds = dnb_odds.get(odds_key, 0)
+                if odds <= 1:
+                    continue
+                factors = {"home_win_raw": round(float(hw), 4),
+                           "away_win_raw": round(float(aw), 4)}
+                pred = _make_prediction(
+                    {**base, "bookmaker": dnb_odds.get("bookmaker", "bet365"), "market": "draw_no_bet"},
+                    "draw_no_bet", sel, odds, prob, factors, match_date, weights_version,
+                )
+                if pred:
+                    tag = "home" if "Home" in sel else "away"
+                    doc_id = f"{match_id}_dnb_{tag}"
+                    pred["match_id"] = doc_id
+                    try: col("predictions").document(doc_id).set(pred)
+                    except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
+                    if pred["edge"] > SPORTS_ALERT_EDGE:
+                        payload = _build_alert_payload(pred, enriched_match)
+                        payload["market_emoji"] = _MARKET_EMOJI.get("draw_no_bet", "🚫")
+                        payload["intensity"]    = _intensity(pred["edge"])
+                        await _send_telegram_alert(payload)
+                    signals_out.append(pred)
+
+    # ── RESULT & GOALS ────────────────────────────────────────────────────────
+    if hw is not None and d is not None and aw is not None:
+        t25 = calc_totals_n(home_xg, away_xg, 2.5)
+        if t25:
+            rg_probs = calc_result_goals(float(hw), float(d), float(aw),
+                                         t25["over"], t25["under"])
+            # Derivar implied odds desde h2h × totals si no hay mercado directo
+            # (h2h_home_implied × over_implied) corregido por vig
+            for combo, prob in rg_probs.items():
+                if prob < 0.05:
+                    continue
+                # Construir odds sintéticas: no tenemos mercado directo → skip si prob < threshold
+                # El modelo sirve como información; alertar solo si hay odds OddsPapi
+                # OddsPapi raramente tiene este mercado → loggear si >= MIN_EDGE
+                if prob >= SPORTS_MIN_CONFIDENCE:
+                    logger.debug("football_markets(%s): result_goals %s p=%.3f", match_id, combo, prob)
+
+    # ── EUROPEAN HANDICAP ─────────────────────────────────────────────────────
+    if event:
+        eh = calc_european_handicap(home_xg, away_xg)
+        # Intentar parsear alternate_spreads de The Odds API como proxy de EH
+        for bk in event.get("bookmakers", []):
+            for mkt in bk.get("markets", []):
+                if mkt.get("key") != "alternate_spreads":
+                    continue
+                for o in mkt.get("outcomes", []):
+                    try:
+                        pt = float(o.get("point", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if pt not in (-1.0, 0.0, 1.0):
+                        continue
+                    nm  = o.get("name", "")
+                    pr  = float(o.get("price", 0))
+                    if pr <= 1:
+                        continue
+                    is_home = home_team[:5].lower() in nm.lower()
+                    if is_home and pt == -1.0:
+                        prob = eh["home_minus1"]
+                        sel  = f"{home_team} -1 EH"
+                    elif not is_home and pt == 1.0:
+                        prob = 1.0 - eh["home_minus1"] - eh["push_minus1"]
+                        sel  = f"{away_team} +1 EH"
+                    else:
+                        continue
+                    factors = {"eh_home_m1": eh["home_minus1"], "eh_push_m1": eh["push_minus1"]}
+                    pred = _make_prediction(
+                        {**base, "bookmaker": bk.get("key", "bet365"), "market": "european_handicap",
+                         "line": pt},
+                        "european_handicap", sel, pr, prob, factors, match_date, weights_version,
+                    )
+                    if pred:
+                        doc_id = f"{match_id}_eh_{str(pt).replace('-','m').replace('.','_')}"
+                        pred["match_id"] = doc_id
+                        try: col("predictions").document(doc_id).set(pred)
+                        except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
+                        if pred["edge"] > SPORTS_ALERT_EDGE:
+                            payload = _build_alert_payload(pred, enriched_match)
+                            payload["market_emoji"] = "📏"
+                            payload["intensity"]    = _intensity(pred["edge"])
+                            await _send_telegram_alert(payload)
+                        signals_out.append(pred)
+
+    # ── OVER/UNDER 1.5 y 4.5 ─────────────────────────────────────────────────
+    for line, market_key in ((1.5, "totals_1.5"), (4.5, "totals_4.5")):
+        tN = calc_totals_n(home_xg, away_xg, line)
+        if not tN or not event:
+            continue
+        alt_odds = parse_alternate_totals_event(event, line)
+        if not alt_odds:
+            continue
+        for sel, prob, odds_key in [
+            (f"Over {line}",  tN["over"],  "over_odds"),
+            (f"Under {line}", tN["under"], "under_odds"),
+        ]:
+            odds = alt_odds.get(odds_key, 0)
+            if odds <= 1:
+                continue
+            factors = {"expected_total": tN["expected_total"],
+                       "xg_home": round(home_xg, 3), "xg_away": round(away_xg, 3)}
+            pred = _make_prediction(
+                {**base, "bookmaker": alt_odds.get("bookmaker", "pinnacle"),
+                 "market": market_key, "line": line},
+                market_key, sel, odds, prob, factors, match_date, weights_version,
+            )
+            if pred:
+                tag = "over" if "Over" in sel else "under"
+                doc_id = f"{match_id}_{market_key.replace('.','_')}_{tag}"
+                pred["match_id"] = doc_id
+                try: col("predictions").document(doc_id).set(pred)
+                except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
+                if pred["edge"] > SPORTS_ALERT_EDGE:
+                    payload = _build_alert_payload(pred, enriched_match)
+                    payload["market_emoji"] = "📊"
+                    payload["intensity"]    = _intensity(pred["edge"])
+                    await _send_telegram_alert(payload)
+                signals_out.append(pred)
+
+    # ── HT TOTALS 0.5 y 1.5 ──────────────────────────────────────────────────
+    for line, market_key in ((0.5, "ht_totals_0.5"), (1.5, "ht_totals_1.5")):
+        ht_t = calc_ht_totals(home_xg, away_xg, line)
+        if not ht_t:
+            continue
+        # Intentar alternate_totals con línea baja como proxy (no hay mercado HT específico en TheOddsAPI)
+        # OddsPapi v4 podría tener HT totals — intentar parse desde fixture
+        ht_fixtures = await _fetch_htft_fixtures()
+        from analyzers.corners_bookings import _find_fixture as _cb_find
+        ht_fix = _cb_find(ht_fixtures, home_team, away_team)
+        if ht_fix:
+            # Buscar mercado HT over/under en fixture (IDs conocidos: 101535 1H corners, similar para goles)
+            # Si no se encuentra, loggear y continuar
+            logger.debug("football_markets(%s): %s p_over=%.3f (sin odds directas)", match_id, market_key, ht_t["over"])
+
+    # ── GOLES EQUIPO LOCAL y VISITANTE O/U 0.5 y 1.5 ─────────────────────────
+    if event:
+        team_odds = parse_team_totals_event(event, home_team, 0.5)
+        for side, team_name, team_xg_val, market_key in [
+            ("home", home_team, home_xg, "home_team_goals"),
+            ("away", away_team, away_xg, "away_team_goals"),
+        ]:
+            for line in (0.5, 1.5):
+                tg = calc_team_goals_ou(team_xg_val, line)
+                # Buscar odds team_totals
+                tm_odds = parse_team_totals_event(event, home_team, line)
+                if not tm_odds:
+                    continue
+                over_key  = f"{side}_over"
+                under_key = f"{side}_under"
+                for sel, prob, odds_key in [
+                    (f"{team_name} Over {line}",  tg["over"],  over_key),
+                    (f"{team_name} Under {line}", tg["under"], under_key),
+                ]:
+                    odds = tm_odds.get(odds_key, 0)
+                    if odds <= 1:
+                        continue
+                    factors = {"team_xg": round(team_xg_val, 3), "line": line}
+                    pred = _make_prediction(
+                        {**base, "bookmaker": tm_odds.get("bookmaker", "bet365"),
+                         "market": market_key, "line": line},
+                        market_key, sel, odds, prob, factors, match_date, weights_version,
+                    )
+                    if pred:
+                        tag = "over" if "Over" in sel else "under"
+                        doc_id = f"{match_id}_{side}_goals_{str(line).replace('.','_')}_{tag}"
+                        pred["match_id"] = doc_id
+                        try: col("predictions").document(doc_id).set(pred)
+                        except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
+                        if pred["edge"] > SPORTS_ALERT_EDGE:
+                            payload = _build_alert_payload(pred, enriched_match)
+                            payload["market_emoji"] = "⚽"
+                            payload["intensity"]    = _intensity(pred["edge"])
+                            await _send_telegram_alert(payload)
+                        signals_out.append(pred)
+
+    # ── HT/FT ─────────────────────────────────────────────────────────────────
+    if hw is not None and d is not None and aw is not None:
+        htft_probs = calc_ht_ft(float(hw), float(d), float(aw), home_xg, away_xg)
+        # Buscar odds HT/FT en OddsPapi v4
+        htft_fixtures = await _fetch_htft_fixtures()
+        from analyzers.corners_bookings import _find_fixture as _htft_find
+        htft_fix = _htft_find(htft_fixtures, home_team, away_team)
+        if htft_fix:
+            htft_implied = _parse_htft_from_fixture(htft_fix)
+            if htft_implied:
+                for combo, prob in htft_probs.items():
+                    # Buscar el implied price más cercano en el fixture
+                    # Los IDs de OddsPapi para HT/FT combinan ht_result/ft_result
+                    # Sin mapeo exacto, usar implied market como referencia
+                    best_implied = min(htft_implied.values()) if htft_implied else 0
+                    if best_implied <= 0:
+                        continue
+                    # Construir odds sintéticas desde implied si no hay mapeo directo
+                    # Esto es informacional — edge real requeriría mapeo exacto de outomeId
+                    logger.debug("football_markets(%s): htft %s p=%.3f implied_ref=%.3f",
+                                 match_id, combo, prob, best_implied)
+
     if signals_out:
-        logger.info("football_markets(%s): %d señales extra (btts/dc/ah/t35)",
+        logger.info("football_markets(%s): %d señales extra",
                     match_id, len(signals_out))
     return signals_out

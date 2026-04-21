@@ -25,6 +25,7 @@ from shared.config import (
     TELEGRAM_BOT_URL,
 )
 from shared.firestore_client import col
+from shared.api_quota_manager import quota
 from enrichers.elo_rating import DEFAULT_ELO
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,10 @@ async def fetch_bookmaker_odds(
         logger.debug("fetch_bookmaker_odds(%s): sin API keys disponibles", match_id)
         return None
 
+    if not quota.can_call("api_sports"):
+        logger.warning("fetch_bookmaker_odds(%s): api_sports — cuota diaria agotada, saltando", match_id)
+        return None
+
     try:
         headers = {
             "X-RapidAPI-Key": FOOTBALL_RAPID_API_KEY,
@@ -281,6 +286,7 @@ async def fetch_bookmaker_odds(
             logger.warning("fetch_bookmaker_odds(%s): RapidAPI respondio %d", match_id, resp.status_code)
             return None
 
+        quota.track_call("api_sports")
         data = resp.json()
         fixtures = data.get("response", [])
         if not fixtures:
@@ -387,13 +393,19 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             return events
 
     # Cache ausente o expirado — llamar a la API
+    if not quota.can_call("the_odds_api"):
+        logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota diaria agotada, saltando", match_id)
+        global _THE_ODDS_API_EXHAUSTED
+        _THE_ODDS_API_EXHAUSTED = True
+        return None
+
     url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url, params={
                 "apiKey": ODDS_API_KEY,
                 "regions": "eu",
-                "markets": "h2h,totals,btts,double_chance,spreads",
+                "markets": "h2h,totals,btts,double_chance,spreads,alternate_totals,draw_no_bet,team_totals",
                 "bookmakers": "bet365,pinnacle,unibet",
                 "oddsFormat": "decimal",
             })
@@ -402,7 +414,6 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida", match_id)
             return None
         if resp.status_code == 422:
-            global _THE_ODDS_API_EXHAUSTED
             _THE_ODDS_API_EXHAUSTED = True
             logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota agotada, activando fallback OddsPapi", match_id)
             return None
@@ -411,8 +422,10 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             return None
 
         events = resp.json()
-        remaining = resp.headers.get("x-requests-remaining", "?")
-        logger.info("The Odds API: '%s' — %d eventos cargados, %s requests restantes", sport_key, len(events), remaining)
+        remaining = resp.headers.get("x-requests-remaining")
+        quota.track_call("the_odds_api", remaining=remaining)
+        logger.info("The Odds API: '%s' — %d eventos cargados, %s requests restantes",
+                    sport_key, len(events), remaining or "?")
         _LEAGUE_ODDS_CACHE[sport_key] = (now, events)
         return events
 
@@ -963,21 +976,43 @@ def _get_weights_version() -> int:
     return 0
 
 
+_MARKET_EMOJI: dict[str, str] = {
+    "h2h": "⚽", "totals_2.5": "📊", "totals_1.5": "📊", "totals_3.5": "📊",
+    "totals_4.5": "📊", "btts": "🔄", "double_chance": "🎯",
+    "asian_handicap": "📐", "result_and_goals": "🔢", "draw_no_bet": "🚫",
+    "european_handicap": "📏", "ht_totals_0.5": "⏱️", "ht_totals_1.5": "⏱️",
+    "ht_ft": "⏱️", "home_team_goals": "⚽", "away_team_goals": "⚽",
+    "first_scorer": "🥅", "anytime_scorer": "🥅", "anytime_assist": "🎯",
+    "corners_1x2": "📐", "bookings_1x2": "🟨", "tennis_total_games": "🎾",
+    "tennis_game_handicap": "🎾", "basketball_h1_spread": "🏀",
+    "basketball_h1_totals": "🏀", "basketball_q1_totals": "🏀",
+    "set_handicap": "🎾", "total_sets": "🎾", "spread": "🏀", "totals": "🏀",
+}
+
+
+def _intensity_emoji(edge: float) -> str:
+    if edge > 0.15: return "🔥"
+    if edge > 0.08: return "✅"
+    return "📊"
+
+
 def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:
     """Construye el payload de alerta con los campos del formato Telegram."""
-    # signals siempre contiene poisson/elo/form/h2h del ensemble_probability,
-    # independientemente de si data_source es statistical_model o groq_ai.
     signals = prediction.get("signals", prediction.get("factors", {}))
+    market  = prediction.get("market_type", prediction.get("market", "h2h"))
+    edge    = float(prediction.get("edge", 0))
     return {
         **prediction,
-        "home_team": prediction.get("home_team", ""),
-        "away_team": prediction.get("away_team", ""),
-        "match_date": str(prediction.get("match_date", ""))[:16],
-        "sport": prediction.get("sport", "football"),
-        "market_type": prediction.get("market_type", "h2h"),
-        "poisson": signals.get("poisson"),
-        "elo": signals.get("elo"),
-        "form": signals.get("form"),
-        "h2h": signals.get("h2h"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "home_team":    prediction.get("home_team", ""),
+        "away_team":    prediction.get("away_team", ""),
+        "match_date":   str(prediction.get("match_date", ""))[:16],
+        "sport":        prediction.get("sport", "football"),
+        "market_type":  market,
+        "market_emoji": prediction.get("market_emoji") or _MARKET_EMOJI.get(market, "📊"),
+        "intensity":    prediction.get("intensity") or _intensity_emoji(edge),
+        "poisson":      signals.get("poisson"),
+        "elo":          signals.get("elo"),
+        "form":         signals.get("form"),
+        "h2h":          signals.get("h2h"),
+        "created_at":   datetime.now(timezone.utc).isoformat(),
     }

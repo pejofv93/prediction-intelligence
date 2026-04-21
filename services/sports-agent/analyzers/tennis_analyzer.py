@@ -383,10 +383,104 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
                     _save_and_alert(pred, doc_id, base, event)
                     predictions.append(pred)
 
+    # ── TOTAL GAMES O/U ───────────────────────────────────────────────────────
+    # Modelo: games_per_set × expected_sets. Bo3: ~22-24 games; Bo5: ~35-38.
+    # Usamos best-of-3 (ATP) a menos que sea Grand Slam (bo5).
+    is_bo5   = match.get("best_of", 3) == 5
+    avg_sets = 2.0 * prob1 ** 2 + 2.0 * (1 - prob1) ** 2 + 3.0 * 2 * prob1 * (1 - prob1)
+    if is_bo5:
+        avg_sets = sum(k * _bo5_set_prob(k, prob1) for k in range(3, 6))
+    # Games por set: dominante gana 6-2 (~8 games), contested gana 7-6 (~13 games)
+    # Aproximar: 11 + abs(prob1 - 0.5) × (-6) games/set
+    games_per_set = 11.0 - abs(prob1 - 0.5) * 6.0
+    exp_total_games = round(avg_sets * games_per_set, 1)
+
+    # Líneas más comunes: 20.5 y 22.5 para Bo3
+    for games_line in (20.5, 22.5):
+        tg_odds = _get_totals_odds(event, games_line) if event else None
+        if not tg_odds:
+            continue
+        from scipy.stats import norm as _norm
+        sigma_games = 4.5  # desviación típica del total de games
+        p_over = float(1.0 - _norm.cdf(games_line, loc=exp_total_games, scale=sigma_games))
+        for sel, prob_t, ok in [
+            (f"Over {games_line} games",  round(p_over, 4), tg_odds["over_odds"]),
+            (f"Under {games_line} games", round(1.0 - p_over, 4), tg_odds["under_odds"]),
+        ]:
+            pred = _make_pred(
+                base, "tennis_total_games", sel, ok, prob_t,
+                {**sigs, "exp_total_games": exp_total_games, "games_line": games_line},
+                conf * 0.80, match_date, weights_version, tg_odds["bookmaker"],
+            )
+            if pred:
+                tag = ("over" if "Over" in sel else "under") + str(games_line).replace(".", "_")
+                doc_id = f"{match_id}_tg_{tag}"
+                pred["match_id"] = doc_id
+                _save_and_alert(pred, doc_id, base, event)
+                predictions.append(pred)
+
+    # ── GAME HANDICAP ─────────────────────────────────────────────────────────
+    # Líneas comunes: -3.5 / +3.5
+    for gh_line in (-3.5, 3.5):
+        gh_odds = _get_totals_odds(event, abs(gh_line)) if event else None  # proxy con totals
+        # Intentar spreads directamente
+        spreads_raw = _get_spreads_odds(event) if event else None
+        if spreads_raw:
+            try:
+                gh_line_actual = float(spreads_raw.get("line", gh_line))
+                if abs(abs(gh_line_actual) - 3.5) > 0.6:
+                    continue
+                gh_odds_price = spreads_raw.get("odds", 0)
+            except (TypeError, ValueError):
+                continue
+        elif not gh_odds:
+            continue
+        else:
+            gh_odds_price = gh_odds.get("over_odds", 0)  # proxy
+
+        if gh_odds_price <= 1:
+            continue
+
+        from scipy.stats import norm as _norm
+        # Diferencia esperada de games: (prob1 - 0.5) × games_per_set × avg_sets
+        exp_diff = (prob1 - 0.5) * games_per_set * avg_sets * 0.6
+        sigma_diff = 4.0
+        if gh_line < 0:  # favorito da games
+            p_cover = float(1.0 - _norm.cdf(abs(gh_line), loc=exp_diff, scale=sigma_diff))
+        else:  # underdog recibe games
+            p_cover = float(1.0 - _norm.cdf(gh_line, loc=-exp_diff, scale=sigma_diff))
+        p_cover = round(max(0.0, min(1.0, p_cover)), 4)
+
+        sel = f"{p1_name} {gh_line:+.1f} games"
+        pred = _make_pred(
+            base, "tennis_game_handicap", sel, gh_odds_price, p_cover,
+            {**sigs, "exp_game_diff": round(exp_diff, 2), "games_line": gh_line},
+            conf * 0.75, match_date, weights_version,
+            spreads_raw.get("bookmaker", "bet365") if spreads_raw else "bet365",
+        )
+        if pred:
+            doc_id = f"{match_id}_gh_{str(gh_line).replace('-','m').replace('.','_')}"
+            pred["match_id"] = doc_id
+            _save_and_alert(pred, doc_id, base, event)
+            predictions.append(pred)
+
     if predictions:
         logger.info("tennis_analyzer(%s): %d señales — %s vs %s",
                     match_id, len(predictions), p1_name, p2_name)
     return predictions
+
+
+def _bo5_set_prob(k: int, p: float) -> float:
+    """P(partido va a k sets en best-of-5). k in [3,4,5]."""
+    from math import comb
+    q = 1.0 - p
+    if k == 3:
+        return p ** 3 + q ** 3
+    elif k == 4:
+        return comb(3, 2) * (p ** 2 * q * p + q ** 2 * p * q)
+    elif k == 5:
+        return 1.0 - _bo5_set_prob(3, p) - _bo5_set_prob(4, p)
+    return 0.0
 
 
 def _save_and_alert(pred: dict, doc_id: str, base: dict, enriched: dict) -> None:

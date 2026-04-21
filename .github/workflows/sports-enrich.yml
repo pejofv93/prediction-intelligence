@@ -7,13 +7,13 @@ on:
 jobs:
   trigger:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Trigger Cloud Run (sync)
         run: |
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-enrich" \
             -H "Content-Type: application/json" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 700 \
+            --max-time 900 \
             --no-buffer \
             --fail --silent --show-error

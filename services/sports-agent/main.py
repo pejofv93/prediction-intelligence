@@ -51,6 +51,17 @@ async def status() -> dict:
     }
 
 
+@app.get("/api/quota")
+async def api_quota() -> dict:
+    """Estado de cuotas diarias de todas las APIs externas."""
+    from shared.api_quota_manager import quota
+    return {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "quotas": quota.get_quota_status(),
+        "budgets": quota.daily_budget(),
+    }
+
+
 async def _stream_job(coro_func, job_name: str):
     """
     Ejecuta coro_func() manteniendo la conexion HTTP abierta hasta completion.
@@ -107,6 +118,38 @@ async def run_learning() -> StreamingResponse:
 async def run_backtest() -> StreamingResponse:
     """Sincrono: ejecutar UNA SOLA VEZ. Puede tardar 30-60min."""
     return StreamingResponse(_stream_job(_bg_backtest, "backtest"), media_type="text/plain")
+
+
+@app.post("/run-fdco-collect", dependencies=[Depends(verify_token)])
+async def run_fdco_collect() -> StreamingResponse:
+    """
+    Descarga stats de corners/tarjetas de football-data.co.uk para todas las ligas.
+    Guarda promedios por equipo en Firestore team_corner_stats.
+    Ejecutar periódicamente (recomendado: cada 24h tras los partidos del día).
+    """
+    return StreamingResponse(_stream_job(_bg_fdco_collect, "fdco-collect"), media_type="text/plain")
+
+
+@app.get("/api/corners-signals")
+async def get_corners_signals(league: str = "PD", days: int = 3) -> dict:
+    """
+    Devuelve señales de corners/tarjetas generadas en los últimos N días.
+    Parámetros: league (código interno, e.g. PD), days (1-7).
+    """
+    from shared.firestore_client import col
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=min(days, 7))).isoformat()
+    try:
+        docs = (
+            col("corners_signals")
+            .where("generated_at", ">=", cutoff)
+            .limit(50)
+            .stream()
+        )
+        results = [d.to_dict() for d in docs]
+        return {"count": len(results), "signals": results}
+    except Exception as e:
+        return {"count": 0, "signals": [], "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +464,33 @@ async def _bg_analyze() -> None:
 
         signals_generated = 0
 
+        # --- Pre-fetch odds en paralelo (evita N×15s secuenciales por liga) ---
+        try:
+            from analyzers.value_bet_engine import _ODDS_SPORT_MAP, _get_league_events
+            from analyzers.basketball_analyzer import _fetch_basketball_odds
+
+            _now = datetime.now(timezone.utc)
+            _active_leagues = {d.to_dict().get("league", "") for d in docs}
+            _prefetch_coros = [
+                _get_league_events(sk, "prefetch", _now)
+                for lg, sk in _ODDS_SPORT_MAP.items()
+                if lg in _active_leagues
+            ] + [
+                _fetch_basketball_odds("basketball_nba"),
+                _fetch_basketball_odds("basketball_euroleague"),
+            ]
+            if _prefetch_coros:
+                logger.info("analyze: pre-fetching %d sport keys en paralelo", len(_prefetch_coros))
+                await asyncio.gather(*_prefetch_coros, return_exceptions=True)
+                logger.info("analyze: pre-fetch completado — cache warm")
+        except Exception:
+            logger.warning("analyze: error en pre-fetch odds — continuando sin cache", exc_info=True)
+
         # --- Fútbol (via enriched_matches con Poisson) ---
+        from analyzers.player_props import generate_player_props_signals
+        from analyzers.corners_bookings import generate_corners_signals, save_signals
+        from datetime import date as _date
+
         for doc in docs:
             enriched = doc.to_dict()
             try:
@@ -432,6 +501,35 @@ async def _bg_analyze() -> None:
                     "analyze: error en generate_signal para %s",
                     enriched.get("match_id"), exc_info=True,
                 )
+
+            # Player props (goleador + asistente)
+            try:
+                prop_sigs = await generate_player_props_signals(enriched, weights_version)
+                signals_generated += len(prop_sigs)
+            except Exception:
+                logger.error("analyze: error player_props %s", enriched.get("match_id"), exc_info=True)
+
+            # Corners + bookings 1X2
+            try:
+                match_date_raw = enriched.get("match_date")
+                if hasattr(match_date_raw, "date"):
+                    match_date_d = match_date_raw.date()
+                elif isinstance(match_date_raw, str):
+                    from datetime import date as _date2
+                    match_date_d = _date2.fromisoformat(match_date_raw[:10])
+                else:
+                    match_date_d = _date.today()
+                cb_sigs = await generate_corners_signals(
+                    home_team  = enriched.get("home_team", ""),
+                    away_team  = enriched.get("away_team", ""),
+                    league     = enriched.get("league", ""),
+                    match_date = match_date_d,
+                )
+                if cb_sigs:
+                    await save_signals(cb_sigs, enriched.get("match_id", ""))
+                signals_generated += len(cb_sigs)
+            except Exception:
+                logger.error("analyze: error corners_bookings %s", enriched.get("match_id"), exc_info=True)
 
         # --- Tenis (directo desde upcoming_matches sport=tennis) ---
         try:
@@ -527,3 +625,22 @@ async def _bg_backtest() -> None:
 
     except Exception as e:
         logger.error("backtest: error no controlado — %s", e, exc_info=True)
+
+
+async def _bg_fdco_collect() -> None:
+    """
+    Descarga stats de corners/tarjetas de football-data.co.uk para todas las ligas.
+    Un CSV por liga (~300KB) — sin cuota de API, sin coste.
+    """
+    try:
+        logger.info("fdco-collect: iniciando descarga de stats corners/tarjetas")
+        from collectors.fdco_collector import run_all_leagues
+
+        results = await run_all_leagues(season_year=2025)
+        total_teams = sum(results.values())
+        logger.info(
+            "fdco-collect: completado — %d equipos guardados en %d ligas: %s",
+            total_teams, len(results), results,
+        )
+    except Exception as e:
+        logger.error("fdco-collect: error no controlado — %s", e, exc_info=True)

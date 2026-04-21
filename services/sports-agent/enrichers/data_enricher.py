@@ -314,44 +314,53 @@ async def run_enrichment() -> int:
 
     logger.info("run_enrichment: evaluando %d partidos SCHEDULED", len(scheduled_matches))
 
-    for match_doc in scheduled_matches:
-        match = match_doc.to_dict()
-        match_id = str(match.get("match_id", ""))
+    # --- Verificar estado de enriquecimiento en paralelo ---
+    loop = asyncio.get_event_loop()
 
-        if not match_id:
-            continue
-
-        # Verificar si ya existe un enriched reciente
-        should_enrich = True
+    def _check_enriched(match_id: str) -> bool:
+        """True si debe enriquecerse (no existe o está obsoleto)."""
         try:
-            enriched_doc = col("enriched_matches").document(match_id).get()
-            if enriched_doc.exists:
-                enriched_at = enriched_doc.to_dict().get("enriched_at")
-                if enriched_at is not None:
-                    # Comparar como datetimes aware
-                    if hasattr(enriched_at, "tzinfo") and enriched_at.tzinfo is None:
-                        from datetime import timezone as tz
-                        enriched_at = enriched_at.replace(tzinfo=tz.utc)
-                    if enriched_at > stale_threshold:
-                        should_enrich = False
+            doc = col("enriched_matches").document(match_id).get()
+            if not doc.exists:
+                return True
+            enriched_at = doc.to_dict().get("enriched_at")
+            if enriched_at is None:
+                return True
+            if hasattr(enriched_at, "tzinfo") and enriched_at.tzinfo is None:
+                from datetime import timezone as tz
+                enriched_at = enriched_at.replace(tzinfo=tz.utc)
+            return enriched_at <= stale_threshold
         except Exception:
-            logger.error(
-                "run_enrichment: error verificando enriched_matches[%s]",
-                match_id, exc_info=True,
-            )
-            # Si hay error al verificar, intentar enriquecer de todas formas
+            return True
 
-        if not should_enrich:
-            logger.debug("run_enrichment: %s ya enriquecido recientemente — omitiendo", match_id)
-            continue
+    check_results = await asyncio.gather(*[
+        loop.run_in_executor(None, _check_enriched, str(m.to_dict().get("match_id", "")))
+        for m in scheduled_matches
+    ], return_exceptions=True)
 
-        try:
-            await enrich_match(match)
-            enriched_count += 1
-        except Exception:
-            logger.error(
-                "run_enrichment: error enriqueciendo partido %s", match_id, exc_info=True
-            )
+    to_enrich = [
+        m.to_dict() for m, should in zip(scheduled_matches, check_results)
+        if should is True and m.to_dict().get("match_id")
+    ]
+    skipped = len(scheduled_matches) - len(to_enrich)
+    logger.info("run_enrichment: %d a enriquecer, %d ya frescos (omitidos)", len(to_enrich), skipped)
+
+    # --- Enriquecer en paralelo con semáforo (max 8 concurrentes) ---
+    sem = asyncio.Semaphore(8)
+
+    async def _bounded_enrich(match: dict) -> bool:
+        async with sem:
+            try:
+                await enrich_match(match)
+                return True
+            except Exception:
+                logger.error(
+                    "run_enrichment: error enriqueciendo %s", match.get("match_id"), exc_info=True
+                )
+                return False
+
+    results = await asyncio.gather(*[_bounded_enrich(m) for m in to_enrich], return_exceptions=True)
+    enriched_count = sum(1 for r in results if r is True)
 
     logger.info("run_enrichment: %d partidos enriquecidos", enriched_count)
     return enriched_count

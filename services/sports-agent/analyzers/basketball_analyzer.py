@@ -358,7 +358,124 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                     _save_and_alert(pred, doc_id, game)
                     predictions.append(pred)
 
+    # ── PRIMERA MITAD — SPREAD y TOTALS ──────────────────────────────────────
+    # Modelo: H1 ≈ 48% del total esperado (NBA historical average)
+    H1_FACTOR = 0.48
+    exp_total = rats["exp_home"] + rats["exp_away"]
+    exp_h1_total  = exp_total  * H1_FACTOR
+    exp_h1_margin = margin     * H1_FACTOR
+
+    # H1 spread: intentar The Odds API markets h1_spreads; si no, derivar
+    for mkt_key, (h1_line_ref, odds_key_sfx, p_h1_cover) in {
+        "h1_spreads": (
+            round(exp_h1_margin, 1),
+            "home_odds",
+            float(norm.cdf(0, loc=-(exp_h1_margin + 0.5), scale=BASKETBALL_SPREAD_SIGMA * 0.7)),
+        ),
+    }.items():
+        h1_sp = _get_market_odds_by_key(event, mkt_key) if event else None
+        if h1_sp:
+            h1_line  = h1_sp.get("home_line", h1_line_ref)
+            h1_odds  = h1_sp.get("home_odds", 0)
+            p_h1_cov = float(norm.cdf(0, loc=-(exp_h1_margin + h1_line),
+                                      scale=BASKETBALL_SPREAD_SIGMA * 0.7))
+        else:
+            # Sin odds directas → skip (no hay precio de mercado para calcular edge)
+            continue
+
+        sel = f"{home_name} {h1_line:+.1f} H1"
+        pred = _make_pred(
+            base, "basketball_h1_spread", sel, h1_odds, round(p_h1_cov, 4),
+            {**sigs, "exp_h1_margin": round(exp_h1_margin, 2)},
+            conf * 0.85, match_date, weights_version, h1_sp.get("bookmaker", "bet365"),
+        )
+        if pred:
+            doc_id = f"{match_id}_h1_spread"
+            pred["match_id"] = doc_id
+            _save_and_alert(pred, doc_id, game)
+            predictions.append(pred)
+
+    # H1 totals
+    h1_tot = _get_market_odds_by_key(event, "h1_totals") if event else None
+    if h1_tot:
+        h1_line_t = h1_tot.get("line", round(exp_h1_total, 1))
+        p_h1_over = float(1.0 - norm.cdf(h1_line_t, loc=exp_h1_total,
+                                          scale=BASKETBALL_SPREAD_SIGMA * 0.85))
+        for sel, prob, ok in [
+            (f"Over {h1_line_t:.1f} H1",  round(p_h1_over, 4), h1_tot.get("over_odds", 0)),
+            (f"Under {h1_line_t:.1f} H1", round(1.0 - p_h1_over, 4), h1_tot.get("under_odds", 0)),
+        ]:
+            if ok <= 1:
+                continue
+            pred = _make_pred(
+                base, "basketball_h1_totals", sel, ok, prob,
+                {**sigs, "exp_h1_total": round(exp_h1_total, 1)},
+                conf * 0.85, match_date, weights_version, h1_tot.get("bookmaker", "pinnacle"),
+            )
+            if pred:
+                tag = "over" if "Over" in sel else "under"
+                doc_id = f"{match_id}_h1_tot_{tag}"
+                pred["match_id"] = doc_id
+                _save_and_alert(pred, doc_id, game)
+                predictions.append(pred)
+
+    # ── PRIMER CUARTO TOTALS ──────────────────────────────────────────────────
+    # Q1 ≈ 12% del total (NBA: cada cuarto ~25% de FH que es ~48% del total → 12%)
+    Q1_FACTOR  = 0.12
+    exp_q1_tot = exp_total * Q1_FACTOR
+    q1_tot = _get_market_odds_by_key(event, "quarter_totals") if event else None
+    if q1_tot:
+        q1_line = q1_tot.get("line", round(exp_q1_tot, 1))
+        p_q1_over = float(1.0 - norm.cdf(q1_line, loc=exp_q1_tot,
+                                          scale=BASKETBALL_SPREAD_SIGMA * 0.5))
+        for sel, prob, ok in [
+            (f"Over {q1_line:.1f} Q1",  round(p_q1_over, 4), q1_tot.get("over_odds", 0)),
+            (f"Under {q1_line:.1f} Q1", round(1.0 - p_q1_over, 4), q1_tot.get("under_odds", 0)),
+        ]:
+            if ok <= 1:
+                continue
+            pred = _make_pred(
+                base, "basketball_q1_totals", sel, ok, prob,
+                {**sigs, "exp_q1_total": round(exp_q1_tot, 1)},
+                conf * 0.80, match_date, weights_version, q1_tot.get("bookmaker", "pinnacle"),
+            )
+            if pred:
+                tag = "over" if "Over" in sel else "under"
+                doc_id = f"{match_id}_q1_tot_{tag}"
+                pred["match_id"] = doc_id
+                _save_and_alert(pred, doc_id, game)
+                predictions.append(pred)
+
     if predictions:
         logger.info("basketball_analyzer(%s): %d señales — %s vs %s",
                     match_id, len(predictions), home_name, away_name)
     return predictions
+
+
+def _get_market_odds_by_key(event: dict, market_key: str) -> dict | None:
+    """Busca un mercado por key exacta en The Odds API event."""
+    if not event:
+        return None
+    for bk in event.get("bookmakers", []):
+        for mkt in bk.get("markets", []):
+            if mkt.get("key") != market_key:
+                continue
+            result: dict = {"bookmaker": bk.get("key", "bet365")}
+            over = under = line = home_odds = home_line = None
+            for o in mkt.get("outcomes", []):
+                nm = o.get("name", "").lower()
+                pr = float(o.get("price", 0))
+                try:
+                    pt = float(o.get("point", 0))
+                except (TypeError, ValueError):
+                    pt = 0.0
+                if nm == "over":   over  = pr; line = pt
+                elif nm == "under": under = pr
+                elif "home" in nm: home_odds = pr; home_line = pt
+            if over and under:
+                result.update({"over_odds": over, "under_odds": under, "line": line})
+            if home_odds:
+                result.update({"home_odds": home_odds, "home_line": home_line})
+            if len(result) > 1:
+                return result
+    return None
