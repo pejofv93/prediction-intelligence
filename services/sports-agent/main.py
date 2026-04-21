@@ -544,14 +544,20 @@ async def _bg_analyze() -> None:
             except Exception:
                 _tennis_sks = set()
 
+            from datetime import timedelta as _td_pf
+            _week_end = _today + _td_pf(days=7)
+
             _prefetch_coros = (
                 # The Odds API: ligas de fútbol activas
                 [_get_league_events(sk, "prefetch", _now)
                  for lg, sk in _ODDS_SPORT_MAP.items() if lg in _active_leagues]
                 # OddsPapi v1: BTTS/AH — solo ligas mapeadas (evita requests sin filtro)
                 + [_fetch_oddspapi_league(lg) for lg in _active_football_leagues]
-                # OddsPapi v4: fixtures de corners/tarjetas del día
+                # OddsPapi v4: fixtures de hoy (para corners del día)
                 + [_fetch_fixtures_for_date(_today)]
+                # OddsPapi v4: fixtures de los próximos 7 días (para h2h de matches del fin de semana)
+                # 1 sola llamada aquí → todas las llamadas por-partido van al cache
+                + [_fetch_fixtures_for_date(_today, to_date=_week_end)]
                 # The Odds API: baloncesto (NBA + Euroleague)
                 + [_fetch_basketball_odds("basketball_nba"),
                    _fetch_basketball_odds("basketball_euroleague")]
