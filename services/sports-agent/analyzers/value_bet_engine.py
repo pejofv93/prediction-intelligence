@@ -83,12 +83,17 @@ _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
 _FOOTBALL_TOTALS_LINE: float = 2.5
 
 # Cache en memoria de odds por liga: {sport_key: (fetched_at, [events])}
-# Un request obtiene markets=h2h,totals,btts,double_chance,spreads — TTL 1h por liga
+# TTL 8h: cubre los 4 ciclos diarios (01/07/13/19 UTC) con una sola llamada por liga.
+# Además se persiste en Firestore (league_odds_cache) para sobrevivir reinicios Cloud Run.
 _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
-_LEAGUE_CACHE_TTL = timedelta(hours=1)
+_LEAGUE_CACHE_TTL = timedelta(hours=8)
 
-# Flag de quota agotada para The Odds API — se resetea al reiniciar el proceso
-# Cuando es True, fetch_bookmaker_odds usa OddsPapi como fallback para h2h
+# Mutex para serializar los track_call concurrentes del pre-fetch (evita race condition
+# donde N coroutines leen can_call=True y hacen N llamadas antes de que se actualice used)
+_THE_ODDS_API_LOCK = asyncio.Lock()
+
+# Flag de quota agotada — True solo cuando la API devuelve 422 o Firestore confirma agotada.
+# NO bloquea hits de cache de Firestore (solo bloquea nuevas llamadas HTTP).
 _THE_ODDS_API_EXHAUSTED: bool = False
 
 # Timeout para llamadas HTTP a API externa
@@ -235,9 +240,11 @@ async def fetch_bookmaker_odds(
     except Exception:
         logger.error("fetch_bookmaker_odds(%s): error leyendo odds_cache", match_id, exc_info=True)
 
-    # --- 2. The Odds API (fuente primaria para h2h cuando quota disponible) ---
+    # --- 2. The Odds API (fuente primaria para h2h cuando quota disponible o cache warm) ---
+    # Intentamos siempre que la liga esté mapeada — _get_league_events usa cache Firestore
+    # incluso cuando _THE_ODDS_API_EXHAUSTED=True (no hace nueva llamada HTTP, solo cache).
     _theodds_tried = False
-    if ODDS_API_KEY and not _THE_ODDS_API_EXHAUSTED and home_team and away_team and league in _ODDS_SPORT_MAP:
+    if ODDS_API_KEY and home_team and away_team and league in _ODDS_SPORT_MAP:
         _theodds_tried = True
         odds_result = await _fetch_the_odds_api(match_id, home_team, away_team, league, now)
         if odds_result:
@@ -391,57 +398,106 @@ async def _fetch_the_odds_api(
 
 async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> list | None:
     """
-    Devuelve todos los eventos de una liga desde cache en memoria (TTL 1h).
-    Si el cache expiró o no existe, llama a The Odds API y actualiza el cache.
-    Devuelve None si la API devuelve error no recuperable.
+    Devuelve todos los eventos de una liga. Orden de precedencia:
+    1. Cache en memoria (rápido, sin I/O) — TTL 8h
+    2. Cache en Firestore (persiste entre reinicios Cloud Run) — TTL 8h
+    3. The Odds API (HTTP) — solo si cuota disponible y ambos caches expirados
+    Devuelve None si no hay cache Y la cuota está agotada.
     """
+    global _THE_ODDS_API_EXHAUSTED
+
+    # --- 1. Cache en memoria ---
     cached = _LEAGUE_ODDS_CACHE.get(sport_key)
     if cached is not None:
         fetched_at, events = cached
         if (now - fetched_at) < _LEAGUE_CACHE_TTL:
-            logger.debug("fetch_bookmaker_odds(%s): cache de liga '%s' vigente (%d eventos)", match_id, sport_key, len(events))
+            logger.debug("fetch_bookmaker_odds(%s): cache memoria '%s' vigente (%d eventos)", match_id, sport_key, len(events))
             return events
 
-    # Cache ausente o expirado — llamar a la API
-    if not quota.can_call("the_odds_api"):
-        logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota diaria agotada, saltando", match_id)
-        global _THE_ODDS_API_EXHAUSTED
-        _THE_ODDS_API_EXHAUSTED = True
-        return None
-
-    url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
+    # --- 2. Cache en Firestore (sobrevive reinicios Cloud Run) ---
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(url, params={
-                "apiKey": ODDS_API_KEY,
-                "regions": "eu",
-                "markets": "h2h,totals,btts,double_chance,spreads,alternate_totals,draw_no_bet,team_totals",
-                "bookmakers": "bet365,pinnacle,unibet",
-                "oddsFormat": "decimal",
-            })
-
-        if resp.status_code == 401:
-            logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida", match_id)
-            return None
-        if resp.status_code == 422:
-            _THE_ODDS_API_EXHAUSTED = True
-            logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota agotada, activando fallback OddsPapi", match_id)
-            return None
-        if resp.status_code != 200:
-            logger.warning("fetch_bookmaker_odds(%s): The Odds API respondio %d", match_id, resp.status_code)
-            return None
-
-        events = resp.json()
-        remaining = resp.headers.get("x-requests-remaining")
-        quota.track_call("the_odds_api", remaining=remaining)
-        logger.info("The Odds API: '%s' — %d eventos cargados, %s requests restantes",
-                    sport_key, len(events), remaining or "?")
-        _LEAGUE_ODDS_CACHE[sport_key] = (now, events)
-        return events
-
+        fs_doc = col("league_odds_cache").document(sport_key).get()
+        if fs_doc.exists:
+            fs_data = fs_doc.to_dict()
+            fs_fetched = fs_data.get("fetched_at")
+            if fs_fetched:
+                if hasattr(fs_fetched, "tzinfo") and fs_fetched.tzinfo is None:
+                    fs_fetched = fs_fetched.replace(tzinfo=timezone.utc)
+                if (now - fs_fetched) < _LEAGUE_CACHE_TTL:
+                    events = fs_data.get("events", [])
+                    _LEAGUE_ODDS_CACHE[sport_key] = (fs_fetched, events)
+                    logger.debug("fetch_bookmaker_odds(%s): cache Firestore '%s' vigente (%d eventos)", match_id, sport_key, len(events))
+                    return events
     except Exception:
-        logger.error("fetch_bookmaker_odds(%s): error llamando The Odds API", match_id, exc_info=True)
+        logger.warning("fetch_bookmaker_odds(%s): error leyendo cache Firestore para '%s'", match_id, sport_key, exc_info=True)
+
+    # --- 3. The Odds API (solo si quota disponible) ---
+    # Mutex: evita race condition donde N coroutines concurrentes todas pasan can_call=True
+    # y todas hacen HTTP request antes de que ninguna llame track_call.
+    if _THE_ODDS_API_EXHAUSTED:
         return None
+
+    async with _THE_ODDS_API_LOCK:
+        # Re-check dentro del lock (otro coroutine pudo haberlo agotado mientras esperábamos)
+        if _THE_ODDS_API_EXHAUSTED:
+            return None
+
+        # Re-check cache (podría haber sido actualizado por otro coroutine)
+        cached = _LEAGUE_ODDS_CACHE.get(sport_key)
+        if cached is not None:
+            fetched_at, events = cached
+            if (now - fetched_at) < _LEAGUE_CACHE_TTL:
+                return events
+
+        if not quota.can_call("the_odds_api"):
+            logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota diaria agotada, saltando", match_id)
+            _THE_ODDS_API_EXHAUSTED = True
+            return None
+
+        url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                resp = await client.get(url, params={
+                    "apiKey": ODDS_API_KEY,
+                    "regions": "eu",
+                    "markets": "h2h,totals,btts,double_chance,spreads,alternate_totals,draw_no_bet,team_totals",
+                    "bookmakers": "bet365,pinnacle,unibet",
+                    "oddsFormat": "decimal",
+                })
+
+            if resp.status_code == 401:
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida", match_id)
+                return None
+            if resp.status_code == 422:
+                _THE_ODDS_API_EXHAUSTED = True
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota agotada (422), activando fallback OddsPapi", match_id)
+                return None
+            if resp.status_code != 200:
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API respondio %d", match_id, resp.status_code)
+                return None
+
+            events = resp.json()
+            remaining = resp.headers.get("x-requests-remaining")
+            quota.track_call("the_odds_api", remaining=remaining)
+            logger.info("The Odds API: '%s' — %d eventos cargados, %s requests restantes",
+                        sport_key, len(events), remaining or "?")
+
+            # Actualizar cache en memoria y en Firestore
+            _LEAGUE_ODDS_CACHE[sport_key] = (now, events)
+            try:
+                col("league_odds_cache").document(sport_key).set({
+                    "sport_key": sport_key,
+                    "fetched_at": now,
+                    "events": events,
+                })
+            except Exception:
+                logger.warning("fetch_bookmaker_odds(%s): error guardando cache Firestore para '%s'", match_id, sport_key, exc_info=True)
+
+            return events
+
+        except Exception:
+            logger.error("fetch_bookmaker_odds(%s): error llamando The Odds API", match_id, exc_info=True)
+            return None
 
 
 def _parse_the_odds_event(event: dict) -> dict | None:

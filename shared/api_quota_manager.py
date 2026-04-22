@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Presupuestos diarios por API (llamadas/día)
 _DAILY_LIMITS: dict[str, int] = {
-    "the_odds_api":  17,   # 500/mes ÷ 30 días
+    "the_odds_api": 500,   # 500/mes — cache Firestore 8h evita re-fetch; la API devuelve 422 si se agota
     "api_sports":   100,   # plan gratuito explícito
     "football_data": 500,  # sin límite real, tope conservador
     "oddspapi":       50,  # desconocido — presupuesto conservador
