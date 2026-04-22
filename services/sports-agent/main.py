@@ -3,7 +3,7 @@ sports-agent — FastAPI service
 Endpoints: /run-collect /run-enrich /run-analyze /run-learning /run-backtest /health /status
 Todos los endpoints /run-* devuelven 202 Accepted inmediatamente.
 El trabajo real se ejecuta en background (asyncio.create_task).
-Cloud Run timeout=900s para /run-collect (puede tardar hasta 15min por rate limit).
+Cloud Run timeout=1800s para /run-collect (puede tardar hasta 15min con rate limit football-data.org).
 """
 import asyncio
 import logging
