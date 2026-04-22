@@ -460,8 +460,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
                     "regions": "eu",
-                    "markets": "h2h,totals,btts,double_chance,spreads,alternate_totals,draw_no_bet,team_totals",
-                    "bookmakers": "bet365,pinnacle,unibet",
+                    "markets": "h2h",
                     "oddsFormat": "decimal",
                 })
 
@@ -469,8 +468,9 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida", match_id)
                 return None
             if resp.status_code == 422:
+                # 422 = cuota mensual agotada (no plan insuficiente — eso sería 403)
                 _THE_ODDS_API_EXHAUSTED = True
-                logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota agotada (422), activando fallback OddsPapi", match_id)
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota mensual agotada (422)", match_id)
                 return None
             if resp.status_code != 200:
                 logger.warning("fetch_bookmaker_odds(%s): The Odds API respondio %d", match_id, resp.status_code)
