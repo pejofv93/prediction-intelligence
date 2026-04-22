@@ -39,7 +39,7 @@ jobs:
         run: |
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-analyze" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 600 \
+            --max-time 1100 \
             --no-buffer \
             --silent --show-error || true
 
