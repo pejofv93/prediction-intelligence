@@ -26,6 +26,18 @@ def _escape_md(text: str) -> str:
     return str(text).replace("_", "\\_").replace("`", "\\`")
 
 
+def _truncate_reasoning(text: str, max_chars: int = 800) -> str:
+    """Trunca en el último punto/exclamación/interrogación para no cortar a mitad de frase."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    for sep in (".", "!", "?"):
+        last = truncated.rfind(sep)
+        if last > max_chars // 2:
+            return truncated[: last + 1]
+    return truncated
+
+
 async def send_message(text: str, chat_id: str | int | None = None, parse_mode: str = "Markdown") -> bool:
     """
     Envia mensaje a chat_id via Bot API. Devuelve True si el envio fue exitoso.
@@ -227,7 +239,7 @@ def _format_poly_alert(analysis: dict) -> str:
     edge = float(analysis.get("edge", 0))
     confidence = float(analysis.get("confidence", 0))
     recommendation = analysis.get("recommendation", "PASS")
-    reasoning = _escape_md(str(analysis.get("reasoning", ""))[:300])
+    reasoning = _escape_md(_truncate_reasoning(str(analysis.get("reasoning", ""))))
     volume_spike = bool(analysis.get("volume_spike", False))
     smart_money = bool(analysis.get("smart_money_detected", False))
 

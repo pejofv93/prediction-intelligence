@@ -136,7 +136,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         days_to_close = 999  # sin fecha de cierre = asumimos que no cierra pronto
 
     question = market_data.get("question", "mercado desconocido")
-    price_yes = float(market_data.get("price_yes", 0.5))
+    # Preferir precio del enriched_market (más reciente) sobre el guardado en Firestore,
+    # que puede tener el bug de 0.5 por defecto si el scanner falló al leer outcomePrices.
+    price_yes = float(
+        enriched_market.get("price_yes") or market_data.get("price_yes") or 0.5
+    )
 
     category = categorize_market(question)
     category_context = _build_category_context(question, category)
@@ -271,7 +275,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "trend": trend,
         "recommendation": recommendation,
         "key_factors": key_factors[:5] if key_factors else [],
-        "reasoning": reasoning[:500] if reasoning else "",
+        "reasoning": reasoning[:1000] if reasoning else "",
         "volume_spike": bool(enriched_market.get("volume_spike", False)),
         "smart_money_detected": bool(smart_money.get("is_smart_money", False)),
         "category": category,

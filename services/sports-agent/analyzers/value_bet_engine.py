@@ -688,12 +688,12 @@ def kelly_criterion(edge: float, decimal_odds: float) -> float:
     """
     Kelly fraction = edge / (decimal_odds - 1).
     Si edge <= 0 devuelve 0.0 (nunca apostar con edge negativo).
-    Clampea resultado entre 0.0 y 0.25 (max 25% del bankroll — fraccion Kelly completa).
+    Clampea resultado entre 0.0 y 0.05 (max 5% del bankroll — cap global de riesgo).
     """
     if edge <= 0.0 or decimal_odds <= 1.0:
         return 0.0
     fraction = edge / (decimal_odds - 1.0)
-    return round(max(0.0, min(0.25, fraction)), 4)
+    return round(max(0.0, min(0.05, fraction)), 4)
 
 
 async def _send_telegram_alert(prediction: dict) -> bool:

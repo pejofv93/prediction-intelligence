@@ -87,7 +87,9 @@ def _parse_market(raw: dict) -> dict | None:
         condition_id = str(raw.get("conditionId", raw.get("condition_id", "")))
         question = str(raw.get("question", raw.get("title", "")))
 
-        price_yes_raw = raw.get("outcomePrices", raw.get("price_yes", []))
+        # Bug fix: raw.get("outcomePrices", fallback) no aplica el fallback cuando la clave
+        # existe pero su valor es None (mercados sin trading). Usar "or" para manejar None/[].
+        price_yes_raw = raw.get("outcomePrices") or raw.get("price_yes") or []
         if isinstance(price_yes_raw, str):
             try:
                 import json as _json
