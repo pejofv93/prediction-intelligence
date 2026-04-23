@@ -210,3 +210,142 @@ def build_results_list(matches: list[dict], team_id: int) -> list[str]:
             results.append("D")
 
     return results
+
+
+def calculate_schedule_difficulty(
+    team_id: int,
+    upcoming_opponents: list[dict],
+    all_elo_ratings: dict[int, float] | None = None,
+    default_elo: float = 1500.0,
+) -> dict:
+    """
+    Calcula dificultad de calendario para los próximos N partidos.
+
+    upcoming_opponents: lista de dicts con {team_id, team_name, elo (opcional)}.
+    all_elo_ratings: dict {team_id: elo} — si None, usa default_elo para todos.
+
+    Returns:
+    {
+      difficulty: float,          # 0.0-1.0 normalizado (avg_elo / 1500)
+      avg_rival_elo: float,
+      n_rivals: int,
+      label: str,
+      confidence_modifier: float
+    }
+    """
+    if not upcoming_opponents:
+        return {
+            "difficulty": 0.5,
+            "avg_rival_elo": default_elo,
+            "n_rivals": 0,
+            "label": "MODERADO",
+            "confidence_modifier": 1.0,
+        }
+
+    elo_values: list[float] = []
+    for opp in upcoming_opponents:
+        opp_id = opp.get("team_id")
+        opp_elo = opp.get("elo")
+
+        if opp_elo is not None:
+            elo_values.append(float(opp_elo))
+        elif all_elo_ratings is not None and opp_id is not None and opp_id in all_elo_ratings:
+            elo_values.append(float(all_elo_ratings[opp_id]))
+        else:
+            elo_values.append(default_elo)
+
+    avg_rival_elo = sum(elo_values) / len(elo_values) if elo_values else default_elo
+
+    # Normalizar: 1500 = 0.50 (base ELO), escalar relativo
+    # difficulty = avg_rival_elo / (2 * default_elo) clampado a [0, 1]
+    difficulty = min(max(avg_rival_elo / (2.0 * default_elo), 0.0), 1.0)
+
+    if difficulty > 0.80:
+        label = "MUY_DIFÍCIL"
+        confidence_modifier = 0.90
+    elif difficulty > 0.60:
+        label = "DIFÍCIL"
+        confidence_modifier = 0.95
+    elif difficulty >= 0.40:
+        label = "MODERADO"
+        confidence_modifier = 1.0
+    elif difficulty >= 0.25:
+        label = "FÁCIL"
+        confidence_modifier = 1.05
+    else:
+        label = "MUY_FÁCIL"
+        confidence_modifier = 1.05
+
+    logger.debug(
+        "calculate_schedule_difficulty: team=%s avg_elo=%.1f difficulty=%.3f label=%s",
+        team_id, avg_rival_elo, difficulty, label,
+    )
+
+    return {
+        "difficulty": round(difficulty, 4),
+        "avg_rival_elo": round(avg_rival_elo, 2),
+        "n_rivals": len(elo_values),
+        "label": label,
+        "confidence_modifier": confidence_modifier,
+    }
+
+
+def apply_schedule_difficulty_to_signal(
+    signal: dict,
+    home_schedule: dict | None,
+    away_schedule: dict | None,
+) -> dict:
+    """
+    Aplica dificultad de calendario al signal.
+    Usa el schedule del equipo apostado (signal.get("team_to_back")).
+    Nunca falla.
+    """
+    try:
+        team_to_back = str(signal.get("team_to_back", "")).lower()
+
+        if team_to_back in ("home", "local"):
+            schedule = home_schedule
+        elif team_to_back in ("away", "visitante"):
+            schedule = away_schedule
+        else:
+            # Si no es explícito, usar el que tenga mayor dificultad como precaución
+            if home_schedule and away_schedule:
+                schedule = (
+                    home_schedule
+                    if home_schedule.get("difficulty", 0) >= away_schedule.get("difficulty", 0)
+                    else away_schedule
+                )
+            else:
+                schedule = home_schedule or away_schedule
+
+        if not schedule:
+            return signal
+
+        difficulty = float(schedule.get("difficulty", 0.5))
+        confidence = float(signal.get("confidence", 1.0))
+
+        if difficulty > 0.80:
+            confidence *= 0.90
+            logger.debug(
+                "apply_schedule_difficulty: difficulty=%.3f > 0.80 → confidence *= 0.90 → %.4f",
+                difficulty, confidence,
+            )
+        elif difficulty < 0.40:
+            confidence *= 1.05
+            logger.debug(
+                "apply_schedule_difficulty: difficulty=%.3f < 0.40 → confidence *= 1.05 → %.4f",
+                difficulty, confidence,
+            )
+
+        signal["confidence"] = round(min(max(confidence, 0.0), 1.0), 4)
+        signal["schedule_difficulty"] = {
+            "difficulty": difficulty,
+            "label": schedule.get("label", "MODERADO"),
+            "avg_rival_elo": schedule.get("avg_rival_elo"),
+            "n_rivals": schedule.get("n_rivals", 0),
+        }
+
+    except Exception as e:
+        logger.warning("apply_schedule_difficulty_to_signal: error — %s", e)
+
+    return signal
