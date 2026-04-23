@@ -19,12 +19,35 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="polymarket-agent")
 
+# Flag para ejecutar retroactive_eval una sola vez por arranque
+_retroactive_done = False
+
 CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")
 
 
 def verify_token(x_cloud_token: str = Header(...)) -> None:
     if x_cloud_token != CLOUD_RUN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    """Lanza retroactive_eval una sola vez al arrancar."""
+    asyncio.create_task(_bg_retroactive_eval())
+
+
+async def _bg_retroactive_eval() -> None:
+    """Ejecuta retroactive_eval en background una sola vez."""
+    global _retroactive_done
+    if _retroactive_done:
+        return
+    _retroactive_done = True
+    try:
+        from shared.shadow_engine import retroactive_eval
+        result = await retroactive_eval()
+        logger.info("retroactive_eval completada: %s", result)
+    except Exception as e:
+        logger.error("retroactive_eval: error — %s", e, exc_info=True)
 
 
 @app.get("/health")
@@ -174,9 +197,23 @@ async def _bg_analyze() -> None:
                         skipped_volume += 1
                     else:
                         predictions_generated += 1
+
+                        # Calcular unified_score antes de alertar
+                        try:
+                            from shared.unified_score import calculate_unified_score
+                            prediction["unified_score"] = calculate_unified_score(prediction)
+                        except Exception as _ue:
+                            logger.error("analyze: error calculando unified_score — %s", _ue)
+
                         alerted = await check_and_alert(prediction)
                         if alerted:
                             alerts_sent += 1
+                            # Registrar señal en shadow trading
+                            try:
+                                from shared.shadow_engine import track_new_signal
+                                await track_new_signal(prediction, "polymarket")
+                            except Exception as _se:
+                                logger.error("analyze: error en track_new_signal — %s", _se)
                         else:
                             logger.debug(
                                 "analyze: %s — edge=%.3f conf=%.2f → no alerta",
