@@ -69,11 +69,24 @@ async def check_and_alert(analysis: dict) -> bool:
         return False
 
     cloud_run_token = os.environ.get("CLOUD_RUN_TOKEN", "")
+
+    # Serializar a JSON-safe: convertir datetime a ISO string
+    def _to_json_safe(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, dict):
+            return {k: _to_json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_to_json_safe(i) for i in obj]
+        return obj
+
+    analysis_safe = _to_json_safe(analysis)
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{TELEGRAM_BOT_URL}/send-alert",
-                json={"type": "polymarket", "data": analysis},
+                json={"type": "polymarket", "data": analysis_safe},
                 headers={"x-cloud-token": cloud_run_token},
             )
         if resp.status_code not in (200, 201, 202):

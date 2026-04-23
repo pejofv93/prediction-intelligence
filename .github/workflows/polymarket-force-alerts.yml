@@ -1,0 +1,132 @@
+name: polymarket-force-alerts
+on:
+  workflow_dispatch:
+
+jobs:
+  force-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install google-cloud-firestore httpx
+
+      - name: Authenticate GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Force-send pending poly alerts
+        env:
+          PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          TELEGRAM_BOT_URL: ${{ secrets.TELEGRAM_BOT_URL }}
+          CLOUD_RUN_TOKEN: ${{ secrets.CLOUD_RUN_TOKEN }}
+          POLY_MIN_EDGE: "0.08"
+          POLY_MIN_CONFIDENCE: "0.65"
+        run: |
+          python - <<'EOF'
+          import os
+          import httpx
+          import asyncio
+          from google.cloud import firestore
+          from datetime import datetime, timezone
+
+          PROJECT = "prediction-intelligence"
+          db = firestore.Client(project=PROJECT)
+          PREFIX = os.environ.get("PREFIX", "prod")
+          BOT_URL = os.environ.get("TELEGRAM_BOT_URL", "")
+          TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")
+          MIN_EDGE = float(os.environ.get("POLY_MIN_EDGE", "0.08"))
+          MIN_CONF = float(os.environ.get("POLY_MIN_CONFIDENCE", "0.65"))
+
+          def col(name):
+              return db.collection(f"{PREFIX}{name}")
+
+          def to_json_safe(obj):
+              if isinstance(obj, datetime):
+                  return obj.isoformat()
+              if isinstance(obj, dict):
+                  return {k: to_json_safe(v) for k, v in obj.items()}
+              if isinstance(obj, list):
+                  return [to_json_safe(i) for i in obj]
+              return obj
+
+          # Leer señales pendientes
+          preds = list(
+              col("poly_predictions")
+              .where("alerted", "==", False)
+              .stream()
+          )
+
+          candidates = []
+          for doc in preds:
+              d = doc.to_dict()
+              edge = float(d.get("edge", 0))
+              conf = float(d.get("confidence", 0))
+              if edge > MIN_EDGE and conf > MIN_CONF:
+                  candidates.append((doc.id, d))
+
+          candidates.sort(key=lambda x: -float(x[1].get("edge", 0)))
+          print(f"Señales candidatas (edge>{MIN_EDGE:.0%} AND conf>{MIN_CONF:.0%}): {len(candidates)}")
+
+          if not BOT_URL:
+              print("ERROR: TELEGRAM_BOT_URL no configurada")
+              exit(1)
+
+          async def send_all():
+              sent = 0
+              skipped_dedup = 0
+              failed = 0
+
+              for market_id, pred in candidates:
+                  edge = float(pred.get("edge", 0))
+                  alert_key = f"{market_id}_{round(edge, 2)}"
+
+                  # Check dedup
+                  existing = list(
+                      col("alerts_sent")
+                      .where("alert_key", "==", alert_key)
+                      .limit(1)
+                      .stream()
+                  )
+                  if existing:
+                      print(f"  SKIP (dedup): {market_id} edge={edge:.3f}")
+                      skipped_dedup += 1
+                      continue
+
+                  payload = to_json_safe(pred)
+                  print(f"  Enviando: {market_id} edge={edge:.3f} conf={float(pred.get('confidence',0)):.2f} q={str(pred.get('question',''))[:50]}")
+
+                  try:
+                      async with httpx.AsyncClient(timeout=20.0) as client:
+                          resp = await client.post(
+                              f"{BOT_URL}/send-alert",
+                              json={"type": "polymarket", "data": payload},
+                              headers={"x-cloud-token": TOKEN},
+                          )
+                      if resp.status_code in (200, 201, 202):
+                          col("alerts_sent").add({
+                              "alert_key": alert_key,
+                              "sent_at": datetime.now(timezone.utc),
+                              "type": "polymarket",
+                          })
+                          col("poly_predictions").document(market_id).update({"alerted": True})
+                          print(f"    OK ({resp.status_code})")
+                          sent += 1
+                      else:
+                          print(f"    FALLO HTTP {resp.status_code}: {resp.text[:100]}")
+                          failed += 1
+                  except Exception as e:
+                      print(f"    ERROR: {e}")
+                      failed += 1
+
+                  await asyncio.sleep(1.2)  # Telegram 1msg/s
+
+              print(f"\nResumen: enviadas={sent}  dedup={skipped_dedup}  fallidas={failed}")
+
+          asyncio.run(send_all())
+          EOF
