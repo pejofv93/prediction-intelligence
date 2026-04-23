@@ -30,6 +30,15 @@ CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")
 # Timestamps de ultima ejecucion (en memoria — se pierden al reiniciar)
 _status: dict = {"last_collect": None, "last_enrich": None, "last_analyze": None}
 
+# Estado del backtest de calidad (backtest_engine) — persiste en memoria
+_backtest_status: dict = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "result": None,   # dict con métricas al completar
+    "error": None,
+}
+
 
 def verify_token(x_cloud_token: str = Header(...)) -> None:
     """Valida el token secreto para proteger los endpoints /run-*."""
@@ -126,9 +135,28 @@ async def run_learning() -> StreamingResponse:
 
 
 @app.post("/run-backtest", dependencies=[Depends(verify_token)])
-async def run_backtest() -> StreamingResponse:
-    """Sincrono: ejecutar UNA SOLA VEZ. Puede tardar 30-60min."""
-    return StreamingResponse(_stream_job(_bg_backtest, "backtest"), media_type="text/plain")
+async def run_backtest() -> JSONResponse:
+    """202 inmediato → background: backtest histórico de calidad (backtest_engine).
+    Puede tardar 30-60 min. Consultar progreso en GET /backtest/status."""
+    if _backtest_status["running"]:
+        return JSONResponse(
+            status_code=409,
+            content={"status": "already_running", "started_at": _backtest_status["started_at"]},
+        )
+    asyncio.create_task(_bg_sports_backtest())
+    return JSONResponse(status_code=202, content={"status": "accepted", "job": "sports-backtest"})
+
+
+@app.get("/backtest/status")
+async def backtest_status() -> JSONResponse:
+    """Estado actual del backtest de calidad (sin auth — solo lectura)."""
+    return JSONResponse(content={
+        "running": _backtest_status["running"],
+        "started_at": _backtest_status["started_at"],
+        "finished_at": _backtest_status["finished_at"],
+        "result": _backtest_status["result"],
+        "error": _backtest_status["error"],
+    })
 
 
 @app.post("/run-arb", dependencies=[Depends(verify_token)])
@@ -699,6 +727,41 @@ async def _bg_learning() -> None:
 
     except Exception as e:
         logger.error("learning: error no controlado — %s", e, exc_info=True)
+
+
+async def _bg_sports_backtest() -> None:
+    """
+    Backtest de calidad histórico (backtest_engine.run_full_backtest).
+    Llama a API-Football para 5 ligas × 3 temporadas, calcula ROI/sharpe/CLV,
+    auto-calibra thresholds y guarda en Firestore backtest_results.
+    Puede tardar 30-60 min — retorna 202 inmediatamente.
+    """
+    global _backtest_status
+    _backtest_status["running"] = True
+    _backtest_status["started_at"] = datetime.now(timezone.utc).isoformat()
+    _backtest_status["finished_at"] = None
+    _backtest_status["result"] = None
+    _backtest_status["error"] = None
+
+    try:
+        logger.info("sports-backtest: iniciando backtest histórico de calidad")
+        start = datetime.now(timezone.utc)
+
+        api_key = os.environ.get("FOOTBALL_RAPID_API_KEY", "")
+        from backtester.backtest_engine import run_full_backtest
+        summary = await run_full_backtest(api_key=api_key)
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+        logger.info("sports-backtest: completado en %.0fs — %s", elapsed, summary)
+        _backtest_status["result"] = summary
+        _backtest_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    except Exception as e:
+        logger.error("sports-backtest: error no controlado — %s", e, exc_info=True)
+        _backtest_status["error"] = str(e)
+        _backtest_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+    finally:
+        _backtest_status["running"] = False
 
 
 async def _bg_backtest() -> None:

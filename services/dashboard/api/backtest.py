@@ -95,6 +95,44 @@ async def get_backtest_results(
         )
 
 
+@router.get("/backtest/status")
+async def get_backtest_status() -> JSONResponse:
+    """
+    Proxy del estado del backtest corriendo en sports-agent.
+    Lee el último resultado guardado en Firestore backtest_results
+    y devuelve si hay un backtest reciente (últimas 24h).
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        docs = list(
+            col("backtest_results")
+            .order_by("created_at", direction="DESCENDING")
+            .limit(1)
+            .stream()
+        )
+        if not docs:
+            return JSONResponse({"status": "no_data", "last_run": None, "results": []})
+
+        last = docs[0].to_dict()
+        created_at = last.get("created_at")
+        if hasattr(created_at, "tzinfo") and created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=__import__("datetime").timezone.utc)
+
+        recent = created_at >= cutoff if created_at else False
+        return JSONResponse({
+            "status": "recent" if recent else "stale",
+            "last_run": created_at.isoformat() if created_at else None,
+            "last_result": {
+                k: v for k, v in last.items()
+                if k in ("league", "market", "n_bets", "win_rate", "roi", "sharpe", "threshold_recommended")
+            },
+        })
+    except Exception as e:
+        logger.error("get_backtest_status: error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @router.get("/backtest/thresholds")
 async def get_backtest_thresholds() -> JSONResponse:
     """
