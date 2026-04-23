@@ -9,6 +9,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")        # solo telegram-bot
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")    # solo telegram-bot
 TELEGRAM_BOT_URL = os.environ.get("TELEGRAM_BOT_URL")    # sports-agent + polymarket-agent
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # fallback Claude Haiku cuando Groq TPD agotado
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")    # solo sports-agent
 FOOTBALL_RAPID_API_KEY = os.environ.get("FOOTBALL_RAPID_API_KEY")  # solo sports-agent

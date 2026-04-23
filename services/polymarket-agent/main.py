@@ -74,9 +74,41 @@ async def run_enrich() -> JSONResponse:
 
 @app.post("/run-analyze", dependencies=[Depends(verify_token)])
 async def run_analyze() -> JSONResponse:
-    """202 inmediato → background: groq_analyzer + maintenance → poly_predictions."""
-    asyncio.create_task(_bg_analyze())
+    """Ejecuta análisis + alertas Telegram en foreground (await) para garantizar entrega en Cloud Run."""
+    await _bg_analyze()
     return JSONResponse(status_code=202, content={"status": "accepted", "job": "analyze"})
+
+
+@app.get("/test-gamma-price", dependencies=[Depends(verify_token)])
+async def test_gamma_price() -> JSONResponse:
+    """Diagnóstico: fetcha 3 mercados de Gamma API y muestra outcomePrices raw + price_yes parseado."""
+    import httpx
+    GAMMA_API = "https://gamma-api.polymarket.com"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(
+                f"{GAMMA_API}/markets",
+                params={"active": "true", "closed": "false", "order": "volume24hr", "ascending": "false", "limit": "3"},
+            )
+        raw_list = resp.json()
+        if not isinstance(raw_list, list):
+            raw_list = raw_list.get("markets", raw_list.get("data", []))
+        result = []
+        for raw in raw_list[:3]:
+            from scanner import _parse_market
+            parsed = _parse_market(raw)
+            result.append({
+                "market_id": raw.get("id"),
+                "question": raw.get("question", "")[:80],
+                "raw_outcomePrices": raw.get("outcomePrices"),
+                "raw_lastTradePrice": raw.get("lastTradePrice"),
+                "raw_bestBid": raw.get("bestBid"),
+                "parsed_price_yes": parsed.get("price_yes") if parsed else None,
+            })
+        return JSONResponse(content={"markets": result})
+    except Exception as e:
+        logger.error("test-gamma-price: error — %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/run-poly-backtest", dependencies=[Depends(verify_token)])

@@ -87,19 +87,38 @@ def _parse_market(raw: dict) -> dict | None:
         condition_id = str(raw.get("conditionId", raw.get("condition_id", "")))
         question = str(raw.get("question", raw.get("title", "")))
 
-        # Bug fix: raw.get("outcomePrices", fallback) no aplica el fallback cuando la clave
-        # existe pero su valor es None (mercados sin trading). Usar "or" para manejar None/[].
+        # outcomePrices puede ser: lista, JSON-string de lista, float directo, None.
+        # Usar "or" para manejar None/[] (raw.get con default no aplica cuando la clave existe pero es None).
         price_yes_raw = raw.get("outcomePrices") or raw.get("price_yes") or []
         if isinstance(price_yes_raw, str):
             try:
                 import json as _json
-                price_yes_raw = _json.loads(price_yes_raw)
+                _parsed = _json.loads(price_yes_raw)
+                if isinstance(_parsed, list):
+                    price_yes_raw = _parsed
+                elif isinstance(_parsed, (int, float)):
+                    # outcomePrices es un float directo (p.ej. "0.5" sin brackets)
+                    price_yes_raw = [_parsed]
+                else:
+                    price_yes_raw = []
             except Exception:
                 price_yes_raw = []
+        if isinstance(price_yes_raw, (int, float)):
+            price_yes_raw = [price_yes_raw]
         if isinstance(price_yes_raw, list) and len(price_yes_raw) >= 1:
             price_yes = float(price_yes_raw[0])
         else:
-            price_yes = float(raw.get("lastTradePrice") or raw.get("price_yes") or 0.5)
+            _last = raw.get("lastTradePrice") or raw.get("bestBid") or raw.get("price_yes")
+            price_yes = float(_last) if _last is not None and float(_last) != 0.0 else 0.5
+            if price_yes == 0.5:
+                logger.warning(
+                    "_parse_market(%s): price_yes defaulted a 0.5 — "
+                    "outcomePrices=%r lastTradePrice=%r bestBid=%r",
+                    market_id,
+                    raw.get("outcomePrices"),
+                    raw.get("lastTradePrice"),
+                    raw.get("bestBid"),
+                )
         price_yes = max(0.0, min(1.0, price_yes))
         price_no = round(1.0 - price_yes, 4)
 

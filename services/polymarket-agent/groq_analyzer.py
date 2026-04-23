@@ -207,6 +207,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         {"role": "user", "content": user_prompt},
     ]
 
+    groq_tpd = False
     for attempt, model in enumerate([GROQ_MODEL, GROQ_FALLBACK_MODEL]):
         try:
             if attempt > 0:
@@ -215,19 +216,46 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             resp = groq_client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=1024,
+                max_tokens=500,
                 temperature=0.3,
             )
             raw_response = resp.choices[0].message.content
             break
         except Exception as e:
-            if "model_not_found" in str(e).lower() or "404" in str(e):
+            err_str = str(e).lower()
+            if "model_not_found" in err_str or "404" in err_str:
                 continue
+            if "429" in err_str or "rate_limit" in err_str or "quota" in err_str or "daily" in err_str:
+                groq_tpd = True
+                logger.warning("analyze_market(%s): Groq TPD agotado en %s — intentando Claude Haiku", market_id, model)
+                break
             logger.error("analyze_market(%s): error Groq — %s", market_id, e, exc_info=True)
             return None
 
+    # Fallback Claude Haiku cuando Groq agota el límite diario de tokens
+    if not raw_response and groq_tpd:
+        import os as _os
+        _anthropic_key = _os.environ.get("ANTHROPIC_API_KEY", "")
+        if not _anthropic_key:
+            logger.warning("analyze_market(%s): ANTHROPIC_API_KEY no configurada — sin fallback Haiku", market_id)
+            return None
+        try:
+            import anthropic as _anthropic
+            _claude = _anthropic.Anthropic(api_key=_anthropic_key)
+            _claude_resp = _claude.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=500,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": messages[-1]["content"]}],
+            )
+            raw_response = _claude_resp.content[0].text
+            logger.info("analyze_market(%s): Claude Haiku fallback exitoso", market_id)
+        except Exception as _ce:
+            logger.error("analyze_market(%s): error Claude Haiku fallback — %s", market_id, _ce, exc_info=True)
+            return None
+
     if not raw_response:
-        logger.error("analyze_market(%s): sin respuesta de Groq", market_id)
+        logger.error("analyze_market(%s): sin respuesta de ningún modelo", market_id)
         return None
 
     # Extraer JSON de la respuesta
