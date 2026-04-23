@@ -32,7 +32,13 @@ async def fetch_active_markets(
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(
                 f"{GAMMA_API}/markets",
-                params={"active": "true", "order": "volume24hr", "limit": str(limit)},
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "order": "volume24hr",
+                    "ascending": "false",
+                    "limit": str(limit),
+                },
             )
         if resp.status_code != 200:
             logger.error("fetch_active_markets: API respondio %d", resp.status_code)
@@ -82,14 +88,25 @@ def _parse_market(raw: dict) -> dict | None:
         question = str(raw.get("question", raw.get("title", "")))
 
         price_yes_raw = raw.get("outcomePrices", raw.get("price_yes", []))
+        if isinstance(price_yes_raw, str):
+            try:
+                import json as _json
+                price_yes_raw = _json.loads(price_yes_raw)
+            except Exception:
+                price_yes_raw = []
         if isinstance(price_yes_raw, list) and len(price_yes_raw) >= 1:
             price_yes = float(price_yes_raw[0])
         else:
-            price_yes = float(raw.get("price_yes", 0.5))
+            price_yes = float(raw.get("lastTradePrice") or raw.get("price_yes") or 0.5)
         price_yes = max(0.0, min(1.0, price_yes))
         price_no = round(1.0 - price_yes, 4)
 
-        volume_24h = float(raw.get("volume24Hr", raw.get("volume_24h", 0.0)) or 0.0)
+        volume_24h = float(
+            raw.get("volume24hr")
+            or raw.get("volume24hrClob")
+            or raw.get("volume_24h")
+            or 0.0
+        )
 
         end_date: datetime | None = None
         end_date_raw = raw.get("endDate", raw.get("end_date", ""))

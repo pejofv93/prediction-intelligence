@@ -36,6 +36,13 @@ jobs:
           def col(name):
               return db.collection(f"{PREFIX}{name}")
 
+          def make_aware(dt):
+              if dt is None:
+                  return None
+              if hasattr(dt, "tzinfo") and dt.tzinfo is None:
+                  return dt.replace(tzinfo=timezone.utc)
+              return dt
+
           now = datetime.now(timezone.utc)
 
           # ── 1. poly_markets ─────────────────────────────────────────────────
@@ -48,12 +55,17 @@ jobs:
               over_5k = sum(1 for v in vols if v >= 5000)
               print(f"  Con volume_24h >= $5,000: {over_5k}")
               print(f"  Vol max: ${max(vols):,.0f}  |  Vol min: ${min(vols):,.0f}")
+              last_updated = [make_aware(d.to_dict().get("updated_at")) for d in markets if d.to_dict().get("updated_at")]
+              if last_updated:
+                  most_recent = max(last_updated)
+                  age_min = (now - most_recent).total_seconds() / 60
+                  print(f"  Más reciente updated_at: {most_recent.strftime('%H:%M UTC')} (hace {age_min:.0f} min)")
 
           # ── 2. poly_price_history ───────────────────────────────────────────
           print("\n" + "="*60)
           print("2. poly_price_history (últimas 72h)")
-          cutoff = now - timedelta(hours=72)
-          snaps = list(col("poly_price_history").where("timestamp", ">=", cutoff).stream())
+          cutoff_72h = now - timedelta(hours=72)
+          snaps = list(col("poly_price_history").where("timestamp", ">=", cutoff_72h).stream())
           print(f"Total snapshots 72h: {len(snaps)}")
           by_market = {}
           for d in snaps:
@@ -63,6 +75,10 @@ jobs:
           if by_market:
               counts = list(by_market.values())
               print(f"  Snapshots por mercado — max: {max(counts)}  min: {min(counts)}  avg: {sum(counts)/len(counts):.1f}")
+          else:
+              # Check if there's ANY data ever
+              all_snaps = list(col("poly_price_history").limit(5).stream())
+              print(f"  (Total histórico con cualquier fecha: {len(all_snaps)} docs encontrados)")
 
           # ── 3. enriched_markets ─────────────────────────────────────────────
           print("\n" + "="*60)
@@ -71,10 +87,11 @@ jobs:
           print(f"Total: {len(enriched)}")
           if enriched:
               cutoff_1h = now - timedelta(hours=1)
-              fresh = sum(1 for d in enriched
-                          if d.to_dict().get("enriched_at") and
-                          d.to_dict()["enriched_at"].replace(tzinfo=timezone.utc if d.to_dict()["enriched_at"].tzinfo is None else None) >= cutoff_1h
-                          )
+              fresh = 0
+              for d in enriched:
+                  ea = make_aware(d.to_dict().get("enriched_at"))
+                  if ea and ea >= cutoff_1h:
+                      fresh += 1
               vol_spikes = sum(1 for d in enriched if d.to_dict().get("volume_spike") is True)
               smart = sum(1 for d in enriched if d.to_dict().get("smart_money", {}).get("is_smart_money") is True)
               print(f"  Frescos (<1h): {fresh}")
@@ -95,7 +112,7 @@ jobs:
               over_edge = sum(1 for e in edges if e > 0.08)
               over_conf = sum(1 for i, e in enumerate(edges) if e > 0.08 and confs[i] > 0.65)
               print(f"  edge > 8%: {over_edge}")
-              print(f"  edge > 8% AND conf > 65%: {over_conf}  ← deberían haberse alertado")
+              print(f"  edge > 8% AND conf > 65%: {over_conf}  <- deberían alertarse ahora")
               print(f"  volume_spike=True: {vol_sp}")
               print(f"  smart_money_detected=True: {sm_det}")
               print(f"  alerted=True: {alerted}")
@@ -115,30 +132,35 @@ jobs:
           alerts = list(col("alerts_sent").where("type", "==", "polymarket").stream())
           print(f"Total alertas enviadas: {len(alerts)}")
           if alerts:
-              for a in sorted(alerts, key=lambda d: d.to_dict().get("sent_at", now), reverse=True)[:5]:
+              for a in sorted(alerts, key=lambda d: make_aware(d.to_dict().get("sent_at")) or now, reverse=True)[:5]:
                   d = a.to_dict()
                   print(f"  {d.get('sent_at')}  key={d.get('alert_key')}")
 
           print("\n" + "="*60)
-          print("DIAGNÓSTICO COMPLETADO")
+          print("DIAGNOSTICO COMPLETADO")
           EOF
 
-      - name: Force run-scan + run-enrich + run-analyze
+      - name: Force full pipeline (scan → wait → enrich → wait → analyze)
         run: |
-          echo "=== Triggering SCAN ==="
-          curl -s -o /dev/null -w "scan: %{http_code}\n" \
+          echo "=== [1/3] Triggering SCAN ==="
+          curl -s -o /dev/null -w "scan HTTP: %{http_code}\n" \
             -X POST "${{ secrets.POLY_AGENT_URL }}/run-scan" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
             --max-time 30
-          sleep 60
-          echo "=== Triggering ENRICH ==="
-          curl -s -o /dev/null -w "enrich: %{http_code}\n" \
+          echo "Esperando 90s para que el scan complete..."
+          sleep 90
+
+          echo "=== [2/3] Triggering ENRICH ==="
+          curl -s -o /dev/null -w "enrich HTTP: %{http_code}\n" \
             -X POST "${{ secrets.POLY_AGENT_URL }}/run-enrich" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
             --max-time 30
-          sleep 90
-          echo "=== Triggering ANALYZE ==="
-          curl -s -o /dev/null -w "analyze: %{http_code}\n" \
+          echo "Esperando 120s para que el enrich complete..."
+          sleep 120
+
+          echo "=== [3/3] Triggering ANALYZE ==="
+          curl -s -o /dev/null -w "analyze HTTP: %{http_code}\n" \
             -X POST "${{ secrets.POLY_AGENT_URL }}/run-analyze" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
             --max-time 30
+          echo "Pipeline forzado completado. Revisar Cloud Run logs."
