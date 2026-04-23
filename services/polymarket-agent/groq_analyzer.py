@@ -9,6 +9,65 @@ from shared.groq_client import GROQ_CALL_DELAY
 
 logger = logging.getLogger(__name__)
 
+CATEGORY_KEYWORDS = {
+    "crypto": ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "halving", "altcoin"],
+    "politics": ["election", "president", "vote", "congress", "senate", "minister", "parliament", "poll", "referendum", "prime minister", "chancellor"],
+    "economy": ["fed", "interest rate", "inflation", "cpi", "gdp", "recession", "unemployment", "federal reserve", "rate hike", "rate cut", "jerome powell"],
+    "sports": ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "league", "nfl", "mlb", "wimbledon", "olympic"],
+    "geopolitics": ["war", "ceasefire", "conflict", "nato", "military", "invasion", "sanctions", "treaty", "diplomacy", "nuclear"],
+}
+
+
+def categorize_market(question: str) -> str:
+    """Categoriza un mercado Polymarket según su pregunta. Devuelve categoria o 'other'."""
+    q_lower = question.lower()
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        if any(kw in q_lower for kw in keywords):
+            return category
+    return "other"
+
+
+def _build_category_context(question: str, category: str) -> str:
+    """
+    Construye contexto adicional para el prompt según categoría.
+    Solo añade instrucciones — no hace web_search real (eso requiere async Tavily).
+    """
+    if category == "crypto":
+        return (
+            "CONTEXTO CRYPTO: Analiza si el precio del activo cripto relevante "
+            "soporta o contradice la probabilidad de mercado. "
+            "Considera volatilidad histórica, halvings, ciclos de mercado. "
+            "Si el precio spot contradice la probabilidad (>15% divergencia), señala como ineficiencia."
+        )
+    elif category == "politics":
+        return (
+            "CONTEXTO POLÍTICO: Considera sesgo de mercado hacia candidatos mainstream. "
+            "Los mercados políticos suelen sobreestimar incumbentes y subestimar outsiders. "
+            "Busca divergencias entre encuestas recientes y precio de mercado."
+        )
+    elif category == "economy":
+        return (
+            "CONTEXTO ECONÓMICO: El mercado Fed Funds Futures (CME FedWatch) "
+            "es la referencia más fiable para decisiones de tipos. "
+            "Considera datos macro recientes: CPI, PCE, empleos no agrícolas. "
+            "Si el mercado diverge >10% de CME FedWatch, hay ineficiencia."
+        )
+    elif category == "sports":
+        return (
+            "CONTEXTO DEPORTIVO: Considera forma reciente de equipos/jugadores, "
+            "cuotas de casas de apuestas como referencia de probabilidad real. "
+            "Los mercados deportivos en Polymarket suelen ser menos eficientes "
+            "porque los participantes son menos especializados."
+        )
+    elif category == "geopolitics":
+        return (
+            "CONTEXTO GEOPOLÍTICO: Eventos de alta incertidumbre. "
+            "Sé conservador: recomienda WATCH más que BUY salvo evidencia muy clara. "
+            "El mercado suele sobreestimar resolución rápida de conflictos."
+        )
+    return ""
+
+
 SYSTEM_PROMPT = (
     "Eres un analista cuantitativo especializado en encontrar ineficiencias en mercados de prediccion. "
     "Tu objetivo es detectar DIVERGENCIAS entre el precio de mercado y la probabilidad real. "
@@ -79,6 +138,9 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     question = market_data.get("question", "mercado desconocido")
     price_yes = float(market_data.get("price_yes", 0.5))
 
+    category = categorize_market(question)
+    category_context = _build_category_context(question, category)
+
     # Construir user_prompt con todos los datos del enriched_market
     orderbook = enriched_market.get("orderbook", {})
     news = enriched_market.get("news_sentiment", {})
@@ -111,6 +173,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"Sé explícito sobre la divergencia: edge = real_prob - {price_yes:.3f}. "
         f"Un edge de 0.00 o cercano a cero indica mercado eficiente — justificalo con argumentos solidos."
     )
+    if category_context:
+        user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
 
     # Llamada a Groq con manejo de JSON mal formateado
     raw_response = ""
@@ -181,6 +245,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "reasoning": reasoning[:500] if reasoning else "",
         "volume_spike": bool(enriched_market.get("volume_spike", False)),
         "smart_money_detected": bool(smart_money.get("is_smart_money", False)),
+        "category": category,
         "analyzed_at": datetime.now(timezone.utc),
         "alerted": False,
     }
@@ -188,8 +253,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     try:
         col("poly_predictions").document(market_id).set(prediction)
         logger.info(
-            "analyze_market(%s): guardado — edge=%.3f conf=%.2f rec=%s",
-            market_id, edge, confidence, recommendation,
+            "analyze_market(%s): guardado — edge=%.3f conf=%.2f rec=%s cat=%s",
+            market_id, edge, confidence, recommendation, category,
         )
     except Exception:
         logger.error("analyze_market(%s): error guardando poly_predictions", market_id, exc_info=True)

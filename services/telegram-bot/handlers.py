@@ -46,6 +46,10 @@ async def handle_start(update: dict) -> None:
         "/poly — Top oportunidades Polymarket\n"
         "/stats — Precisión del modelo y pesos actuales\n"
         "/calc — Calculadora matched betting\n"
+        "/shadow — Métricas shadow mode (trades virtuales)\n"
+        "/bankroll — Evolución P&L virtual\n"
+        "/arb — Oportunidades de arbitraje activas\n"
+        "/btc — Precio BTC + señales crypto Polymarket\n"
         "/help — Ayuda detallada\n\n"
         "_Los datos se actualizan automáticamente vía GitHub Actions._"
     )
@@ -298,14 +302,244 @@ async def handle_help(update: dict) -> None:
         "*/poly* — Top 5 oportunidades Polymarket (edge > 12%)\n"
         "*/stats* — Precisión del modelo esta semana + pesos actuales\n"
         "*/calc <stake> <back> <lay> <com%>* — Calculadora qualifying bet\n"
+        "*/shadow* — Métricas del modo shadow (trades virtuales)\n"
+        "*/bankroll* — Evolución P&L virtual (últimos 10 trades)\n"
+        "*/arb* — Oportunidades de arbitraje activas\n"
+        "*/btc* — Precio BTC actual + señales crypto Polymarket\n"
         "*/help* — Esta ayuda\n\n"
         "📡 *Fuentes de datos:*\n"
         "• Fútbol: football-data.org (modelo Poisson+ELO)\n"
         "• Otros deportes: API-Sports + Groq AI\n"
-        "• Polymarket: Gamma API + CLOB + análisis Groq\n\n"
+        "• Polymarket: Gamma API + CLOB + análisis Groq\n"
+        "• BTC: Binance REST API (snapshots cada 5 min)\n\n"
         "⚠️ _Solo para fines informativos. No es asesoramiento financiero._"
     )
     await send_message(text, chat_id=chat_id)
+
+
+async def handle_shadow(update: dict) -> None:
+    """
+    /shadow — métricas del shadow mode.
+    Lee col("shadow_trades") máx 200 docs, calcula métricas con calculate_metrics().
+    """
+    from alert_manager import send_message
+    from shared.firestore_client import col
+    chat_id = _chat_id(update)
+
+    try:
+        trades = [d.to_dict() for d in col("shadow_trades").limit(200).stream()]
+        try:
+            from shared.shadow_engine import calculate_metrics
+            m = calculate_metrics(trades)
+        except ImportError:
+            # Cálculo inline básico
+            closed = [t for t in trades if t.get("result") in ("win", "loss")]
+            wins = [t for t in closed if t.get("result") == "win"]
+            stakes = sum(float(t.get("virtual_stake", 0)) for t in closed)
+            pnl = sum(float(t.get("pnl_virtual", 0)) for t in closed if t.get("pnl_virtual") is not None)
+            m = {
+                "current_bankroll": 50.0 + pnl,
+                "roi_total": pnl / stakes if stakes > 0 else 0,
+                "win_rate": len(wins) / len(closed) if closed else 0,
+                "total_closed": len(closed),
+                "pending": len(trades) - len(closed),
+                "ready_for_real": False,
+            }
+
+        bankroll = float(m.get("current_bankroll", 50.0))
+        roi = float(m.get("roi_total", 0))
+        wr = float(m.get("win_rate", 0))
+        total = int(m.get("total_closed", 0))
+        pending = int(m.get("pending", 0))
+        ready = m.get("ready_for_real", False)
+
+        ready_str = "✅ Listo para considerar real" if ready else "⏳ Acumulando historial"
+
+        text = (
+            f"👻 *SHADOW MODE*\n\n"
+            f"💰 Bankroll virtual: *{bankroll:.2f}€* (inicio: 50€)\n"
+            f"📈 ROI total: *{roi:+.1%}*\n"
+            f"🎯 Win rate: *{wr:.0%}*\n"
+            f"📊 Trades cerrados: {total} | Pendientes: {pending}\n\n"
+            f"{ready_str}\n\n"
+            f"_Datos simulados — no dinero real._"
+        )
+    except Exception as e:
+        logger.error(f"handle_shadow error: {e}")
+        text = "❌ Error consultando shadow mode."
+
+    await send_message(text, chat_id=chat_id)
+
+
+async def handle_bankroll(update: dict) -> None:
+    """
+    /bankroll — evolución P&L virtual.
+    Muestra últimos 10 trades con P&L acumulado.
+    """
+    from alert_manager import send_message
+    from shared.firestore_client import col
+    chat_id = _chat_id(update)
+
+    try:
+        trades_raw = list(
+            col("shadow_trades")
+            .where("result", "in", ["win", "loss"])
+            .order_by("closed_at", direction="DESCENDING")
+            .limit(10)
+            .stream()
+        )
+        if not trades_raw:
+            await send_message("📭 Sin trades cerrados aún en shadow mode.", chat_id=chat_id)
+            return
+
+        trades = [d.to_dict() for d in trades_raw]
+
+        lines = ["📊 *BANKROLL VIRTUAL — Últimos 10 trades*\n"]
+        for t in reversed(trades):  # cronológico
+            pnl = float(t.get("pnl_virtual") or 0)
+            result = t.get("result", "?")
+            emoji = "✅" if result == "win" else "❌"
+            mkt = str(t.get("market", ""))[:30]
+            stake = float(t.get("virtual_stake", 0))
+            lines.append(f"{emoji} {mkt} | Stake: {stake:.2f}€ | P&L: {pnl:+.2f}€")
+
+        total_pnl = sum(float(t.get("pnl_virtual") or 0) for t in trades)
+        bankroll = 50.0 + total_pnl
+        lines.append(f"\n💰 Bankroll actual: *{bankroll:.2f}€*")
+
+        await send_message("\n".join(lines), chat_id=chat_id)
+    except Exception as e:
+        logger.error(f"handle_bankroll error: {e}")
+        await send_message("❌ Error consultando bankroll.", chat_id=chat_id)
+
+
+async def handle_arb(update: dict) -> None:
+    """
+    /arb — últimas oportunidades de arbitraje (últimas 2h).
+    Lee col("arb_opportunities") con expires_at > now.
+    """
+    from alert_manager import send_message
+    from shared.firestore_client import col
+    from datetime import datetime, timezone
+    chat_id = _chat_id(update)
+
+    try:
+        now = datetime.now(timezone.utc)
+        docs = list(
+            col("arb_opportunities")
+            .where("expires_at", ">", now)
+            .order_by("expires_at", direction="DESCENDING")
+            .limit(5)
+            .stream()
+        )
+
+        if not docs:
+            await send_message("📭 Sin oportunidades de arbitraje activas en este momento.", chat_id=chat_id)
+            return
+
+        lines = ["🎯 *ARBITRAJE ACTIVO*\n"]
+        for d in docs:
+            arb = d.to_dict()
+            profit = float(arb.get("profit_pct", 0))
+            league = _esc(str(arb.get("league", "?")))
+            home = _esc(str(arb.get("home", "?")))
+            away = _esc(str(arb.get("away", "?")))
+            bh_o = float(arb.get("best_home_odds", 0))
+            ba_o = float(arb.get("best_away_odds", 0))
+            bh_b = _esc(str(arb.get("best_home_book", "?")))
+            ba_b = _esc(str(arb.get("best_away_book", "?")))
+            lines.append(
+                f"⚽ {league}\n"
+                f"{home} vs {away}\n"
+                f"Back {home}: {bh_b} @ {bh_o:.2f}\n"
+                f"Back {away}: {ba_b} @ {ba_o:.2f}\n"
+                f"Beneficio garantizado: *+{profit:.1f}%*\n"
+                f"⚠️ Apuesta responsablemente.\n"
+            )
+
+        await send_message("\n".join(lines), chat_id=chat_id)
+    except Exception as e:
+        logger.error(f"handle_arb error: {e}")
+        await send_message("❌ Error consultando arbitraje.", chat_id=chat_id)
+
+
+async def handle_btc(update: dict) -> None:
+    """
+    /btc — precio BTC actual + señales crypto Polymarket.
+    """
+    from alert_manager import send_message
+    from shared.firestore_client import col
+    chat_id = _chat_id(update)
+
+    try:
+        # Intentar leer snapshot Firestore
+        btc_price = 0.0
+        btc_change = 0.0
+
+        try:
+            docs = list(
+                col("binance_snapshots")
+                .where("symbol", "==", "BTCUSDT")
+                .order_by("recorded_at", direction="DESCENDING")
+                .limit(1)
+                .stream()
+            )
+            if docs:
+                snap = docs[0].to_dict()
+                btc_price = float(snap.get("price", 0))
+                btc_change = float(snap.get("change_24h_pct", 0))
+        except Exception:
+            pass
+
+        # Si no hay snapshot, hacer fetch directo
+        if btc_price == 0:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT")
+            if resp.status_code == 200:
+                d = resp.json()
+                btc_price = float(d.get("lastPrice", 0))
+                btc_change = float(d.get("priceChangePercent", 0))
+
+        # Señales crypto Polymarket activas
+        crypto_signals = []
+        try:
+            docs = list(
+                col("poly_predictions")
+                .where("category", "==", "crypto")
+                .where("alerted", "==", False)
+                .order_by("edge", direction="DESCENDING")
+                .limit(3)
+                .stream()
+            )
+            for d in docs:
+                p = d.to_dict()
+                if float(p.get("edge", 0)) > 0.08:
+                    crypto_signals.append(p)
+        except Exception:
+            pass
+
+        arrow = "📈" if btc_change >= 0 else "📉"
+        text = (
+            f"₿ *BITCOIN*\n\n"
+            f"Precio: *${btc_price:,.0f}*\n"
+            f"{arrow} 24h: *{btc_change:+.2f}%*\n\n"
+        )
+
+        if crypto_signals:
+            text += "🔮 *Señales Polymarket Crypto:*\n"
+            for s in crypto_signals:
+                q = _esc(str(s.get("question", ""))[:60])
+                edge = float(s.get("edge", 0))
+                price = float(s.get("market_price_yes", 0))
+                text += f"• {q}\n  YES: {price:.0%} | Edge: +{edge:.0%}\n"
+        else:
+            text += "_Sin señales crypto activas en Polymarket._"
+
+        await send_message(text, chat_id=chat_id)
+    except Exception as e:
+        logger.error(f"handle_btc error: {e}")
+        await send_message("❌ Error consultando BTC.", chat_id=chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +572,14 @@ async def dispatch_update(update: dict) -> None:
             await handle_calc(update, args)
         elif command == "help":
             await handle_help(update)
+        elif command == "shadow":
+            await handle_shadow(update)
+        elif command == "bankroll":
+            await handle_bankroll(update)
+        elif command == "arb":
+            await handle_arb(update)
+        elif command == "btc":
+            await handle_btc(update)
         else:
             # Comando desconocido — sugerir /help
             from alert_manager import send_message

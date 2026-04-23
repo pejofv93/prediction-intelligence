@@ -8,6 +8,7 @@ Configurar webhook tras deploy (solo una vez):
 curl -X POST "https://api.telegram.org/bot{TOKEN}/setWebhook?url={CLOUD_RUN_URL}/webhook"
 Ver target set-webhook en Makefile.
 """
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -57,6 +58,23 @@ async def webhook(request: Request) -> JSONResponse:
         logger.error("webhook: error en dispatch_update", exc_info=True)
 
     return JSONResponse({"ok": True})
+
+
+@app.post("/run-btc-snapshot", dependencies=[Depends(verify_token)])
+async def run_btc_snapshot() -> JSONResponse:
+    """202 → background: guarda snapshot BTC en Firestore."""
+    asyncio.create_task(_bg_btc_snapshot())
+    return JSONResponse(status_code=202, content={"status": "accepted", "job": "btc-snapshot"})
+
+
+async def _bg_btc_snapshot() -> None:
+    try:
+        # Import inline para no fallar si binance_tracker no está disponible
+        from realtime.binance_tracker import save_btc_snapshot
+        await save_btc_snapshot()
+        logger.info("btc-snapshot: guardado en Firestore")
+    except Exception as e:
+        logger.error("btc-snapshot: error — %s", e, exc_info=True)
 
 
 @app.post("/send-alert", dependencies=[Depends(verify_token)])
