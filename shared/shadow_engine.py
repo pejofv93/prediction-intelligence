@@ -230,6 +230,51 @@ async def track_new_signal(signal: dict, source: str) -> str:
     return trade_id
 
 
+def calculate_clv(trade: dict, closing_odds: float) -> float:
+    """
+    CLV = (odds_at_signal / closing_odds) - 1
+    CLV > 0: apostaste mejor que el mercado final
+    CLV < 0: el mercado era mas inteligente
+
+    trade: dict con campo "odds" (cuota cuando se genero la senal)
+    closing_odds: cuota de cierre (ultima antes del partido)
+
+    Returns float rounded to 4 decimal places.
+    """
+    try:
+        odds_at_signal = float(trade.get("odds") or 0)
+        if odds_at_signal <= 0 or closing_odds <= 0:
+            return 0.0
+        clv = (odds_at_signal / closing_odds) - 1.0
+        return round(clv, 4)
+    except Exception as e:
+        logger.error("calculate_clv: error: %s", e)
+        return 0.0
+
+
+async def update_trade_clv(trade_id: str, closing_odds: float) -> None:
+    """
+    Calcula y guarda CLV para un trade.
+    Lee el doc de shadow_trades/{trade_id}, calcula CLV con calculate_clv,
+    actualiza el campo "clv" en Firestore.
+    """
+    try:
+        doc_ref = col("shadow_trades").document(trade_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            logger.error("update_trade_clv: trade_id=%s no encontrado", trade_id)
+            return
+        trade = doc.to_dict()
+        clv = calculate_clv(trade, closing_odds)
+        doc_ref.update({"clv": clv})
+        logger.info(
+            "update_trade_clv: trade_id=%s clv=%.4f closing_odds=%.2f",
+            trade_id, clv, closing_odds,
+        )
+    except Exception as e:
+        logger.error("update_trade_clv: error para trade_id=%s: %s", trade_id, e)
+
+
 async def update_trade_result(trade_id: str, result: str, odds_final: float = None) -> None:
     """Actualiza resultado de un trade. result: 'win'|'loss'|'void'"""
     try:
@@ -378,6 +423,15 @@ def calculate_metrics(trades: list = None) -> dict:
             and len(closed) >= 20
         )
 
+        # CLV metrics
+        clv_values = [float(t["clv"]) for t in trades if t.get("clv") is not None]
+        avg_clv = round(mean(clv_values), 4) if clv_values else 0.0
+        clv_positive_rate = (
+            round(sum(1 for v in clv_values if v > 0) / len(clv_values), 4)
+            if clv_values else 0.0
+        )
+        clv_edge_confirmed = avg_clv > 0.03
+
         return {
             "total_trades": len(trades),
             "closed_trades": len(closed),
@@ -400,6 +454,9 @@ def calculate_metrics(trades: list = None) -> dict:
             "by_source": by_source,
             "by_category": by_category_out,
             "ready_for_real": ready_for_real,
+            "avg_clv": avg_clv,
+            "clv_positive_rate": clv_positive_rate,
+            "clv_edge_confirmed": clv_edge_confirmed,
         }
     except Exception as e:
         logger.error("shadow: error en calculate_metrics: %s", e)
@@ -425,4 +482,7 @@ def calculate_metrics(trades: list = None) -> dict:
             "by_source": {},
             "by_category": {},
             "ready_for_real": False,
+            "avg_clv": 0.0,
+            "clv_positive_rate": 0.0,
+            "clv_edge_confirmed": False,
         }

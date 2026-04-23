@@ -111,6 +111,71 @@ async def send_alert(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "sent": sent})
 
 
+@app.post("/daily-report", dependencies=[Depends(verify_token)])
+async def daily_report() -> JSONResponse:
+    """
+    Genera y envia el reporte diario a Telegram.
+    Llamado por Cloud Scheduler o GitHub Actions a las 08:00 Europe/Madrid.
+    """
+    asyncio.create_task(_bg_daily_report())
+    return JSONResponse(status_code=202, content={"status": "accepted", "job": "daily-report"})
+
+
+async def _bg_daily_report() -> None:
+    """
+    1. check_model_health() → health dict
+    2. calculate_metrics() → shadow_metrics
+    3. Buscar top signal en predictions (result==None, unified_score DESC)
+       Fallback: poly_predictions (alerted==False, edge DESC)
+    4. format_daily_report(health, shadow_metrics, top_signal)
+    5. send_message(report_text)
+    6. Si health.degraded: send_message(format_health_alert(health)) — alerta separada
+    """
+    try:
+        from shared.model_health import check_model_health, format_health_alert, format_daily_report
+        from shared.shadow_engine import calculate_metrics
+        from shared.firestore_client import col
+        from alert_manager import send_message
+
+        health = check_model_health()
+        shadow_metrics = calculate_metrics()
+
+        # Buscar top signal
+        top_signal = None
+        try:
+            docs = list(
+                col("predictions")
+                .where("result", "==", None)
+                .order_by("unified_score", direction="DESCENDING")
+                .limit(1)
+                .stream()
+            )
+            if docs:
+                top_signal = docs[0].to_dict()
+            else:
+                docs = list(
+                    col("poly_predictions")
+                    .where("alerted", "==", False)
+                    .order_by("edge", direction="DESCENDING")
+                    .limit(1)
+                    .stream()
+                )
+                if docs:
+                    top_signal = docs[0].to_dict()
+        except Exception:
+            pass
+
+        report = format_daily_report(health, shadow_metrics, top_signal)
+        await send_message(report)
+
+        if health.get("degraded"):
+            await send_message(format_health_alert(health))
+
+        logger.info("daily-report: enviado correctamente")
+    except Exception as e:
+        logger.error("daily-report: error — %s", e, exc_info=True)
+
+
 @app.post("/send-weekly-report", dependencies=[Depends(verify_token)])
 async def send_weekly_report() -> JSONResponse:
     """

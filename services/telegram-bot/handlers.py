@@ -349,17 +349,26 @@ async def handle_shadow(update: dict) -> None:
         bankroll = float(m.get("current_bankroll", 50.0))
         roi = float(m.get("roi_total", 0))
         wr = float(m.get("win_rate", 0))
-        total = int(m.get("total_closed", 0))
-        pending = int(m.get("pending", 0))
+        total = int(m.get("closed_trades", m.get("total_closed", 0)))
+        pending = int(m.get("pending_trades", m.get("pending", 0)))
         ready = m.get("ready_for_real", False)
 
         ready_str = "✅ Listo para considerar real" if ready else "⏳ Acumulando historial"
+
+        # CLV
+        avg_clv = float(m.get("avg_clv", 0))
+        clv_edge = m.get("clv_edge_confirmed", False)
+        clv_line = ""
+        if avg_clv != 0.0:
+            edge_badge = " ✅ edge real confirmado" if clv_edge else " (acumulando datos)"
+            clv_line = f"📐 CLV medio: *{avg_clv:+.1%}*{edge_badge}\n"
 
         text = (
             f"👻 *SHADOW MODE*\n\n"
             f"💰 Bankroll virtual: *{bankroll:.2f}€* (inicio: 50€)\n"
             f"📈 ROI total: *{roi:+.1%}*\n"
             f"🎯 Win rate: *{wr:.0%}*\n"
+            f"{clv_line}"
             f"📊 Trades cerrados: {total} | Pendientes: {pending}\n\n"
             f"{ready_str}\n\n"
             f"_Datos simulados — no dinero real._"
