@@ -9,7 +9,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")        # solo telegram-bot
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")    # solo telegram-bot
 TELEGRAM_BOT_URL = os.environ.get("TELEGRAM_BOT_URL")    # sports-agent + polymarket-agent
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # fallback Claude Haiku cuando Groq TPD agotado
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY")    # solo sports-agent
 FOOTBALL_RAPID_API_KEY = os.environ.get("FOOTBALL_RAPID_API_KEY")  # solo sports-agent
@@ -24,7 +23,13 @@ COLLECTION_PREFIX = os.environ.get("FIRESTORE_COLLECTION_PREFIX", "")
 
 # IA
 GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_FALLBACK_MODEL = "llama-3.1-70b-versatile"  # fallback si el modelo principal es deprecado
+GROQ_MODEL_ROTATION = [
+    "llama-3.3-70b-versatile",   # principal
+    "mixtral-8x7b-32768",        # fallback 1
+    "gemma2-9b-it",              # fallback 2
+    "llama-3.1-8b-instant",      # fallback 3
+]
+GROQ_FALLBACK_MODEL = GROQ_MODEL_ROTATION[1]  # backward compat
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"  # compatible con openai SDK
 
 # Thresholds

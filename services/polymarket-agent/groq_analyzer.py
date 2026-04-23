@@ -104,7 +104,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     from datetime import datetime, timezone
     from shared.firestore_client import col
     from shared.groq_client import _get_groq, GROQ_CALL_DELAY
-    from shared.config import GROQ_MODEL, GROQ_FALLBACK_MODEL
+    from shared.config import GROQ_MODEL_ROTATION
 
     market_id = enriched_market.get("market_id", "")
 
@@ -199,7 +199,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
 
-    # Llamada a Groq con manejo de JSON mal formateado
+    # Llamada a Groq con rotación de modelos
     raw_response = ""
     groq_client = _get_groq()
     messages = [
@@ -207,12 +207,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         {"role": "user", "content": user_prompt},
     ]
 
-    groq_tpd = False
-    for attempt, model in enumerate([GROQ_MODEL, GROQ_FALLBACK_MODEL]):
+    all_tpd = True
+    for attempt, model in enumerate(GROQ_MODEL_ROTATION):
         try:
             if attempt > 0:
-                # Segundo intento: instruccion mas explicita
-                messages[-1]["content"] += "\n\nResponde SOLO JSON, sin texto adicional."
+                messages[-1]["content"] = user_prompt + "\n\nResponde SOLO JSON, sin texto adicional."
             resp = groq_client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -220,59 +219,73 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 temperature=0.3,
             )
             raw_response = resp.choices[0].message.content
+            all_tpd = False
             break
         except Exception as e:
             err_str = str(e).lower()
             if "model_not_found" in err_str or "404" in err_str:
+                logger.warning("analyze_market(%s): modelo %s no encontrado — probando siguiente", market_id, model)
                 continue
             if "429" in err_str or "rate_limit" in err_str or "quota" in err_str or "daily" in err_str:
-                groq_tpd = True
-                logger.warning("analyze_market(%s): Groq TPD agotado en %s — intentando Claude Haiku", market_id, model)
-                break
-            logger.error("analyze_market(%s): error Groq — %s", market_id, e, exc_info=True)
+                logger.warning("analyze_market(%s): TPD agotado en %s — probando siguiente", market_id, model)
+                continue
+            logger.error("analyze_market(%s): error Groq en %s — %s", market_id, model, e, exc_info=True)
             return None
 
-    # Fallback Claude Haiku cuando Groq agota el límite diario de tokens
-    if not raw_response and groq_tpd:
-        import os as _os
-        _anthropic_key = _os.environ.get("ANTHROPIC_API_KEY", "")
-        if not _anthropic_key:
-            logger.warning("analyze_market(%s): ANTHROPIC_API_KEY no configurada — sin fallback Haiku", market_id)
-            return None
-        try:
-            import anthropic as _anthropic
-            _claude = _anthropic.Anthropic(api_key=_anthropic_key)
-            _claude_resp = _claude.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=500,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": messages[-1]["content"]}],
-            )
-            raw_response = _claude_resp.content[0].text
-            logger.info("analyze_market(%s): Claude Haiku fallback exitoso", market_id)
-        except Exception as _ce:
-            logger.error("analyze_market(%s): error Claude Haiku fallback — %s", market_id, _ce, exc_info=True)
-            return None
+    # Fallback básico sin LLM cuando todos los modelos Groq están agotados
+    if not raw_response and all_tpd:
+        logger.warning("analyze_market(%s): todos los modelos Groq agotados — usando análisis básico", market_id)
+        orderbook_fb = enriched_market.get("orderbook", {})
+        buy_pressure = float(orderbook_fb.get("buy_pressure", 0.5))
+        momentum = enriched_market.get("price_momentum", "STABLE")
+        arb = enriched_market.get("arbitrage", {})
+        sm = enriched_market.get("smart_money", {})
 
-    if not raw_response:
+        real_prob = price_yes
+        if sm.get("is_smart_money"):
+            real_prob += 0.06 if buy_pressure > 0.5 else -0.06
+        if enriched_market.get("volume_spike"):
+            real_prob += 0.03 if momentum == "RISING" else (-0.03 if momentum == "FALLING" else 0)
+        if arb.get("detected"):
+            real_prob += float(arb.get("inefficiency", 0)) * 0.5
+        real_prob = max(0.01, min(0.99, real_prob))
+        edge_fb = round(real_prob - price_yes, 4)
+
+        if edge_fb >= POLY_MIN_EDGE:
+            rec_fb = "BUY_YES"
+        elif edge_fb <= -POLY_MIN_EDGE:
+            rec_fb = "BUY_NO"
+        else:
+            rec_fb = "PASS"
+
+        result = {
+            "real_prob": round(real_prob, 4),
+            "edge": edge_fb,
+            "confidence": 0.25,
+            "trend": momentum,
+            "recommendation": rec_fb,
+            "key_factors": ["fallback_no_llm", "all_groq_tpd_exhausted"],
+            "reasoning": f"Análisis básico sin LLM: buy_pressure={buy_pressure:.2f}, momentum={momentum}, smart_money={sm.get('is_smart_money', False)}",
+        }
+    elif not raw_response:
         logger.error("analyze_market(%s): sin respuesta de ningún modelo", market_id)
         return None
+    else:
+        # Extraer JSON de la respuesta del LLM
+        result = None
+        for extractor in [
+            lambda r: json.loads(r),
+            lambda r: json.loads(re.search(r"\{.*\}", r, re.DOTALL).group()),
+        ]:
+            try:
+                result = extractor(raw_response)
+                break
+            except Exception:
+                continue
 
-    # Extraer JSON de la respuesta
-    result: dict | None = None
-    for extractor in [
-        lambda r: json.loads(r),
-        lambda r: json.loads(re.search(r"\{.*\}", r, re.DOTALL).group()),
-    ]:
-        try:
-            result = extractor(raw_response)
-            break
-        except Exception:
-            continue
-
-    if result is None:
-        logger.error("analyze_market(%s): no se pudo parsear JSON de Groq: %s", market_id, raw_response[:200])
-        return None
+        if result is None:
+            logger.error("analyze_market(%s): no se pudo parsear JSON de Groq: %s", market_id, raw_response[:200])
+            return None
 
     # Construir documento poly_prediction
     real_prob = float(result.get("real_prob", price_yes))

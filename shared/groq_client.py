@@ -7,7 +7,7 @@ import logging
 
 from shared.config import (
     GROQ_API_KEY, TAVILY_API_KEY,
-    GROQ_MODEL, GROQ_FALLBACK_MODEL, GROQ_BASE_URL,
+    GROQ_MODEL, GROQ_MODEL_ROTATION, GROQ_BASE_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,8 +69,7 @@ def analyze(system_prompt: str, user_prompt: str, web_search: bool = True) -> st
         {"role": "user", "content": enriched_prompt},
     ]
 
-    # Intentar con modelo principal, fallback si el modelo fue deprecado
-    for model in [GROQ_MODEL, GROQ_FALLBACK_MODEL]:
+    for model in GROQ_MODEL_ROTATION:
         try:
             response = _get_groq().chat.completions.create(
                 model=model,
@@ -80,8 +79,12 @@ def analyze(system_prompt: str, user_prompt: str, web_search: bool = True) -> st
             )
             return response.choices[0].message.content
         except Exception as e:
-            if "model_not_found" in str(e).lower() or "404" in str(e):
-                logger.warning("Modelo %s no encontrado, intentando fallback", model)
+            err_str = str(e).lower()
+            if "model_not_found" in err_str or "404" in err_str:
+                logger.warning("Modelo %s no encontrado, probando siguiente", model)
                 continue
-            raise  # otros errores propagar
-    raise RuntimeError(f"Ambos modelos Groq fallaron: {GROQ_MODEL}, {GROQ_FALLBACK_MODEL}")
+            if "429" in err_str or "rate_limit" in err_str or "quota" in err_str or "daily" in err_str:
+                logger.warning("Modelo %s TPD agotado, probando siguiente", model)
+                continue
+            raise
+    raise RuntimeError(f"Todos los modelos Groq agotados: {GROQ_MODEL_ROTATION}")
