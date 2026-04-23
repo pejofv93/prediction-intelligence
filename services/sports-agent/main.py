@@ -131,6 +131,13 @@ async def run_backtest() -> StreamingResponse:
     return StreamingResponse(_stream_job(_bg_backtest, "backtest"), media_type="text/plain")
 
 
+@app.post("/run-arb", dependencies=[Depends(verify_token)])
+async def run_arb() -> JSONResponse:
+    """202 → background: lee cuotas de Firestore, detecta arb, envía alertas Telegram."""
+    asyncio.create_task(_bg_arb())
+    return JSONResponse(status_code=202, content={"status": "accepted", "job": "arb"})
+
+
 @app.post("/run-fdco-collect", dependencies=[Depends(verify_token)])
 async def run_fdco_collect() -> StreamingResponse:
     """
@@ -718,6 +725,96 @@ async def _bg_backtest() -> None:
 
     except Exception as e:
         logger.error("backtest: error no controlado — %s", e, exc_info=True)
+
+
+async def _bg_arb() -> None:
+    """
+    Pipeline de detección de arbitraje:
+    1. Lee enriched_matches con odds_current != None de las últimas 24h.
+    2. Formatea para arbitrage_detector.detect_and_store_arbitrage.
+    3. Envía alerta Telegram por cada arb encontrado.
+    """
+    try:
+        logger.info("arb: iniciando detección de arbitraje")
+        from shared.firestore_client import col
+        from collectors.arbitrage_detector import detect_and_store_arbitrage, format_arb_telegram
+
+        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+        try:
+            raw_docs = list(
+                col("enriched_matches")
+                .where("odds_current", "!=", None)
+                .stream()
+            )
+        except Exception as e:
+            logger.warning("arb: error leyendo enriched_matches — %s", e)
+            raw_docs = []
+
+        # Filtrar por las últimas 24h manualmente (Firestore no soporta != + rango de fecha)
+        enriched_docs: list[dict] = []
+        for d in raw_docs:
+            data = d.to_dict()
+            match_date = data.get("match_date") or data.get("updated_at") or ""
+            if isinstance(match_date, str) and match_date >= cutoff_24h:
+                enriched_docs.append(data)
+            elif hasattr(match_date, "isoformat") and match_date.isoformat() >= cutoff_24h:
+                enriched_docs.append(data)
+
+        logger.info("arb: %d partidos enriquecidos con cuotas en las últimas 24h", len(enriched_docs))
+
+        # Construir estructura markets para el detector
+        markets: list[dict] = []
+        for enriched in enriched_docs:
+            odds_current = enriched.get("odds_current")
+            if not odds_current or not isinstance(odds_current, dict):
+                continue
+
+            bookmakers: list[dict] = []
+            # odds_current puede ser {bookmaker: {home, draw, away}} o lista
+            if isinstance(odds_current, dict):
+                for bm_name, bm_odds in odds_current.items():
+                    if isinstance(bm_odds, dict):
+                        bookmakers.append({
+                            "name": bm_name,
+                            "home_odds": bm_odds.get("home") or bm_odds.get("1") or 0,
+                            "draw_odds": bm_odds.get("draw") or bm_odds.get("X") or 0,
+                            "away_odds": bm_odds.get("away") or bm_odds.get("2") or 0,
+                        })
+
+            if not bookmakers:
+                continue
+
+            markets.append({
+                "match": f"{enriched.get('home_team', '')} vs {enriched.get('away_team', '')}",
+                "home": enriched.get("home_team", ""),
+                "away": enriched.get("away_team", ""),
+                "league": enriched.get("league", ""),
+                "bookmakers": bookmakers,
+            })
+
+        arbs = await detect_and_store_arbitrage(markets)
+
+        telegram_url = os.environ.get("TELEGRAM_BOT_URL", "")
+        sent = 0
+        for arb in arbs:
+            try:
+                message = format_arb_telegram(arb)
+                if telegram_url:
+                    import httpx as _httpx
+                    async with _httpx.AsyncClient(timeout=10.0) as client:
+                        await client.post(
+                            f"{telegram_url}/send-alert",
+                            json={"type": "sports", "data": {"arb": True, "message": message}},
+                        )
+                    sent += 1
+            except Exception as e:
+                logger.warning("arb: error enviando alerta Telegram — %s", e)
+
+        logger.info("arb: %d arbs encontrados, %d alertas Telegram enviadas", len(arbs), sent)
+
+    except Exception as e:
+        logger.error("arb: error no controlado — %s", e, exc_info=True)
 
 
 async def _bg_fdco_collect() -> None:
