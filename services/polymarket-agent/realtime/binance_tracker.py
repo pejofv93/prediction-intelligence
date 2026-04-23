@@ -97,6 +97,99 @@ async def get_latest_btc() -> dict:
     return await get_btc_price()
 
 
+async def get_fear_greed() -> dict:
+    """
+    GET https://api.alternative.me/fng/?limit=7
+    Sin API key, sin límites.
+    Devuelve {value: int, label: str, last_7d: [int], trend: "FEAR"|"GREED"|"NEUTRAL"}
+    Si falla: devuelve {"value": 50, "label": "Neutral", "error": str(e)}
+    """
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get("https://api.alternative.me/fng/?limit=7")
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        if not data:
+            return {"value": 50, "label": "Neutral", "error": "sin datos"}
+
+        current = data[0]
+        value = int(current.get("value", 50))
+        label = current.get("value_classification", "Neutral")
+        last_7d = [int(d.get("value", 50)) for d in data]
+
+        if value < 25:
+            trend = "EXTREME_FEAR"
+        elif value < 45:
+            trend = "FEAR"
+        elif value > 75:
+            trend = "EXTREME_GREED"
+        elif value > 55:
+            trend = "GREED"
+        else:
+            trend = "NEUTRAL"
+
+        return {"value": value, "label": label, "trend": trend, "last_7d": last_7d}
+    except Exception as e:
+        logger.error("get_fear_greed: error — %s", e)
+        return {"value": 50, "label": "Neutral", "trend": "NEUTRAL", "error": str(e)}
+
+
+def apply_fear_greed_to_signal(
+    signal: dict,
+    fg: dict,
+    recommendation: str,
+) -> dict:
+    """
+    Ajusta señal crypto según Fear & Greed Index.
+    recommendation: "BUY_YES" o "BUY_NO" (dirección de la señal)
+
+    - Extreme Fear (<25): mercado en pánico → precio suele rebotar
+      Si señal es BUY_YES (espera subida): confidence *= 1.12
+      Si señal es BUY_NO: confidence *= 0.90 (contra el rebote probable)
+    - Fear (25-45): leve boost BUY_YES × 1.06
+    - Extreme Greed (>75): mercado eufórico → precio suele caer
+      Si señal es BUY_NO (espera bajada): confidence *= 1.12
+      Si señal es BUY_YES: confidence *= 0.90
+    - Greed (55-75): leve boost BUY_NO × 1.06
+
+    Añade campo fear_greed_index al signal.
+    Clampa confidence a [0.0, 1.0]. Nunca falla.
+    """
+    try:
+        value = int(fg.get("value", 50))
+        trend = fg.get("trend", "NEUTRAL")
+        label = fg.get("label", "Neutral")
+
+        confidence = float(signal.get("confidence", 0.65))
+        is_buy_yes = recommendation in ("BUY_YES", "BUY")
+
+        modifier = 1.0
+        if trend == "EXTREME_FEAR":
+            modifier = 1.12 if is_buy_yes else 0.90
+        elif trend == "FEAR":
+            modifier = 1.06 if is_buy_yes else 1.0
+        elif trend == "EXTREME_GREED":
+            modifier = 0.90 if is_buy_yes else 1.12
+        elif trend == "GREED":
+            modifier = 1.0 if is_buy_yes else 1.06
+
+        if modifier != 1.0:
+            confidence = min(1.0, max(0.0, confidence * modifier))
+            signal["confidence"] = round(confidence, 4)
+
+        signal["fear_greed_index"] = {
+            "value": value,
+            "label": label,
+            "trend": trend,
+            "modifier_applied": round(modifier, 3),
+        }
+        logger.debug("apply_fear_greed: F&G=%d (%s) modifier=%.3f", value, trend, modifier)
+    except Exception as e:
+        logger.warning("apply_fear_greed: error — %s", e)
+    return signal
+
+
 def detect_crypto_divergence(btc_data: dict, poly_market: dict) -> dict | None:
     """
     Detecta divergencia entre precio BTC y mercados crypto Polymarket.

@@ -141,6 +141,23 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     category = categorize_market(question)
     category_context = _build_category_context(question, category)
 
+    # Fear & Greed para mercados crypto
+    fear_greed: dict = {}
+    if category == "crypto":
+        try:
+            from realtime.binance_tracker import get_fear_greed
+            fear_greed = await get_fear_greed()
+            fg_value = fear_greed.get("value", 50)
+            fg_label = fear_greed.get("label", "Neutral")
+            fg_trend = fear_greed.get("trend", "NEUTRAL")
+            fear_greed_line = f"Fear & Greed Index: {fg_value} ({fg_label}) — tendencia: {fg_trend}\n"
+            logger.debug("groq_analyzer: Fear&Greed=%d (%s)", fg_value, fg_label)
+        except Exception as _fge:
+            fear_greed_line = ""
+            logger.debug("groq_analyzer: error obteniendo Fear&Greed — %s", _fge)
+    else:
+        fear_greed_line = ""
+
     # Construir user_prompt con todos los datos del enriched_market
     orderbook = enriched_market.get("orderbook", {})
     news = enriched_market.get("news_sentiment", {})
@@ -173,6 +190,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"Sé explícito sobre la divergencia: edge = real_prob - {price_yes:.3f}. "
         f"Un edge de 0.00 o cercano a cero indica mercado eficiente — justificalo con argumentos solidos."
     )
+    if fear_greed_line:
+        user_prompt += f"\n{fear_greed_line}"
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
 
@@ -232,6 +251,16 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     key_factors = result.get("key_factors", [])
     reasoning = result.get("reasoning", "")
 
+    # Aplicar ajuste Fear & Greed si es crypto
+    if fear_greed and category == "crypto":
+        try:
+            from realtime.binance_tracker import apply_fear_greed_to_signal
+            _tmp = {"confidence": confidence}
+            _tmp = apply_fear_greed_to_signal(_tmp, fear_greed, recommendation)
+            confidence = float(_tmp.get("confidence", confidence))
+        except Exception as _fga:
+            logger.debug("groq_analyzer: error aplicando F&G — %s", _fga)
+
     prediction = {
         "market_id": market_id,
         "question": question,
@@ -246,6 +275,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "volume_spike": bool(enriched_market.get("volume_spike", False)),
         "smart_money_detected": bool(smart_money.get("is_smart_money", False)),
         "category": category,
+        "fear_greed_index": fear_greed.get("value") if fear_greed else None,
+        "fear_greed_label": fear_greed.get("label") if fear_greed else None,
         "analyzed_at": datetime.now(timezone.utc),
         "alerted": False,
     }

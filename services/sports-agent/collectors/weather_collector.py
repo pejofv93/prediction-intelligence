@@ -278,6 +278,128 @@ def adjust_signal_for_weather(signal: dict, weather: dict) -> dict:
     return signal
 
 
+def calculate_travel_distance(coord_a: tuple[float, float], coord_b: tuple[float, float]) -> float:
+    """Distancia en km entre dos coordenadas usando la fórmula de Haversine."""
+    import math
+    lat1, lon1 = math.radians(coord_a[0]), math.radians(coord_a[1])
+    lat2, lon2 = math.radians(coord_b[0]), math.radians(coord_b[1])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return round(6371 * 2 * math.asin(math.sqrt(a)), 1)
+
+
+async def calculate_travel_fatigue(team_name: str, recent_matches: list[dict]) -> dict:
+    """
+    Calcula fatiga de viaje real basada en distancias entre estadios visitados
+    en los últimos 7 días.
+
+    recent_matches: lista de dicts con {home_team_name, away_team_name, match_date}
+                    ordenados por fecha descendente. Se espera que team_name sea visitante
+                    en algunos de ellos.
+
+    Returns:
+    {
+      total_km: float,
+      fatigue_level: "ALTA"|"MODERADA"|"BAJA",
+      confidence_modifier: float,
+      matches_traveled: int,
+      note: str
+    }
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        team_lower = team_name.lower().strip()
+        total_km = 0.0
+        matches_traveled = 0
+        prev_coords: tuple[float, float] | None = None
+
+        for m in recent_matches:
+            # Filtrar por fecha
+            match_date = m.get("match_date") or m.get("date")
+            if match_date:
+                try:
+                    if isinstance(match_date, str):
+                        match_date = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+                    if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
+                        match_date = match_date.replace(tzinfo=timezone.utc)
+                    if match_date < cutoff:
+                        continue
+                except Exception:
+                    pass
+
+            # El equipo viajó si era visitante
+            away = str(m.get("away_team_name") or m.get("away_team", "")).lower()
+            home = str(m.get("home_team_name") or m.get("home_team", "")).lower()
+
+            if team_lower not in away and team_lower not in home:
+                continue
+
+            is_away = team_lower in away
+            venue_team = home if is_away else away
+            coords = get_stadium_coords(venue_team)
+            if coords is None:
+                continue
+
+            if prev_coords is not None and is_away:
+                dist = calculate_travel_distance(prev_coords, coords)
+                total_km += dist
+                matches_traveled += 1
+
+            prev_coords = coords
+
+        if total_km > 5000:
+            level = "ALTA"
+            modifier = 0.80
+        elif total_km > 3000:
+            level = "ALTA"
+            modifier = 0.88
+        elif total_km > 1500:
+            level = "MODERADA"
+            modifier = 0.94
+        else:
+            level = "BAJA"
+            modifier = 1.0
+
+        return {
+            "total_km": round(total_km, 0),
+            "fatigue_level": level,
+            "confidence_modifier": modifier,
+            "matches_traveled": matches_traveled,
+            "note": f"✈️ {total_km:.0f}km en 7 días ({matches_traveled} desplaz.)" if total_km > 1500 else "",
+        }
+
+    except Exception as e:
+        logger.warning("calculate_travel_fatigue: error — %s", e)
+        return {"total_km": 0, "fatigue_level": "BAJA", "confidence_modifier": 1.0, "matches_traveled": 0, "note": ""}
+
+
+def apply_travel_fatigue_to_signal(signal: dict, fatigue: dict) -> dict:
+    """
+    Aplica modificador de fatiga de viaje al signal.
+    Clampa confidence a [0.0, 1.0]. Nunca falla.
+    """
+    try:
+        modifier = float(fatigue.get("confidence_modifier", 1.0))
+        if modifier < 1.0:
+            confidence = float(signal.get("confidence", 0.65))
+            signal["confidence"] = round(min(1.0, max(0.0, confidence * modifier)), 4)
+            signal["travel_fatigue"] = {
+                "level": fatigue.get("fatigue_level", "BAJA"),
+                "km_7d": fatigue.get("total_km", 0),
+                "note": fatigue.get("note", ""),
+            }
+            logger.debug(
+                "travel_fatigue: %s (%.0fkm) → confidence *= %.2f",
+                fatigue.get("fatigue_level"), fatigue.get("total_km", 0), modifier,
+            )
+    except Exception as e:
+        logger.warning("apply_travel_fatigue_to_signal: error — %s", e)
+    return signal
+
+
 async def enrich_signal_with_weather(match: dict, signal: dict) -> dict:
     """
     Orquestador: busca coords del estadio, obtiene clima, ajusta signal.

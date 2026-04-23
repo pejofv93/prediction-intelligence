@@ -349,3 +349,125 @@ def apply_schedule_difficulty_to_signal(
         logger.warning("apply_schedule_difficulty_to_signal: error — %s", e)
 
     return signal
+
+
+# ── Rendimiento bajo presión ─────────────────────────────────────────────────
+
+
+def calculate_pressure_performance(
+    all_matches: list[dict],
+    team_id: int,
+    pressure_matches: list[dict],
+) -> dict:
+    """
+    Calcula rendimiento de un equipo en partidos de presión vs rendimiento general.
+
+    all_matches: todos los partidos del equipo (con result/goals)
+    pressure_matches: subconjunto donde había algo en juego:
+      - diferencia con zona descenso < 5 puntos
+      - diferencia con zona Champions < 5 puntos
+      - últimas 5 jornadas de temporada
+
+    Returns:
+    {
+      general_win_rate: float,
+      pressure_win_rate: float,
+      n_general: int,
+      n_pressure: int,
+      pressure_strength: bool,  # pressure_win_rate > general * 1.2
+      pressure_weakness: bool,  # pressure_win_rate < general * 0.8
+      confidence_modifier: float,
+      label: str
+    }
+    """
+    def _win_rate(matches: list[dict]) -> float:
+        wins = draws = losses = 0
+        for m in matches:
+            home_id = m.get("home_team_id")
+            gh = m.get("goals_home")
+            ga = m.get("goals_away")
+            if gh is None or ga is None:
+                continue
+            if home_id == team_id:
+                gf, gc = gh, ga
+            else:
+                gf, gc = ga, gh
+            if gf > gc:
+                wins += 1
+            elif gf < gc:
+                losses += 1
+            else:
+                draws += 1
+        total = wins + losses + draws
+        return wins / total if total > 0 else 0.5
+
+    general_wr = _win_rate(all_matches)
+    pressure_wr = _win_rate(pressure_matches)
+    n_pressure = len([m for m in pressure_matches
+                      if m.get("goals_home") is not None])
+
+    pressure_strength = False
+    pressure_weakness = False
+    modifier = 1.0
+    label = "NEUTRAL"
+
+    if n_pressure >= 5:  # mínimo 5 partidos de presión para ser significativo
+        if pressure_wr > general_wr * 1.2:
+            pressure_strength = True
+            modifier = 1.10
+            label = "FORTALEZA_PRESION"
+        elif pressure_wr < general_wr * 0.8:
+            pressure_weakness = True
+            modifier = 0.85
+            label = "DEBILIDAD_PRESION"
+
+    return {
+        "general_win_rate": round(general_wr, 4),
+        "pressure_win_rate": round(pressure_wr, 4),
+        "n_general": len(all_matches),
+        "n_pressure": n_pressure,
+        "pressure_strength": pressure_strength,
+        "pressure_weakness": pressure_weakness,
+        "confidence_modifier": modifier,
+        "label": label,
+    }
+
+
+def apply_pressure_performance_to_signal(
+    signal: dict,
+    pressure_data: dict,
+    is_decisive_match: bool = False,
+) -> dict:
+    """
+    Aplica rendimiento bajo presión al signal.
+    Solo ajusta si is_decisive_match=True (partidos con algo en juego).
+    Clampa confidence a [0.0, 1.0]. Nunca falla.
+    """
+    try:
+        if not is_decisive_match:
+            return signal
+        if not pressure_data:
+            return signal
+
+        modifier = float(pressure_data.get("confidence_modifier", 1.0))
+        if modifier == 1.0:
+            return signal
+
+        confidence = float(signal.get("confidence", 0.65))
+        confidence = min(1.0, max(0.0, confidence * modifier))
+        signal["confidence"] = round(confidence, 4)
+        signal["pressure_performance"] = {
+            "label": pressure_data.get("label", "NEUTRAL"),
+            "general_win_rate": pressure_data.get("general_win_rate"),
+            "pressure_win_rate": pressure_data.get("pressure_win_rate"),
+            "n_pressure": pressure_data.get("n_pressure", 0),
+            "modifier": modifier,
+        }
+        logger.debug(
+            "pressure_performance: %s → confidence *= %.2f → %.4f",
+            pressure_data.get("label"), modifier, confidence,
+        )
+    except Exception as e:
+        logger.warning("apply_pressure_performance_to_signal: error — %s", e)
+
+    return signal

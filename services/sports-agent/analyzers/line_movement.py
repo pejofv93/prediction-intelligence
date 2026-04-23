@@ -322,6 +322,152 @@ def format_late_money_alert(fixture: dict, movement: dict) -> str:
         return "⚡ LATE MONEY DETECTADO\n⚠️ Apuesta responsablemente."
 
 
+# ── Odds Drift (apertura vs actual) ──────────────────────────────────────────
+
+
+async def calculate_odds_drift(fixture_id: str) -> dict:
+    """
+    Calcula el drift entre cuota de apertura y actual para un fixture.
+    opening_value = (odds_open - odds_current) / odds_open
+
+    Thresholds:
+    - odds bajaron >15% desde apertura (opening_value > 0.15):
+      "PROCESSED" — mercado ya procesó información → reducir confidence
+    - odds subieron >10% desde apertura (opening_value < -0.10):
+      "DRIFTED_UP" — posible valor residual → boost confidence
+
+    Returns:
+    {
+      has_data: bool,
+      direction: "home"|"away"|"draw"|None,
+      drift_home: float,   # positivo = cuota bajó (más dinero), negativo = cuota subió
+      drift_away: float,
+      type: "PROCESSED"|"DRIFTED_UP"|"NONE",
+      team: "home"|"away"|None,  # qué equipo tiene el drift más significativo
+      message: str
+    }
+    """
+    result: dict = {
+        "has_data": False,
+        "drift_home": 0.0,
+        "drift_away": 0.0,
+        "type": "NONE",
+        "team": None,
+        "message": "",
+    }
+    try:
+        from shared.firestore_client import col
+
+        docs = list(col("odds_history").where("fixture_id", "==", fixture_id).stream())
+        if not docs:
+            return result
+
+        drifts_home: list[float] = []
+        drifts_away: list[float] = []
+
+        for doc in docs:
+            data = doc.to_dict() or {}
+            odds_open = data.get("odds_open", {})
+            odds_cur = data.get("odds_current", {})
+
+            o_home = float(odds_open.get("home", 0) or 0)
+            o_away = float(odds_open.get("away", 0) or 0)
+            c_home = float(odds_cur.get("home", 0) or 0)
+            c_away = float(odds_cur.get("away", 0) or 0)
+
+            if o_home > 0 and c_home > 0:
+                drifts_home.append((o_home - c_home) / o_home)
+            if o_away > 0 and c_away > 0:
+                drifts_away.append((o_away - c_away) / o_away)
+
+        if not drifts_home and not drifts_away:
+            return result
+
+        avg_drift_home = sum(drifts_home) / len(drifts_home) if drifts_home else 0.0
+        avg_drift_away = sum(drifts_away) / len(drifts_away) if drifts_away else 0.0
+
+        result["has_data"] = True
+        result["drift_home"] = round(avg_drift_home, 4)
+        result["drift_away"] = round(avg_drift_away, 4)
+
+        # El drift más significativo determina el tipo
+        max_drift = max(abs(avg_drift_home), abs(avg_drift_away))
+        dominant_team = "home" if abs(avg_drift_home) >= abs(avg_drift_away) else "away"
+        dominant_drift = avg_drift_home if dominant_team == "home" else avg_drift_away
+
+        if dominant_drift > 0.15:
+            result["type"] = "PROCESSED"
+            result["team"] = dominant_team
+            result["message"] = (
+                f"Cuota {dominant_team} bajó {dominant_drift:.0%} desde apertura "
+                f"→ mercado ya procesó información"
+            )
+        elif dominant_drift < -0.10:
+            result["type"] = "DRIFTED_UP"
+            result["team"] = dominant_team
+            result["message"] = (
+                f"Cuota {dominant_team} subió {abs(dominant_drift):.0%} desde apertura "
+                f"→ posible valor residual"
+            )
+
+        logger.debug(
+            "calculate_odds_drift fixture=%s: home=%.3f away=%.3f type=%s",
+            fixture_id, avg_drift_home, avg_drift_away, result["type"],
+        )
+    except Exception as e:
+        logger.warning("calculate_odds_drift: error fixture=%s — %s", fixture_id, e)
+
+    return result
+
+
+def apply_odds_drift_to_signal(signal: dict, drift: dict) -> dict:
+    """
+    Ajusta confidence según drift de cuota (apertura vs actual).
+
+    - Si drift.type == "PROCESSED" y drift.team == equipo apostado:
+      confidence *= 0.85 (el mercado ya procesó la info, la ventana se cerró)
+    - Si drift.type == "DRIFTED_UP" y drift.team == equipo apostado:
+      confidence *= 1.10 (hay valor residual no procesado)
+    - Añade campo odds_drift al signal.
+    Clampa confidence a [0.0, 1.0]. Nunca falla.
+    """
+    try:
+        if not drift.get("has_data") or drift.get("type") == "NONE":
+            return signal
+
+        confidence = float(signal.get("confidence", 0.65))
+        team_to_back = str(signal.get("team_to_back", "")).lower()
+        drift_team = drift.get("team")
+        drift_type = drift.get("type", "NONE")
+
+        team_dir = None
+        if team_to_back in ("home", "local"):
+            team_dir = "home"
+        elif team_to_back in ("away", "visitante"):
+            team_dir = "away"
+
+        if drift_team and team_dir and drift_team == team_dir:
+            if drift_type == "PROCESSED":
+                confidence = min(1.0, max(0.0, confidence * 0.85))
+                logger.debug("odds_drift: PROCESSED en equipo apostado → confidence=%.4f", confidence)
+            elif drift_type == "DRIFTED_UP":
+                confidence = min(1.0, max(0.0, confidence * 1.10))
+                logger.debug("odds_drift: DRIFTED_UP en equipo apostado → confidence=%.4f", confidence)
+
+        signal["confidence"] = round(confidence, 4)
+        signal["odds_drift"] = {
+            "type": drift_type,
+            "team": drift_team,
+            "drift_home_pct": round(drift.get("drift_home", 0) * 100, 1),
+            "drift_away_pct": round(drift.get("drift_away", 0) * 100, 1),
+            "message": drift.get("message", ""),
+        }
+    except Exception as e:
+        logger.warning("apply_odds_drift_to_signal: error — %s", e)
+
+    return signal
+
+
 # ── BLOQUE 9: Sharp Money (Pinnacle) ──────────────────────────────────────────
 
 

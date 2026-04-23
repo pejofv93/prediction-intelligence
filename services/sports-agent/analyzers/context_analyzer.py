@@ -563,3 +563,185 @@ async def detect_rotation_risk(match: dict, signal: dict) -> dict:
         logger.warning("detect_rotation_risk: error general — %s", e)
 
     return signal
+
+
+# ── Árbitro: sesgo de penaltis con equipos grandes ────────────────────────────
+
+_BIG_CLUBS: frozenset[str] = frozenset({
+    "real madrid", "barcelona", "manchester city", "manchester united",
+    "liverpool", "arsenal", "chelsea", "tottenham", "juventus", "inter",
+    "milan", "ac milan", "napoli", "psg", "paris saint-germain",
+    "bayern", "dortmund", "atletico", "atlético de madrid", "sevilla",
+})
+
+
+async def analyze_referee_penalty_bias(
+    referee_name: str,
+    api_key: str,
+    quota_mgr=None,
+) -> dict:
+    """
+    Analiza historial del árbitro para detectar sesgo de penaltis con equipos grandes.
+
+    Fetch: GET https://v3.football.api-sports.io/fixtures
+           ?referee={referee_name}&last=20
+    Headers: x-rapidapi-key: {api_key}
+
+    Por cada partido en el historial:
+    - Si home_team o away_team está en _BIG_CLUBS: contar como "big_club_match"
+    - Extraer penaltis pitados (fixture.events donde type=="Penalty")
+
+    Calcula:
+    - avg_penalties_big_clubs: media de penaltis por partido con grandes
+    - avg_penalties_others: media de penaltis por partido sin grandes
+    - penalty_bias: True si avg_big > avg_others * 1.4
+
+    Returns:
+    {
+      referee_name: str,
+      has_data: bool,
+      avg_penalties_big: float,
+      avg_penalties_others: float,
+      penalty_bias: bool,
+      bias_ratio: float,        # avg_big / avg_others
+      n_big_matches: int,
+      n_other_matches: int,
+      note: str
+    }
+
+    Si no hay datos o falla: has_data=False, penalty_bias=False.
+    """
+    result: dict = {
+        "referee_name": referee_name,
+        "has_data": False,
+        "avg_penalties_big": 0.0,
+        "avg_penalties_others": 0.0,
+        "penalty_bias": False,
+        "bias_ratio": 1.0,
+        "n_big_matches": 0,
+        "n_other_matches": 0,
+        "note": "",
+    }
+
+    if not referee_name or not api_key:
+        return result
+
+    if quota_mgr and not quota_mgr.can_call("api_sports"):
+        logger.debug("analyze_referee_penalty_bias: sin quota api_sports")
+        return result
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://v3.football.api-sports.io/fixtures",
+                params={"referee": referee_name, "last": "20"},
+                headers={
+                    "x-rapidapi-key": api_key,
+                    "x-rapidapi-host": "v3.football.api-sports.io",
+                },
+            )
+        if quota_mgr:
+            quota_mgr.track_call("api_sports")
+
+        if resp.status_code != 200:
+            logger.debug("analyze_referee_penalty_bias: API respondió %d", resp.status_code)
+            return result
+
+        fixtures = resp.json().get("response", [])
+        if not fixtures:
+            return result
+
+        big_penalties: list[float] = []
+        other_penalties: list[float] = []
+
+        for fx in fixtures:
+            fixture_info = fx.get("fixture", {})
+            teams = fx.get("teams", {})
+            events = fx.get("events", []) or []
+
+            home_name = str(teams.get("home", {}).get("name", "")).lower()
+            away_name = str(teams.get("away", {}).get("name", "")).lower()
+
+            is_big = any(
+                big in home_name or big in away_name
+                for big in _BIG_CLUBS
+            )
+
+            pen_count = sum(
+                1 for ev in events
+                if str(ev.get("type", "")).lower() == "var"
+                or "penalty" in str(ev.get("detail", "")).lower()
+            )
+
+            if is_big:
+                big_penalties.append(float(pen_count))
+            else:
+                other_penalties.append(float(pen_count))
+
+        avg_big = sum(big_penalties) / len(big_penalties) if big_penalties else 0.0
+        avg_others = sum(other_penalties) / len(other_penalties) if other_penalties else 0.0
+        bias_ratio = avg_big / avg_others if avg_others > 0 else 1.0
+        penalty_bias = bias_ratio > 1.40 and len(big_penalties) >= 5
+
+        result.update({
+            "has_data": True,
+            "avg_penalties_big": round(avg_big, 3),
+            "avg_penalties_others": round(avg_others, 3),
+            "penalty_bias": penalty_bias,
+            "bias_ratio": round(bias_ratio, 3),
+            "n_big_matches": len(big_penalties),
+            "n_other_matches": len(other_penalties),
+            "note": (
+                f"📋 Árbitro pita {bias_ratio:.1f}x más penaltis con equipos grandes"
+                if penalty_bias else ""
+            ),
+        })
+
+        logger.info(
+            "referee_penalty_bias: %s — big=%.2f others=%.2f ratio=%.2f bias=%s",
+            referee_name, avg_big, avg_others, bias_ratio, penalty_bias,
+        )
+
+    except Exception as e:
+        logger.warning("analyze_referee_penalty_bias: error — %s", e)
+
+    return result
+
+
+def apply_referee_bias_to_signal(signal: dict, referee_bias: dict) -> dict:
+    """
+    Ajusta señales de corners/tarjetas según sesgo del árbitro.
+    - penalty_bias=True y apostando al equipo grande: boost confidence × 1.08
+      (el árbitro favorece a equipos grandes en penaltis)
+    - Para señales de market_type en ("corners", "bookings", "cards"):
+      Solo ajusta si hay sesgo confirmado.
+    Nunca falla.
+    """
+    try:
+        if not referee_bias.get("penalty_bias"):
+            return signal
+
+        market_type = str(signal.get("market_type", "")).lower()
+        team_to_back = str(signal.get("team_to_back", "")).lower()
+
+        is_big_team = any(big in team_to_back for big in _BIG_CLUBS)
+        is_relevant_market = market_type in (
+            "corners", "bookings", "cards", "asian_handicap", "h2h", "btts"
+        )
+
+        if is_relevant_market and is_big_team:
+            confidence = float(signal.get("confidence", 0.65))
+            confidence = min(1.0, max(0.0, confidence * 1.08))
+            signal["confidence"] = round(confidence, 4)
+            logger.debug("referee_bias: boost × 1.08 para %s (penalty_bias)", team_to_back)
+
+        signal["referee_penalty_bias"] = {
+            "detected": True,
+            "ratio": referee_bias.get("bias_ratio", 1.0),
+            "note": referee_bias.get("note", ""),
+        }
+    except Exception as e:
+        logger.warning("apply_referee_bias_to_signal: error — %s", e)
+
+    return signal
