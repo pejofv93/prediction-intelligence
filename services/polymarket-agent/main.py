@@ -22,6 +22,9 @@ app = FastAPI(title="polymarket-agent")
 # Flag para ejecutar retroactive_eval una sola vez por arranque
 _retroactive_done = False
 
+# Flag para etiquetar grupos de mercados una sola vez al arranque
+_groups_labeled = False
+
 CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")
 
 
@@ -198,12 +201,45 @@ async def _bg_analyze() -> None:
                     else:
                         predictions_generated += 1
 
-                        # Calcular unified_score antes de alertar
+                        # Whale detection
+                        try:
+                            from price_tracker import detect_whale_activity, apply_whale_to_signal
+                            whale_data = await detect_whale_activity(enriched.get("market_id", ""))
+                            if whale_data.get("whale_detected"):
+                                prediction = apply_whale_to_signal(prediction, whale_data)
+                                logger.info(
+                                    "analyze: ballena en %s — manipulation=%s",
+                                    enriched.get("market_id"),
+                                    whale_data.get("possible_manipulation"),
+                                )
+                        except Exception as _we:
+                            logger.debug("analyze: error en whale detection — %s", _we)
+
+                        # CLV temporal factor en unified_score
                         try:
                             from shared.unified_score import calculate_unified_score
-                            prediction["unified_score"] = calculate_unified_score(prediction)
-                        except Exception as _ue:
-                            logger.error("analyze: error calculando unified_score — %s", _ue)
+                            from datetime import datetime, timezone
+                            market_doc = col("poly_markets").document(
+                                prediction.get("market_id", "")
+                            ).get()
+                            days_to_close = None
+                            if market_doc.exists:
+                                end_date = market_doc.to_dict().get("end_date")
+                                if end_date:
+                                    if hasattr(end_date, "tzinfo") and end_date.tzinfo is None:
+                                        end_date = end_date.replace(tzinfo=timezone.utc)
+                                    days_to_close = max(
+                                        0,
+                                        (end_date - datetime.now(timezone.utc)).days,
+                                    )
+                            prediction["unified_score"] = calculate_unified_score(
+                                prediction, days_to_close=days_to_close
+                            )
+                        except Exception as _se:
+                            logger.debug(
+                                "analyze: error recalculando unified_score con time factor — %s",
+                                _se,
+                            )
 
                         alerted = await check_and_alert(prediction)
                         if alerted:
@@ -234,6 +270,16 @@ async def _bg_analyze() -> None:
                 len(docs), predictions_generated, alerts_sent,
                 skipped_volume, skipped_groq, elapsed,
             )
+
+        # Asignar grupos tematicos a mercados (una sola vez al deploy)
+        global _groups_labeled
+        if not _groups_labeled:
+            try:
+                from correlation_engine import save_market_group_labels
+                await save_market_group_labels()
+                _groups_labeled = True
+            except Exception:
+                logger.debug("analyze: error en save_market_group_labels — se reintentara")
 
         # Limpieza de datos antiguos
         try:
