@@ -160,6 +160,9 @@ async def _bg_analyze() -> None:
             predictions_generated = 0
             alerts_sent = 0
 
+            skipped_volume = 0
+            skipped_groq = 0
+
             for i, doc in enumerate(docs):
                 enriched = doc.to_dict()
                 if i > 0:
@@ -167,12 +170,22 @@ async def _bg_analyze() -> None:
 
                 try:
                     prediction = await analyze_market(enriched)
-                    if prediction is not None:
+                    if prediction is None:
+                        skipped_volume += 1
+                    else:
                         predictions_generated += 1
                         alerted = await check_and_alert(prediction)
                         if alerted:
                             alerts_sent += 1
+                        else:
+                            logger.debug(
+                                "analyze: %s — edge=%.3f conf=%.2f → no alerta",
+                                enriched.get("market_id"),
+                                float(prediction.get("edge", 0)),
+                                float(prediction.get("confidence", 0)),
+                            )
                 except Exception:
+                    skipped_groq += 1
                     logger.error(
                         "analyze: error en mercado %s",
                         enriched.get("market_id"), exc_info=True,
@@ -180,8 +193,9 @@ async def _bg_analyze() -> None:
 
             elapsed = (datetime.now(timezone.utc) - start).total_seconds()
             logger.info(
-                "analyze: %d predicciones, %d alertas en %.1fs",
-                predictions_generated, alerts_sent, elapsed,
+                "analyze: total=%d analizados=%d alertas=%d skip_vol=%d skip_err=%d en %.1fs",
+                len(docs), predictions_generated, alerts_sent,
+                skipped_volume, skipped_groq, elapsed,
             )
 
         # Limpieza de datos antiguos

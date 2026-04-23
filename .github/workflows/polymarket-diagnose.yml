@@ -1,0 +1,144 @@
+name: polymarket-diagnose
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install google-cloud-firestore
+
+      - name: Authenticate GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Diagnose Polymarket state
+        env:
+          PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: |
+          python - <<'EOF'
+          import os
+          from google.cloud import firestore
+          from datetime import datetime, timedelta, timezone
+
+          PROJECT = "prediction-intelligence"
+          db = firestore.Client(project=PROJECT)
+          PREFIX = os.environ.get("PREFIX", "prod")
+
+          def col(name):
+              return db.collection(f"{PREFIX}{name}")
+
+          now = datetime.now(timezone.utc)
+
+          # ── 1. poly_markets ─────────────────────────────────────────────────
+          print("\n" + "="*60)
+          print("1. poly_markets")
+          markets = list(col("poly_markets").stream())
+          print(f"Total mercados: {len(markets)}")
+          if markets:
+              vols = [float(d.to_dict().get("volume_24h", 0)) for d in markets]
+              over_5k = sum(1 for v in vols if v >= 5000)
+              print(f"  Con volume_24h >= $5,000: {over_5k}")
+              print(f"  Vol max: ${max(vols):,.0f}  |  Vol min: ${min(vols):,.0f}")
+
+          # ── 2. poly_price_history ───────────────────────────────────────────
+          print("\n" + "="*60)
+          print("2. poly_price_history (últimas 72h)")
+          cutoff = now - timedelta(hours=72)
+          snaps = list(col("poly_price_history").where("timestamp", ">=", cutoff).stream())
+          print(f"Total snapshots 72h: {len(snaps)}")
+          by_market = {}
+          for d in snaps:
+              mid = d.to_dict().get("market_id", "?")
+              by_market[mid] = by_market.get(mid, 0) + 1
+          print(f"Mercados con historial: {len(by_market)}")
+          if by_market:
+              counts = list(by_market.values())
+              print(f"  Snapshots por mercado — max: {max(counts)}  min: {min(counts)}  avg: {sum(counts)/len(counts):.1f}")
+
+          # ── 3. enriched_markets ─────────────────────────────────────────────
+          print("\n" + "="*60)
+          print("3. enriched_markets")
+          enriched = list(col("enriched_markets").stream())
+          print(f"Total: {len(enriched)}")
+          if enriched:
+              cutoff_1h = now - timedelta(hours=1)
+              fresh = sum(1 for d in enriched
+                          if d.to_dict().get("enriched_at") and
+                          d.to_dict()["enriched_at"].replace(tzinfo=timezone.utc if d.to_dict()["enriched_at"].tzinfo is None else None) >= cutoff_1h
+                          )
+              vol_spikes = sum(1 for d in enriched if d.to_dict().get("volume_spike") is True)
+              smart = sum(1 for d in enriched if d.to_dict().get("smart_money", {}).get("is_smart_money") is True)
+              print(f"  Frescos (<1h): {fresh}")
+              print(f"  Con volume_spike=True: {vol_spikes}")
+              print(f"  Con smart_money=True: {smart}")
+
+          # ── 4. poly_predictions ─────────────────────────────────────────────
+          print("\n" + "="*60)
+          print("4. poly_predictions (todas)")
+          preds = list(col("poly_predictions").stream())
+          print(f"Total predicciones: {len(preds)}")
+          if preds:
+              edges = [float(d.to_dict().get("edge", 0)) for d in preds]
+              confs = [float(d.to_dict().get("confidence", 0)) for d in preds]
+              vol_sp = sum(1 for d in preds if d.to_dict().get("volume_spike") is True)
+              sm_det = sum(1 for d in preds if d.to_dict().get("smart_money_detected") is True)
+              alerted = sum(1 for d in preds if d.to_dict().get("alerted") is True)
+              over_edge = sum(1 for e in edges if e > 0.08)
+              over_conf = sum(1 for i, e in enumerate(edges) if e > 0.08 and confs[i] > 0.65)
+              print(f"  edge > 8%: {over_edge}")
+              print(f"  edge > 8% AND conf > 65%: {over_conf}  ← deberían haberse alertado")
+              print(f"  volume_spike=True: {vol_sp}")
+              print(f"  smart_money_detected=True: {sm_det}")
+              print(f"  alerted=True: {alerted}")
+              print(f"\n  Edge promedio: {sum(edges)/len(edges):.3f}  |  Edge max: {max(edges):.3f}")
+              print(f"\nTop 5 por edge:")
+              top5 = sorted(preds, key=lambda d: -float(d.to_dict().get("edge", 0)))[:5]
+              for p in top5:
+                  d = p.to_dict()
+                  print(f"  edge={float(d.get('edge',0)):.3f}  conf={float(d.get('confidence',0)):.2f}"
+                        f"  vol_spike={d.get('volume_spike')}  sm={d.get('smart_money_detected')}"
+                        f"  alerted={d.get('alerted')}  rec={d.get('recommendation')}")
+                  print(f"    Q: {str(d.get('question',''))[:70]}")
+
+          # ── 5. alerts_sent (polymarket) ─────────────────────────────────────
+          print("\n" + "="*60)
+          print("5. alerts_sent (tipo polymarket)")
+          alerts = list(col("alerts_sent").where("type", "==", "polymarket").stream())
+          print(f"Total alertas enviadas: {len(alerts)}")
+          if alerts:
+              for a in sorted(alerts, key=lambda d: d.to_dict().get("sent_at", now), reverse=True)[:5]:
+                  d = a.to_dict()
+                  print(f"  {d.get('sent_at')}  key={d.get('alert_key')}")
+
+          print("\n" + "="*60)
+          print("DIAGNÓSTICO COMPLETADO")
+          EOF
+
+      - name: Force run-scan + run-enrich + run-analyze
+        run: |
+          echo "=== Triggering SCAN ==="
+          curl -s -o /dev/null -w "scan: %{http_code}\n" \
+            -X POST "${{ secrets.POLY_AGENT_URL }}/run-scan" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30
+          sleep 60
+          echo "=== Triggering ENRICH ==="
+          curl -s -o /dev/null -w "enrich: %{http_code}\n" \
+            -X POST "${{ secrets.POLY_AGENT_URL }}/run-enrich" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30
+          sleep 90
+          echo "=== Triggering ANALYZE ==="
+          curl -s -o /dev/null -w "analyze: %{http_code}\n" \
+            -X POST "${{ secrets.POLY_AGENT_URL }}/run-analyze" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30
