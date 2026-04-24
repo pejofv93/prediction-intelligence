@@ -182,11 +182,8 @@ async def _bg_enrich() -> None:
         from shared.firestore_client import col
 
         try:
-            docs_raw = await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(None, col("poly_markets").get),
-                timeout=30.0,
-            )
-        except (asyncio.TimeoutError, DeadlineExceeded, ServiceUnavailable) as e:
+            docs_raw = list(col("poly_markets").stream())
+        except (DeadlineExceeded, ServiceUnavailable) as e:
             logger.error("enrich: error leyendo poly_markets: %s", e)
             return
         markets = [d.to_dict() for d in docs_raw]
@@ -219,11 +216,8 @@ async def _bg_analyze() -> None:
         from shared.groq_client import GROQ_CALL_DELAY
 
         try:
-            docs = await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(None, col("enriched_markets").get),
-                timeout=30.0,
-            )
-        except (asyncio.TimeoutError, DeadlineExceeded, ServiceUnavailable) as e:
+            docs = list(col("enriched_markets").stream())
+        except (DeadlineExceeded, ServiceUnavailable) as e:
             logger.error("analyze: error leyendo enriched_markets: %s", e)
             return
 
