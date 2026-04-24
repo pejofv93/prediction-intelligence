@@ -221,8 +221,9 @@ async def _bg_analyze() -> None:
 
         try:
             col("enriched_markets").document("_conn_warmup").get()
-        except Exception:
-            pass
+            logger.info("analyze: warmup Firestore OK")
+        except Exception as e:
+            logger.warning("analyze: warmup fallo — %s: %s", type(e).__name__, e)
         try:
             docs = list(col("enriched_markets").stream())
         except Exception as e:
