@@ -181,17 +181,12 @@ async def _bg_enrich() -> None:
         from enrichers.market_enricher import run_enrichment
         from shared.firestore_client import col
 
-        docs_raw = None
-        for attempt in range(3):
-            try:
-                docs_raw = list(col("poly_markets").stream(timeout=10.0))
-                break
-            except Exception as e:
-                logger.warning("enrich: Firestore intento %d/3 — %s: %s", attempt + 1, type(e).__name__, e)
-                if attempt == 2:
-                    logger.error("enrich: error leyendo poly_markets tras 3 intentos")
-                    return
-                await asyncio.sleep(3)
+        try:
+            from shared.firestore_client import async_col
+            docs_raw = [d async for d in async_col("poly_markets").stream()]
+        except Exception as e:
+            logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
+            return
         markets = [d.to_dict() for d in docs_raw]
 
         count = await run_enrichment(markets)
@@ -221,17 +216,12 @@ async def _bg_analyze() -> None:
         from shared.firestore_client import col
         from shared.groq_client import GROQ_CALL_DELAY
 
-        docs = None
-        for attempt in range(3):
-            try:
-                docs = list(col("enriched_markets").stream(timeout=10.0))
-                break
-            except Exception as e:
-                logger.warning("analyze: Firestore intento %d/3 — %s: %s", attempt + 1, type(e).__name__, e)
-                if attempt == 2:
-                    logger.error("analyze: error leyendo enriched_markets tras 3 intentos")
-                    return
-                await asyncio.sleep(3)
+        try:
+            from shared.firestore_client import async_col
+            docs = [d async for d in async_col("enriched_markets").stream()]
+        except Exception as e:
+            logger.error("analyze: error leyendo enriched_markets — %s: %s", type(e).__name__, e)
+            return
 
         if not docs:
             logger.warning("analyze: enriched_markets vacía — ejecuta /run-enrich primero")
