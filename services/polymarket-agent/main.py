@@ -74,8 +74,8 @@ async def run_enrich() -> JSONResponse:
 
 @app.post("/run-analyze", dependencies=[Depends(verify_token)])
 async def run_analyze() -> JSONResponse:
-    """Ejecuta análisis + alertas Telegram en foreground (await) para garantizar entrega en Cloud Run."""
-    await _bg_analyze()
+    """202 inmediato → background: groq_analyzer + alert_engine."""
+    asyncio.create_task(_bg_analyze())
     return JSONResponse(status_code=202, content={"status": "accepted", "job": "analyze"})
 
 
