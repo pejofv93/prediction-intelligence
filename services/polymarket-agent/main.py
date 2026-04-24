@@ -364,7 +364,7 @@ async def _bg_analyze() -> None:
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info(
             "analyze: total=%d analizados=%d alertas=%d skip_vol=%d skip_err=%d en %.1fs",
-            len(docs), predictions_generated, alerts_sent,
+            len(docs_balanced), predictions_generated, alerts_sent,
             skipped_volume, skipped_groq, elapsed,
         )
 
