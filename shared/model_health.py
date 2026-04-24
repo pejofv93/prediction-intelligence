@@ -54,6 +54,25 @@ def check_model_health(trades: Optional[list[dict]] = None) -> dict:
         wins = [t for t in closed if t.get("result") == "win"]
 
         win_rate = round(len(wins) / len(closed), 4) if closed else 0.0
+
+        # Sin suficiente muestra estadistica: no ajustar threshold
+        if len(closed) < 20:
+            result = {
+                "status": "SALUDABLE",
+                "win_rate_last_20": win_rate,
+                "recommended_edge": _DEFAULT_SPORTS_MIN_EDGE,
+                "blacklisted_leagues": [],
+                "degraded": False,
+                "message": f"Muestra insuficiente ({len(closed)} trades cerrados < 20). Threshold fijo en {_DEFAULT_SPORTS_MIN_EDGE:.0%}.",
+                "checked_at": _now_utc(),
+            }
+            try:
+                col("model_weights").document("health_check").set(result)
+            except Exception as e:
+                logger.error("check_model_health: error guardando health_check: %s", e)
+            logger.info("check_model_health: muestra insuficiente (%d < 20), threshold=%.1f%%", len(closed), _DEFAULT_SPORTS_MIN_EDGE * 100)
+            return result
+
         recommended_edge = _DEFAULT_SPORTS_MIN_EDGE
 
         # Determinar status y ajustar threshold
