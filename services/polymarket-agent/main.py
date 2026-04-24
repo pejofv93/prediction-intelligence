@@ -18,6 +18,23 @@ from google.api_core.exceptions import DeadlineExceeded, ServiceUnavailable
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# Monkey-patch: google-cloud-firestore 2.x accede a gapic_callable._retry en _UnaryStreamMultiCallable
+# que no tiene ese atributo → AttributeError. Fix: devolver False (no reintentar) si falta el atributo.
+try:
+    from google.cloud.firestore_v1 import base_query as _bq
+    _orig_retry_fn = _bq.BaseQuery._retry_query_after_exception
+
+    def _safe_retry_query_after_exception(self, exc, retry, transaction):
+        try:
+            return _orig_retry_fn(self, exc, retry, transaction)
+        except AttributeError:
+            return False
+
+    _bq.BaseQuery._retry_query_after_exception = _safe_retry_query_after_exception
+    logger.info("patch: _retry_query_after_exception aplicado OK")
+except Exception as _patch_err:
+    logger.warning("patch: no aplicado — %s", _patch_err)
+
 app = FastAPI(title="polymarket-agent")
 
 # Flag para ejecutar retroactive_eval una sola vez por arranque
@@ -224,6 +241,11 @@ async def _bg_analyze() -> None:
             logger.info("analyze: warmup Firestore OK")
         except Exception as e:
             logger.warning("analyze: warmup fallo — %s: %s", type(e).__name__, e)
+        try:
+            _probe = col("enriched_markets").limit(1).get()
+            logger.info("analyze: probe enriched_markets → %d doc(s)", len(_probe))
+        except Exception as e:
+            logger.warning("analyze: probe fallo — %s: %s", type(e).__name__, e)
         try:
             docs = list(col("enriched_markets").stream())
         except Exception as e:
