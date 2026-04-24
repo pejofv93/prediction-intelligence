@@ -35,6 +35,27 @@ def check_model_health(trades: Optional[list[dict]] = None) -> dict:
     }
     """
     try:
+        # Guard: sin muestra suficiente no ajustar thresholds
+        try:
+            weights_doc = col("model_weights").document("current").get()
+            data = weights_doc.to_dict() if weights_doc.exists else {}
+            total_closed = int(data.get("total_predictions", 0))
+        except Exception as e:
+            logger.warning("check_model_health: no se pudo leer total_predictions — %s", e)
+            total_closed = 0
+
+        if total_closed < 20:
+            logger.info("check_model_health: omitido — %d/20 trades mínimos", total_closed)
+            return {
+                "status": "skipped",
+                "win_rate_last_20": 0.0,
+                "recommended_edge": _DEFAULT_SPORTS_MIN_EDGE,
+                "blacklisted_leagues": [],
+                "degraded": False,
+                "message": f"Health check omitido: {total_closed}/20 trades cerrados mínimos.",
+                "checked_at": _now_utc(),
+            }
+
         if trades is None:
             try:
                 docs = (

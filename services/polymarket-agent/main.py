@@ -13,6 +13,7 @@ load_dotenv()
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
+from google.api_core.exceptions import DeadlineExceeded, ServiceUnavailable
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -180,8 +181,15 @@ async def _bg_enrich() -> None:
         from enrichers.market_enricher import run_enrichment
         from shared.firestore_client import col
 
-        docs = list(col("poly_markets").stream())
-        markets = [d.to_dict() for d in docs]
+        try:
+            docs_raw = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(None, col("poly_markets").get),
+                timeout=30.0,
+            )
+        except (asyncio.TimeoutError, DeadlineExceeded, ServiceUnavailable) as e:
+            logger.error("enrich: error leyendo poly_markets: %s", e)
+            return
+        markets = [d.to_dict() for d in docs_raw]
 
         count = await run_enrichment(markets)
 
@@ -201,7 +209,6 @@ async def _bg_analyze() -> None:
     4. run_maintenance() limpia datos antiguos
     """
     try:
-        import asyncio
         from datetime import datetime, timezone
         start = datetime.now(timezone.utc)
         logger.info("analyze: iniciando pipeline")
@@ -211,97 +218,107 @@ async def _bg_analyze() -> None:
         from shared.firestore_client import col
         from shared.groq_client import GROQ_CALL_DELAY
 
-        docs = list(col("enriched_markets").stream())
-        if not docs:
-            logger.warning("analyze: sin enriched_markets en Firestore")
-        else:
-            predictions_generated = 0
-            alerts_sent = 0
-
-            skipped_volume = 0
-            skipped_groq = 0
-
-            for i, doc in enumerate(docs):
-                enriched = doc.to_dict()
-                if i > 0:
-                    await asyncio.sleep(GROQ_CALL_DELAY)
-
-                try:
-                    prediction = await analyze_market(enriched)
-                    if prediction is None:
-                        skipped_volume += 1
-                    else:
-                        predictions_generated += 1
-
-                        # Whale detection
-                        try:
-                            from price_tracker import detect_whale_activity, apply_whale_to_signal
-                            whale_data = await detect_whale_activity(enriched.get("market_id", ""))
-                            if whale_data.get("whale_detected"):
-                                prediction = apply_whale_to_signal(prediction, whale_data)
-                                logger.info(
-                                    "analyze: ballena en %s — manipulation=%s",
-                                    enriched.get("market_id"),
-                                    whale_data.get("possible_manipulation"),
-                                )
-                        except Exception as _we:
-                            logger.debug("analyze: error en whale detection — %s", _we)
-
-                        # CLV temporal factor en unified_score
-                        try:
-                            from shared.unified_score import calculate_unified_score
-                            from datetime import datetime, timezone
-                            market_doc = col("poly_markets").document(
-                                prediction.get("market_id", "")
-                            ).get()
-                            days_to_close = None
-                            if market_doc.exists:
-                                end_date = market_doc.to_dict().get("end_date")
-                                if end_date:
-                                    if hasattr(end_date, "tzinfo") and end_date.tzinfo is None:
-                                        end_date = end_date.replace(tzinfo=timezone.utc)
-                                    days_to_close = max(
-                                        0,
-                                        (end_date - datetime.now(timezone.utc)).days,
-                                    )
-                            prediction["unified_score"] = calculate_unified_score(
-                                prediction, days_to_close=days_to_close
-                            )
-                        except Exception as _se:
-                            logger.debug(
-                                "analyze: error recalculando unified_score con time factor — %s",
-                                _se,
-                            )
-
-                        alerted = await check_and_alert(prediction)
-                        if alerted:
-                            alerts_sent += 1
-                            # Registrar señal en shadow trading
-                            try:
-                                from shared.shadow_engine import track_new_signal
-                                await track_new_signal(prediction, "polymarket")
-                            except Exception as _se:
-                                logger.error("analyze: error en track_new_signal — %s", _se)
-                        else:
-                            logger.debug(
-                                "analyze: %s — edge=%.3f conf=%.2f → no alerta",
-                                enriched.get("market_id"),
-                                float(prediction.get("edge", 0)),
-                                float(prediction.get("confidence", 0)),
-                            )
-                except Exception:
-                    skipped_groq += 1
-                    logger.error(
-                        "analyze: error en mercado %s",
-                        enriched.get("market_id"), exc_info=True,
-                    )
-
-            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
-            logger.info(
-                "analyze: total=%d analizados=%d alertas=%d skip_vol=%d skip_err=%d en %.1fs",
-                len(docs), predictions_generated, alerts_sent,
-                skipped_volume, skipped_groq, elapsed,
+        try:
+            docs = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(None, col("enriched_markets").get),
+                timeout=30.0,
             )
+        except (asyncio.TimeoutError, DeadlineExceeded, ServiceUnavailable) as e:
+            logger.error("analyze: error leyendo enriched_markets: %s", e)
+            return
+
+        if not docs:
+            logger.warning("analyze: enriched_markets vacía — ejecuta /run-enrich primero")
+            return
+
+        logger.info("analyze: mercados a analizar: %d", len(docs))
+        predictions_generated = 0
+        alerts_sent = 0
+
+        skipped_volume = 0
+        skipped_groq = 0
+
+        for i, doc in enumerate(docs):
+            enriched = doc.to_dict()
+            if i > 0:
+                await asyncio.sleep(GROQ_CALL_DELAY)
+
+            try:
+                prediction = await analyze_market(enriched)
+                if prediction is None:
+                    skipped_volume += 1
+                else:
+                    predictions_generated += 1
+
+                    # Whale detection
+                    try:
+                        from price_tracker import detect_whale_activity, apply_whale_to_signal
+                        whale_data = await detect_whale_activity(enriched.get("market_id", ""))
+                        if whale_data.get("whale_detected"):
+                            prediction = apply_whale_to_signal(prediction, whale_data)
+                            logger.info(
+                                "analyze: ballena en %s — manipulation=%s",
+                                enriched.get("market_id"),
+                                whale_data.get("possible_manipulation"),
+                            )
+                    except Exception as _we:
+                        logger.debug("analyze: error en whale detection — %s", _we)
+
+                    # CLV temporal factor en unified_score
+                    try:
+                        from shared.unified_score import calculate_unified_score
+                        from datetime import datetime, timezone
+                        market_doc = col("poly_markets").document(
+                            prediction.get("market_id", "")
+                        ).get()
+                        days_to_close = None
+                        if market_doc.exists:
+                            end_date = market_doc.to_dict().get("end_date")
+                            if end_date:
+                                if hasattr(end_date, "tzinfo") and end_date.tzinfo is None:
+                                    end_date = end_date.replace(tzinfo=timezone.utc)
+                                days_to_close = max(
+                                    0,
+                                    (end_date - datetime.now(timezone.utc)).days,
+                                )
+                        prediction["unified_score"] = calculate_unified_score(
+                            prediction, days_to_close=days_to_close
+                        )
+                    except Exception as _se:
+                        logger.debug(
+                            "analyze: error recalculando unified_score con time factor — %s",
+                            _se,
+                        )
+
+                    alerted = await check_and_alert(prediction)
+                    if alerted:
+                        alerts_sent += 1
+                        # Registrar señal en shadow trading
+                        try:
+                            from shared.shadow_engine import track_new_signal
+                            await track_new_signal(prediction, "polymarket")
+                        except Exception as _se:
+                            logger.error("analyze: error en track_new_signal — %s", _se)
+                    else:
+                        logger.debug(
+                            "analyze: %s — edge=%.3f conf=%.2f → no alerta",
+                            enriched.get("market_id"),
+                            float(prediction.get("edge", 0)),
+                            float(prediction.get("confidence", 0)),
+                        )
+            except Exception:
+                skipped_groq += 1
+                logger.error(
+                    "analyze: error en mercado %s",
+                    enriched.get("market_id"), exc_info=True,
+                )
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+        logger.info(
+            "analyze: total=%d analizados=%d alertas=%d skip_vol=%d skip_err=%d en %.1fs",
+            len(docs), predictions_generated, alerts_sent,
+            skipped_volume, skipped_groq, elapsed,
+        )
 
         # Asignar grupos tematicos a mercados (una sola vez al deploy)
         global _groups_labeled
