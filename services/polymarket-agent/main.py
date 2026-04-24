@@ -20,9 +20,10 @@ logger = logging.getLogger(__name__)
 
 # Monkey-patch: google-cloud-firestore 2.x accede a gapic_callable._retry en _UnaryStreamMultiCallable
 # que no tiene ese atributo → AttributeError. Fix: devolver False (no reintentar) si falta el atributo.
+# El método está en query.Query, no en base_query.BaseQuery.
 try:
-    from google.cloud.firestore_v1 import base_query as _bq
-    _orig_retry_fn = _bq.BaseQuery._retry_query_after_exception
+    from google.cloud.firestore_v1.query import Query as _FSQuery
+    _orig_retry_fn = _FSQuery._retry_query_after_exception
 
     def _safe_retry_query_after_exception(self, exc, retry, transaction):
         try:
@@ -30,8 +31,8 @@ try:
         except AttributeError:
             return False
 
-    _bq.BaseQuery._retry_query_after_exception = _safe_retry_query_after_exception
-    logger.info("patch: _retry_query_after_exception aplicado OK")
+    _FSQuery._retry_query_after_exception = _safe_retry_query_after_exception
+    logger.info("patch: _retry_query_after_exception en query.Query aplicado OK")
 except Exception as _patch_err:
     logger.warning("patch: no aplicado — %s", _patch_err)
 
@@ -203,7 +204,7 @@ async def _bg_enrich() -> None:
         except Exception:
             pass
         try:
-            docs_raw = list(col("poly_markets").stream())
+            docs_raw = list(col("poly_markets").stream(timeout=30.0))
         except Exception as e:
             logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
             return
@@ -247,7 +248,7 @@ async def _bg_analyze() -> None:
         except Exception as e:
             logger.warning("analyze: probe fallo — %s: %s", type(e).__name__, e)
         try:
-            docs = list(col("enriched_markets").stream())
+            docs = list(col("enriched_markets").stream(timeout=30.0))
         except Exception as e:
             logger.error("analyze: error leyendo enriched_markets — %s: %s", type(e).__name__, e)
             return
