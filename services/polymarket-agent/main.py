@@ -182,8 +182,11 @@ async def _bg_enrich() -> None:
         from shared.firestore_client import col
 
         try:
-            from shared.firestore_client import async_col
-            docs_raw = [d async for d in async_col("poly_markets").stream()]
+            col("poly_markets").document("_conn_warmup").get()
+        except Exception:
+            pass
+        try:
+            docs_raw = list(col("poly_markets").stream())
         except Exception as e:
             logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
             return
@@ -217,8 +220,11 @@ async def _bg_analyze() -> None:
         from shared.groq_client import GROQ_CALL_DELAY
 
         try:
-            from shared.firestore_client import async_col
-            docs = [d async for d in async_col("enriched_markets").stream()]
+            col("enriched_markets").document("_conn_warmup").get()
+        except Exception:
+            pass
+        try:
+            docs = list(col("enriched_markets").stream())
         except Exception as e:
             logger.error("analyze: error leyendo enriched_markets — %s: %s", type(e).__name__, e)
             return
