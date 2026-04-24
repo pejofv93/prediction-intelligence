@@ -56,7 +56,7 @@ async def check_and_alert(analysis: dict) -> bool:
 
     # Verificar deduplicacion
     try:
-        existing = col("alerts_sent").where("alert_key", "==", alert_key).limit(1).stream()
+        existing = col("alerts_sent").where("alert_key", "==", alert_key).limit(1).stream(timeout=10.0)
         if any(True for _ in existing):
             logger.debug("check_and_alert(%s): alerta duplicada omitida", market_id)
             return False
@@ -82,19 +82,6 @@ async def check_and_alert(analysis: dict) -> bool:
 
     analysis_safe = _to_json_safe(analysis)
 
-    # Guardar dedup record ANTES del POST para evitar envíos duplicados ante reintento
-    try:
-        col("alerts_sent").add({
-            "alert_key": alert_key,
-            "sent_at": datetime.now(timezone.utc),
-            "type": "polymarket",
-        })
-    except Exception:
-        logger.error(
-            "check_and_alert(%s): error guardando dedup en alerts_sent — continuando con el POST",
-            market_id, exc_info=True,
-        )
-
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -111,6 +98,19 @@ async def check_and_alert(analysis: dict) -> bool:
     except Exception:
         logger.error("check_and_alert(%s): error enviando alerta", market_id, exc_info=True)
         return False
+
+    # Guardar dedup record DESPUÉS del POST exitoso
+    try:
+        col("alerts_sent").add({
+            "alert_key": alert_key,
+            "sent_at": datetime.now(timezone.utc),
+            "type": "polymarket",
+        })
+    except Exception:
+        logger.error(
+            "check_and_alert(%s): error guardando dedup en alerts_sent",
+            market_id, exc_info=True,
+        )
 
     # Marcar como alertado en poly_predictions
     try:
