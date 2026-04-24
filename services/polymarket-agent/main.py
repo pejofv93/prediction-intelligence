@@ -204,7 +204,7 @@ async def _bg_enrich() -> None:
         except Exception:
             pass
         try:
-            docs_raw = list(col("poly_markets").stream(timeout=30.0))
+            docs_raw = list(col("poly_markets").limit(100).stream(timeout=60.0))
         except Exception as e:
             logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
             return
@@ -248,7 +248,7 @@ async def _bg_analyze() -> None:
         except Exception as e:
             logger.warning("analyze: probe fallo — %s: %s", type(e).__name__, e)
         try:
-            docs = list(col("enriched_markets").stream(timeout=30.0))
+            docs = list(col("enriched_markets").limit(100).stream(timeout=60.0))
         except Exception as e:
             logger.error("analyze: error leyendo enriched_markets — %s: %s", type(e).__name__, e)
             return
