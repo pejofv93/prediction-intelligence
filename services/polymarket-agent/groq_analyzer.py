@@ -27,6 +27,104 @@ def categorize_market(question: str) -> str:
     return "other"
 
 
+def _get_current_crypto_price(question: str) -> float | None:
+    """Devuelve precio actual aproximado del activo crypto mencionado en la pregunta."""
+    q = question.lower()
+    if any(kw in q for kw in ["btc", "bitcoin"]):
+        return 94000.0
+    if any(kw in q for kw in ["eth", "ethereum"]):
+        return 3200.0
+    if any(kw in q for kw in ["sol", "solana"]):
+        return 140.0
+    if any(kw in q for kw in ["bnb"]):
+        return 600.0
+    if any(kw in q for kw in ["xrp", "ripple"]):
+        return 2.2
+    if any(kw in q for kw in ["ada", "cardano"]):
+        return 0.7
+    return None
+
+
+def _extract_target_price(question: str) -> float | None:
+    """Extrae precio objetivo de preguntas tipo 'BTC to $250,000?' → 250000.0"""
+    import re
+    patterns = [
+        r'\$([\d,]+)[kK]',          # $250k
+        r'\$([\d,]+(?:\.\d+)?)',      # $250,000 or $250000
+        r'([\d,]+)[kK]\s*(?:usd|USD)',  # 250k USD
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, question, re.IGNORECASE)
+        if match:
+            raw = match.group(1).replace(',', '')
+            try:
+                val = float(raw)
+                if '[kK]' in pattern or 'k' in match.group(0).lower():
+                    val *= 1000
+                if 50 < val < 1e8:
+                    return val
+            except Exception:
+                continue
+    return None
+
+
+def _validate_crypto_price_prediction(
+    question: str,
+    real_prob: float,
+    market_price_yes: float,
+    days_to_close: int,
+    reasoning: str,
+) -> tuple[float, float, str]:
+    """
+    Aplica caps de probabilidad para predicciones de precio crypto históricamente improbables.
+    Caps:
+      variación > 200% en cualquier plazo  → prob máxima 0.15
+      variación > 100% en < 12 meses      → prob máxima 0.25
+      variación > 50%  en < 3 meses       → prob máxima 0.35
+    Retorna (real_prob_ajustada, edge_ajustado, reasoning_actualizado).
+    """
+    current_price = _get_current_crypto_price(question)
+    if current_price is None:
+        return real_prob, round(real_prob - market_price_yes, 4), reasoning
+
+    target_price = _extract_target_price(question)
+    if target_price is None:
+        return real_prob, round(real_prob - market_price_yes, 4), reasoning
+
+    variation = (target_price - current_price) / current_price
+    abs_var = abs(variation)
+
+    max_prob = 1.0
+    cap_note = ""
+
+    if abs_var > 2.0:
+        max_prob = 0.15
+        cap_note = f"variación requerida {variation:+.0%} > 200% en cualquier plazo"
+    elif abs_var > 1.0 and days_to_close < 365:
+        max_prob = 0.25
+        cap_note = f"variación requerida {variation:+.0%} en {days_to_close}d (< 12 meses)"
+    elif abs_var > 0.5 and days_to_close < 90:
+        max_prob = 0.35
+        cap_note = f"variación requerida {variation:+.0%} en {days_to_close}d (< 3 meses)"
+
+    if max_prob < 1.0 and real_prob > max_prob:
+        old_prob = real_prob
+        real_prob = max_prob
+        note = (
+            f"⚠️ Ajuste por magnitud aplicado: {cap_note}. "
+            f"Prob. máxima = {max_prob:.0%} (LLM estimó {old_prob:.0%}). "
+            f"Precio actual ~${current_price:,.0f} → objetivo ${target_price:,.0f}"
+        )
+        reasoning = f"{reasoning}\n{note}" if reasoning else note
+        logger.info(
+            "validate_crypto(%s): prob %.2f→%.2f cap=%.2f var=%+.0f%%",
+            question[:50], old_prob, real_prob, max_prob, variation * 100,
+        )
+
+    edge = round(real_prob - market_price_yes, 4)
+    return real_prob, edge, reasoning
+
+
 def _build_category_context(question: str, category: str) -> str:
     """
     Construye contexto adicional para el prompt según categoría.
@@ -295,6 +393,19 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     recommendation = result.get("recommendation", "PASS")
     key_factors = result.get("key_factors", [])
     reasoning = result.get("reasoning", "")
+
+    # Validador de precio crypto — caps para predicciones históricamente improbables
+    if category == "crypto" and _extract_target_price(question) is not None:
+        real_prob, edge, reasoning = _validate_crypto_price_prediction(
+            question, real_prob, price_yes, days_to_close, reasoning
+        )
+        # Recalcular recommendation tras ajuste
+        if edge >= POLY_MIN_EDGE:
+            recommendation = "BUY_YES"
+        elif edge <= -POLY_MIN_EDGE:
+            recommendation = "BUY_NO"
+        else:
+            recommendation = "PASS"
 
     # Aplicar ajuste Fear & Greed si es crypto
     if fear_greed and category == "crypto":

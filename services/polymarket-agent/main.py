@@ -160,7 +160,7 @@ async def _bg_scan() -> None:
         from scanner import fetch_active_markets
         from price_tracker import save_price_snapshot
 
-        markets = await fetch_active_markets(limit=50, min_volume=1000)
+        markets = await fetch_active_markets(limit=200, min_volume=500)
         if not markets:
             logger.warning("scan: ningun mercado obtenido")
             return
@@ -204,7 +204,7 @@ async def _bg_enrich() -> None:
         except Exception:
             pass
         try:
-            docs_raw = list(col("poly_markets").limit(100).stream(timeout=60.0))
+            docs_raw = list(col("poly_markets").limit(300).stream(timeout=60.0))
         except Exception as e:
             logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
             return
@@ -248,24 +248,41 @@ async def _bg_analyze() -> None:
         except Exception as e:
             logger.warning("analyze: probe fallo — %s: %s", type(e).__name__, e)
         try:
-            docs = list(col("enriched_markets").limit(100).stream(timeout=60.0))
+            raw_docs = list(col("enriched_markets").limit(300).stream(timeout=60.0))
         except Exception as e:
             logger.error("analyze: error leyendo enriched_markets — %s: %s", type(e).__name__, e)
             return
 
-        if not docs:
+        if not raw_docs:
             logger.warning("analyze: enriched_markets vacía — ejecuta /run-enrich primero")
             return
 
-        logger.info("analyze: mercados a analizar: %d", len(docs))
+        # Balanceo por categoría: top 5 por volumen de cada categoría activa
+        from collections import Counter
+        from groq_analyzer import categorize_market
+
+        _markets_by_cat: dict[str, list[dict]] = {}
+        for _raw in raw_docs:
+            _m = _raw.to_dict()
+            _cat = categorize_market(_m.get("question", ""))
+            _markets_by_cat.setdefault(_cat, []).append(_m)
+
+        docs_balanced: list[dict] = []
+        for _cat_markets in _markets_by_cat.values():
+            _top = sorted(_cat_markets, key=lambda x: float(x.get("volume_24h", 0)), reverse=True)[:5]
+            docs_balanced.extend(_top)
+        docs_balanced.sort(key=lambda x: float(x.get("volume_24h", 0)), reverse=True)
+
+        cat_counter = Counter(categorize_market(m.get("question", "")) for m in docs_balanced)
+        logger.info("analyze: categorías a analizar: %s", dict(cat_counter))
+        logger.info("analyze: mercados a analizar: %d", len(docs_balanced))
+
         predictions_generated = 0
         alerts_sent = 0
-
         skipped_volume = 0
         skipped_groq = 0
 
-        for i, doc in enumerate(docs):
-            enriched = doc.to_dict()
+        for i, enriched in enumerate(docs_balanced):
             if i > 0:
                 await asyncio.sleep(GROQ_CALL_DELAY)
 
