@@ -204,7 +204,7 @@ async def _bg_enrich() -> None:
         except Exception:
             pass
         try:
-            docs_raw = list(col("poly_markets").limit(300).stream(timeout=60.0))
+            docs_raw = list(col("poly_markets").limit(200).stream(timeout=120.0))
         except Exception as e:
             logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
             return
@@ -242,17 +242,41 @@ async def _bg_analyze() -> None:
             logger.info("analyze: warmup Firestore OK")
         except Exception as e:
             logger.warning("analyze: warmup fallo — %s: %s", type(e).__name__, e)
+        # Freshness guard: aborta si el último enrich fue hace más de 30 min.
+        # Evita analizar datos del ciclo anterior cuando el scheduler dispara analyze
+        # antes de que el enrich del ciclo actual haya terminado.
         try:
-            _probe = col("enriched_markets").limit(1).get()
-            logger.info("analyze: probe enriched_markets → %d doc(s)", len(_probe))
+            _latest_docs = (
+                col("enriched_markets")
+                .order_by("enriched_at", direction="DESCENDING")
+                .limit(1)
+                .get()
+            )
+            if not _latest_docs:
+                logger.warning("analyze: enriched_markets vacía — ejecuta /run-enrich primero")
+                return
+            logger.info("analyze: probe enriched_markets → %d doc(s)", len(_latest_docs))
+            _enriched_at = _latest_docs[0].to_dict().get("enriched_at")
+            if _enriched_at:
+                if hasattr(_enriched_at, "tzinfo") and _enriched_at.tzinfo is None:
+                    _enriched_at = _enriched_at.replace(tzinfo=timezone.utc)
+                _age_min = (datetime.now(timezone.utc) - _enriched_at).total_seconds() / 60
+                if _age_min > 30:
+                    logger.warning(
+                        "analyze: enriched_markets desactualizado (%.0f min) — "
+                        "abortando, espera a que /run-enrich complete",
+                        _age_min,
+                    )
+                    return
+                logger.info("analyze: enriched_markets fresco (%.0f min) — OK", _age_min)
         except Exception as e:
-            logger.warning("analyze: probe fallo — %s: %s", type(e).__name__, e)
+            logger.warning("analyze: freshness check fallo — %s: %s", type(e).__name__, e)
         try:
             raw_docs = list(
                 col("enriched_markets")
                 .order_by("enriched_at", direction="DESCENDING")
                 .limit(100)
-                .stream(timeout=60.0)
+                .stream(timeout=120.0)
             )
         except Exception as e:
             logger.error("analyze: error leyendo enriched_markets — %s: %s", type(e).__name__, e)

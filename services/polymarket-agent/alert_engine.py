@@ -1,6 +1,8 @@
 """
 Motor de alertas Polymarket → telegram-bot.
-Envia alerta si edge > POLY_MIN_EDGE + confianza > POLY_MIN_CONFIDENCE.
+Envia alerta si abs(edge) > POLY_MIN_EDGE + confianza > POLY_MIN_CONFIDENCE.
+edge positivo → BUY_YES (mercado subvalorado).
+edge negativo → BUY_NO (mercado sobrevalorado).
 volume_spike y smart_money son señales extra (no requisito).
 """
 import logging
@@ -13,8 +15,9 @@ logger = logging.getLogger(__name__)
 async def check_and_alert(analysis: dict) -> bool:
     """
     Envia alerta Telegram si:
-      edge > POLY_MIN_EDGE (0.08)
+      abs(edge) > POLY_MIN_EDGE (0.08)
       confidence > POLY_MIN_CONFIDENCE (0.65)
+    edge positivo → BUY_YES; edge negativo → BUY_NO.
     volume_spike y smart_money son señales bonus incluidas en el mensaje, no requisito.
     Verifica en alerts_sent que no se haya enviado ya.
     NO usa on_snapshot — llama directamente POST {TELEGRAM_BOT_URL}/send-alert.
@@ -33,10 +36,10 @@ async def check_and_alert(analysis: dict) -> bool:
     volume_spike = bool(analysis.get("volume_spike", False))
     smart_money = bool(analysis.get("smart_money_detected", False))
 
-    if edge <= POLY_MIN_EDGE:
+    if abs(edge) <= POLY_MIN_EDGE:
         logger.debug(
-            "check_and_alert(%s): edge=%.3f <= %.3f — omitida",
-            analysis.get("market_id"), edge, POLY_MIN_EDGE,
+            "check_and_alert(%s): abs(edge)=%.3f <= %.3f — omitida",
+            analysis.get("market_id"), abs(edge), POLY_MIN_EDGE,
         )
         return False
     if confidence <= POLY_MIN_CONFIDENCE:
