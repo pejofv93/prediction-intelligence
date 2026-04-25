@@ -86,16 +86,18 @@ async def run_scan() -> JSONResponse:
 
 @app.post("/run-enrich", dependencies=[Depends(verify_token)])
 async def run_enrich() -> JSONResponse:
-    """202 inmediato → background: enrichers + realtime smart_money_analysis → enriched_markets."""
-    asyncio.create_task(_bg_enrich())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "enrich"})
+    """Síncrono: ejecuta el enrich completo y devuelve el resultado.
+    Cloud Run mantiene la instancia viva durante todo el proceso (timeout=1200s)."""
+    result = await _bg_enrich()
+    return JSONResponse(status_code=200, content=result)
 
 
 @app.post("/run-analyze", dependencies=[Depends(verify_token)])
 async def run_analyze() -> JSONResponse:
-    """202 inmediato → background: groq_analyzer + alert_engine."""
-    asyncio.create_task(_bg_analyze())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "analyze"})
+    """Síncrono: ejecuta el analyze completo y devuelve el resultado.
+    Cloud Run mantiene la instancia viva durante todo el proceso (timeout=1200s)."""
+    result = await _bg_analyze()
+    return JSONResponse(status_code=200, content=result)
 
 
 @app.get("/test-gamma-price", dependencies=[Depends(verify_token)])
@@ -184,7 +186,7 @@ async def _bg_scan() -> None:
         logger.error("scan: error no controlado — %s", e, exc_info=True)
 
 
-async def _bg_enrich() -> None:
+async def _bg_enrich() -> dict:
     """
     Pipeline de enriquecimiento:
     1. Lee mercados activos de poly_markets
@@ -207,19 +209,21 @@ async def _bg_enrich() -> None:
             docs_raw = list(col("poly_markets").limit(200).stream(timeout=120.0))
         except Exception as e:
             logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
-            return
+            return {"status": "error", "error": f"{type(e).__name__}: {e}", "enriched": 0}
         markets = [d.to_dict() for d in docs_raw]
 
         count = await run_enrichment(markets)
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info("enrich: %d mercados enriquecidos en %.1fs", count, elapsed)
+        return {"status": "ok", "enriched": count, "elapsed_s": round(elapsed, 1)}
 
     except Exception as e:
         logger.error("enrich: error no controlado — %s", e, exc_info=True)
+        return {"status": "error", "error": str(e), "enriched": 0}
 
 
-async def _bg_analyze() -> None:
+async def _bg_analyze() -> dict:
     """
     Pipeline de analisis:
     1. Lee enriched_markets de Firestore
@@ -254,7 +258,7 @@ async def _bg_analyze() -> None:
             )
             if not _latest_docs:
                 logger.warning("analyze: enriched_markets vacía — ejecuta /run-enrich primero")
-                return
+                return {"status": "skipped", "reason": "empty", "analyzed": 0, "alerts": 0}
             logger.info("analyze: probe enriched_markets → %d doc(s)", len(_latest_docs))
             _enriched_at = _latest_docs[0].to_dict().get("enriched_at")
             if _enriched_at:
@@ -267,7 +271,7 @@ async def _bg_analyze() -> None:
                         "abortando, espera a que /run-enrich complete",
                         _age_min,
                     )
-                    return
+                    return {"status": "skipped", "reason": "stale_data", "age_min": round(_age_min), "analyzed": 0, "alerts": 0}
                 logger.info("analyze: enriched_markets fresco (%.0f min) — OK", _age_min)
         except Exception as e:
             logger.warning("analyze: freshness check fallo — %s: %s", type(e).__name__, e)
@@ -280,11 +284,11 @@ async def _bg_analyze() -> None:
             )
         except Exception as e:
             logger.error("analyze: error leyendo enriched_markets — %s: %s", type(e).__name__, e)
-            return
+            return {"status": "error", "error": f"{type(e).__name__}: {e}", "analyzed": 0, "alerts": 0}
 
         if not raw_docs:
             logger.warning("analyze: enriched_markets vacía — ejecuta /run-enrich primero")
-            return
+            return {"status": "skipped", "reason": "empty", "analyzed": 0, "alerts": 0}
 
         # Balanceo por categoría: top 5 por volumen de cada categoría activa
         from collections import Counter
@@ -408,8 +412,19 @@ async def _bg_analyze() -> None:
         except Exception:
             logger.error("analyze: error en run_maintenance", exc_info=True)
 
+        return {
+            "status": "ok",
+            "total": len(docs_balanced),
+            "analyzed": predictions_generated,
+            "alerts": alerts_sent,
+            "skip_vol": skipped_volume,
+            "skip_err": skipped_groq,
+            "elapsed_s": round(elapsed, 1),
+        }
+
     except Exception as e:
         logger.error("analyze: error no controlado — %s", e, exc_info=True)
+        return {"status": "error", "error": str(e), "analyzed": 0, "alerts": 0}
 
 
 async def _bg_poly_backtest() -> None:
