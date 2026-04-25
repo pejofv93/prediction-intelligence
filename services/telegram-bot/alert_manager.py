@@ -252,7 +252,7 @@ def _format_poly_alert(analysis: dict) -> str:
         f"❓ {question}\n\n"
         f"📈 Precio mercado YES: *{market_price_yes:.0%}*\n"
         f"🎯 Probabilidad estimada: *{real_prob:.0%}*\n"
-        f"💎 Edge: *+{edge:.0%}* | Confianza: *{confidence:.0%}*\n\n"
+        f"💎 Edge: *{edge:+.0%}* | Confianza: *{confidence:.0%}*\n\n"
         f"Recomendación: *{recommendation}*"
         f"{smart_money_line}\n\n"
         f"💭 {reasoning}\n\n"

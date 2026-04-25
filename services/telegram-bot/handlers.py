@@ -153,7 +153,7 @@ async def handle_poly(update: dict) -> None:
 
         lines.append(
             f"*{i}. {question}*\n"
-            f"   💎 Edge: +{edge:.0%} | Conf: {conf:.0%} {vol_spike}\n"
+            f"   💎 Edge: {edge:+.0%} | Conf: {conf:.0%} {vol_spike}\n"
             f"   📈 YES: {price_yes:.0%} → Real: {real_prob:.0%} | {rec}"
         )
 
@@ -541,7 +541,7 @@ async def handle_btc(update: dict) -> None:
                 q = _esc(str(s.get("question", ""))[:60])
                 edge = float(s.get("edge", 0))
                 price = float(s.get("market_price_yes", 0))
-                text += f"• {q}\n  YES: {price:.0%} | Edge: +{edge:.0%}\n"
+                text += f"• {q}\n  YES: {price:.0%} | Edge: {edge:+.0%}\n"
         else:
             text += "_Sin señales crypto activas en Polymarket._"
 
