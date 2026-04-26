@@ -45,7 +45,7 @@ function ProbBar({ label, value, color }: { label: string; value: number; color:
 }
 
 function PolyCard({ p }: { p: PolyPrediction }) {
-  const edgeColor = p.edge > 0.20 ? '#00C853' : p.edge > 0.12 ? '#F7931A' : '#888'
+  const edgeColor = p.edge >= 0.20 ? '#00C853' : p.edge >= 0.08 ? '#F7931A' : p.edge <= -0.08 ? '#FF5252' : '#888'
   const dateStr = p.analyzed_at
     ? new Date(p.analyzed_at).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
     : '—'
@@ -86,7 +86,7 @@ function PolyCard({ p }: { p: PolyPrediction }) {
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
         {[
           { label: 'RECOMENDACIÓN', value: p.recommendation, color: '#F7931A' },
-          { label: 'EDGE', value: `+${(p.edge * 100).toFixed(1)}%`, color: edgeColor },
+          { label: 'EDGE', value: `${p.edge >= 0 ? '+' : ''}${(p.edge * 100).toFixed(1)}%`, color: edgeColor },
           { label: 'CONFIANZA', value: `${(p.confidence * 100).toFixed(0)}%`, color: '#ccc' },
         ].map(({ label, value, color }) => (
           <div key={label} style={{ background: '#1e1e1e', border: '1px solid #2e2e2e', borderRadius: 6, padding: '6px 12px', minWidth: 80 }}>
@@ -147,32 +147,42 @@ export default function PolymarketCards() {
   if (error) return <p style={{ color: '#F7931A', padding: 24 }}>Error: {error}</p>
   if (!data?.length) return <p style={{ color: '#888', padding: 24 }}>Sin mercados con edge detectado.</p>
 
-  const highEdge = data.filter(p => p.edge >= 0.20)
-  const midEdge = data.filter(p => p.edge >= 0.12 && p.edge < 0.20)
+  // Umbral mínimo = POLY_MIN_EDGE (0.08). Separar BUY_YES/WATCH de BUY_NO.
+  const buyYes = data.filter(p => p.edge >= 0.08)
+  const buyNo  = data.filter(p => p.edge <= -0.08)
+  const total  = buyYes.length + buyNo.length
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <h2 style={{ color: '#F7931A', margin: 0 }}>🔮 Polymarket</h2>
-        <span style={{ color: '#888', fontSize: 13 }}>{data.length} mercados con edge</span>
+        <span style={{ color: '#888', fontSize: 13 }}>
+          {total > 0 ? `${total} señales (últimas 48h)` : 'Sin señales recientes'}
+        </span>
       </div>
 
-      {highEdge.length > 0 && (
+      {buyYes.length > 0 && (
         <>
           <div style={{ color: '#666', fontSize: 11, letterSpacing: 1, marginBottom: 10 }}>
-            ALTO EDGE ≥20% ({highEdge.length})
+            BUY YES — edge ≥ 8% ({buyYes.length})
           </div>
-          {highEdge.map(p => <PolyCard key={p.market_id} p={p} />)}
+          {buyYes.map(p => <PolyCard key={p.market_id} p={p} />)}
         </>
       )}
 
-      {midEdge.length > 0 && (
+      {buyNo.length > 0 && (
         <>
           <div style={{ color: '#666', fontSize: 11, letterSpacing: 1, margin: '20px 0 10px' }}>
-            EDGE 12–20% ({midEdge.length})
+            BUY NO — edge ≤ −8% ({buyNo.length})
           </div>
-          {midEdge.map(p => <PolyCard key={p.market_id} p={p} />)}
+          {buyNo.map(p => <PolyCard key={p.market_id} p={p} />)}
         </>
+      )}
+
+      {total === 0 && (
+        <p style={{ color: '#888', padding: '16px 0' }}>
+          Sin señales con edge ≥ 8% en las últimas 48h.
+        </p>
       )}
     </div>
   )
