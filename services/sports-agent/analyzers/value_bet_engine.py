@@ -460,7 +460,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
                     "regions": "eu",
-                    "markets": "h2h",
+                    "markets": "h2h,btts,spreads,totals,alternate_totals,double_chance,draw_no_bet,team_totals",
                     "oddsFormat": "decimal",
                 })
 

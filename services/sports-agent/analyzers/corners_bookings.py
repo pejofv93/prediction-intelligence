@@ -27,7 +27,7 @@ import httpx
 import numpy as np
 from scipy.stats import poisson as _poisson
 
-from shared.config import ODDSPAPI_KEY, SPORTS_MIN_EDGE, SPORTS_MIN_CONFIDENCE
+from shared.config import ODDSPAPI_KEY, SPORTS_MIN_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_ALERT_EDGE
 from shared.api_quota_manager import quota
 
 logger = logging.getLogger(__name__)
@@ -446,20 +446,62 @@ async def generate_corners_signals(
     return signals
 
 
-async def save_signals(signals: list[dict], match_id: str) -> None:
-    """Guarda señales en Firestore colección corners_signals."""
+async def save_signals(signals: list[dict], match_id: str, enriched_match: dict | None = None) -> None:
+    """
+    Guarda señales de corners/bookings en predictions (misma colección que el resto de señales).
+    Una señal por documento — mismo esquema que football_markets.py.
+    Envía alerta Telegram para señales con edge > SPORTS_ALERT_EDGE.
+    """
     if not signals:
         return
     from shared.firestore_client import col
-    now = datetime.now(timezone.utc).isoformat()
-    doc_id = f"{match_id}_corners"
-    try:
-        col("corners_signals").document(doc_id).set({
-            "match_id": match_id,
-            "signals": signals,
-            "generated_at": now,
-            "count": len(signals),
-        })
-        logger.info("corners_bookings: %d señales guardadas para %s", len(signals), match_id)
-    except Exception:
-        logger.error("corners_bookings: error guardando señales", exc_info=True)
+
+    enriched_match = enriched_match or {}
+    league = enriched_match.get("league", "")
+    now = datetime.now(timezone.utc)
+    saved = 0
+
+    for sig in signals:
+        market_key = sig.get("market", "corners")
+        selection  = sig.get("selection", "")
+        tag        = selection.replace(" ", "_")
+        doc_id     = f"{match_id}_{market_key}_{tag}"
+
+        pred = {
+            **sig,
+            "match_id":        doc_id,
+            "sport":           "football",
+            "league":          league,
+            "market_type":     market_key,
+            "calculated_prob": sig.get("poisson_prob") or sig.get("consensus_prob", 0),
+            "kelly_fraction":  0.0,
+            "factors": {
+                "poisson_prob":  sig.get("poisson_prob"),
+                "consensus_prob": sig.get("consensus_prob"),
+                "n_bookmakers":  sig.get("n_bookmakers", 0),
+            },
+            "signals":         {},
+            "data_source":     "corners_bookings_v1",
+            "odds_source":     "oddspapi_v4",
+            "weights_version": 0,
+            "created_at":      now,
+            "result":          None,
+            "correct":         None,
+            "error_type":      None,
+        }
+
+        try:
+            col("predictions").document(doc_id).set(pred)
+            saved += 1
+        except Exception:
+            logger.error("corners_bookings: error guardando %s", doc_id, exc_info=True)
+            continue
+
+        if float(sig.get("edge", 0)) > SPORTS_ALERT_EDGE:
+            try:
+                from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
+                await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+            except Exception:
+                logger.error("corners_bookings: error enviando alerta Telegram %s", doc_id, exc_info=True)
+
+    logger.info("corners_bookings: %d señales guardadas en predictions para %s", saved, match_id)

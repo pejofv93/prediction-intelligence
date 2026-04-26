@@ -656,7 +656,7 @@ async def _bg_analyze() -> None:
                     match_date = match_date_d,
                 )
                 if cb_sigs:
-                    await save_signals(cb_sigs, enriched.get("match_id", ""))
+                    await save_signals(cb_sigs, enriched.get("match_id", ""), enriched)
                 signals_generated += len(cb_sigs)
             except Exception:
                 logger.error("analyze: error corners_bookings %s", enriched.get("match_id"), exc_info=True)
