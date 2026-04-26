@@ -3,6 +3,7 @@ Analizador Groq para mercados Polymarket enriched.
 Recibe enriched_market → prob real + edge + reasoning.
 """
 import logging
+import re
 
 from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE
 from shared.groq_client import GROQ_CALL_DELAY
@@ -177,6 +178,41 @@ def _build_category_context(question: str, category: str) -> str:
             "El mercado suele sobreestimar resolución rápida de conflictos."
         )
     return ""
+
+
+def _validate_prob_in_reasoning(real_prob: float, reasoning: str) -> str:
+    """
+    Extract probability mentions from reasoning text and compare against real_prob.
+    If any mention diverges by >0.10, log a warning and prepend a disambiguation note
+    so the Telegram message unambiguously shows the authoritative JSON value.
+    """
+    if not reasoning:
+        return reasoning
+
+    candidates: list[float] = []
+    for m in re.finditer(r'\b(0\.\d{2,3})\b', reasoning):
+        val = float(m.group(1))
+        if 0.05 < val < 0.95:
+            candidates.append(val)
+    for m in re.finditer(r'\b(\d{1,2}(?:\.\d+)?)\s*%', reasoning):
+        val = float(m.group(1)) / 100
+        if 0.05 < val < 0.95:
+            candidates.append(val)
+
+    if not candidates:
+        return reasoning
+
+    max_delta = max(abs(c - real_prob) for c in candidates)
+    if max_delta > 0.10:
+        logger.warning(
+            "prob_consistency: real_prob=%.3f pero reasoning menciona %s — delta=%.3f, usando JSON",
+            real_prob,
+            [f"{c:.3f}" for c in candidates],
+            max_delta,
+        )
+        return f"[prob estructurada: {real_prob:.0%}] {reasoning}"
+
+    return reasoning
 
 
 SYSTEM_PROMPT = (
@@ -414,6 +450,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     recommendation = result.get("recommendation", "PASS")
     key_factors = result.get("key_factors", [])
     reasoning = result.get("reasoning", "")
+
+    # Garantizar coherencia: si el texto del reasoning menciona una prob distinta
+    # a real_prob en >0.10, prepender nota aclaratoria para el mensaje Telegram.
+    # real_prob del JSON estructurado es siempre el valor canónico.
+    reasoning = _validate_prob_in_reasoning(real_prob, reasoning)
 
     # Validador de precio crypto — caps para predicciones históricamente improbables
     if category == "crypto" and _extract_target_price(question) is not None:
