@@ -141,7 +141,7 @@ def _validate_crypto_price_prediction(
 def _build_category_context(question: str, category: str) -> str:
     """
     Construye contexto adicional para el prompt según categoría.
-    Solo añade instrucciones — no hace web_search real (eso requiere async Tavily).
+    Solo añade instrucciones contextuales — el news_sentiment ya viene del enricher (DuckDuckGo).
     """
     if category == "crypto":
         return (

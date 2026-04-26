@@ -1,8 +1,7 @@
 """
-Sentiment de noticias via Tavily.
-Presupuesto: max 30 busquedas/dia total (free tier = 1,000/mes).
-Solo se invoca para top 10 mercados por volumen del dia.
+Sentiment de noticias via DuckDuckGo (sin API key, sin límites de uso).
 """
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -16,50 +15,12 @@ SOURCE_WEIGHTS = {
     "default": 0.5,
 }
 
-
 _NO_DATA = {
     "sentiment_score": 0.0,
     "news_count": 0,
     "top_headlines": [],
     "sentiment_trend": "NO_DATA",
 }
-
-
-def _budget_ref():
-    from datetime import datetime, timezone
-    from shared.firestore_client import col
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return col("tavily_budget").document(today), today
-
-
-async def _check_budget() -> bool:
-    """True si hay presupuesto disponible."""
-    try:
-        from datetime import datetime, timezone
-        ref, today = _budget_ref()
-        doc = ref.get()
-        if doc.exists:
-            data = doc.to_dict()
-            return int(data.get("calls_today", 0)) < int(data.get("limit", 30))
-        return True
-    except Exception:
-        logger.error("_check_budget: error leyendo tavily_budget", exc_info=True)
-        return False
-
-
-async def _increment_budget() -> None:
-    """Incrementa el contador de llamadas del dia."""
-    try:
-        from datetime import datetime, timezone
-        from google.cloud.firestore import Increment
-        ref, today = _budget_ref()
-        doc = ref.get()
-        if doc.exists:
-            ref.update({"calls_today": Increment(1), "updated_at": datetime.now(timezone.utc)})
-        else:
-            ref.set({"date": today, "calls_today": 1, "limit": 30, "updated_at": datetime.now(timezone.utc)})
-    except Exception:
-        logger.error("_increment_budget: error actualizando tavily_budget", exc_info=True)
 
 
 def _get_source_weight(url: str) -> float:
@@ -70,7 +31,7 @@ def _get_source_weight(url: str) -> float:
 
 
 def _classify_sentiment(text: str) -> float:
-    """Heuristica simple: cuenta palabras positivas y negativas."""
+    """Heurística simple: cuenta palabras positivas y negativas."""
     positive = ["wins", "win", "gain", "rise", "rises", "up", "pass", "passes", "approve", "approved",
                 "victory", "success", "confirms", "confirmed", "positive", "growth", "advance"]
     negative = ["loses", "lose", "loss", "fall", "falls", "down", "fail", "fails", "reject", "rejected",
@@ -84,37 +45,29 @@ def _classify_sentiment(text: str) -> float:
     return round((pos - neg) / total, 3)
 
 
+def _fetch_ddg_news(query: str) -> list[dict]:
+    """Síncrono — se llama desde run_in_executor para no bloquear el event loop."""
+    from duckduckgo_search import DDGS
+    with DDGS() as ddgs:
+        return list(ddgs.news(query, max_results=5))
+
+
 async def fetch_news_sentiment(market_question: str) -> dict:
     """
-    PRESUPUESTO TAVILY: max 30 busquedas/dia total (free tier = 1,000/mes).
-    1. Comprobar Firestore tavily_budget {date, calls_today, limit: 30}
-       Si calls_today >= limit → devolver {"sentiment_score": 0.0, "news_count": 0,
-       "top_headlines": [], "sentiment_trend": "NO_DATA"} sin llamar Tavily
-    2. Solo se invoca para top 10 mercados por volumen del dia, no para todos
-    3. Tavily search: max_results=5 (no 10, para conservar presupuesto)
-    4. Incrementar calls_today en Firestore tras cada llamada exitosa
-    5. Ponderar resultados por SOURCE_WEIGHTS
+    Busca noticias con DuckDuckGo y calcula sentiment ponderado por fuente.
+    Sin API key, sin límite de llamadas.
     Devuelve:
-      sentiment_score: float (-1.0 a 1.0)   → 0.0 si NO_DATA
-      news_count: int                        → 0 si NO_DATA
-      top_headlines: list[str] (max 3)       → [] si NO_DATA
+      sentiment_score: float (-1.0 a 1.0)
+      news_count: int
+      top_headlines: list[str] (max 3)
       sentiment_trend: "IMPROVING" | "DETERIORATING" | "STABLE" | "NO_DATA"
     """
     try:
-        has_budget = await _check_budget()
-        if not has_budget:
-            logger.info("fetch_news_sentiment: presupuesto Tavily agotado hoy")
-            return dict(_NO_DATA)
+        loop = asyncio.get_event_loop()
+        articles = await loop.run_in_executor(None, _fetch_ddg_news, market_question)
 
-        from shared.groq_client import _get_tavily
-        tavily = _get_tavily()
-
-        results = tavily.search(query=market_question, max_results=5)
-        articles = results.get("results", [])
         if not articles:
             return dict(_NO_DATA)
-
-        await _increment_budget()
 
         weighted_score = 0.0
         total_weight = 0.0
@@ -123,10 +76,10 @@ async def fetch_news_sentiment(market_question: str) -> dict:
         for article in articles:
             url = article.get("url", "")
             title = article.get("title", "")
-            content = article.get("content", "")
+            body = article.get("body", "")
             weight = _get_source_weight(url)
 
-            text = f"{title} {content}"
+            text = f"{title} {body}"
             sentiment = _classify_sentiment(text)
             weighted_score += sentiment * weight
             total_weight += weight
@@ -142,6 +95,11 @@ async def fetch_news_sentiment(market_question: str) -> dict:
             trend = "DETERIORATING"
         else:
             trend = "STABLE"
+
+        logger.info(
+            "fetch_news_sentiment(%s...): %d artículos, score=%.3f trend=%s",
+            market_question[:40], len(articles), sentiment_score, trend,
+        )
 
         return {
             "sentiment_score": sentiment_score,
