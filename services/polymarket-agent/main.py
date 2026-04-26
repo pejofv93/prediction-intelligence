@@ -134,6 +134,40 @@ async def recent_predictions(limit: int = 20) -> JSONResponse:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/sample-enriched", dependencies=[Depends(verify_token)])
+async def sample_enriched(limit: int = 5) -> JSONResponse:
+    """Diagnóstico: devuelve N enriched_markets recientes con su news_sentiment (headlines, score, trend)."""
+    from shared.firestore_client import col
+    try:
+        docs = list(
+            col("enriched_markets")
+            .order_by("enriched_at", direction="DESCENDING")
+            .limit(min(limit, 20))
+            .stream(timeout=15.0)
+        )
+        result = []
+        for d in docs:
+            f = d.to_dict()
+            ns = f.get("news_sentiment", {})
+            at = f.get("enriched_at")
+            result.append({
+                "market_id": d.id,
+                "question": (f.get("question") or "")[:80],
+                "volume_24h": f.get("volume_24h"),
+                "news_sentiment": {
+                    "score": ns.get("score"),
+                    "count": ns.get("count"),
+                    "trend": ns.get("trend"),
+                    "headlines": ns.get("headlines", []),
+                },
+                "enriched_at": at.isoformat() if hasattr(at, "isoformat") else str(at),
+            })
+        return JSONResponse(content={"count": len(result), "markets": result})
+    except Exception as e:
+        logger.error("sample-enriched: error — %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/test-gamma-price", dependencies=[Depends(verify_token)])
 async def test_gamma_price() -> JSONResponse:
     """Diagnóstico: fetcha 3 mercados de Gamma API y muestra outcomePrices raw + price_yes parseado."""
