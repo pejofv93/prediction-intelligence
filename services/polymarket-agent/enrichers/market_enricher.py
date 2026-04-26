@@ -117,9 +117,11 @@ async def enrich_market(market: dict, all_markets: list[dict] | None = None) -> 
 async def run_enrichment(markets: list[dict] | None = None) -> int:
     """
     Procesa todos los mercados activos de Firestore poly_markets.
-    Si se pasan markets como parametro, los usa directamente.
-    Devuelve el numero de mercados enriquecidos.
+    Concurrencia: 10 mercados en paralelo con asyncio.gather + semáforo.
+    Con DDG (max 5 concurrent, 6s timeout/call): ~120s para 200 mercados.
     """
+    import asyncio
+
     try:
         if markets is None:
             docs = list(col("poly_markets").stream())
@@ -129,17 +131,22 @@ async def run_enrichment(markets: list[dict] | None = None) -> int:
             logger.warning("run_enrichment: sin mercados activos")
             return 0
 
-        count = 0
-        for market in markets:
-            try:
-                await enrich_market(market, all_markets=markets)
-                count += 1
-            except Exception:
-                logger.error(
-                    "run_enrichment: error enriqueciendo %s",
-                    market.get("market_id"), exc_info=True,
-                )
+        sem = asyncio.Semaphore(10)
 
+        async def _enrich(market: dict) -> bool:
+            async with sem:
+                try:
+                    await enrich_market(market, all_markets=markets)
+                    return True
+                except Exception:
+                    logger.error(
+                        "run_enrichment: error enriqueciendo %s",
+                        market.get("market_id"), exc_info=True,
+                    )
+                    return False
+
+        results = await asyncio.gather(*[_enrich(m) for m in markets])
+        count = sum(1 for r in results if r)
         logger.info("run_enrichment: %d/%d mercados enriquecidos", count, len(markets))
         return count
 

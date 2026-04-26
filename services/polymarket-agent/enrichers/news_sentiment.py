@@ -1,5 +1,6 @@
 """
 Sentiment de noticias via DuckDuckGo (sin API key, sin límites de uso).
+Concurrencia controlada: semáforo de 5 llamadas simultáneas + timeout 6s por llamada.
 """
 import asyncio
 import logging
@@ -21,6 +22,16 @@ _NO_DATA = {
     "top_headlines": [],
     "sentiment_trend": "NO_DATA",
 }
+
+# Límite de llamadas DDG concurrentes para no saturar la IP ni el thread pool
+_DDG_SEM: asyncio.Semaphore | None = None
+
+
+def _get_ddg_sem() -> asyncio.Semaphore:
+    global _DDG_SEM
+    if _DDG_SEM is None:
+        _DDG_SEM = asyncio.Semaphore(5)
+    return _DDG_SEM
 
 
 def _get_source_weight(url: str) -> float:
@@ -55,59 +66,70 @@ def _fetch_ddg_news(query: str) -> list[dict]:
 async def fetch_news_sentiment(market_question: str) -> dict:
     """
     Busca noticias con DuckDuckGo y calcula sentiment ponderado por fuente.
-    Sin API key, sin límite de llamadas.
+    Máx 5 llamadas DDG concurrentes, timeout de 6s por llamada.
     Devuelve:
       sentiment_score: float (-1.0 a 1.0)
       news_count: int
       top_headlines: list[str] (max 3)
       sentiment_trend: "IMPROVING" | "DETERIORATING" | "STABLE" | "NO_DATA"
     """
-    try:
-        loop = asyncio.get_event_loop()
-        articles = await loop.run_in_executor(None, _fetch_ddg_news, market_question)
+    async with _get_ddg_sem():
+        try:
+            loop = asyncio.get_event_loop()
+            try:
+                articles = await asyncio.wait_for(
+                    loop.run_in_executor(None, _fetch_ddg_news, market_question),
+                    timeout=6.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "fetch_news_sentiment(%s...): DDG timeout (>6s) — NO_DATA",
+                    market_question[:40],
+                )
+                return dict(_NO_DATA)
 
-        if not articles:
+            if not articles:
+                return dict(_NO_DATA)
+
+            weighted_score = 0.0
+            total_weight = 0.0
+            headlines: list[str] = []
+
+            for article in articles:
+                url = article.get("url", "")
+                title = article.get("title", "")
+                body = article.get("body", "")
+                weight = _get_source_weight(url)
+
+                text = f"{title} {body}"
+                sentiment = _classify_sentiment(text)
+                weighted_score += sentiment * weight
+                total_weight += weight
+
+                if title and len(headlines) < 3:
+                    headlines.append(title)
+
+            sentiment_score = round(weighted_score / total_weight, 3) if total_weight > 0 else 0.0
+
+            if sentiment_score > 0.2:
+                trend = "IMPROVING"
+            elif sentiment_score < -0.2:
+                trend = "DETERIORATING"
+            else:
+                trend = "STABLE"
+
+            logger.info(
+                "fetch_news_sentiment(%s...): %d artículos, score=%.3f trend=%s",
+                market_question[:40], len(articles), sentiment_score, trend,
+            )
+
+            return {
+                "sentiment_score": sentiment_score,
+                "news_count": len(articles),
+                "top_headlines": headlines,
+                "sentiment_trend": trend,
+            }
+
+        except Exception:
+            logger.error("fetch_news_sentiment(%s...): error", market_question[:50], exc_info=True)
             return dict(_NO_DATA)
-
-        weighted_score = 0.0
-        total_weight = 0.0
-        headlines: list[str] = []
-
-        for article in articles:
-            url = article.get("url", "")
-            title = article.get("title", "")
-            body = article.get("body", "")
-            weight = _get_source_weight(url)
-
-            text = f"{title} {body}"
-            sentiment = _classify_sentiment(text)
-            weighted_score += sentiment * weight
-            total_weight += weight
-
-            if title and len(headlines) < 3:
-                headlines.append(title)
-
-        sentiment_score = round(weighted_score / total_weight, 3) if total_weight > 0 else 0.0
-
-        if sentiment_score > 0.2:
-            trend = "IMPROVING"
-        elif sentiment_score < -0.2:
-            trend = "DETERIORATING"
-        else:
-            trend = "STABLE"
-
-        logger.info(
-            "fetch_news_sentiment(%s...): %d artículos, score=%.3f trend=%s",
-            market_question[:40], len(articles), sentiment_score, trend,
-        )
-
-        return {
-            "sentiment_score": sentiment_score,
-            "news_count": len(articles),
-            "top_headlines": headlines,
-            "sentiment_trend": trend,
-        }
-
-    except Exception:
-        logger.error("fetch_news_sentiment(%s...): error", market_question[:50], exc_info=True)
-        return dict(_NO_DATA)
