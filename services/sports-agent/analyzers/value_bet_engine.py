@@ -39,13 +39,15 @@ _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
 # The Odds API — sport key map (league field in Firestore → The Odds API sport key)
 _ODDS_SPORT_MAP: dict[str, str] = {
-    # Football — football-data.org competition codes
-    "PL":  "soccer_england_premier_league",   # re-añadida para temporada 25/26
+    # ── Fútbol masculino Europa (football-data.org) ────────────────────────────
+    "PL":  "soccer_england_premier_league",
     "ELC": "soccer_england_championship",
     "PD":  "soccer_spain_la_liga",
+    "SD":  "soccer_spain_segunda_division",
     "BL1": "soccer_germany_bundesliga",
     "BL2": "soccer_germany_bundesliga2",
     "SA":  "soccer_italy_serie_a",
+    "SB":  "soccer_italy_serie_b",
     "FL1": "soccer_france_ligue_one",
     "FL2": "soccer_france_ligue_two",
     "CL":  "soccer_uefa_champs_league",
@@ -53,13 +55,56 @@ _ODDS_SPORT_MAP: dict[str, str] = {
     "ECL": "soccer_uefa_europa_conference_league",
     "PPL": "soccer_portugal_primeira_liga",
     "DED": "soccer_netherlands_eredivisie",
-    "SD":  "soccer_spain_segunda_division",
-    "SB":  "soccer_italy_serie_b",
     "TU1": "soccer_turkey_super_league",
-    # Basketball — league strings from api_sports_client.py _SPORT_TO_LEAGUE
+
+    # ── Fútbol masculino internacional (selecciones) ───────────────────────────
+    # Competiciones de clubes por confederación
+    "CLI":  "soccer_conmebol_libertadores",
+    "CSUD": "soccer_conmebol_sudamericana",
+    # Competiciones de selecciones — Europa
+    "NL":  "soccer_uefa_nations_league",
+    "WCQ": "soccer_fifa_world_cup_qualification_europe",
+    "EC":  "soccer_uefa_european_championship",          # Euro 2024/2028 (solo activo durante torneo)
+    # Competiciones de selecciones — Sudamérica (AllSportsAPI colector activo)
+    "CAM":  "soccer_conmebol_copa_america",              # solo activo durante torneo
+    # Competiciones de selecciones — otras confederaciones (sin colector aún)
+    "WCQ_CONMEBOL":  "soccer_conmebol_world_cup_qualification",
+    "WCQ_CONCACAF":  "soccer_concacaf_world_cup_qualification",  # ⚠️ verify key
+    "WCQ_AFC":       "soccer_afc_asian_cup_qualification",       # ⚠️ verify key
+    "WCQ_CAF":       "soccer_africa_cup_of_nations_qualification", # ⚠️ verify key
+    "INTL":          "soccer_international",                     # friendlies internacionales
+    "WC":            "soccer_fifa_world_cup",                    # solo activo durante torneo
+
+    # ── Fútbol masculino Sudamérica / ligas domésticas ────────────────────────
+    "BSA": "soccer_brazil_campeonato",
+    "ARG": "soccer_argentina_primera_division",
+
+    # ── Fútbol femenino (sin colector activo — listo para cuando se implemente) ─
+    # Torneos internacionales
+    "W_WWC":     "soccer_fifa_womens_world_cup",
+    "W_WEURO":   "soccer_uefa_womens_euro",                      # ⚠️ verify key
+    "W_WNATIONS":"soccer_uefa_womens_nations_league",            # ⚠️ verify key
+    "W_WCL":     "soccer_uefa_womens_champions_league",         # ⚠️ verify key
+    # Ligas domésticas femeninas
+    "W_WSL":     "soccer_england_womens_super_league",
+    "W_NWSL":    "soccer_usa_nwsl",
+    "W_LIGA_F":  "soccer_spain_primera_division_w",              # ⚠️ verify key (Liga F)
+    "W_D1F":     "soccer_france_d1_feminine",                   # ⚠️ verify key
+    "W_FRAUEN_BL":"soccer_germany_frauen_bundesliga",            # ⚠️ verify key
+
+    # ── Baloncesto ─────────────────────────────────────────────────────────────
+    # Con colector activo (basketball_collector.py)
     "NBA":        "basketball_nba",
     "EUROLEAGUE": "basketball_euroleague",
-    # Tennis — tournament strings (pre-mapped; activate when collector added)
+    # Sin colector activo (preparado para cuando se implemente)
+    "ACB":        "basketball_spain_acb",                        # ⚠️ verify key
+    "NCAA_BB":    "basketball_ncaab",
+    "FIBA_WC":    "basketball_fiba_world_cup",                   # ⚠️ verify key; solo torneo
+    "EUROBASKET": "basketball_eurobasket",                       # ⚠️ verify key; solo torneo
+
+    # ── Tenis (prefetch; señal real vía _TENNIS_SPORT_KEYS en tennis_analyzer) ──
+    "ATP_AUS_OPEN":    "tennis_atp_australian_open",
+    "WTA_AUS_OPEN":    "tennis_wta_australian_open",
     "ATP_FRENCH_OPEN": "tennis_atp_french_open",
     "WTA_FRENCH_OPEN": "tennis_wta_french_open",
     "ATP_WIMBLEDON":   "tennis_atp_wimbledon",
@@ -67,19 +112,50 @@ _ODDS_SPORT_MAP: dict[str, str] = {
     "ATP_US_OPEN":     "tennis_atp_us_open",
     "WTA_US_OPEN":     "tennis_wta_us_open",
     "ATP_BARCELONA":   "tennis_atp_barcelona_open",
+    "ATP_MADRID":      "tennis_atp_madrid_open",
+    "WTA_MADRID":      "tennis_wta_madrid_open",
     "ATP_MUNICH":      "tennis_atp_munich",
+    "ATP_ROME":        "tennis_atp_rome",
+    "WTA_ROME":        "tennis_wta_rome",
     "WTA_STUTTGART":   "tennis_wta_stuttgart_open",
 }
 
 # Football sport keys where Poisson totals model is applicable
 _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
-    "soccer_england_premier_league", "soccer_england_championship",
-    "soccer_spain_la_liga", "soccer_germany_bundesliga", "soccer_germany_bundesliga2",
-    "soccer_italy_serie_a", "soccer_france_ligue_one", "soccer_france_ligue_two",
-    "soccer_uefa_champs_league", "soccer_uefa_europa_league",
-    "soccer_uefa_europa_conference_league", "soccer_portugal_primeira_liga",
-    "soccer_netherlands_eredivisie", "soccer_spain_segunda_division",
-    "soccer_italy_serie_b", "soccer_turkey_super_league",
+    # ── Ligas domésticas masculinas (modelo Poisson+ELO completo) ─────────────
+    # Europa
+    "soccer_england_premier_league",        "soccer_england_championship",
+    "soccer_spain_la_liga",                 "soccer_spain_segunda_division",
+    "soccer_germany_bundesliga",            "soccer_germany_bundesliga2",
+    "soccer_italy_serie_a",                 "soccer_italy_serie_b",
+    "soccer_france_ligue_one",              "soccer_france_ligue_two",
+    "soccer_uefa_champs_league",            "soccer_uefa_europa_league",
+    "soccer_uefa_europa_conference_league",
+    "soccer_portugal_primeira_liga",        "soccer_netherlands_eredivisie",
+    "soccer_turkey_super_league",
+    # Sudamérica — ligas domésticas con fixture regular
+    "soccer_brazil_campeonato",
+    "soccer_argentina_primera_division",
+    # Copas sudamericanas: fase de grupos tiene 6 partidos fijos → Poisson aplicable
+    "soccer_conmebol_libertadores",
+    "soccer_conmebol_sudamericana",
+
+    # ── Ligas domésticas femeninas (Poisson aplicable con datos suficientes) ───
+    # Nota: actualmente sin colector — se activarán cuando se implemente
+    "soccer_england_womens_super_league",   # W_WSL
+    "soccer_usa_nwsl",                      # W_NWSL
+    "soccer_germany_frauen_bundesliga",     # W_FRAUEN_BL ⚠️ verify key
+    "soccer_france_d1_feminine",            # W_D1F ⚠️ verify key
+    "soccer_spain_primera_division_w",      # W_LIGA_F ⚠️ verify key
+
+    # EXCLUIDOS intencionalmente (Poisson no fiable — selecciones nacionales,
+    # rotación de plantillas, partidos únicos sin historial de equipo estable):
+    # soccer_uefa_nations_league, soccer_fifa_world_cup_qualification_europe,
+    # soccer_conmebol_world_cup_qualification, soccer_concacaf_world_cup_qualification,
+    # soccer_conmebol_copa_america, soccer_uefa_european_championship,
+    # soccer_fifa_world_cup, soccer_international,
+    # soccer_uefa_womens_euro, soccer_fifa_womens_world_cup,
+    # soccer_uefa_womens_champions_league, soccer_uefa_womens_nations_league
 })
 
 _FOOTBALL_TOTALS_LINE: float = 2.5

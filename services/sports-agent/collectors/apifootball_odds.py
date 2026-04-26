@@ -45,18 +45,53 @@ _ODDS_TTL   = timedelta(hours=1)
 
 # Mapeo código de liga interno → API-Football league_id (season 2025)
 _LEAGUE_IDS: dict[str, int] = {
-    "PL":  39,   # Premier League
-    "PD":  140,  # La Liga
-    "BL1": 78,   # Bundesliga
-    "SA":  135,  # Serie A
-    "FL1": 61,   # Ligue 1
-    "CL":  2,    # Champions League
-    "EL":  3,    # Europa League
-    "ELC": 40,   # Championship
-    "DED": 88,   # Eredivisie
-    "PPL": 94,   # Primeira Liga
-    "BL2": 79,   # Bundesliga 2
-    "SB":  135,  # Serie B (id real = 136 en API-Football pero poco coverage)
+    # ── Fútbol masculino Europa ───────────────────────────────────────────────
+    "PL":  39,    # Premier League
+    "ELC": 40,    # Championship
+    "PD":  140,   # La Liga
+    "SD":  141,   # La Liga 2 (Segunda División)
+    "BL1": 78,    # Bundesliga
+    "BL2": 79,    # Bundesliga 2
+    "SA":  135,   # Serie A
+    "SB":  136,   # Serie B
+    "FL1": 61,    # Ligue 1
+    "FL2": 62,    # Ligue 2
+    "CL":  2,     # Champions League
+    "EL":  3,     # Europa League
+    "ECL": 848,   # Europa Conference League
+    "PPL": 94,    # Primeira Liga
+    "DED": 88,    # Eredivisie
+    "TU1": 203,   # Süper Lig
+
+    # ── Fútbol masculino internacional (selecciones) ──────────────────────────
+    "WC":   1,    # FIFA World Cup (cualquier edición)
+    "NL":   5,    # UEFA Nations League
+    "CAM":  9,    # Copa América — ⚠️ verify (agent reported 17; 9 es más común)
+    "INTL": 10,   # International Friendlies
+    "EC":   4,    # UEFA Euro (cualquier edición)
+    "WCQ":  32,   # WC 2026 Qualifiers UEFA (Europa)
+    "WCQ_CONMEBOL":  31,   # WC 2026 Qualifiers CONMEBOL
+    "WCQ_CONCACAF":  30,   # WC 2026 Qualifiers CONCACAF — ⚠️ verify
+    "WCQ_AFC":       33,   # WC 2026 Qualifiers AFC (Asia)
+    "WCQ_CAF":       29,   # WC 2026 Qualifiers CAF (África) — ⚠️ verify
+
+    # ── Fútbol masculino Sudamérica ───────────────────────────────────────────
+    "BSA":  71,   # Brasileirao Serie A
+    "ARG":  128,  # Primera División Argentina
+    "CLI":  13,   # Copa Libertadores
+    "CSUD": 11,   # Copa Sudamericana
+
+    # ── Fútbol femenino (sin colector activo — IDs listos para cuando se implemente)
+    "W_WWC":      8,    # FIFA Women's World Cup — ⚠️ verify (alt: 20)
+    "W_WEURO":    50,   # UEFA Women's Euro — ⚠️ verify
+    "W_WNATIONS": 956,  # UEFA Women's Nations League — ⚠️ verify
+    "W_WCL":      545,  # UEFA Women's Champions League — ⚠️ verify
+    "W_WSL":      253,  # Women's Super League (England) — ⚠️ verify
+    "W_NWSL":     264,  # NWSL (USA) — ⚠️ verify
+    "W_FRAUEN_BL": 57,  # Frauen-Bundesliga (Germany) — ⚠️ verify
+    "W_D1F":      519,  # D1 Féminine (France) — ⚠️ verify
+    "W_LIGA_F":   750,  # Liga F (Spain) — ⚠️ verify
+    # basketball usa api-basketball.p.rapidapi.com, no API-Football
 }
 
 # Bet IDs relevantes

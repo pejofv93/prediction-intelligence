@@ -22,15 +22,22 @@ _DELAY = 1.5
 
 # Mapeo tipo de torneo → league code en Firestore (coincide con _ODDS_SPORT_MAP)
 _TOURNAMENT_LEAGUE_MAP = {
-    "French Open": "ATP_FRENCH_OPEN",
-    "Roland Garros": "ATP_FRENCH_OPEN",
-    "Roland-Garros": "ATP_FRENCH_OPEN",
-    "Wimbledon": "ATP_WIMBLEDON",
-    "US Open": "ATP_US_OPEN",
+    # Grand Slams
     "Australian Open": "ATP_AUS_OPEN",
-    "Barcelona Open": "ATP_BARCELONA",
-    "Munich": "ATP_MUNICH",
-    "Stuttgart": "WTA_STUTTGART",
+    "Roland Garros":   "ATP_FRENCH_OPEN",
+    "Roland-Garros":   "ATP_FRENCH_OPEN",
+    "French Open":     "ATP_FRENCH_OPEN",
+    "Wimbledon":       "ATP_WIMBLEDON",
+    "US Open":         "ATP_US_OPEN",
+    # Masters 1000 / WTA 1000 — primavera (activos abril-mayo)
+    "Barcelona Open":  "ATP_BARCELONA",
+    "Mutua Madrid":    "ATP_MADRID",
+    "Madrid Open":     "ATP_MADRID",
+    "Internazionali":  "ATP_ROME",
+    "Italian Open":    "ATP_ROME",
+    "Rome":            "ATP_ROME",
+    "Munich":          "ATP_MUNICH",
+    "Stuttgart":       "WTA_STUTTGART",
 }
 
 _SURFACE_KEYS = {

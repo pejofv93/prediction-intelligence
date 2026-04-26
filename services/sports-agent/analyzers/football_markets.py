@@ -75,20 +75,28 @@ _HTTP_TIMEOUT = 15.0
 
 # Mapeo de league code Firestore → competition en OddsPapi
 _ODDSPAPI_LEAGUE_MAP = {
+    # Europa
     "PL":  "PremierLeague",
     "ELC": "Championship",
     "PD":  "LaLiga",
+    "SD":  "LaLiga2",
     "BL1": "Bundesliga",
+    "BL2": "Bundesliga2",
     "SA":  "SerieA",
+    "SB":  "SerieB",
     "FL1": "Ligue1",
+    "FL2": "Ligue2",
     "CL":  "ChampionsLeague",
     "EL":  "EuropaLeague",
+    "ECL": "ConferenceLeague",
     "PPL": "PrimeiraLiga",
     "DED": "Eredivisie",
-    "BL2": "Bundesliga2",
-    "SD":  "Segunda",
-    "SB":  "SerieB",
     "TU1": "SuperLig",
+    # Sudamérica
+    "BSA":  "BrasileiraoSerieA",
+    "ARG":  "PrimeraDivision",
+    "CLI":  "CopaLibertadores",
+    "CSUD": "CopaSudamericana",
 }
 
 

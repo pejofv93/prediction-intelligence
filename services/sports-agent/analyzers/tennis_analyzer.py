@@ -32,17 +32,26 @@ _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
 _CACHE_TTL = timedelta(hours=2)
 
 # Sport keys de The Odds API para tenis
+# Claves específicas mejoran precisión; genéricas (ATP/WTA/ITF) actúan de fallback.
 _TENNIS_SPORT_KEYS = {
-    "ATP_FRENCH_OPEN":  "tennis_atp_french_open",
-    "WTA_FRENCH_OPEN":  "tennis_wta_french_open",
-    "ATP_WIMBLEDON":    "tennis_atp_wimbledon",
-    "WTA_WIMBLEDON":    "tennis_wta_wimbledon",
-    "ATP_US_OPEN":      "tennis_atp_us_open",
-    "WTA_US_OPEN":      "tennis_wta_us_open",
-    "ATP_BARCELONA":    "tennis_atp_barcelona_open",
-    "ATP_MUNICH":       "tennis_atp_munich",
-    "WTA_STUTTGART":    "tennis_wta_stuttgart_open",
-    # Generic fallback: si no hay key específica usamos éstos
+    # Grand Slams
+    "ATP_AUS_OPEN":    "tennis_atp_australian_open",
+    "WTA_AUS_OPEN":    "tennis_wta_australian_open",
+    "ATP_FRENCH_OPEN": "tennis_atp_french_open",
+    "WTA_FRENCH_OPEN": "tennis_wta_french_open",
+    "ATP_WIMBLEDON":   "tennis_atp_wimbledon",
+    "WTA_WIMBLEDON":   "tennis_wta_wimbledon",
+    "ATP_US_OPEN":     "tennis_atp_us_open",
+    "WTA_US_OPEN":     "tennis_wta_us_open",
+    # Masters 1000 / WTA 1000 (primavera — activos en abril-mayo)
+    "ATP_BARCELONA":   "tennis_atp_barcelona_open",
+    "ATP_MADRID":      "tennis_atp_madrid_open",
+    "WTA_MADRID":      "tennis_wta_madrid_open",
+    "ATP_MUNICH":      "tennis_atp_munich",
+    "ATP_ROME":        "tennis_atp_rome",
+    "WTA_ROME":        "tennis_wta_rome",
+    "WTA_STUTTGART":   "tennis_wta_stuttgart_open",
+    # Generic fallback — cubre cualquier torneo no mapeado explícitamente
     "ATP": "tennis_atp",
     "WTA": "tennis_wta",
     "ITF": "tennis_itf",
