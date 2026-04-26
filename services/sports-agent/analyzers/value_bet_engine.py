@@ -38,9 +38,10 @@ _ODDS_API_BASE = "https://api-football-v1.p.rapidapi.com"
 _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
 # The Odds API — sport key map (league field in Firestore → The Odds API sport key)
-# PL eliminada: temporada 24/25 terminada, The Odds API devuelve 404
 _ODDS_SPORT_MAP: dict[str, str] = {
     # Football — football-data.org competition codes
+    "PL":  "soccer_england_premier_league",   # re-añadida para temporada 25/26
+    "ELC": "soccer_england_championship",
     "PD":  "soccer_spain_la_liga",
     "BL1": "soccer_germany_bundesliga",
     "BL2": "soccer_germany_bundesliga2",
@@ -72,6 +73,7 @@ _ODDS_SPORT_MAP: dict[str, str] = {
 
 # Football sport keys where Poisson totals model is applicable
 _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
+    "soccer_england_premier_league", "soccer_england_championship",
     "soccer_spain_la_liga", "soccer_germany_bundesliga", "soccer_germany_bundesliga2",
     "soccer_italy_serie_a", "soccer_france_ligue_one", "soccer_france_ligue_two",
     "soccer_uefa_champs_league", "soccer_uefa_europa_league",

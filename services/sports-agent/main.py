@@ -619,7 +619,17 @@ async def _bg_analyze() -> None:
         # --- Fútbol (via enriched_matches con Poisson) ---
         from analyzers.player_props import generate_player_props_signals
         from analyzers.corners_bookings import generate_corners_signals, save_signals
+        from analyzers.value_bet_engine import _ODDS_SPORT_MAP, _FOOTBALL_SPORT_KEYS
         from datetime import date as _date
+
+        # Diagnóstico: ligas en enriched_matches vs. ligas con cobertura de señales extra
+        _leagues_all    = {d.to_dict().get("league", "?") for d in docs}
+        _leagues_extra  = {lg for lg in _leagues_all if _ODDS_SPORT_MAP.get(lg, "") in _FOOTBALL_SPORT_KEYS}
+        _leagues_skip   = _leagues_all - _leagues_extra
+        logger.info(
+            "analyze: ligas en enriched=%s | con señales extra=%s | sin cobertura=%s",
+            sorted(_leagues_all), sorted(_leagues_extra), sorted(_leagues_skip),
+        )
 
         for doc in docs:
             enriched = doc.to_dict()

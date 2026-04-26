@@ -75,6 +75,8 @@ _HTTP_TIMEOUT = 15.0
 
 # Mapeo de league code Firestore → competition en OddsPapi
 _ODDSPAPI_LEAGUE_MAP = {
+    "PL":  "PremierLeague",
+    "ELC": "Championship",
     "PD":  "LaLiga",
     "BL1": "Bundesliga",
     "SA":  "SerieA",
