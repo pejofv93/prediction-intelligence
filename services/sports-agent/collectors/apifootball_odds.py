@@ -29,6 +29,7 @@ from shared.config import FOOTBALL_RAPID_API_KEY
 from shared.api_quota_manager import quota
 
 logger = logging.getLogger(__name__)
+logger.info("apifootball_odds: módulo cargado — FOOTBALL_RAPID_API_KEY presente: %s", bool(FOOTBALL_RAPID_API_KEY))
 
 _HOST    = "api-football-v1.p.rapidapi.com"
 _BASE    = f"https://{_HOST}"

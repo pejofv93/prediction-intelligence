@@ -805,9 +805,13 @@ async def generate_football_extra_signals(
     op_btts_ev = op_ev
     op_ah_ev   = op_ev
 
-    # Fallback: API-Football odds cuando OddsPapi y The Odds API no están disponibles
+    # Fallback: API-Football cuando OddsPapi no está disponible.
+    # Se activa aunque exista un evento The Odds API en caché, porque ese caché
+    # puede ser h2h-only (anterior al fix de markets=btts,spreads,...) y no tener
+    # los mercados alternativos que buscamos.
+    # La cadena `or` por mercado garantiza que AF solo se usa si la fuente primaria devolvió None.
     _af_odds: dict | None = None
-    if not op_ev and not event:
+    if not op_ev:
         try:
             from collectors.apifootball_odds import get_match_odds as _get_af_odds
             from datetime import date as _date_t
@@ -816,9 +820,14 @@ async def generate_football_extra_signals(
             )
             _af_odds = await _get_af_odds(home_team, away_team, league, _md)
             if _af_odds:
-                logger.info("football_markets(%s): usando fallback API-Football odds", match_id)
+                logger.info(
+                    "football_markets(%s): fallback API-Football activo — mercados: %s",
+                    match_id, list(_af_odds.keys()),
+                )
+            else:
+                logger.info("football_markets(%s): fallback API-Football sin datos (fixture no encontrado o cuota)", match_id)
         except Exception:
-            logger.debug("football_markets(%s): API-Football fallback no disponible", match_id, exc_info=True)
+            logger.warning("football_markets(%s): error en fallback API-Football", match_id, exc_info=True)
 
     # ── BTTS ─────────────────────────────────────────────────────────────────
     _af_btts = None
