@@ -805,9 +805,29 @@ async def generate_football_extra_signals(
     op_btts_ev = op_ev
     op_ah_ev   = op_ev
 
+    # Fallback: API-Football odds cuando OddsPapi y The Odds API no están disponibles
+    _af_odds: dict | None = None
+    if not op_ev and not event:
+        try:
+            from collectors.apifootball_odds import get_match_odds as _get_af_odds
+            from datetime import date as _date_t
+            _md = match_date if isinstance(match_date, _date_t) else (
+                match_date.date() if hasattr(match_date, "date") else _date_t.today()
+            )
+            _af_odds = await _get_af_odds(home_team, away_team, league, _md)
+            if _af_odds:
+                logger.info("football_markets(%s): usando fallback API-Football odds", match_id)
+        except Exception:
+            logger.debug("football_markets(%s): API-Football fallback no disponible", match_id, exc_info=True)
+
     # ── BTTS ─────────────────────────────────────────────────────────────────
+    _af_btts = None
+    if _af_odds:
+        from collectors.apifootball_odds import parse_btts as _af_parse_btts
+        _af_btts = _af_parse_btts(_af_odds)
     btts_odds = ((_parse_oddspapi_btts(op_btts_ev) if op_btts_ev else None)
-                 or (parse_btts_event(event) if event else None))
+                 or (parse_btts_event(event) if event else None)
+                 or _af_btts)
     if btts_odds:
         btts_probs = calc_btts(home_xg, away_xg)
         if btts_probs:
@@ -836,8 +856,12 @@ async def generate_football_extra_signals(
                     signals_out.append(pred)
 
     # ── DOUBLE CHANCE ─────────────────────────────────────────────────────────
-    if event and hw is not None and d is not None and aw is not None:
-        dc_odds = parse_double_chance_event(event)
+    if hw is not None and d is not None and aw is not None:
+        _af_dc = None
+        if _af_odds:
+            from collectors.apifootball_odds import parse_double_chance as _af_parse_dc
+            _af_dc = _af_parse_dc(_af_odds)
+        dc_odds = (parse_double_chance_event(event) if event else None) or _af_dc
         dc_probs = calc_double_chance(float(hw), float(d), float(aw))
         if dc_odds and dc_probs:
             for sel in ("1X", "X2", "12"):
@@ -865,10 +889,14 @@ async def generate_football_extra_signals(
                     signals_out.append(pred)
 
     # ── ASIAN HANDICAP ────────────────────────────────────────────────────────
-    # OddsPapi primario; The Odds API spreads como fallback
-    op_ah_lines = _parse_oddspapi_ah(op_ah_ev) if op_ah_ev else []
-    the_odds_ah = parse_spreads_event(event) if event else []
-    spread_lines = op_ah_lines or the_odds_ah
+    # OddsPapi primario; The Odds API spreads como fallback; API-Football como tercer fallback
+    op_ah_lines  = _parse_oddspapi_ah(op_ah_ev) if op_ah_ev else []
+    the_odds_ah  = parse_spreads_event(event) if event else []
+    _af_ah_lines: list = []
+    if _af_odds and not op_ah_lines and not the_odds_ah:
+        from collectors.apifootball_odds import parse_asian_handicap as _af_parse_ah
+        _af_ah_lines = _af_parse_ah(_af_odds)
+    spread_lines = op_ah_lines or the_odds_ah or _af_ah_lines
     if spread_lines:
         ah_probs = calc_asian_handicap(home_xg, away_xg)
         for spread in spread_lines:
@@ -912,10 +940,13 @@ async def generate_football_extra_signals(
 
     # ── TOTALS 3.5 ────────────────────────────────────────────────────────────
     t35 = calc_totals_n(home_xg, away_xg, 3.5)
-    if t35 and event:
-        # Buscar odds totals con línea 3.5 en el evento
+    if t35:
         from analyzers.value_bet_engine import _parse_totals_event
-        t35_odds = _parse_totals_event(event, line=3.5)
+        _af_t35 = None
+        if _af_odds:
+            from collectors.apifootball_odds import parse_goals_ou as _af_parse_ou
+            _af_t35 = _af_parse_ou(_af_odds, 3.5)
+        t35_odds = (_parse_totals_event(event, line=3.5) if event else None) or _af_t35
         if t35_odds:
             for sel, prob, odds_key in [("Over 3.5",  t35["over"],  "over_odds"),
                                          ("Under 3.5", t35["under"], "under_odds")]:

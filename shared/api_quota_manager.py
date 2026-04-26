@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 
 # Presupuestos diarios por API (llamadas/día)
 _DAILY_LIMITS: dict[str, int] = {
-    "the_odds_api": 500,   # 500/mes — cache Firestore 8h evita re-fetch; la API devuelve 422 si se agota
-    "api_sports":   100,   # plan gratuito explícito
+    "the_odds_api":  500,  # 500/mes — cache Firestore 8h evita re-fetch; la API devuelve 422 si se agota
+    "api_sports":    100,  # plan gratuito explícito
     "football_data": 500,  # sin límite real, tope conservador
     "oddspapi":       50,  # desconocido — presupuesto conservador
+    "apifootball":    80,  # api-football-v1.p.rapidapi.com free = 100/día; reservamos 20 para fixtures
 }
 
 # Umbral para alerta Telegram (fracción del límite diario)
