@@ -100,6 +100,40 @@ async def run_analyze() -> JSONResponse:
     return JSONResponse(status_code=200, content=result)
 
 
+@app.get("/recent-predictions", dependencies=[Depends(verify_token)])
+async def recent_predictions(limit: int = 20) -> JSONResponse:
+    """Diagnóstico: devuelve las últimas N predicciones de poly_predictions ordenadas por analyzed_at."""
+    from datetime import datetime, timezone
+    from shared.firestore_client import col
+    try:
+        docs = list(
+            col("poly_predictions")
+            .order_by("analyzed_at", direction="DESCENDING")
+            .limit(min(limit, 50))
+            .stream(timeout=15.0)
+        )
+        result = []
+        for d in docs:
+            f = d.to_dict()
+            at = f.get("analyzed_at")
+            result.append({
+                "market_id": d.id,
+                "question": (f.get("question") or "")[:80],
+                "category": f.get("category"),
+                "price_yes": f.get("market_price_yes"),
+                "real_prob": f.get("real_prob"),
+                "edge": f.get("edge"),
+                "confidence": f.get("confidence"),
+                "recommendation": f.get("recommendation"),
+                "alerted": f.get("alerted"),
+                "analyzed_at": at.isoformat() if hasattr(at, "isoformat") else str(at),
+            })
+        return JSONResponse(content={"count": len(result), "predictions": result})
+    except Exception as e:
+        logger.error("recent-predictions: error — %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/test-gamma-price", dependencies=[Depends(verify_token)])
 async def test_gamma_price() -> JSONResponse:
     """Diagnóstico: fetcha 3 mercados de Gamma API y muestra outcomePrices raw + price_yes parseado."""
