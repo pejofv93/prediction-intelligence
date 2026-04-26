@@ -55,14 +55,40 @@ async def check_and_alert(analysis: dict) -> bool:
     )
 
     market_id = analysis.get("market_id", "unknown")
+    current_price = float(analysis.get("market_price_yes", 0.5))
     alert_key = f"{market_id}_{round(edge, 2)}"
 
-    # Verificar deduplicacion
+    # Re-alerta permitida si >24h desde la última Y precio cambió >5%
     try:
-        existing = col("alerts_sent").where("alert_key", "==", alert_key).limit(1).stream(timeout=10.0)
-        if any(True for _ in existing):
-            logger.debug("check_and_alert(%s): alerta duplicada omitida", market_id)
-            return False
+        from datetime import timedelta
+        _cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+        _existing = list(
+            col("alerts_sent")
+            .where("market_id", "==", market_id)
+            .order_by("sent_at", direction="DESCENDING")
+            .limit(1)
+            .stream(timeout=10.0)
+        )
+        if _existing:
+            _last = _existing[0].to_dict()
+            _last_sent = _last.get("sent_at")
+            if _last_sent and hasattr(_last_sent, "tzinfo") and _last_sent.tzinfo is None:
+                _last_sent = _last_sent.replace(tzinfo=timezone.utc)
+            _last_price = float(_last.get("last_price", current_price))
+            _price_chg = abs(current_price - _last_price) / max(_last_price, 0.001)
+            if _last_sent and _last_sent > _cutoff_24h:
+                logger.debug("check_and_alert(%s): alerta reciente (<24h) omitida", market_id)
+                return False
+            if _price_chg <= 0.05:
+                logger.debug(
+                    "check_and_alert(%s): precio sin cambio significativo (%.1f%%) — omitida",
+                    market_id, _price_chg * 100,
+                )
+                return False
+            logger.info(
+                "check_and_alert(%s): re-alerta permitida — >24h y precio cambió %.1f%%",
+                market_id, _price_chg * 100,
+            )
     except Exception:
         logger.error("check_and_alert(%s): error comprobando dedup", market_id, exc_info=True)
 
@@ -106,6 +132,8 @@ async def check_and_alert(analysis: dict) -> bool:
     try:
         col("alerts_sent").add({
             "alert_key": alert_key,
+            "market_id": market_id,
+            "last_price": current_price,
             "sent_at": datetime.now(timezone.utc),
             "type": "polymarket",
         })

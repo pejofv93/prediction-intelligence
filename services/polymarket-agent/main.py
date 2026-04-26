@@ -290,21 +290,66 @@ async def _bg_analyze() -> dict:
             logger.warning("analyze: enriched_markets vacía — ejecuta /run-enrich primero")
             return {"status": "skipped", "reason": "empty", "analyzed": 0, "alerts": 0}
 
-        # Balanceo por categoría: top 5 por volumen de cada categoría activa
+        # Balanceo por categoría: top 5 frescos por enriched_at de cada categoría activa
         from collections import Counter
+        from datetime import timedelta
         from groq_analyzer import categorize_market
 
+        # Excluir mercados analizados en <12h salvo que precio haya cambiado >3%
+        _cutoff_12h = datetime.now(timezone.utc) - timedelta(hours=12)
+        _recent_preds: dict[str, dict] = {}
+        try:
+            _pred_docs = list(
+                col("poly_predictions")
+                .where("analyzed_at", ">=", _cutoff_12h)
+                .stream(timeout=20.0)
+            )
+            for _pd in _pred_docs:
+                _pdata = _pd.to_dict()
+                _recent_preds[_pd.id] = {"price": float(_pdata.get("market_price_yes", 0.5))}
+            logger.info("analyze: %d mercados analizados en las últimas 12h", len(_recent_preds))
+        except Exception as _rpe:
+            logger.warning("analyze: error leyendo poly_predictions recientes — %s", _rpe)
+
         _markets_by_cat: dict[str, list[dict]] = {}
+        _skipped_rotation = 0
         for _raw in raw_docs:
             _m = _raw.to_dict()
+            _mid = _m.get("market_id", "")
+            if _mid in _recent_preds:
+                _last_price = _recent_preds[_mid]["price"]
+                _cur_price = float(_m.get("price_yes", 0.5))
+                _price_chg = abs(_cur_price - _last_price) / max(_last_price, 0.001)
+                if _price_chg <= 0.03:
+                    _skipped_rotation += 1
+                    logger.debug(
+                        "analyze: %s omitido — analizado <12h, precio sin cambio (%.1f%%)",
+                        _mid, _price_chg * 100,
+                    )
+                    continue
             _cat = categorize_market(_m.get("question", ""))
             _markets_by_cat.setdefault(_cat, []).append(_m)
 
+        if _skipped_rotation:
+            logger.info(
+                "analyze: %d mercados excluidos por rotación (analiz. <12h sin Δprecio >3%%)",
+                _skipped_rotation,
+            )
+
+        _dt_min = datetime.min.replace(tzinfo=timezone.utc)
         docs_balanced: list[dict] = []
         for _cat_markets in _markets_by_cat.values():
-            _top = sorted(_cat_markets, key=lambda x: float(x.get("volume_24h", 0)), reverse=True)[:5]
+            # Ordenar por enriched_at DESC — priorizar datos frescos
+            _top = sorted(
+                _cat_markets,
+                key=lambda x: x.get("enriched_at") or _dt_min,
+                reverse=True,
+            )[:5]
             docs_balanced.extend(_top)
-        docs_balanced.sort(key=lambda x: float(x.get("volume_24h", 0)), reverse=True)
+        docs_balanced.sort(
+            key=lambda x: x.get("enriched_at") or _dt_min,
+            reverse=True,
+        )
 
         cat_counter = Counter(categorize_market(m.get("question", "")) for m in docs_balanced)
         logger.info("analyze: categorías a analizar: %s", dict(cat_counter))

@@ -97,15 +97,28 @@ def _validate_crypto_price_prediction(
     max_prob = 1.0
     cap_note = ""
 
-    if abs_var > 2.0:
-        max_prob = 0.15
-        cap_note = f"variación requerida {variation:+.0%} > 200% en cualquier plazo"
-    elif abs_var > 1.0 and days_to_close < 365:
-        max_prob = 0.25
-        cap_note = f"variación requerida {variation:+.0%} en {days_to_close}d (< 12 meses)"
-    elif abs_var > 0.5 and days_to_close < 90:
-        max_prob = 0.35
-        cap_note = f"variación requerida {variation:+.0%} en {days_to_close}d (< 3 meses)"
+    if variation < 0:
+        # Caps para predicciones de bajada (independientes del plazo)
+        if abs_var > 0.80:
+            max_prob = 0.10
+            cap_note = f"caída requerida {variation:+.0%} > 80%"
+        elif abs_var > 0.70:
+            max_prob = 0.20
+            cap_note = f"caída requerida {variation:+.0%} > 70%"
+        elif abs_var > 0.50:
+            max_prob = 0.30
+            cap_note = f"caída requerida {variation:+.0%} > 50%"
+    else:
+        # Caps para predicciones de subida
+        if abs_var > 2.0:
+            max_prob = 0.15
+            cap_note = f"variación requerida {variation:+.0%} > 200% en cualquier plazo"
+        elif abs_var > 1.0 and days_to_close < 365:
+            max_prob = 0.25
+            cap_note = f"variación requerida {variation:+.0%} en {days_to_close}d (< 12 meses)"
+        elif abs_var > 0.5 and days_to_close < 90:
+            max_prob = 0.35
+            cap_note = f"variación requerida {variation:+.0%} en {days_to_close}d (< 3 meses)"
 
     if max_prob < 1.0 and real_prob > max_prob:
         old_prob = real_prob
@@ -239,6 +252,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     price_yes = float(
         enriched_market.get("price_yes") or market_data.get("price_yes") or 0.5
     )
+
+    # FIX 1: mercado prácticamente resuelto — no tiene sentido analizarlo
+    if price_yes < 0.05 or price_yes > 0.95:
+        logger.debug(
+            "analyze_market(%s): mercado prácticamente resuelto (price_yes=%.3f) — omitiendo",
+            market_id, price_yes,
+        )
+        return None
 
     category = categorize_market(question)
     category_context = _build_category_context(question, category)
