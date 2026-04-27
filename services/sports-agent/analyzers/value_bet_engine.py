@@ -414,7 +414,19 @@ async def _fetch_the_odds_api(
                 await _save_odds_cache(match_id, odds_result, now)
                 return odds_result
 
-    logger.info("fetch_bookmaker_odds(%s): The Odds API — partido no encontrado (%s vs %s)", match_id, home_team, away_team)
+    # Logging detallado para diagnosticar por qué no matchea.
+    # Muestra los nombres normalizados que buscábamos y los primeros 5 eventos del caché.
+    h_norm = _normalize_team(home_team)
+    a_norm = _normalize_team(away_team)
+    sample = [
+        f"{_normalize_team(ev.get('home_team','?'))} vs {_normalize_team(ev.get('away_team','?'))}"
+        for ev in events[:5]
+    ]
+    logger.info(
+        "fetch_bookmaker_odds(%s): The Odds API — no encontrado | "
+        "buscando: '%s' vs '%s' | caché %d eventos | muestra: %s",
+        match_id, h_norm, a_norm, len(events), sample,
+    )
     return None
 
 
@@ -433,7 +445,11 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
     if cached is not None:
         fetched_at, events = cached
         if (now - fetched_at) < _LEAGUE_CACHE_TTL:
-            logger.debug("fetch_bookmaker_odds(%s): cache memoria '%s' vigente (%d eventos)", match_id, sport_key, len(events))
+            # INFO solo en el primer partido de cada liga (no spam por cada uno)
+            if match_id == "prefetch" or not events:
+                logger.info("The Odds API: caché memoria '%s' — %d eventos", sport_key, len(events))
+            else:
+                logger.debug("The Odds API: caché memoria '%s' vigente (%d eventos)", sport_key, len(events))
             return events
 
     # --- 2. Cache en Firestore (sobrevive reinicios Cloud Run) ---
@@ -448,7 +464,9 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 if (now - fs_fetched) < _LEAGUE_CACHE_TTL:
                     events = fs_data.get("events", [])
                     _LEAGUE_ODDS_CACHE[sport_key] = (fs_fetched, events)
-                    logger.debug("fetch_bookmaker_odds(%s): cache Firestore '%s' vigente (%d eventos)", match_id, sport_key, len(events))
+                    age_min = round((now - fs_fetched).total_seconds() / 60)
+                    logger.info("The Odds API: caché Firestore '%s' — %d eventos (edad %d min)",
+                                sport_key, len(events), age_min)
                     return events
     except Exception:
         logger.warning("fetch_bookmaker_odds(%s): error leyendo cache Firestore para '%s'", match_id, sport_key, exc_info=True)

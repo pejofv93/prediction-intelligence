@@ -67,13 +67,15 @@ logger = logging.getLogger(__name__)
 _AH_LINES = (-0.5, -1.0, -1.5, 0.5, 1.0, 1.5)
 
 # ── OddsPapi client ────────────────────────────────────────────────────────────
-_ODDSPAPI_BASE = "https://api.oddspapi.com"
+# v1 API (api.oddspapi.com) está deprecada y su dominio no resuelve DNS.
+# Usamos v4 (api.oddspapi.io) que es el dominio activo.
+_ODDSPAPI_BASE = "https://api.oddspapi.io"
 # Cache por liga (una sola llamada devuelve TODOS los mercados) — TTL 1h
 _ODDSPAPI_LEAGUE_CACHE: dict[str, tuple[datetime, list]] = {}
 _ODDSPAPI_TTL = timedelta(hours=1)
 _HTTP_TIMEOUT = 15.0
 
-# Mapeo de league code Firestore → competition en OddsPapi
+# Mapeo de league code → competition name (usado como filtro de fallback en v4)
 _ODDSPAPI_LEAGUE_MAP = {
     # Europa
     "PL":  "PremierLeague",
@@ -99,6 +101,29 @@ _ODDSPAPI_LEAGUE_MAP = {
     "CSUD": "CopaSudamericana",
 }
 
+# Mapeo league code → OddsPapi v4 tournamentId (verificados en api.oddspapi.io)
+_ODDSPAPI_TOURNAMENT_IDS: dict[str, int] = {
+    "PL":  1,    # Premier League
+    "FL1": 2,    # Ligue 1
+    "BL1": 4,    # Bundesliga
+    "SA":  5,    # Serie A
+    "EL":  6,    # Europa League
+    "CL":  7,    # Champions League
+    "PD":  8,    # La Liga
+    "SD":  9,    # Segunda División
+    "DED": 10,   # Eredivisie
+    "SB":  11,   # Serie B
+    "PPL": 13,   # Primeira Liga
+    "ELC": 40,   # Championship (mismo ID que API-Football)
+    "BL2": 78,   # Bundesliga 2
+    "FL2": 65,   # Ligue 2
+    "ECL": 480,  # Conference League
+    "TU1": 203,  # Süper Lig
+    "BSA": 71,   # Brasileirao Serie A
+    "ARG": 128,  # Primera División Argentina
+    "CLI": 13,   # Copa Libertadores
+}
+
 
 def _safe_float(v) -> float | None:
     try:
@@ -110,8 +135,8 @@ def _safe_float(v) -> float | None:
 
 async def _fetch_oddspapi_league(league: str) -> list:
     """
-    Una sola llamada por liga que devuelve TODOS los mercados para todos los fixtures.
-    Cache TTL 1h — evita llamadas repetidas para btts/ah/h2h del mismo partido.
+    GET api.oddspapi.io/v4/odds — devuelve eventos con todos los mercados disponibles.
+    Filtra por tournamentId cuando está mapeado. Cache TTL 1h por liga.
     """
     if not ODDSPAPI_KEY:
         logger.debug("OddsPapi: ODDSPAPI_KEY no configurada — saltando liga %s", league)
@@ -127,38 +152,54 @@ async def _fetch_oddspapi_league(league: str) -> list:
     if cached and (now - cached[0]) < _ODDSPAPI_TTL:
         return cached[1]
 
-    competition = _ODDSPAPI_LEAGUE_MAP.get(league, "")
-    # Sin parámetro market → OddsPapi devuelve todos los mercados disponibles
-    params: dict = {"apiKey": ODDSPAPI_KEY, "sport": "football"}
-    if competition:
-        params["competition"] = competition
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    week_end = today + _td(days=7)
+
+    # v4 usa sportId + tournamentId (numérico) en vez de sport + competition (string)
+    tid = _ODDSPAPI_TOURNAMENT_IDS.get(league)
+    params: dict = {
+        "apiKey":  ODDSPAPI_KEY,
+        "sportId": "10",           # 10 = fútbol en OddsPapi v4
+        "from":    today.isoformat(),
+        "to":      week_end.isoformat(),
+    }
+    if tid:
+        params["tournamentId"] = str(tid)
 
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(f"{_ODDSPAPI_BASE}/odds", params=params)
+            resp = await client.get(f"{_ODDSPAPI_BASE}/v4/odds", params=params)
 
         if resp.status_code == 401:
-            logger.warning("OddsPapi: clave inválida (401)")
+            logger.warning("OddsPapi v4: clave inválida (401) — liga %s", league)
+            _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, [])
+            return []
+        if resp.status_code == 404:
+            logger.warning("OddsPapi v4: endpoint /v4/odds no encontrado (404) — liga %s", league)
+            _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, [])
             return []
         if resp.status_code == 429:
-            logger.warning("OddsPapi: rate limit (429)")
+            logger.warning("OddsPapi v4: rate limit (429) — liga %s", league)
             return []
         if resp.status_code != 200:
-            logger.warning("OddsPapi: HTTP %d para liga %s", resp.status_code, league)
+            logger.warning("OddsPapi v4: HTTP %d para liga %s — body: %.200s",
+                           resp.status_code, league, resp.text)
+            _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, [])
             return []
 
         quota.track_call("oddspapi")
         data = resp.json()
-        events = data if isinstance(data, list) else data.get("data", data.get("events", []))
+        events = data if isinstance(data, list) else data.get("data", data.get("events", data.get("odds", [])))
         if not isinstance(events, list):
             events = []
 
-        logger.info("OddsPapi: %s → %d fixtures (todos los mercados)", league, len(events))
+        logger.info("OddsPapi v4: %s → %d eventos (tournamentId=%s)", league, len(events), tid)
         _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, events)
         return events
 
     except Exception:
-        logger.error("OddsPapi: error fetching liga %s", league, exc_info=True)
+        logger.error("OddsPapi v4: error fetching liga %s", league, exc_info=True)
         _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, [])  # evita retry por cada partido
         return []
 
