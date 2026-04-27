@@ -159,6 +159,7 @@ async def _fetch_oddspapi_league(league: str) -> list:
 
     except Exception:
         logger.error("OddsPapi: error fetching liga %s", league, exc_info=True)
+        _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, [])  # evita retry por cada partido
         return []
 
 

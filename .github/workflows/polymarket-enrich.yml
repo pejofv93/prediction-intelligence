@@ -1,7 +1,7 @@
 name: polymarket-enrich
 on:
   schedule:
-    - cron: '40 */2 * * *'
+    - cron: '30 3,9,15,21 * * *'
   workflow_dispatch:
 
 jobs:

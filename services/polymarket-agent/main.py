@@ -314,9 +314,9 @@ async def _bg_analyze() -> dict:
             logger.info("analyze: warmup Firestore OK")
         except Exception as e:
             logger.warning("analyze: warmup fallo — %s: %s", type(e).__name__, e)
-        # Freshness guard: aborta si el último enrich fue hace más de 30 min.
-        # Evita analizar datos del ciclo anterior cuando el scheduler dispara analyze
-        # antes de que el enrich del ciclo actual haya terminado.
+        # Freshness guard: aborta si el último enrich fue hace más de 90 min.
+        # enrich corre a :30 h-1 y analyze a :00 h → gap típico 30 min + delays GH Actions
+        # 90 min cubre gap base (30min) + hasta 60min de delay acumulado entre los dos jobs.
         try:
             _latest_docs = (
                 col("enriched_markets")
@@ -333,7 +333,7 @@ async def _bg_analyze() -> dict:
                 if hasattr(_enriched_at, "tzinfo") and _enriched_at.tzinfo is None:
                     _enriched_at = _enriched_at.replace(tzinfo=timezone.utc)
                 _age_min = (datetime.now(timezone.utc) - _enriched_at).total_seconds() / 60
-                if _age_min > 30:
+                if _age_min > 90:
                     logger.warning(
                         "analyze: enriched_markets desactualizado (%.0f min) — "
                         "abortando, espera a que /run-enrich complete",
