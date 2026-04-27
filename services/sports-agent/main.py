@@ -204,36 +204,89 @@ async def get_corners_signals(league: str = "PD", days: int = 3) -> dict:
 
 async def _bg_collect() -> None:
     """
-    Pipeline de recoleccion completo:
-    1. Futbol (football-data.org): upcoming_matches + team_stats + h2h
-    2. Otros deportes (API-Sports): games_today + team_stats
-    Prioridad: futbol primero, resto con budget restante.
+    Pipeline de recoleccion completo.
+    Orden: deportes rápidos primero para garantizar que no los bloquee
+    el rate-limit de football-data.org (10 req/min, ~20-25 min para 88 partidos).
     """
     try:
         logger.info("collect: iniciando pipeline")
         start = datetime.now(timezone.utc)
 
-        # --- 1. Futbol (football-data.org) ---
-        await _collect_football()
+        # --- 1. Baloncesto (rápido, sin rate-limit severo) ---
+        await _collect_basketball_enhanced()
 
-        # --- 2. Futbol extra (AllSportsApi: NL, WCQ, Argentina, Copa Sud, Copa Am) ---
-        await _collect_allsports_football()
-
-        # --- 3. Tenis (Tennis API ATP/WTA ITF) ---
+        # --- 2. Tenis (rápido) ---
         await _collect_tennis()
 
-        # --- 4. Otros deportes (Basketball API, NFL, etc.) ---
+        # --- 3. Otros deportes (Basketball API, NFL, etc.) ---
         await _collect_other_sports()
 
-        # --- 5. Baloncesto enriquecido (team stats para basketball_analyzer) ---
-        await _collect_basketball_enhanced()
+        # --- 4. Fútbol extra (AllSports: NL, WCQ, Argentina, Copa Sud) ---
+        await _collect_allsports_football()
+
+        # --- 5. Fútbol europeo (football-data.org — lento, rate-limit 10 req/min) ---
+        await _collect_football()
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         _status["last_collect"] = datetime.now(timezone.utc).isoformat()
         logger.info("collect: completado en %.1fs", elapsed)
 
+        # Limpieza de partidos FINISHED >48h (no bloquea el pipeline si falla)
+        try:
+            deleted = await _cleanup_stale_upcoming()
+            if deleted:
+                logger.info("collect.cleanup: %d partidos FINISHED eliminados de upcoming_matches", deleted)
+        except Exception as exc:
+            logger.warning("collect.cleanup: error no crítico — %s", exc)
+
     except Exception as e:
         logger.error("collect: error no controlado — %s", e, exc_info=True)
+
+
+async def _cleanup_stale_upcoming() -> int:
+    """
+    Elimina de upcoming_matches los partidos con status FINISHED/PAUSED
+    cuyo match_date tenga más de 48h de antigüedad.
+    Los partidos ya fueron evaluados por el learning engine; no se necesitan más.
+    Devuelve el número de documentos eliminados.
+    """
+    from shared.firestore_client import col
+    from datetime import timezone as _tz
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+    deleted = 0
+
+    try:
+        docs = list(
+            col("upcoming_matches")
+            .where("status", "in", ["FINISHED", "PAUSED"])
+            .stream()
+        )
+    except Exception as exc:
+        logger.warning("_cleanup_stale_upcoming: error leyendo Firestore — %s", exc)
+        return 0
+
+    for doc in docs:
+        data = doc.to_dict()
+        match_date = data.get("match_date")
+        if not match_date:
+            continue
+        if isinstance(match_date, str):
+            try:
+                from datetime import datetime as _dt
+                match_date = _dt.fromisoformat(match_date.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
+            match_date = match_date.replace(tzinfo=timezone.utc)
+        if match_date < cutoff:
+            try:
+                doc.reference.delete()
+                deleted += 1
+            except Exception as exc:
+                logger.warning("_cleanup_stale_upcoming: error borrando %s — %s", doc.id, exc)
+
+    return deleted
 
 
 async def _is_stats_fresh(collection: str, doc_id: str, ttl_hours: int) -> bool:
@@ -730,6 +783,14 @@ async def _bg_learning() -> None:
 
         from learner.learning_engine import run_daily_learning
         await run_daily_learning()
+
+        # Limpiar FINISHED >48h después de que el learning haya evaluado resultados
+        try:
+            deleted = await _cleanup_stale_upcoming()
+            if deleted:
+                logger.info("learning.cleanup: %d partidos FINISHED eliminados de upcoming_matches", deleted)
+        except Exception as exc:
+            logger.warning("learning.cleanup: error no crítico — %s", exc)
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info("learning: completado en %.1fs", elapsed)
