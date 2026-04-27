@@ -594,15 +594,12 @@ async def _bg_analyze() -> None:
             _week_end = _today + _td_pf(days=7)
 
             _prefetch_coros = (
-                # The Odds API: ligas de fútbol activas
+                # The Odds API: ligas de fútbol activas (solo h2h,spreads,totals,btts — free tier)
                 [_get_league_events(sk, "prefetch", _now)
                  for lg, sk in _ODDS_SPORT_MAP.items() if lg in _active_leagues]
-                # OddsPapi v1: BTTS/AH — solo ligas mapeadas (evita requests sin filtro)
-                + [_fetch_oddspapi_league(lg) for lg in _active_football_leagues]
-                # OddsPapi v4: fixtures de hoy (para corners del día)
+                # OddsPapi v4: fixtures de hoy (para corners/bookings del día)
                 + [_fetch_fixtures_for_date(_today)]
-                # OddsPapi v4: fixtures de los próximos 7 días (para h2h de matches del fin de semana)
-                # 1 sola llamada aquí → todas las llamadas por-partido van al cache
+                # OddsPapi v4: fixtures de los próximos 7 días
                 + [_fetch_fixtures_for_date(_today, to_date=_week_end)]
                 # The Odds API: baloncesto (NBA + Euroleague)
                 + [_fetch_basketball_odds("basketball_nba"),
@@ -610,6 +607,8 @@ async def _bg_analyze() -> None:
                 # The Odds API: torneos de tenis activos
                 + [_fetch_tennis_odds(sk, "prefetch") for sk in _tennis_sks]
             )
+            # OddsPapi v4 /v4/odds requiere fixtureId (no es endpoint por liga).
+            # Pre-fetch de OddsPapi por liga eliminado para evitar 429 en paralelo.
             logger.info("analyze: pre-fetching %d coroutines en paralelo", len(_prefetch_coros))
             await asyncio.gather(*_prefetch_coros, return_exceptions=True)
             logger.info("analyze: pre-fetch completado — todas las fuentes en cache")

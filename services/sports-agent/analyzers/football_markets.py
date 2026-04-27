@@ -206,27 +206,13 @@ async def _fetch_oddspapi_league(league: str) -> list:
 
 async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> dict | None:
     """
-    Exportado: usado por value_bet_engine como fallback h2h cuando The Odds API no encuentra el partido.
-    Usa OddsPapi v1 (api.oddspapi.com/odds) que devuelve todos los mercados incluyendo 1X2.
-    El pre-fetch del analyze ya carga esta caché — esta función solo hace un lookup en memoria.
+    OddsPapi v4 no provee cuotas 1X2 de resultado de partido en este plan:
+    - /v4/fixtures solo tiene corners/bookings en bookmakerOdds
+    - /v4/odds requiere fixtureId (endpoint per-fixture, no por liga)
+    La fuente principal para h2h es The Odds API. Esta función es un stub
+    hasta confirmar que OddsPapi amplíe el plan a mercados de resultado.
     """
-    events = await _fetch_oddspapi_league(league)
-    if not events:
-        logger.info("get_oddspapi_h2h_odds: 0 eventos OddsPapi v1 para liga %s", league)
-        return None
-
-    event = _oddspapi_find_event(events, home_team, away_team)
-    if not event:
-        logger.info(
-            "get_oddspapi_h2h_odds: partido no encontrado en %d eventos OddsPapi (%s vs %s)",
-            len(events), home_team, away_team,
-        )
-        return None
-
-    result = _parse_oddspapi_v1_h2h(event)
-    if not result:
-        logger.info("get_oddspapi_h2h_odds: evento encontrado pero sin cuotas 1X2 (%s vs %s)", home_team, away_team)
-    return result
+    return None
 
 
 def _parse_oddspapi_v1_h2h(event: dict) -> dict | None:

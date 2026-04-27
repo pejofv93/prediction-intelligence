@@ -500,20 +500,36 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
                     "regions": "eu",
-                    "markets": "h2h,btts,spreads,totals,alternate_totals,double_chance,draw_no_bet,team_totals",
+                    # Solo mercados disponibles en el plan free. Los avanzados
+                    # (alternate_totals, double_chance, draw_no_bet, team_totals)
+                    # devuelven 422 en el free tier y bloquean toda la sesión.
+                    "markets": "h2h,spreads,totals,btts",
                     "oddsFormat": "decimal",
                 })
 
             if resp.status_code == 401:
-                logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida", match_id)
-                return None
-            if resp.status_code == 422:
-                # 422 = cuota mensual agotada (no plan insuficiente — eso sería 403)
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida (401)", match_id)
                 _THE_ODDS_API_EXHAUSTED = True
-                logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota mensual agotada (422)", match_id)
+                return None
+            if resp.status_code == 404:
+                # 404 = liga no activa en The Odds API en este momento (p.ej. lunes sin partidos)
+                # NO es error global — otras ligas pueden seguir funcionando
+                logger.info("fetch_bookmaker_odds(%s): The Odds API — liga %s sin eventos activos (404)", match_id, sport_key)
+                _LEAGUE_ODDS_CACHE[sport_key] = (now, [])
+                return []
+            if resp.status_code == 422:
+                # 422 = mercado no disponible en este plan (NO es cuota agotada — eso sería 429)
+                # NO setear _THE_ODDS_API_EXHAUSTED: solo esta liga falla, otras pueden funcionar
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API — liga %s mercado no disponible (422) — reducir markets", match_id, sport_key)
+                _LEAGUE_ODDS_CACHE[sport_key] = (now, [])
+                return []
+            if resp.status_code == 429:
+                # 429 = cuota real agotada → bloquear todas las ligas
+                _THE_ODDS_API_EXHAUSTED = True
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota agotada (429)", match_id)
                 return None
             if resp.status_code != 200:
-                logger.warning("fetch_bookmaker_odds(%s): The Odds API respondio %d", match_id, resp.status_code)
+                logger.warning("fetch_bookmaker_odds(%s): The Odds API respondio %d para %s", match_id, resp.status_code, sport_key)
                 return None
 
             events = resp.json()
