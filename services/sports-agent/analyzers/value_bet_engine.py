@@ -500,10 +500,9 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
                     "regions": "eu",
-                    # Solo mercados disponibles en el plan free. Los avanzados
-                    # (alternate_totals, double_chance, draw_no_bet, team_totals)
-                    # devuelven 422 en el free tier y bloquean toda la sesión.
-                    "markets": "h2h,spreads,totals,btts",
+                    # Plan Starter: h2h,spreads,totals. btts y otros avanzados → 422.
+                    # Basketball usa exactamente estos 3 y devuelve 200 OK.
+                    "markets": "h2h,spreads,totals",
                     "oddsFormat": "decimal",
                 })
 
