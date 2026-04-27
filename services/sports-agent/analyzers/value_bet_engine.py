@@ -17,7 +17,6 @@ import numpy as np
 from shared.config import (
     CLOUD_RUN_TOKEN,
     DEFAULT_WEIGHTS,
-    FOOTBALL_RAPID_API_KEY,
     ODDS_API_KEY,
     SPORTS_ALERT_EDGE,
     SPORTS_MIN_CONFIDENCE,
@@ -29,10 +28,6 @@ from shared.api_quota_manager import quota
 from enrichers.elo_rating import DEFAULT_ELO
 
 logger = logging.getLogger(__name__)
-
-# API-Football via RapidAPI (fallback — free tier no incluye /odds)
-_ODDS_API_HOST = "api-football-v1.p.rapidapi.com"
-_ODDS_API_BASE = "https://api-football-v1.p.rapidapi.com"
 
 # The Odds API — fuente primaria de cuotas
 _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
@@ -293,7 +288,7 @@ async def fetch_bookmaker_odds(
     Obtiene cuotas 1X2 para un partido. Orden de prioridad:
     1. Cache Firestore (TTL 4h) — evita llamadas redundantes
     2. The Odds API (fuente primaria — free tier incluye cuotas reales)
-    3. API-Football via RapidAPI (fallback — free tier no incluye /odds, devuelve 403)
+    2b. OddsPapi v1 fallback — usa caché ya cargada en el pre-fetch, lookup en memoria
     Devuelve {bookmaker, home_odds, draw_odds, away_odds, opening_home_odds} o None.
     """
     now = datetime.now(timezone.utc)
@@ -319,28 +314,19 @@ async def fetch_bookmaker_odds(
         logger.error("fetch_bookmaker_odds(%s): error leyendo odds_cache", match_id, exc_info=True)
 
     # --- 2. The Odds API (fuente primaria para h2h cuando quota disponible o cache warm) ---
-    # Intentamos siempre que la liga esté mapeada — _get_league_events usa cache Firestore
-    # incluso cuando _THE_ODDS_API_EXHAUSTED=True (no hace nueva llamada HTTP, solo cache).
-    _theodds_tried = False
+    # _get_league_events usa cache Firestore incluso cuando _THE_ODDS_API_EXHAUSTED=True.
     if ODDS_API_KEY and home_team and away_team and league in _ODDS_SPORT_MAP:
-        _theodds_tried = True
         odds_result = await _fetch_the_odds_api(match_id, home_team, away_team, league, now)
         if odds_result:
             return {**odds_result, "source": "theoddsapi"}
 
     # --- 2b. OddsPapi fallback h2h ---
-    # Activa cuando la liga está en OddsPapi Y al menos uno de:
-    #   (A) _theodds_tried=True: The Odds API buscó pero no encontró el partido
-    #   (B) _THE_ODDS_API_EXHAUSTED: quota mensual agotada (422)
-    #   (C) liga no está en _ODDS_SPORT_MAP (ej. DED, ECL) → The Odds API nunca fue intentada
+    # Activa cuando la liga está en OddsPapi. No depende de si The Odds API fue intentada —
+    # el pre-fetch ya cargó la caché v1, así que esta llamada es solo un lookup en memoria.
     if home_team and away_team:
         try:
             from analyzers.football_markets import get_oddspapi_h2h_odds, _ODDSPAPI_LEAGUE_MAP as _op_map
-            _needs_oddspapi = (
-                league in _op_map
-                and (_THE_ODDS_API_EXHAUSTED or _theodds_tried or league not in _ODDS_SPORT_MAP)
-            )
-            if _needs_oddspapi:
+            if league in _op_map:
                 op_result = await get_oddspapi_h2h_odds(league, home_team, away_team)
                 if op_result:
                     await _save_odds_cache(match_id, op_result, now)
@@ -351,52 +337,10 @@ async def fetch_bookmaker_odds(
         except Exception:
             logger.error("fetch_bookmaker_odds(%s): error en OddsPapi fallback", match_id, exc_info=True)
 
-    # --- 3. API-Football via RapidAPI (fallback final) ---
-    if not FOOTBALL_RAPID_API_KEY:
-        logger.debug("fetch_bookmaker_odds(%s): sin API keys disponibles", match_id)
-        return None
-
-    if not quota.can_call("api_sports"):
-        logger.warning("fetch_bookmaker_odds(%s): api_sports — cuota diaria agotada, saltando", match_id)
-        return None
-
-    try:
-        headers = {
-            "X-RapidAPI-Key": FOOTBALL_RAPID_API_KEY,
-            "X-RapidAPI-Host": _ODDS_API_HOST,
-        }
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(
-                f"{_ODDS_API_BASE}/odds",
-                headers=headers,
-                params={"fixture": match_id, "bookmaker": 1},
-            )
-
-        if resp.status_code == 429:
-            # No dormir 60s por partido: RapidAPI free tier no incluye /odds de todos modos.
-            logger.warning("fetch_bookmaker_odds(%s): RapidAPI 429 — saltando sin espera", match_id)
-            return None
-
-        if resp.status_code != 200:
-            logger.warning("fetch_bookmaker_odds(%s): RapidAPI respondio %d", match_id, resp.status_code)
-            return None
-
-        quota.track_call("api_sports")
-        data = resp.json()
-        fixtures = data.get("response", [])
-        if not fixtures:
-            return None
-
-        odds_result = _parse_odds_response(fixtures[0])
-        if not odds_result:
-            return None
-
-        await _save_odds_cache(match_id, odds_result, now)
-        return odds_result
-
-    except Exception:
-        logger.error("fetch_bookmaker_odds(%s): error llamando RapidAPI", match_id, exc_info=True)
-        return None
+    # RapidAPI /odds no está disponible en el plan free de API-Football (siempre 403).
+    # apifootball_odds.py cubre BTTS/AH/DC via /v3/odds en generate_football_extra_signals.
+    logger.debug("fetch_bookmaker_odds(%s): sin cuotas h2h disponibles", match_id)
+    return None
 
 
 _GENERIC_WORDS = {"fc", "cf", "ac", "sc", "ss", "ca", "cd", "ud", "sd", "rc", "rcd",

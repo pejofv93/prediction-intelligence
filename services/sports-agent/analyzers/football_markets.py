@@ -114,6 +114,7 @@ async def _fetch_oddspapi_league(league: str) -> list:
     Cache TTL 1h — evita llamadas repetidas para btts/ah/h2h del mismo partido.
     """
     if not ODDSPAPI_KEY:
+        logger.debug("OddsPapi: ODDSPAPI_KEY no configurada — saltando liga %s", league)
         return []
 
     if not quota.can_call("oddspapi"):
@@ -163,45 +164,78 @@ async def _fetch_oddspapi_league(league: str) -> list:
 
 async def get_oddspapi_h2h_odds(league: str, home_team: str, away_team: str) -> dict | None:
     """
-    Exportado: usado por value_bet_engine como fallback h2h cuando The Odds API está agotada.
-    Usa OddsPapi v4 fixtures (mismo cache que corners_bookings) — sin coste adicional.
-
-    La API v1 (api.oddspapi.com) está deprecada. Usamos v4 (api.oddspapi.io) que devuelve
-    fixtures con bookmakerOdds embebidos. Auto-detectamos el mercado 1X2 buscando el que
-    tiene exactamente 3 outcomes activos con cuotas típicas de resultado de partido.
+    Exportado: usado por value_bet_engine como fallback h2h cuando The Odds API no encuentra el partido.
+    Usa OddsPapi v1 (api.oddspapi.com/odds) que devuelve todos los mercados incluyendo 1X2.
+    El pre-fetch del analyze ya carga esta caché — esta función solo hace un lookup en memoria.
     """
-    from datetime import date as _date, timedelta as _td
-    from analyzers.corners_bookings import _fetch_fixtures_for_date, _find_fixture
-
-    # Buscar en rango hoy+7 días — los matches del Firestore pueden ser este fin de semana.
-    # _fetch_fixtures_for_date usa cache TTL 1h, así que solo 1 llamada HTTP por rango.
-    try:
-        today = _date.today()
-        week_end = today + _td(days=7)
-        logger.info("get_oddspapi_h2h_odds: buscando %s vs %s en %s → %s", home_team, away_team, today, week_end)
-        fixtures = await _fetch_fixtures_for_date(today, to_date=week_end)
-        logger.info("get_oddspapi_h2h_odds: %d fixtures v4 obtenidos (%s → %s)", len(fixtures), today, week_end)
-    except Exception:
-        logger.error("get_oddspapi_h2h_odds: error obteniendo fixtures v4", exc_info=True)
+    events = await _fetch_oddspapi_league(league)
+    if not events:
+        logger.info("get_oddspapi_h2h_odds: 0 eventos OddsPapi v1 para liga %s", league)
         return None
 
-    if not fixtures:
-        logger.warning("get_oddspapi_h2h_odds: 0 fixtures v4 — quota agotada o API error")
+    event = _oddspapi_find_event(events, home_team, away_team)
+    if not event:
+        logger.info(
+            "get_oddspapi_h2h_odds: partido no encontrado en %d eventos OddsPapi (%s vs %s)",
+            len(events), home_team, away_team,
+        )
         return None
 
-    # Filtrar por tournamentId antes del name-matching para mayor precisión
-    from analyzers.corners_bookings import _TOURNAMENT_IDS
-    tid = _TOURNAMENT_IDS.get(league)
-
-    fixture = _find_fixture(fixtures, home_team, away_team, tournament_id=tid)
-    if not fixture:
-        logger.info("get_oddspapi_h2h_odds: fixture no encontrado en %d fixtures (%s vs %s)", len(fixtures), home_team, away_team)
-        return None
-
-    result = _extract_h2h_from_v4_fixture(fixture)
+    result = _parse_oddspapi_v1_h2h(event)
     if not result:
-        logger.info("get_oddspapi_h2h_odds: fixture encontrado pero sin mercado 1X2 detectado")
+        logger.info("get_oddspapi_h2h_odds: evento encontrado pero sin cuotas 1X2 (%s vs %s)", home_team, away_team)
     return result
+
+
+def _parse_oddspapi_v1_h2h(event: dict) -> dict | None:
+    """
+    Extrae cuotas 1X2 de un evento OddsPapi v1 (api.oddspapi.com/odds).
+    El formato varía entre respuestas; prueba las combinaciones de claves conocidas.
+    """
+    odds = event.get("odds", event.get("markets", event))
+    if not isinstance(odds, dict):
+        return None
+
+    # Intentar mercado h2h anidado (ej: {"1x2": {"home": 2.10, "draw": 3.40, "away": 3.20}})
+    for mkt_key in ("1x2", "match_winner", "match_result", "h2h", "winner"):
+        mkt = odds.get(mkt_key)
+        if isinstance(mkt, dict):
+            ho = _safe_float(mkt.get("home") or mkt.get("home_win") or mkt.get("1"))
+            do = _safe_float(mkt.get("draw") or mkt.get("x") or mkt.get("X"))
+            ao = _safe_float(mkt.get("away") or mkt.get("away_win") or mkt.get("2"))
+            if ho and ao:
+                logger.info(
+                    "get_oddspapi_h2h_odds: v1 market=%s home=%.2f draw=%.2f away=%.2f",
+                    mkt_key, ho, do or 3.2, ao,
+                )
+                return {
+                    "bookmaker": event.get("bookmaker", event.get("source", "oddspapi")),
+                    "home_odds": ho,
+                    "draw_odds": do or 3.2,
+                    "away_odds": ao,
+                    "opening_home_odds": ho,
+                    "source": "oddspapi_v1",
+                }
+
+    # Cuotas planas en el propio dict de odds (ej: {"home_win": 2.10, "draw": 3.40, "away_win": 3.20})
+    ho = _safe_float(odds.get("home_win") or odds.get("home") or odds.get("1"))
+    do = _safe_float(odds.get("draw") or odds.get("x") or odds.get("X") or odds.get("draw_odds"))
+    ao = _safe_float(odds.get("away_win") or odds.get("away") or odds.get("2"))
+    if ho and ao:
+        logger.info(
+            "get_oddspapi_h2h_odds: v1 flat home=%.2f draw=%.2f away=%.2f",
+            ho, do or 3.2, ao,
+        )
+        return {
+            "bookmaker": event.get("bookmaker", event.get("source", "oddspapi")),
+            "home_odds": ho,
+            "draw_odds": do or 3.2,
+            "away_odds": ao,
+            "opening_home_odds": ho,
+            "source": "oddspapi_v1",
+        }
+
+    return None
 
 
 def _extract_h2h_from_v4_fixture(fixture: dict) -> dict | None:
