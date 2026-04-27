@@ -647,13 +647,21 @@ async def _bg_analyze() -> None:
             from datetime import timedelta as _td_pf
             _week_end = _today + _td_pf(days=7)
 
+            # Pre-fetch odds-api.io (primaria): una coroutine por liga activa
+            from shared.config import ODDSAPIIO_KEY as _ODDSAPIIO_KEY
+            _oaio_coros = []
+            if _ODDSAPIIO_KEY:
+                from collectors.odds_apiio_client import get_league_odds as _get_oaio_odds
+                _oaio_coros = [_get_oaio_odds(lg) for lg in _active_leagues if lg]
+
             _prefetch_coros = (
-                # The Odds API: ligas de fútbol activas (solo h2h,spreads,totals,btts — free tier)
-                [_get_league_events(sk, "prefetch", _now)
-                 for lg, sk in _ODDS_SPORT_MAP.items() if lg in _active_leagues]
-                # OddsPapi v4: fixtures de hoy (para corners/bookings del día)
+                # odds-api.io: fuente primaria — pre-fetch todas las ligas activas
+                _oaio_coros
+                # The Odds API: secundaria (solo cuando odds-api.io falla)
+                + [_get_league_events(sk, "prefetch", _now)
+                   for lg, sk in _ODDS_SPORT_MAP.items() if lg in _active_leagues]
+                # OddsPapi v4: fixtures de hoy (corners/bookings del día)
                 + [_fetch_fixtures_for_date(_today)]
-                # OddsPapi v4: fixtures de los próximos 7 días
                 + [_fetch_fixtures_for_date(_today, to_date=_week_end)]
                 # The Odds API: baloncesto (NBA + Euroleague)
                 + [_fetch_basketball_odds("basketball_nba"),
@@ -661,8 +669,6 @@ async def _bg_analyze() -> None:
                 # The Odds API: torneos de tenis activos
                 + [_fetch_tennis_odds(sk, "prefetch") for sk in _tennis_sks]
             )
-            # OddsPapi v4 /v4/odds requiere fixtureId (no es endpoint por liga).
-            # Pre-fetch de OddsPapi por liga eliminado para evitar 429 en paralelo.
             logger.info("analyze: pre-fetching %d coroutines en paralelo", len(_prefetch_coros))
             await asyncio.gather(*_prefetch_coros, return_exceptions=True)
             logger.info("analyze: pre-fetch completado — todas las fuentes en cache")

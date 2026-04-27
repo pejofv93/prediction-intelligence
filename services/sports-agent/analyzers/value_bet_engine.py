@@ -161,6 +161,11 @@ _FOOTBALL_TOTALS_LINE: float = 2.5
 _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
 _LEAGUE_CACHE_TTL = timedelta(hours=8)
 
+# Cache de odds-api.io en memoria: {league_code: (fetched_at, [events_normalised])}
+# TTL 4h — la propia caché del cliente odds_apiio_client también es 4h
+_ODDSAPIIO_CACHE: dict[str, tuple[datetime, list]] = {}
+_ODDSAPIIO_CACHE_TTL = timedelta(hours=4)
+
 # Mutex para serializar los track_call concurrentes del pre-fetch (evita race condition
 # donde N coroutines leen can_call=True y hacen N llamadas antes de que se actualice used)
 _THE_ODDS_API_LOCK = asyncio.Lock()
@@ -313,16 +318,24 @@ async def fetch_bookmaker_odds(
     except Exception:
         logger.error("fetch_bookmaker_odds(%s): error leyendo odds_cache", match_id, exc_info=True)
 
-    # --- 2. The Odds API (fuente primaria para h2h cuando quota disponible o cache warm) ---
-    # _get_league_events usa cache Firestore incluso cuando _THE_ODDS_API_EXHAUSTED=True.
+    # --- 2. odds-api.io (fuente PRIMARIA — 5000 req/h, >72k/mes) ---
+    if home_team and away_team:
+        try:
+            from shared.config import ODDSAPIIO_KEY as _ODDSAPIIO_KEY
+            if _ODDSAPIIO_KEY:
+                oaio = await _fetch_oddsapiio(match_id, home_team, away_team, league, now)
+                if oaio:
+                    return {**oaio, "source": "oddsapiio"}
+        except Exception:
+            logger.error("fetch_bookmaker_odds(%s): error en odds-api.io", match_id, exc_info=True)
+
+    # --- 3. The Odds API (secundaria — 500/mes) ---
     if ODDS_API_KEY and home_team and away_team and league in _ODDS_SPORT_MAP:
         odds_result = await _fetch_the_odds_api(match_id, home_team, away_team, league, now)
         if odds_result:
             return {**odds_result, "source": "theoddsapi"}
 
-    # --- 2b. OddsPapi fallback h2h ---
-    # Activa cuando la liga está en OddsPapi. No depende de si The Odds API fue intentada —
-    # el pre-fetch ya cargó la caché v1, así que esta llamada es solo un lookup en memoria.
+    # --- 4. OddsPapi (terciaria — 250/mes, cuando quota activa) ---
     if home_team and away_team:
         try:
             from analyzers.football_markets import get_oddspapi_h2h_odds, _ODDSPAPI_LEAGUE_MAP as _op_map
@@ -382,6 +395,57 @@ def _teams_match(our_name: str, api_name: str) -> bool:
     if len(first_a) >= 4 and len(first_b) >= 4 and first_a == first_b:
         return True
     return False
+
+
+async def _fetch_oddsapiio(
+    match_id: str, home_team: str, away_team: str, league: str, now: datetime
+) -> dict | None:
+    """
+    Obtiene cuotas de odds-api.io (fuente primaria).
+    Usa el cliente odds_apiio_client que cachea por liga TTL 4h.
+    Normaliza la respuesta al mismo formato que The Odds API.
+    """
+    # Verificar caché en memoria (evita re-llamar al cliente entre partidos de la misma liga)
+    cached = _ODDSAPIIO_CACHE.get(league)
+    if cached is not None:
+        fetched_at, events = cached
+        if (now - fetched_at) < _ODDSAPIIO_CACHE_TTL:
+            return _search_oddsapiio_event(events, home_team, away_team, match_id)
+        # Cache expirado → dejar que el cliente decida (también tiene su propio TTL)
+
+    try:
+        from collectors.odds_apiio_client import get_league_odds
+        events = await get_league_odds(league)
+        _ODDSAPIIO_CACHE[league] = (now, events)
+    except Exception:
+        logger.error("_fetch_oddsapiio(%s): error llamando cliente", match_id, exc_info=True)
+        return None
+
+    return _search_oddsapiio_event(events, home_team, away_team, match_id)
+
+
+def _search_oddsapiio_event(events: list, home_team: str, away_team: str, match_id: str) -> dict | None:
+    """Busca el partido en la lista de eventos de odds-api.io y extrae cuotas h2h."""
+    for ev in events:
+        api_home = ev.get("home_team", "")
+        api_away = ev.get("away_team", "")
+        if not (_teams_match(home_team, api_home) and _teams_match(away_team, api_away)):
+            continue
+        # El evento está normalizado al formato The Odds API — reutilizar el parser existente
+        result = _parse_the_odds_event(ev)
+        if result:
+            logger.info(
+                "fetch_bookmaker_odds(%s): odds-api.io — %s @ home=%.2f draw=%.2f away=%.2f",
+                match_id, result["bookmaker"],
+                result["home_odds"], result["draw_odds"], result["away_odds"],
+            )
+            return result
+    if events:
+        logger.info(
+            "fetch_bookmaker_odds(%s): odds-api.io — partido no encontrado (%s vs %s) en %d eventos",
+            match_id, _normalize_team(home_team), _normalize_team(away_team), len(events),
+        )
+    return None
 
 
 async def _fetch_the_odds_api(

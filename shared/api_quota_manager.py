@@ -61,8 +61,9 @@ _DAILY_LIMITS: dict[str, int] = {
 
 # ── Presupuestos mensuales (APIs con límite por mes) ─────────────────────────
 _MONTHLY_LIMITS: dict[str, int] = {
-    "the_odds_api": 500,   # 500/mes — verificado. Header x-requests-remaining fiable.
-    "oddspapi":     250,   # 250/mes — confirmado por usuario. Agotada hasta ~May 1.
+    "oddsapiio":    72_000, # odds-api.io free: 5000 req/h × 24h × ~15 días activos
+    "the_odds_api":    500, # 500/mes — verificado. Header x-requests-remaining fiable.
+    "oddspapi":        250, # 250/mes — confirmado. Agotada hasta ~May 1.
 }
 
 # ── Umbral de alerta (% del límite) ──────────────────────────────────────────

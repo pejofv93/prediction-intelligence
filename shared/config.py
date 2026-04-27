@@ -17,8 +17,9 @@ COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY")            # polymarket-
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER")        # solo dashboard
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS")        # solo dashboard
 CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")  # token inter-servicios
-ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")      # The Odds API — cuotas reales
-ODDSPAPI_KEY   = os.environ.get("ODDSPAPI_KEY", "")      # OddsPapi — PENDING (BTTS/AH cuando activo)
+ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")      # The Odds API — secundaria (500/mes)
+ODDSPAPI_KEY   = os.environ.get("ODDSPAPI_KEY", "")      # OddsPapi — terciaria (250/mes)
+ODDSAPIIO_KEY  = os.environ.get("ODDSAPIIO_KEY", "")     # odds-api.io — primaria (5000 req/h)
 COLLECTION_PREFIX = os.environ.get("FIRESTORE_COLLECTION_PREFIX", "")
 
 # IA
