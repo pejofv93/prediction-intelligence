@@ -489,8 +489,9 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             if (now - fetched_at) < _LEAGUE_CACHE_TTL:
                 return events
 
-        if not quota.can_call("the_odds_api"):
-            logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota diaria agotada, saltando", match_id)
+        # Verificar cuota mensual (The Odds API es 500/mes, no diaria)
+        if not quota.can_call_monthly("the_odds_api"):
+            logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota mensual agotada", match_id)
             _THE_ODDS_API_EXHAUSTED = True
             return None
 
@@ -533,7 +534,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
             events = resp.json()
             remaining = resp.headers.get("x-requests-remaining")
-            quota.track_call("the_odds_api", remaining=remaining)
+            quota.track_monthly("the_odds_api", remaining=remaining)  # límite es mensual
             logger.info("The Odds API: '%s' — %d eventos cargados, %s requests restantes",
                         sport_key, len(events), remaining or "?")
 
@@ -872,6 +873,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # --- 3. Cuotas ---
     odds_data = await fetch_bookmaker_odds(match_id, home_team=str(home_team), away_team=str(away_team), league=league)
     if odds_data is None:
+        # Cuando TODAS las fuentes de odds están agotadas: fallback Poisson sintético.
+        # No se descarta el partido — se genera señal informativa sin validación de bookmaker.
+        if quota.all_monthly_exhausted(["the_odds_api", "oddspapi"]):
+            return await _generate_poisson_signal(
+                enriched_match, match_id, str(home_team), str(away_team),
+                league, sport, match_date, weights_version, result_home, result_away,
+            )
         logger.warning(
             "generate_signal(%s): sin cuotas reales de bookmaker — partido descartado (%s vs %s | %s)",
             match_id, home_team, away_team, league,
@@ -1084,6 +1092,103 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             logger.error("generate_signal(%s): error en football_markets", match_id, exc_info=True)
 
     return results
+
+
+async def _generate_poisson_signal(
+    enriched_match: dict,
+    match_id: str,
+    home_team: str,
+    away_team: str,
+    league: str,
+    sport: str,
+    match_date,
+    weights_version: int,
+    result_home: dict,
+    result_away: dict,
+) -> list[dict]:
+    """
+    Fallback cuando TODAS las APIs de odds están agotadas.
+    Genera señal basada únicamente en el modelo Poisson propio.
+
+    Sin bookmaker odds no hay edge real calculable, pero el modelo puede
+    identificar un favorito claro con alta confianza. La señal se marca como
+    'poisson_synthetic' y 'validated: False' para que el usuario sepa que
+    NO es una value bet verificada contra cuotas reales.
+
+    Threshold más alto que el normal: confianza > 0.72 y probabilidad > 0.62.
+    """
+    SYNTHETIC_MIN_CONFIDENCE = 0.72
+    SYNTHETIC_MIN_PROB = 0.62
+
+    prob_home = result_home["prob"]
+    prob_away = result_away["prob"]
+    conf_home = result_home["confidence"]
+    conf_away = result_away["confidence"]
+
+    # Elegir el lado más fuerte
+    if prob_home >= prob_away:
+        best_prob, best_conf, team_to_back = prob_home, conf_home, home_team
+    else:
+        best_prob, best_conf, team_to_back = prob_away, conf_away, away_team
+
+    if best_conf < SYNTHETIC_MIN_CONFIDENCE or best_prob < SYNTHETIC_MIN_PROB:
+        return []
+
+    # Cuota sintética: 1/prob sin vig (no representa precio de mercado real)
+    synthetic_odds = round(1.0 / max(best_prob, 0.01), 2)
+
+    prediction = {
+        "match_id": match_id,
+        "home_team": home_team,
+        "away_team": away_team,
+        "sport": sport,
+        "league": league,
+        "market_type": "h2h",
+        "data_source": "poisson_only",
+        "odds_source": "poisson_synthetic",
+        "validated": False,
+        "match_date": match_date,
+        "team_to_back": team_to_back,
+        "bookmaker": None,
+        "odds": synthetic_odds,
+        "calculated_prob": round(best_prob, 4),
+        "edge": None,
+        "confidence": round(best_conf, 4),
+        "kelly_fraction": 0.0,
+        "factors": result_home["signals"] if prob_home >= prob_away else result_away["signals"],
+        "signals": {},
+        "weights_version": weights_version,
+        "created_at": datetime.now(timezone.utc),
+        "result": None,
+        "correct": None,
+        "error_type": None,
+    }
+
+    try:
+        col("predictions").document(f"{match_id}_synthetic").set(prediction)
+    except Exception:
+        logger.error("_generate_poisson_signal(%s): error guardando en Firestore", match_id, exc_info=True)
+
+    logger.info(
+        "generate_signal(%s): POISSON_SYNTHETIC — %s p=%.2f conf=%.0f%% (sin odds externas)",
+        match_id, team_to_back, best_prob, best_conf * 100,
+    )
+
+    # Alerta Telegram con formato diferenciado
+    await _send_telegram_alert({
+        **prediction,
+        "market_emoji": "📊",
+        "intensity": "📊",
+        "match_date": str(match_date)[:16] if match_date else "?",
+        "_synthetic_warning": "⚠️ Sin validación de bookmaker — modelo Poisson propio",
+        "poisson": result_home["signals"].get("poisson"),
+        "elo": result_home["signals"].get("elo"),
+        "form": result_home["signals"].get("form"),
+        "h2h": result_home["signals"].get("h2h"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return [prediction]
 
 
 def _get_weights_version() -> int:

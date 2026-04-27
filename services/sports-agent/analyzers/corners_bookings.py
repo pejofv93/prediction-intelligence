@@ -90,8 +90,8 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
     if cached and (now - cached[0]) < _CACHE_TTL:
         return cached[1]
 
-    if not quota.can_call("oddspapi"):
-        logger.warning("corners_bookings: oddspapi cuota agotada, saltando fetch")
+    if not quota.can_call_monthly("oddspapi"):
+        logger.warning("corners_bookings: oddspapi cuota mensual agotada, saltando fetch")
         return []
 
     params = {
@@ -112,7 +112,7 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
             logger.warning("corners_bookings: OddsPapi HTTP %d", resp.status_code)
             return []
 
-        quota.track_call("oddspapi")
+        quota.track_monthly("oddspapi")
         data = resp.json()
         fixtures = data if isinstance(data, list) else data.get("data", [])
         if not isinstance(fixtures, list):

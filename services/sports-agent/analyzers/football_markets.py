@@ -142,8 +142,8 @@ async def _fetch_oddspapi_league(league: str) -> list:
         logger.debug("OddsPapi: ODDSPAPI_KEY no configurada — saltando liga %s", league)
         return []
 
-    if not quota.can_call("oddspapi"):
-        logger.warning("OddsPapi: cuota diaria agotada para liga %s, saltando", league)
+    if not quota.can_call_monthly("oddspapi"):
+        logger.warning("OddsPapi: cuota mensual agotada para liga %s, saltando", league)
         return []
 
     cache_key = f"league_{league}"
@@ -188,7 +188,7 @@ async def _fetch_oddspapi_league(league: str) -> list:
             _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, [])
             return []
 
-        quota.track_call("oddspapi")
+        quota.track_monthly("oddspapi")
         data = resp.json()
         events = data if isinstance(data, list) else data.get("data", data.get("events", data.get("odds", [])))
         if not isinstance(events, list):

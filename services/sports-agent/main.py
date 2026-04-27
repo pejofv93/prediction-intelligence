@@ -62,12 +62,13 @@ async def status() -> dict:
 
 @app.get("/api/quota")
 async def api_quota() -> dict:
-    """Estado de cuotas diarias de todas las APIs externas."""
+    """Estado de cuotas de todas las APIs externas (diarias y mensuales)."""
     from shared.api_quota_manager import quota
     return {
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "quotas": quota.get_quota_status(),
-        "budgets": quota.daily_budget(),
+        "daily": quota.get_quota_status(),
+        "monthly": quota.get_monthly_status(),
+        "odds_sources_exhausted": quota.all_monthly_exhausted(["the_odds_api", "oddspapi"]),
     }
 
 
