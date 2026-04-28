@@ -219,7 +219,13 @@ _ODDS_MAP_LOCK = asyncio.Lock()
 
 
 def _cache_ttl(entry: dict) -> timedelta:
-    """Devuelve el TTL aplicable a una entrada de caché según su flag error."""
+    """Devuelve el TTL aplicable a una entrada de caché.
+    rate_limited=True → _TTL_RATE_LIMIT (3600s) — esperar reset del límite horario
+    error=True        → _TTL_ERR (60s)         — reintento rápido
+    sin error         → _TTL_OK  (4h)           — resultado real
+    """
+    if entry.get("rate_limited"):
+        return _TTL_RATE_LIMIT
     return _TTL_ERR if entry.get("error") else _TTL_OK
 
 
@@ -619,11 +625,10 @@ async def _fetch_all_soccer_events() -> list[dict]:
             status, body, data = await _get_raw("/events", {"sport": slug})
 
             if status == 429:
-                err = {"events": [], "error": True, "cached_at": now}
-                # TTL 3600s — esperar reset del rate limit antes de reintentar
-                _TTL_RATE_LIMIT_ENTRY = {"events": [], "error": True,
-                                          "cached_at": now - (_TTL_OK - _TTL_RATE_LIMIT)}
-                _EVENT_CACHE[_SOCCER_ALL_KEY] = _TTL_RATE_LIMIT_ENTRY
+                # rate_limited=True → _cache_ttl devuelve _TTL_RATE_LIMIT (3600s)
+                _EVENT_CACHE[_SOCCER_ALL_KEY] = {
+                    "events": [], "error": True, "rate_limited": True, "cached_at": now
+                }
                 logger.warning(
                     "odds-api.io: 429 rate limit — body=%s — TTL 3600s hasta reset", body[:200]
                 )
