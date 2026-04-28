@@ -46,6 +46,8 @@ SUPPORTED_FOOTBALL_LEAGUES = {
     "PD":  2014,   # La Liga
     "BL1": 2002,   # Bundesliga
     "SA":  2019,   # Serie A
+    "FL1": 2015,   # Ligue 1
+    "PPL": 2017,   # Primeira Liga Portugal
     # Tier gratuito adicional
     "CL":  2001,   # UEFA Champions League
     "DED": 2003,   # Eredivisie
