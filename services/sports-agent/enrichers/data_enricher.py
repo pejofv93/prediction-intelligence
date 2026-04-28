@@ -19,7 +19,6 @@ from shared.firestore_client import col
 
 from enrichers.poisson_model import fit_attack_defense, predict_match_probs
 from enrichers.elo_rating import elo_win_probability, get_team_elo
-from collectors.odds_movement import get_odds_movement
 
 logger = logging.getLogger(__name__)
 
