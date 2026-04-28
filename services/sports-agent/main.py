@@ -651,12 +651,8 @@ async def _bg_analyze() -> None:
             from shared.config import ODDSAPIIO_KEY as _ODDSAPIIO_KEY
             _oaio_coros = []
             if _ODDSAPIIO_KEY:
-                from collectors.odds_apiio_client import get_league_odds as _get_oaio_odds, _EVENT_CACHE as _OAIO_CACHE
+                from collectors.odds_apiio_client import get_league_odds as _get_oaio_odds
                 _oaio_coros = [_get_oaio_odds(lg) for lg in _active_leagues if lg]
-            logger.info(
-                "analyze: oddsapiio key_set=%s coros=%d active_leagues=%s",
-                bool(_ODDSAPIIO_KEY), len(_oaio_coros), sorted(_active_leagues)[:5],
-            )
 
             _prefetch_coros = (
                 # odds-api.io: fuente primaria — pre-fetch todas las ligas activas
@@ -674,15 +670,8 @@ async def _bg_analyze() -> None:
                 + [_fetch_tennis_odds(sk, "prefetch") for sk in _tennis_sks]
             )
             logger.info("analyze: pre-fetching %d coroutines en paralelo", len(_prefetch_coros))
-            results = await asyncio.gather(*_prefetch_coros, return_exceptions=True)
-            _oaio_exceptions = [r for r in results[:len(_oaio_coros)] if isinstance(r, Exception)]
-            _oaio_cache_summary = {lg: len(v) for lg, (_, v) in _OAIO_CACHE.items()} if _ODDSAPIIO_KEY else {}
-            logger.info(
-                "analyze: pre-fetch completado — oaio_exceptions=%d cache=%s",
-                len(_oaio_exceptions), _oaio_cache_summary,
-            )
-            if _oaio_exceptions:
-                logger.error("analyze: oddsapiio prefetch errors: %s", _oaio_exceptions[:3])
+            await asyncio.gather(*_prefetch_coros, return_exceptions=True)
+            logger.info("analyze: pre-fetch completado — todas las fuentes en cache")
         except Exception:
             logger.warning("analyze: error en pre-fetch odds — continuando sin cache", exc_info=True)
 
@@ -781,6 +770,19 @@ async def _bg_analyze() -> None:
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         _status["last_analyze"] = datetime.now(timezone.utc).isoformat()
+
+        # Diagnóstico odds-api.io — log al final donde Cloud Logging no dropa
+        try:
+            from collectors.odds_apiio_client import _EVENT_CACHE as _oaio_ev_cache, _SPORTS_CACHE as _oaio_sp_cache
+            from shared.config import ODDSAPIIO_KEY as _oaio_key
+            _oaio_summary = {lg: len(v) for lg, (_, v) in _oaio_ev_cache.items()}
+            logger.info(
+                "analyze[diag]: oddsapiio key_set=%s sports_cached=%d event_cache=%s",
+                bool(_oaio_key), len(_oaio_sp_cache), _oaio_summary,
+            )
+        except Exception as _diag_e:
+            logger.warning("analyze[diag]: error leyendo oaio cache — %s", _diag_e)
+
         logger.info(
             "analyze: %d senales generadas de %d enriquecidos en %.1fs",
             signals_generated, len(docs), elapsed,
