@@ -20,8 +20,11 @@ API_SPORTS_HOSTS = {
     "american-football": "api-american-football.p.rapidapi.com",
     "baseball": "api-baseball.p.rapidapi.com",
     "hockey": "api-hockey.p.rapidapi.com",
-    "mma": "api-mma.p.rapidapi.com",
+    # "mma": "api-mma.p.rapidapi.com",  # desactivado: API eliminada → 404
 }
+
+# Deportes desactivados por endpoint muerto — get_games_today retorna [] sin HTTP
+_DISABLED_SPORTS = {"mma", "ufc"}  # api-mma.p.rapidapi.com/fights → 404
 
 API_SPORTS_DELAY = 2.0  # segundos entre requests — conservador dado el limite diario
 
@@ -145,9 +148,12 @@ def _parse_game(item: dict, sport: str) -> dict:
 
 async def get_games_today(sport: str) -> list[dict]:
     """
-    sport: "nba" | "nfl" | "mlb" | "nhl" | "mma".
+    sport: "nba" | "nfl" | "mlb" | "nhl".
     Devuelve partidos del dia con scores si disponibles.
     """
+    if sport in _DISABLED_SPORTS:
+        logger.info("api_sports_client: colector %s desactivado — endpoint muerto", sport)
+        return []
     try:
         host = _get_host(sport)
     except ValueError as e:

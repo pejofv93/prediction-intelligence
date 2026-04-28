@@ -14,6 +14,8 @@ from shared.config import FOOTBALL_RAPID_API_KEY, ALLSPORTS_FOOTBALL_LEAGUES, AL
 
 logger = logging.getLogger(__name__)
 
+COLLECTOR_DISABLED = True  # endpoint muerto: /football/ → 404 "Endpoint does not exist"
+
 _HOST = "allsportsapi2.p.rapidapi.com"
 _BASE = f"https://{_HOST}"
 _HTTP_TIMEOUT = 20.0
@@ -104,6 +106,9 @@ async def get_upcoming_matches(days: int = 7) -> list[dict]:
     Obtiene partidos próximos de todas las ligas en ALLSPORTS_FOOTBALL_LEAGUES.
     Devuelve lista normalizada compatible con firestore_writer.save_upcoming_matches.
     """
+    if COLLECTOR_DISABLED:
+        logger.info("allsports_client: colector desactivado — endpoint muerto")
+        return []
     now = datetime.now(timezone.utc)
     date_from = now.strftime("%Y-%m-%d")
     date_to = (now + timedelta(days=days)).strftime("%Y-%m-%d")
