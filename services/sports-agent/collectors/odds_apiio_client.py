@@ -35,8 +35,14 @@ _HTTP_TIMEOUT = 15.0
 _SPORTS_CACHE: dict[str, dict] = {}
 _SPORTS_CACHED_AT: datetime | None = None
 _SPORTS_TTL = timedelta(hours=24)
+_SPORTS_LOCK = asyncio.Lock()  # evita que el pre-fetch llame /sports N veces en paralelo
 
-# Caché de eventos por liga: {league_code: (fetched_at, [events_normalised])}
+# Caché de eventos por deporte: {sport_slug: (fetched_at, [events_raw])}
+# Compartido entre todas las ligas del mismo deporte (evita N llamadas a /events?sport=football)
+_SPORT_EVENTS_CACHE: dict[str, tuple[datetime, list]] = {}
+_SPORT_EVENTS_LOCK = asyncio.Lock()
+
+# Caché de eventos normalizados por liga: {league_code: (fetched_at, [events_normalised])}
 _EVENT_CACHE: dict[str, tuple[datetime, list]] = {}
 _EVENT_TTL = timedelta(hours=4)
 
@@ -93,19 +99,21 @@ _TENNIS_LEAGUES = {"ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN
 # ── Internals ──────────────────────────────────────────────────────────────────
 
 async def _get(path: str, params: dict | None = None) -> dict | list | None:
-    """Llamada GET autenticada a odds-api.io."""
+    """Llamada GET autenticada a odds-api.io. Auth: Authorization: Bearer {key}."""
     if not ODDSAPIIO_KEY:
         return None
-    p = dict(params or {})
-    p["apiKey"] = ODDSAPIIO_KEY
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(f"{_BASE}{path}", params=p)
+            resp = await client.get(
+                f"{_BASE}{path}",
+                params=params or {},
+                headers={"Authorization": f"Bearer {ODDSAPIIO_KEY}"},
+            )
         if resp.status_code == 429:
             logger.warning("odds-api.io: rate limit 429")
             return None
         if resp.status_code == 401:
-            logger.warning("odds-api.io: clave inválida (401)")
+            logger.warning("odds-api.io: clave inválida (401) — verificar ODDSAPIIO_KEY")
             return None
         if resp.status_code != 200:
             logger.warning("odds-api.io: HTTP %d para %s", resp.status_code, path)
@@ -119,35 +127,38 @@ async def _get(path: str, params: dict | None = None) -> dict | list | None:
 async def discover_sports() -> dict[str, dict]:
     """
     GET /sports — lista de todos los deportes disponibles.
-    No requiere auth. Cacheado 24h en memoria.
+    No requiere auth. Cacheado 24h en memoria con lock para evitar llamadas paralelas.
     Devuelve {slug: sport_dict}.
     """
     global _SPORTS_CACHE, _SPORTS_CACHED_AT
     now = datetime.now(timezone.utc)
     if _SPORTS_CACHED_AT and (now - _SPORTS_CACHED_AT) < _SPORTS_TTL and _SPORTS_CACHE:
         return _SPORTS_CACHE
-
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(f"{_BASE}/sports")
-        if resp.status_code != 200:
-            logger.warning("odds-api.io: /sports HTTP %d", resp.status_code)
+    async with _SPORTS_LOCK:
+        # Re-check dentro del lock
+        if _SPORTS_CACHED_AT and (now - _SPORTS_CACHED_AT) < _SPORTS_TTL and _SPORTS_CACHE:
             return _SPORTS_CACHE
-        data = resp.json()
-        # La respuesta puede ser lista o dict {data: [...]}
-        sports = data if isinstance(data, list) else data.get("data", data.get("sports", []))
-        result: dict[str, dict] = {}
-        for s in sports:
-            slug = s.get("slug") or s.get("key") or s.get("id") or ""
-            if slug:
-                result[slug.lower()] = s
-        _SPORTS_CACHE = result
-        _SPORTS_CACHED_AT = now
-        logger.info("odds-api.io: %d sports descubiertos", len(result))
-        return result
-    except Exception:
-        logger.error("odds-api.io: error obteniendo /sports", exc_info=True)
-        return _SPORTS_CACHE
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                resp = await client.get(f"{_BASE}/sports")
+            if resp.status_code != 200:
+                logger.warning("odds-api.io: /sports HTTP %d", resp.status_code)
+                return _SPORTS_CACHE
+            data = resp.json()
+            # La respuesta puede ser lista o dict {data: [...]}
+            sports = data if isinstance(data, list) else data.get("data", data.get("sports", []))
+            result: dict[str, dict] = {}
+            for s in sports:
+                slug = s.get("slug") or s.get("key") or s.get("id") or ""
+                if slug:
+                    result[slug.lower()] = s
+            _SPORTS_CACHE = result
+            _SPORTS_CACHED_AT = now
+            logger.info("odds-api.io: %d sports descubiertos", len(result))
+            return result
+        except Exception:
+            logger.error("odds-api.io: error obteniendo /sports", exc_info=True)
+            return _SPORTS_CACHE
 
 
 def _league_to_category(league: str) -> str:
@@ -177,15 +188,30 @@ async def _find_sport_slug(category: str) -> str | None:
 
 
 async def _fetch_events(sport_slug: str) -> list[dict]:
-    """GET /events?sport={slug} → lista de eventos."""
-    data = await _get("/events", {"sport": sport_slug})
-    if data is None:
-        return []
-    events = data if isinstance(data, list) else data.get("data", data.get("events", []))
-    if not isinstance(events, list):
-        logger.debug("odds-api.io: /events response inesperada: %s", str(data)[:200])
-        return []
-    return events
+    """
+    GET /events?sport={slug} → lista de eventos.
+    Cachea por sport_slug con lock para evitar N llamadas paralelas al mismo deporte.
+    """
+    now = datetime.now(timezone.utc)
+    cached = _SPORT_EVENTS_CACHE.get(sport_slug)
+    if cached and (now - cached[0]) < _EVENT_TTL:
+        return cached[1]
+
+    async with _SPORT_EVENTS_LOCK:
+        cached = _SPORT_EVENTS_CACHE.get(sport_slug)
+        if cached and (now - cached[0]) < _EVENT_TTL:
+            return cached[1]
+
+        data = await _get("/events", {"sport": sport_slug})
+        if data is None:
+            return []
+        events = data if isinstance(data, list) else data.get("data", data.get("events", []))
+        if not isinstance(events, list):
+            logger.warning("odds-api.io: /events respuesta inesperada para %s: %s", sport_slug, str(data)[:300])
+            return []
+        _SPORT_EVENTS_CACHE[sport_slug] = (now, events)
+        logger.info("odds-api.io: /events %s → %d eventos cargados", sport_slug, len(events))
+        return events
 
 
 async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
