@@ -899,21 +899,39 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         except Exception:
             logger.warning("generate_signal(%s): no se pudo resolver nombre de equipo desde upcoming_matches", match_id)
 
-    # Fix 1: futbol sin Poisson valido → descartar siempre (cold-start no genera senales reales)
+    # Ligas donde Poisson no es viable: Copa Lib/BSA tienen <3 partidos de fase de grupos
+    # en la primera mitad de la temporada. Se permite continuar con ELO solo si está disponible.
+    _POISSON_EXEMPT_LEAGUES = {"CLI", "BSA", "ARG", "CSUD", "CAM"}
+
+    # Fix 1: futbol sin Poisson valido → descartar, EXCEPTO ligas exentas con ELO disponible
     if sport == "football" and enriched_match.get("poisson_home_win") is None:
-        # DIAG: elo_home_win_prob=None + form=50/50 → team_stats vacíos en Firestore (collect no corrió)
-        #       elo=valor + form≠50 → team_stats OK pero raw_matches < MIN_MATCHES_TO_FIT (3)
-        logger.warning(
-            "DIAG_POISSON_GUARD: %s vs %s [%s] — poisson=None quality=%s "
-            "elo=%.3f form=%.1f/%.1f — fetch_bookmaker_odds NO se llamará "
-            "(causa: team_stats sin raw_matches suficientes en Firestore)",
-            home_team, away_team, league,
-            enriched_match.get("data_quality", "?"),
-            enriched_match.get("elo_home_win_prob") or -1.0,
-            enriched_match.get("home_form_score", 50.0),
-            enriched_match.get("away_form_score", 50.0),
-        )
-        return []
+        elo_available = enriched_match.get("elo_home_win_prob") is not None
+        if league in _POISSON_EXEMPT_LEAGUES and elo_available:
+            logger.info(
+                "generate_signal(%s): %s vs %s [%s] — Poisson exento (liga Copa/BSA), "
+                "continuando con ELO elo=%.3f",
+                match_id, home_team, away_team, league,
+                enriched_match.get("elo_home_win_prob", 0.0),
+            )
+            # Inyectar Poisson sintético desde ELO para que el ensemble funcione
+            elo_p = enriched_match.get("elo_home_win_prob", 0.45)
+            enriched_match = {
+                **enriched_match,
+                "poisson_home_win": elo_p,
+                "poisson_draw":     max(0.0, 1.0 - elo_p - (1.0 - elo_p) * 0.6),
+                "poisson_away_win": (1.0 - elo_p) * 0.6,
+            }
+        else:
+            logger.warning(
+                "DIAG_POISSON_GUARD: %s vs %s [%s] — poisson=None quality=%s "
+                "elo=%.3f form=%.1f/%.1f — fetch_bookmaker_odds NO se llamará",
+                home_team, away_team, league,
+                enriched_match.get("data_quality", "?"),
+                enriched_match.get("elo_home_win_prob") or -1.0,
+                enriched_match.get("home_form_score", 50.0),
+                enriched_match.get("away_form_score", 50.0),
+            )
+            return []
 
     # Guardia de calidad: omitir partidos sin datos reales (no-football)
     poisson_none = enriched_match.get("poisson_home_win") is None

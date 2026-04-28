@@ -266,7 +266,10 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
             # Intento 1: sin filtro temporal (para ver qué devuelve la API por defecto)
             status, _, data = await _get_raw("/events", {"sport": candidate})
             if status == 429:
-                logger.warning("odds-api.io: 429 en slug=%s — abortando todos los candidatos", candidate)
+                # Cachear 60s para que las otras N corutinas del pre-fetch no disparen también
+                # → corta el cascade de N×429 que ocurre cuando pre-fetch lanza ligas en paralelo
+                _SPORT_EVENTS_CACHE[candidate] = (now - (_EVENT_TTL - timedelta(seconds=60)), [])
+                logger.warning("odds-api.io: 429 slug=%s — cacheado 60s para cortar cascade", candidate)
                 return []
             if status == 401:
                 logger.warning("odds-api.io: 401 — ODDSAPIIO_KEY inválida")
