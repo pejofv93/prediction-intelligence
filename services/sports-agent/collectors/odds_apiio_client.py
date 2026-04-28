@@ -235,12 +235,13 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
     - Prueba con commenceTimeFrom/To para los próximos 7 días
     - Loguea todos los status values encontrados (no filtra por "pending" en el log)
     """
-    # DIAG: log antes de cualquier caché — si no aparece, _fetch_events no se llama nunca
-    logger.warning("DIAG_FETCH: llamando /events sport=%s", sport_slug)
     now = datetime.now(timezone.utc)
     cached = _SPORT_EVENTS_CACHE.get(sport_slug)
     if cached and (now - cached[0]) < _EVENT_TTL:
         return cached[1]
+
+    # Solo loguear cuando vamos a intentar HTTP real (no en cache hits)
+    logger.warning("DIAG_FETCH: llamando /events sport=%s", sport_slug)
 
     async with _SPORT_EVENTS_LOCK:
         cached = _SPORT_EVENTS_CACHE.get(sport_slug)
@@ -256,20 +257,22 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
         if sport_slug not in _FOOTBALL_SLUG_CANDIDATES:
             candidates += _FOOTBALL_SLUG_CANDIDATES
         else:
-            # Si el slug ya es uno de los conocidos, poner los demás también
             candidates += [s for s in _FOOTBALL_SLUG_CANDIDATES if s != sport_slug]
 
         best_raw: list[dict] = []
         winning_slug: str = sport_slug
 
         for candidate in candidates:
-            # Intento 1: sin filtro temporal (para ver qué devuelve la API por defecto)
+            # Intento 1: sin filtro temporal
             status, _, data = await _get_raw("/events", {"sport": candidate})
             if status == 429:
-                # Cachear 60s para que las otras N corutinas del pre-fetch no disparen también
-                # → corta el cascade de N×429 que ocurre cuando pre-fetch lanza ligas en paralelo
-                _SPORT_EVENTS_CACHE[candidate] = (now - (_EVENT_TTL - timedelta(seconds=60)), [])
-                logger.warning("odds-api.io: 429 slug=%s — cacheado 60s para cortar cascade", candidate)
+                # Cachear 60s para TODOS los candidatos conocidos de fútbol —
+                # así las N corutinas del pre-fetch que ya pasaron el outer cache check
+                # encuentran el error en el inner check sin hacer HTTP
+                _error_ts = now - (_EVENT_TTL - timedelta(seconds=60))
+                for slug in set([candidate] + _FOOTBALL_SLUG_CANDIDATES):
+                    _SPORT_EVENTS_CACHE[slug] = (_error_ts, [])
+                logger.warning("odds-api.io: 429 slug=%s — todos los slugs cacheados 60s", candidate)
                 return []
             if status == 401:
                 logger.warning("odds-api.io: 401 — ODDSAPIIO_KEY inválida")
@@ -356,11 +359,35 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
     """
     GET /odds/multi?eventIds={id1,id2,...}
     Máximo 10 IDs por llamada. Batchea internamente si hay más.
+    Usa _get_raw() en la primera llamada para loguear el body del 400 y diagnosticar
+    el formato correcto de eventIds que espera la API.
     """
     all_results = []
+    _first_call = True
     for i in range(0, len(event_ids), 10):
         batch = event_ids[i:i+10]
-        data = await _get("/odds/multi", {"eventIds": ",".join(batch)})
+        if _first_call:
+            # Primera llamada: usar _get_raw para loguear body del 400 si ocurre
+            status, body, data = await _get_raw("/odds/multi", {"eventIds": ",".join(batch)})
+            _first_call = False
+            if status == 400:
+                logger.warning(
+                    "odds-api.io: /odds/multi 400 — body=%s (posible formato incorrecto de eventIds)",
+                    body[:300],
+                )
+                # Intentar formato alternativo: IDs como lista separada por pipes o espacios
+                status2, body2, data = await _get_raw("/odds/multi", {"eventId": batch[0]})
+                if status2 == 200:
+                    logger.info("odds-api.io: /odds/multi funciona con 'eventId' singular: body=%s", body2[:200])
+                else:
+                    logger.warning("odds-api.io: /odds/multi eventId singular también falla: status=%d body=%s",
+                                   status2, body2[:200])
+                    continue
+            elif status != 200:
+                logger.warning("odds-api.io: /odds/multi HTTP %d body=%s", status, body[:200])
+                continue
+        else:
+            data = await _get("/odds/multi", {"eventIds": ",".join(batch)})
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("data", data.get("odds", []))

@@ -1000,6 +1000,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     edge_home = calculate_edge(result_home["prob"], home_odds)
     edge_away = calculate_edge(result_away["prob"], away_odds)
 
+    logger.info(
+        "generate_signal(%s): edges — HOME %s p=%.2f @%.2f edge=%.3f | AWAY %s p=%.2f @%.2f edge=%.3f",
+        match_id,
+        home_team, result_home["prob"], home_odds, edge_home,
+        away_team, result_away["prob"], away_odds, edge_away,
+    )
+
     # --- 5. Seleccionar el lado con mayor edge ---
     if edge_home >= edge_away:
         best_edge = edge_home
