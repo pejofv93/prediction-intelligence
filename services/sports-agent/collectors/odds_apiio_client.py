@@ -352,16 +352,19 @@ async def get_league_odds(league: str) -> list[dict]:
     Llamar desde el pre-fetch de main.py y desde _get_league_events_oddsapiio().
     """
     if not ODDSAPIIO_KEY:
+        logger.warning("odds-api.io: ODDSAPIIO_KEY no configurada — saltando liga %s", league)
         return []
+
+    now = datetime.now(timezone.utc)
+
+    # Cache check PRIMERO (antes del quota check) — evita consumir quota con datos ya en cache
+    cached = _EVENT_CACHE.get(league)
+    if cached and (now - cached[0]) < _EVENT_TTL:
+        return cached[1]
 
     if not quota.can_call_monthly("oddsapiio"):
         logger.warning("odds-api.io: cuota mensual agotada, saltando %s", league)
         return []
-
-    now = datetime.now(timezone.utc)
-    cached = _EVENT_CACHE.get(league)
-    if cached and (now - cached[0]) < _EVENT_TTL:
-        return cached[1]
 
     category = _league_to_category(league)
     sport_slug = await _find_sport_slug(category)
@@ -370,18 +373,20 @@ async def get_league_odds(league: str) -> list[dict]:
         _EVENT_CACHE[league] = (now - (_EVENT_TTL - timedelta(minutes=30)), [])
         return []
 
-    # Paso 1: obtener eventos del deporte
-    quota.track_monthly("oddsapiio")
+    # Paso 1: obtener eventos del deporte — track quota solo si la llamada tiene éxito
     raw_events = await _fetch_events(sport_slug)
     if not raw_events:
         logger.info("odds-api.io: 0 eventos para %s (sport=%s)", league, sport_slug)
         _EVENT_CACHE[league] = (now - (_EVENT_TTL - timedelta(minutes=30)), [])
         return []
 
-    # En el primer uso, loguear estructura para diagnóstico
+    # Solo trackear quota si la llamada devolvió datos
+    quota.track_monthly("oddsapiio")
+
+    # Loguear estructura del primer evento para diagnóstico (INFO, no DEBUG)
     if raw_events:
         sample = raw_events[0]
-        logger.debug("odds-api.io: estructura evento: %s", list(sample.keys()))
+        logger.info("odds-api.io: estructura evento keys=%s sample=%s", list(sample.keys()), str(sample)[:200])
 
     # Filtrar eventos que pertenecen a esta liga
     keywords = _LEAGUE_KEYWORDS.get(league, [])

@@ -26,7 +26,7 @@ async def fetch_active_markets(
     Guarda en Firestore poly_markets. Devuelve lista de mercados procesados.
     """
     now = datetime.now(timezone.utc)
-    min_end_date = now + timedelta(days=2)
+    min_end_date = now + timedelta(hours=24)
 
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
@@ -130,7 +130,18 @@ def _parse_market(raw: dict) -> dict | None:
         )
 
         end_date: datetime | None = None
-        end_date_raw = raw.get("endDate", raw.get("end_date", ""))
+        # Polymarket Gamma API usa distintos nombres según el tipo de mercado
+        end_date_raw = (
+            raw.get("endDate")
+            or raw.get("end_date")
+            or raw.get("closeTime")
+            or raw.get("close_time")
+            or raw.get("resolutionTime")
+            or raw.get("resolution_time")
+            or raw.get("expiry")
+            or raw.get("expiration")
+            or ""
+        )
         if end_date_raw:
             try:
                 if isinstance(end_date_raw, datetime):
@@ -138,7 +149,12 @@ def _parse_market(raw: dict) -> dict | None:
                 else:
                     end_date = datetime.fromisoformat(str(end_date_raw).replace("Z", "+00:00"))
             except Exception:
-                pass
+                logger.warning(
+                    "_parse_market(%s): no se pudo parsear end_date_raw=%r",
+                    market_id, end_date_raw,
+                )
+        if end_date is None:
+            logger.warning("_parse_market(%s): end_date no encontrado en campos conocidos", market_id)
 
         return {
             "market_id": market_id,

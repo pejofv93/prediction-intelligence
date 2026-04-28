@@ -271,16 +271,25 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         logger.debug("analyze_market(%s): volumen insuficiente (%.0f)", market_id, volume_24h)
         return None
 
+    now_utc = datetime.now(timezone.utc)
     end_date = market_data.get("end_date")
     if end_date:
         if hasattr(end_date, "tzinfo") and end_date.tzinfo is None:
             end_date = end_date.replace(tzinfo=timezone.utc)
-        days_to_close = (end_date - datetime.now(timezone.utc)).days
-        if days_to_close <= 2:
-            logger.debug("analyze_market(%s): cierra en %d dias — omitiendo", market_id, days_to_close)
+        # Descartar si el mercado cierra en menos de 24h (incluyendo ya expirados)
+        if end_date < now_utc + timedelta(hours=24):
+            logger.info(
+                "analyze_market(%s): mercado cierra/cerró en <24h (end_date=%s) — omitiendo",
+                market_id, end_date.isoformat(),
+            )
             return None
+        days_to_close = (end_date - now_utc).days
     else:
-        days_to_close = 999  # sin fecha de cierre = asumimos que no cierra pronto
+        logger.warning(
+            "analyze_market(%s): end_date no disponible en Firestore — omitiendo por seguridad",
+            market_id,
+        )
+        return None
 
     question = market_data.get("question", "mercado desconocido")
     # Preferir precio del enriched_market (más reciente) sobre el guardado en Firestore,
@@ -468,6 +477,22 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             recommendation = "BUY_NO"
         else:
             recommendation = "PASS"
+
+    # URGENTE 2 — Validar que recommendation coincide con la dirección del edge.
+    # edge = real_prob - market_price_yes: positivo → BUY_YES, negativo → BUY_NO.
+    # Si Groq devuelve la combinación contraria, la señal es incoherente → descartar.
+    if edge > 0 and recommendation == "BUY_NO":
+        logger.warning(
+            "analyze_market(%s): señal contradictoria — edge=%.3f>0 pero rec=BUY_NO → descartando",
+            market_id, edge,
+        )
+        return None
+    if edge < 0 and recommendation == "BUY_YES":
+        logger.warning(
+            "analyze_market(%s): señal contradictoria — edge=%.3f<0 pero rec=BUY_YES → descartando",
+            market_id, edge,
+        )
+        return None
 
     # Aplicar ajuste Fear & Greed si es crypto
     if fear_greed and category == "crypto":
