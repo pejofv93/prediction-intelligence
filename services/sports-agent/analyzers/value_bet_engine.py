@@ -298,7 +298,6 @@ async def fetch_bookmaker_odds(
     """
     # DIAG: si este log no aparece → generate_signal() sale antes de llegar aquí (Poisson guard)
     logger.warning("DIAG_FBO: iniciando fetch para match_id=%s league=%s", match_id, league)
-    """
     now = datetime.now(timezone.utc)
     cache_ttl = timedelta(hours=4)
 
