@@ -1,6 +1,6 @@
 """
 sports-agent — FastAPI service
-Endpoints: /run-collect /run-enrich /run-analyze /run-learning /run-backtest /health /status
+Endpoints: /run-collect /run-enrich /run-analyze /run-learning /run-backtest /clear-odds-cache /health /status
 Todos los endpoints /run-* devuelven 202 Accepted inmediatamente.
 El trabajo real se ejecuta en background (asyncio.create_task).
 Cloud Run timeout=1800s para /run-collect (puede tardar hasta 15min con rate limit football-data.org).
@@ -175,6 +175,18 @@ async def run_fdco_collect() -> StreamingResponse:
     Ejecutar periódicamente (recomendado: cada 24h tras los partidos del día).
     """
     return StreamingResponse(_stream_job(_bg_fdco_collect, "fdco-collect"), media_type="text/plain")
+
+
+@app.post("/clear-odds-cache", dependencies=[Depends(verify_token)])
+async def clear_odds_cache() -> dict:
+    """
+    Limpia los cachés en memoria de odds-api.io (_EVENT_CACHE, _SPORT_EVENTS_CACHE, _SPORTS_CACHE).
+    Útil para forzar reintento inmediato tras un rate limit 429 sin esperar el TTL.
+    Requiere X-Cloud-Token. El caché es solo en memoria — se limpia solo en cold starts.
+    """
+    from collectors.odds_apiio_client import clear_caches
+    result = clear_caches()
+    return {"ok": True, **result}
 
 
 @app.get("/api/corners-signals")

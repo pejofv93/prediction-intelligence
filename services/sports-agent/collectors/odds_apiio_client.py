@@ -188,11 +188,55 @@ async def _find_sport_slug(category: str) -> str | None:
     return None
 
 
+_EVENT_ERROR_TTL = timedelta(minutes=5)  # TTL corto para resultados vacíos/error
+
+# Slugs a probar en orden para fútbol — "soccer" suele ser el slug real en odds-api.io
+_FOOTBALL_SLUG_CANDIDATES = ["soccer", "football", "soccer_football"]
+
+
+async def _get_raw(path: str, params: dict | None = None) -> tuple[int, str, dict | list | None]:
+    """
+    Versión diagnóstica de _get() que devuelve (status_code, body_text, parsed_json|None).
+    Siempre loguea status + primeros 500 chars del body para diagnóstico.
+    """
+    if not ODDSAPIIO_KEY:
+        return 0, "NO_KEY", None
+    try:
+        merged = {**(params or {}), "apiKey": ODDSAPIIO_KEY}
+        url = f"{_BASE}{path}"
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.get(url, params=merged)
+        body = resp.text[:500]
+        logger.info(
+            "odds-api.io DIAG: GET %s params=%s → status=%d body=%s",
+            path, {k: v for k, v in merged.items() if k != "apiKey"}, resp.status_code, body,
+        )
+        if resp.status_code != 200:
+            return resp.status_code, resp.text, None
+        try:
+            return resp.status_code, resp.text, resp.json()
+        except Exception:
+            logger.warning("odds-api.io DIAG: body no es JSON válido")
+            return resp.status_code, resp.text, None
+    except Exception:
+        logger.error("odds-api.io DIAG: error en %s", path, exc_info=True)
+        return 0, "EXCEPTION", None
+
+
 async def _fetch_events(sport_slug: str) -> list[dict]:
     """
     GET /events?sport={slug} → lista de eventos.
     Cachea por sport_slug con lock para evitar N llamadas paralelas al mismo deporte.
+    Resultados vacíos (0 pending) se cachean solo 5 min para permitir reintento rápido.
+
+    MODO DIAGNÓSTICO ACTIVO:
+    - Usa _get_raw() para loguear status + body exacto de cada intento
+    - Prueba slugs alternativos si el principal devuelve 0 eventos
+    - Prueba con commenceTimeFrom/To para los próximos 7 días
+    - Loguea todos los status values encontrados (no filtra por "pending" en el log)
     """
+    # DIAG: log antes de cualquier caché — si no aparece, _fetch_events no se llama nunca
+    logger.warning("DIAG_FETCH: llamando /events sport=%s", sport_slug)
     now = datetime.now(timezone.utc)
     cached = _SPORT_EVENTS_CACHE.get(sport_slug)
     if cached and (now - cached[0]) < _EVENT_TTL:
@@ -203,18 +247,106 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
         if cached and (now - cached[0]) < _EVENT_TTL:
             return cached[1]
 
-        data = await _get("/events", {"sport": sport_slug})
-        if data is None:
+        # Construir ventana temporal próximos 7 días
+        from_dt = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_dt = (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Candidatos a probar: slug descubierto + alternativos de fútbol si aplica
+        candidates = [sport_slug]
+        if sport_slug not in _FOOTBALL_SLUG_CANDIDATES:
+            candidates += _FOOTBALL_SLUG_CANDIDATES
+        else:
+            # Si el slug ya es uno de los conocidos, poner los demás también
+            candidates += [s for s in _FOOTBALL_SLUG_CANDIDATES if s != sport_slug]
+
+        best_raw: list[dict] = []
+        winning_slug: str = sport_slug
+
+        for candidate in candidates:
+            # Intento 1: sin filtro temporal (para ver qué devuelve la API por defecto)
+            status, _, data = await _get_raw("/events", {"sport": candidate})
+            if status == 429:
+                logger.warning("odds-api.io: 429 en slug=%s — abortando todos los candidatos", candidate)
+                return []
+            if status == 401:
+                logger.warning("odds-api.io: 401 — ODDSAPIIO_KEY inválida")
+                return []
+
+            if data is not None:
+                raw = data if isinstance(data, list) else data.get("data", data.get("events", []))
+                if isinstance(raw, list) and raw:
+                    # Loguear todos los status values presentes para diagnóstico
+                    statuses = {}
+                    for ev in raw:
+                        s = ev.get("status", "MISSING")
+                        statuses[s] = statuses.get(s, 0) + 1
+                    logger.info(
+                        "odds-api.io DIAG slug=%s: %d eventos totales, status_counts=%s",
+                        candidate, len(raw), statuses,
+                    )
+                    # Muestra estructura del primer evento
+                    if raw:
+                        logger.info("odds-api.io DIAG: primer evento keys=%s sample=%s",
+                                    list(raw[0].keys()), str(raw[0])[:300])
+                    best_raw = raw
+                    winning_slug = candidate
+                    break  # Encontramos eventos — no seguir probando slugs
+                else:
+                    logger.info("odds-api.io DIAG slug=%s: 0 eventos (sin filtro temporal)", candidate)
+
+            # Intento 2: con ventana temporal explícita
+            status2, _, data2 = await _get_raw(
+                "/events",
+                {"sport": candidate, "commenceTimeFrom": from_dt, "commenceTimeTo": to_dt},
+            )
+            if data2 is not None:
+                raw2 = data2 if isinstance(data2, list) else data2.get("data", data2.get("events", []))
+                if isinstance(raw2, list) and raw2:
+                    statuses2 = {}
+                    for ev in raw2:
+                        s = ev.get("status", "MISSING")
+                        statuses2[s] = statuses2.get(s, 0) + 1
+                    logger.info(
+                        "odds-api.io DIAG slug=%s +timeRange: %d eventos, status_counts=%s",
+                        candidate, len(raw2), statuses2,
+                    )
+                    if raw2:
+                        logger.info("odds-api.io DIAG +timeRange: primer evento keys=%s sample=%s",
+                                    list(raw2[0].keys()), str(raw2[0])[:300])
+                    best_raw = raw2
+                    winning_slug = candidate
+                    break
+                else:
+                    logger.info("odds-api.io DIAG slug=%s +timeRange: 0 eventos", candidate)
+
+        if not best_raw:
+            logger.warning("odds-api.io DIAG: 0 eventos en todos los candidatos=%s", candidates)
+            _SPORT_EVENTS_CACHE[sport_slug] = (now - (_EVENT_TTL - _EVENT_ERROR_TTL), [])
             return []
-        raw = data if isinstance(data, list) else data.get("data", data.get("events", []))
-        if not isinstance(raw, list):
-            logger.warning("odds-api.io: /events respuesta inesperada para %s: %s", sport_slug, str(data)[:300])
-            return []
-        # Filtrar solo partidos pendientes (no jugados ni cancelados)
-        events = [e for e in raw if e.get("status") == "pending"]
-        _SPORT_EVENTS_CACHE[sport_slug] = (now, events)
-        logger.info("odds-api.io: /events %s → %d pending (de %d totales)", sport_slug, len(events), len(raw))
-        return events
+
+        # Filtrar solo pending (pero loguear cuántos hay sin filtro)
+        pending = [e for e in best_raw if e.get("status") == "pending"]
+        logger.info(
+            "odds-api.io: slug ganador=%s → %d pending de %d totales",
+            winning_slug, len(pending), len(best_raw),
+        )
+
+        if pending:
+            _SPORT_EVENTS_CACHE[winning_slug] = (now, pending)
+            if winning_slug != sport_slug:
+                _SPORT_EVENTS_CACHE[sport_slug] = (now, pending)
+        else:
+            # Hay eventos pero ninguno pending — guardar todos para que get_league_odds decida
+            logger.warning(
+                "odds-api.io: %d eventos pero 0 con status=pending — guardando todos sin filtrar",
+                len(best_raw),
+            )
+            _SPORT_EVENTS_CACHE[winning_slug] = (now, best_raw)
+            if winning_slug != sport_slug:
+                _SPORT_EVENTS_CACHE[sport_slug] = (now, best_raw)
+            pending = best_raw  # pasar todos para que el filtro de liga funcione
+
+        return pending
 
 
 async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
@@ -378,6 +510,22 @@ def _to_float(v) -> float | None:
 
 # ── Public interface ───────────────────────────────────────────────────────────
 
+def clear_caches() -> dict:
+    """
+    Limpia todos los cachés en memoria de odds-api.io.
+    Útil tras un rate limit 429 para forzar reintento inmediato.
+    """
+    global _SPORTS_CACHE, _SPORTS_CACHED_AT
+    n_events = len(_SPORT_EVENTS_CACHE)
+    n_leagues = len(_EVENT_CACHE)
+    _SPORT_EVENTS_CACHE.clear()
+    _EVENT_CACHE.clear()
+    _SPORTS_CACHE = {}
+    _SPORTS_CACHED_AT = None
+    logger.info("odds-api.io: cachés limpiados (sports=%d, events=%d ligas)", n_events, n_leagues)
+    return {"cleared": {"sport_events": n_events, "league_events": n_leagues, "sports": True}}
+
+
 async def get_league_odds(league: str) -> list[dict]:
     """
     Devuelve lista de eventos con cuotas normalizados al formato The Odds API.
@@ -403,14 +551,14 @@ async def get_league_odds(league: str) -> list[dict]:
     sport_slug = await _find_sport_slug(category)
     if not sport_slug:
         logger.warning("odds-api.io: no se encontró sport slug para %s (%s)", league, category)
-        _EVENT_CACHE[league] = (now - (_EVENT_TTL - timedelta(minutes=30)), [])
+        _EVENT_CACHE[league] = (now - (_EVENT_TTL - _EVENT_ERROR_TTL), [])
         return []
 
     # Paso 1: obtener eventos del deporte — track quota solo si la llamada tiene éxito
     raw_events = await _fetch_events(sport_slug)
     if not raw_events:
         logger.info("odds-api.io: 0 eventos para %s (sport=%s)", league, sport_slug)
-        _EVENT_CACHE[league] = (now - (_EVENT_TTL - timedelta(minutes=30)), [])
+        _EVENT_CACHE[league] = (now - (_EVENT_TTL - _EVENT_ERROR_TTL), [])
         return []
 
     # Solo trackear quota si la llamada devolvió datos
