@@ -124,10 +124,10 @@ def _format_alert_unified(prediction: dict) -> str:
     """Formato unificado para todos los deportes y mercados."""
     sport = prediction.get("sport", "football")
     market_type = prediction.get("market_type", "h2h")
-    edge = float(prediction.get("edge", 0))
-    conf = float(prediction.get("confidence", 0))
-    odds = float(prediction.get("odds", 0))
-    kelly = float(prediction.get("kelly_fraction", 0))
+    edge = float(prediction.get("edge") or 0)
+    conf = float(prediction.get("confidence") or 0)
+    odds = float(prediction.get("odds") or 0)
+    kelly = float(prediction.get("kelly_fraction") or 0)
     league_code = prediction.get("league", "?")
 
     # Intensidad
@@ -181,10 +181,10 @@ def _format_sports_alert(prediction: dict) -> str:
         raw = str(match_date or "")
         date_str = raw[:16].replace("T", " ") if raw else "?"
 
-    odds = float(prediction.get("odds", 0))
-    edge = float(prediction.get("edge", 0))
-    confidence = float(prediction.get("confidence", 0))
-    kelly = float(prediction.get("kelly_fraction", 0))
+    odds = float(prediction.get("odds") or 0)
+    edge = float(prediction.get("edge") or 0)
+    confidence = float(prediction.get("confidence") or 0)
+    kelly = float(prediction.get("kelly_fraction") or 0)
 
     if edge >= 0.15:
         label = "🔥 SEÑAL FUERTE"
@@ -236,8 +236,8 @@ def _format_poly_alert(analysis: dict) -> str:
     question = _escape_md(analysis.get("question", "?"))
     market_price_yes = float(analysis.get("market_price_yes", 0))
     real_prob = float(analysis.get("real_prob", 0))
-    edge = float(analysis.get("edge", 0))
-    confidence = float(analysis.get("confidence", 0))
+    edge = float(analysis.get("edge") or 0)
+    confidence = float(analysis.get("confidence") or 0)
     recommendation = analysis.get("recommendation", "PASS")
     reasoning = _escape_md(_truncate_reasoning(str(analysis.get("reasoning", ""))))
     volume_spike = bool(analysis.get("volume_spike", False))
@@ -274,7 +274,7 @@ async def send_sports_alert(prediction: dict) -> bool:
     """
     from shared.firestore_client import col
 
-    edge = float(prediction.get("edge", 0))
+    edge = float(prediction.get("edge") or 0)
     key = _alert_key(prediction, edge)
 
     try:
@@ -314,7 +314,7 @@ async def send_poly_alert(analysis: dict) -> bool:
     """
     from shared.firestore_client import col
 
-    edge = float(analysis.get("edge", 0))
+    edge = float(analysis.get("edge") or 0)
     key = _alert_key(analysis, edge)
 
     try:
