@@ -200,9 +200,11 @@ def format_daily_report(
     health: dict,
     shadow_metrics: dict,
     top_signal: Optional[dict] = None,
+    pred_stats: Optional[dict] = None,
 ) -> str:
     """
     Formato reporte diario matutino.
+    pred_stats: {total, pending, resolved, correct, incorrect} desde col("predictions").
     """
     now = datetime.now(timezone.utc)
     fecha = now.strftime("%d/%m/%Y")
@@ -215,18 +217,38 @@ def format_daily_report(
     else:
         status_emoji = "🚨"
 
-    pending = int(shadow_metrics.get("pending_trades") or shadow_metrics.get("pending") or 0)
     bankroll = float(shadow_metrics.get("current_bankroll") or 50.0)
     avg_clv = float(shadow_metrics.get("avg_clv") or 0.0)
     roi_total = float(shadow_metrics.get("roi_total") or 0.0)
     win_rate = float(shadow_metrics.get("win_rate") or 0.0)
 
-    lines = [
-        f"📊 RESUMEN DEL DIA — {fecha}",
-        "",
-        f"Senales activas: {pending} pendientes",
-        f"Bankroll virtual: {bankroll:.2f}€",
-    ]
+    lines = [f"📊 RESUMEN DEL DIA — {fecha}", ""]
+
+    # Bloque de predicciones: usar pred_stats si disponible (fuente fiable)
+    if pred_stats and pred_stats.get("total", 0) > 0:
+        total = pred_stats["total"]
+        pending = pred_stats["pending"]
+        resolved = pred_stats["resolved"]
+        correct = pred_stats["correct"]
+        incorrect = pred_stats["incorrect"]
+        lines.append(f"📋 Señales: {total} total")
+        if resolved > 0:
+            lines.append(f"✅ Resueltas: {resolved} ({correct} correctas · {incorrect} falladas)")
+        if pending > 0:
+            lines.append(f"⏳ Pendientes: {pending}")
+        elif resolved == total:
+            lines.append("⏳ Pendientes: 0")
+    else:
+        # Fallback a shadow_metrics si pred_stats no disponible
+        pending_fb = int(shadow_metrics.get("pending_trades") or 0)
+        closed_fb = int(shadow_metrics.get("closed_trades") or 0)
+        wins_fb = int(shadow_metrics.get("wins") or 0)
+        losses_fb = int(shadow_metrics.get("losses") or 0)
+        lines.append(f"⏳ Pendientes: {pending_fb}")
+        if closed_fb > 0:
+            lines.append(f"✅ Resueltas: {closed_fb} ({wins_fb} correctas · {losses_fb} falladas)")
+
+    lines.append(f"Bankroll virtual: {bankroll:.2f}€")
 
     if avg_clv != 0.0:
         lines.append(f"CLV medio: {avg_clv:+.1%}")

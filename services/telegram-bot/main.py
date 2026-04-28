@@ -124,12 +124,11 @@ async def daily_report() -> JSONResponse:
 async def _bg_daily_report() -> None:
     """
     1. check_model_health() → health dict
-    2. calculate_metrics() → shadow_metrics
-    3. Buscar top signal en predictions (result==None, unified_score DESC)
-       Fallback: poly_predictions (alerted==False, edge DESC)
-    4. format_daily_report(health, shadow_metrics, top_signal)
-    5. send_message(report_text)
-    6. Si health.degraded: send_message(format_health_alert(health)) — alerta separada
+    2. calculate_metrics() → shadow_metrics (ROI/bankroll de shadow_trades)
+    3. Contar predictions sports directamente (result=None/correct) para estadísticas reales
+    4. Buscar top signal en predictions (result==None, unified_score DESC)
+    5. format_daily_report(health, shadow_metrics, top_signal, pred_stats)
+    6. Si health.degraded: send_message(format_health_alert(health))
     """
     try:
         from shared.model_health import check_model_health, format_health_alert, format_daily_report
@@ -139,6 +138,25 @@ async def _bg_daily_report() -> None:
 
         health = check_model_health()
         shadow_metrics = calculate_metrics()
+
+        # Contar predicciones sports directamente — shadow_trades no es fiable para este conteo
+        # (mezcla polymarket retroactivo, poly nuevos y sports retro, todos con lógica distinta)
+        pred_stats = {"total": 0, "pending": 0, "resolved": 0, "correct": 0, "incorrect": 0}
+        try:
+            all_preds = list(col("predictions").limit(500).stream())
+            for doc in all_preds:
+                d = doc.to_dict()
+                pred_stats["total"] += 1
+                if d.get("result") is None and d.get("correct") is None:
+                    pred_stats["pending"] += 1
+                else:
+                    pred_stats["resolved"] += 1
+                    if d.get("correct") is True:
+                        pred_stats["correct"] += 1
+                    elif d.get("correct") is False:
+                        pred_stats["incorrect"] += 1
+        except Exception as _pe:
+            logger.warning("daily-report: error leyendo predictions — %s", _pe)
 
         # Buscar top signal
         top_signal = None
@@ -165,7 +183,7 @@ async def _bg_daily_report() -> None:
         except Exception:
             pass
 
-        report = format_daily_report(health, shadow_metrics, top_signal)
+        report = format_daily_report(health, shadow_metrics, top_signal, pred_stats)
         await send_message(report)
 
         if health.get("degraded"):
