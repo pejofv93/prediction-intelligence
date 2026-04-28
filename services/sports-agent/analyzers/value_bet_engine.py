@@ -410,8 +410,15 @@ async def _fetch_oddsapiio(
     if cached is not None:
         fetched_at, events = cached
         if (now - fetched_at) < _ODDSAPIIO_CACHE_TTL:
+            age_min = int((now - fetched_at).total_seconds() / 60)
+            logger.warning(
+                "DIAG_VBE_CACHE_HIT: _ODDSAPIIO_CACHE[%s] → %d eventos (age=%dmin) — NO llama get_league_odds",
+                league, len(events), age_min,
+            )
             return _search_oddsapiio_event(events, home_team, away_team, match_id)
         # Cache expirado → dejar que el cliente decida (también tiene su propio TTL)
+
+    logger.warning("DIAG_VBE_CACHE_MISS: _ODDSAPIIO_CACHE[%s] miss → llamando get_league_odds", league)
 
     try:
         from collectors.odds_apiio_client import get_league_odds

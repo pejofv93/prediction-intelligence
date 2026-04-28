@@ -541,11 +541,22 @@ async def get_league_odds(league: str) -> list[dict]:
     # Cache check PRIMERO (antes del quota check) — evita consumir quota con datos ya en cache
     cached = _EVENT_CACHE.get(league)
     if cached and (now - cached[0]) < _EVENT_TTL:
+        age_min = int((now - cached[0]).total_seconds() / 60)
+        logger.warning(
+            "DIAG_CACHE_HIT: _EVENT_CACHE[%s] → %d eventos (age=%dmin, TTL=%dmin) — NO llama _fetch_events",
+            league, len(cached[1]), age_min, int(_EVENT_TTL.total_seconds() / 60),
+        )
         return cached[1]
 
     if not quota.can_call_monthly("oddsapiio"):
-        logger.warning("odds-api.io: cuota mensual agotada, saltando %s", league)
+        logger.warning(
+            "DIAG_QUOTA_BLOCK: quota.can_call_monthly('oddsapiio')=False — saltando liga %s — "
+            "verifica Firestore api_quotas/oddsapiio_monthly_%s",
+            league, now.strftime("%Y-%m"),
+        )
         return []
+
+    logger.warning("DIAG_GET_LEAGUE: caché miss + quota OK → llamando _find_sport_slug para %s", league)
 
     category = _league_to_category(league)
     sport_slug = await _find_sport_slug(category)
