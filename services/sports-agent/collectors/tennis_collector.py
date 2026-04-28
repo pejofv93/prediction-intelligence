@@ -1,6 +1,6 @@
 """
-Collector: Tennis API - ATP WTA ITF via RapidAPI.
-host: tennis-api-atp-wta-itf.p.rapidapi.com
+Collector: Tennis API via RapidAPI (tennisapi1.p.rapidapi.com — API-Dojo).
+host anterior tennis-api-atp-wta-itf.p.rapidapi.com → 404 (endpoint eliminado).
 Recolecta: torneos activos, partidos próximos, rankings, forma por superficie, H2H.
 Escribe en Firestore: upcoming_matches + team_stats (usando player_id como clave).
 """
@@ -15,7 +15,7 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-_HOST = "tennis-api-atp-wta-itf.p.rapidapi.com"
+_HOST = "tennisapi1.p.rapidapi.com"  # sustituye tennis-api-atp-wta-itf (404)
 _BASE = f"https://{_HOST}"
 _HTTP_TIMEOUT = 20.0
 _DELAY = 1.5

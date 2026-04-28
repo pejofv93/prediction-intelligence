@@ -189,6 +189,46 @@ async def clear_odds_cache() -> dict:
     return {"ok": True, **result}
 
 
+@app.get("/test-nba", dependencies=[Depends(verify_token)])
+async def test_nba() -> dict:
+    """
+    Verifica que api-basketball.p.rapidapi.com responde.
+    Llama GET /games?date=hoy y devuelve status + primeros 2 partidos.
+    """
+    from collectors.api_sports_client import _request
+    today = __import__("datetime").date.today().isoformat()
+    host = "api-basketball.p.rapidapi.com"
+    data = await _request(host, "/games", {"date": today, "league": "12", "season": "2024-2025"})
+    if data is None:
+        return {"ok": False, "error": "sin respuesta — verificar key o host"}
+    games = data.get("response", [])
+    return {
+        "ok": True,
+        "host": host,
+        "total": len(games),
+        "sample": games[:2],
+    }
+
+
+@app.get("/test-tennis", dependencies=[Depends(verify_token)])
+async def test_tennis() -> dict:
+    """
+    Verifica que tennisapi1.p.rapidapi.com responde.
+    Llama /tournaments y devuelve status + primeros 2 torneos.
+    """
+    from collectors.tennis_collector import _request as tennis_request
+    data = await tennis_request("/tournaments")
+    if data is None:
+        return {"ok": False, "error": "sin respuesta — verificar key o host en tennisapi1"}
+    results = data.get("results", data if isinstance(data, list) else [])
+    return {
+        "ok": True,
+        "host": "tennisapi1.p.rapidapi.com",
+        "total": len(results) if isinstance(results, list) else "?",
+        "sample": results[:2] if isinstance(results, list) else results,
+    }
+
+
 @app.get("/api/corners-signals")
 async def get_corners_signals(league: str = "PD", days: int = 3) -> dict:
     """
