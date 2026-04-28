@@ -787,7 +787,10 @@ async def _bg_analyze() -> None:
         try:
             from collectors.odds_apiio_client import _EVENT_CACHE as _oaio_ev_cache, _SPORTS_CACHE as _oaio_sp_cache
             from shared.config import ODDSAPIIO_KEY as _oaio_key
-            _oaio_summary = {lg: len(v) for lg, (_, v) in _oaio_ev_cache.items()}
+            _oaio_summary = {
+                lg: f"{len(e['events'])}{'(err)' if e.get('error') else ''}"
+                for lg, e in _oaio_ev_cache.items()
+            }
             logger.info(
                 "analyze[diag]: oddsapiio key_set=%s sports_cached=%d event_cache=%s",
                 bool(_oaio_key), len(_oaio_sp_cache), _oaio_summary,

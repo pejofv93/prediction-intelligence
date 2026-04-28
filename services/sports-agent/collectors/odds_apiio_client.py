@@ -4,7 +4,7 @@ collectors/odds_apiio_client.py
 Cliente para odds-api.io — fuente primaria de cuotas.
 Base URL: https://api.odds-api.io/v3
 Auth: ?apiKey=KEY (query param)
-Rate limit: 5000 req/hora (tier gratuito)
+Rate limit: 100 req/hora (tier gratuito — confirmado por 429 body)
 Monthly limit: no declarado — tracked en QuotaManager como "oddsapiio"
 
 Flujo (2 pasos):
