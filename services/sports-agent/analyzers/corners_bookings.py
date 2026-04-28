@@ -107,6 +107,7 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
 
         if resp.status_code == 429:
             logger.warning("corners_bookings: OddsPapi rate limit 429")
+            quota.track_monthly("oddspapi", remaining=0)  # marcar agotada en quota manager
             return []
         if resp.status_code != 200:
             logger.warning("corners_bookings: OddsPapi HTTP %d", resp.status_code)

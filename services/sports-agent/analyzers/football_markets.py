@@ -181,6 +181,8 @@ async def _fetch_oddspapi_league(league: str) -> list:
             return []
         if resp.status_code == 429:
             logger.warning("OddsPapi v4: rate limit (429) — liga %s", league)
+            from shared.api_quota_manager import quota as _quota
+            _quota.track_monthly("oddspapi", remaining=0)
             return []
         if resp.status_code != 200:
             logger.warning("OddsPapi v4: HTTP %d para liga %s — body: %.200s",

@@ -574,6 +574,8 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             if resp.status_code == 401:
                 logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida (401)", match_id)
                 _THE_ODDS_API_EXHAUSTED = True
+                # Marcar también en el quota manager para que all_monthly_exhausted() lo refleje
+                quota.track_monthly("the_odds_api", remaining=0)
                 return None
             if resp.status_code == 404:
                 # 404 = liga no activa ahora (p.ej. lunes sin partidos). NO es error global.
@@ -937,9 +939,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # --- 3. Cuotas ---
     odds_data = await fetch_bookmaker_odds(match_id, home_team=str(home_team), away_team=str(away_team), league=league)
     if odds_data is None:
-        # Cuando TODAS las fuentes de odds están agotadas: fallback Poisson sintético.
-        # No se descarta el partido — se genera señal informativa sin validación de bookmaker.
-        if quota.all_monthly_exhausted(["the_odds_api", "oddspapi"]):
+        # Fallback Poisson sintético cuando todas las fuentes externas están inaccesibles.
+        # Condiciones:
+        #   a) quota manager confirma the_odds_api + oddspapi agotadas (429/cuota), O
+        #   b) _THE_ODDS_API_EXHAUSTED=True (401 global en The Odds API) — el flag de
+        #      memoria no actualiza el quota manager, por eso se comprueba explícitamente.
+        all_sources_down = (
+            quota.all_monthly_exhausted(["the_odds_api", "oddspapi"])
+            or (_THE_ODDS_API_EXHAUSTED and quota.all_monthly_exhausted(["oddspapi"]))
+        )
+        if all_sources_down:
             return await _generate_poisson_signal(
                 enriched_match, match_id, str(home_team), str(away_team),
                 league, sport, match_date, weights_version, result_home, result_away,
