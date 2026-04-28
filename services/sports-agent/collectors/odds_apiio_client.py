@@ -49,34 +49,35 @@ _EVENT_TTL = timedelta(hours=4)
 # Mapeo liga interna → palabras clave del nombre de competición en odds-api.io
 # El cliente busca el slug cuyo "name" o "competition" contenga estas palabras.
 _LEAGUE_KEYWORDS: dict[str, list[str]] = {
-    "PL":   ["premier league", "england"],
-    "ELC":  ["championship", "england"],
-    "PD":   ["la liga", "spain", "primera"],
-    "SD":   ["segunda", "spain"],
-    "BL1":  ["bundesliga", "germany"],
-    "BL2":  ["2. bundesliga", "germany 2"],
-    "SA":   ["serie a", "italy"],
-    "SB":   ["serie b", "italy"],
-    "FL1":  ["ligue 1", "france"],
-    "FL2":  ["ligue 2", "france"],
-    "CL":   ["champions league", "uefa champions"],
-    "EL":   ["europa league", "uefa europa"],
-    "ECL":  ["conference league"],
-    "PPL":  ["primeira liga", "portugal"],
-    "DED":  ["eredivisie", "netherlands"],
-    "TU1":  ["süper lig", "super lig", "turkey"],
-    "BSA":  ["brasileirao", "brazil serie a", "campeonato brasileiro"],
-    "ARG":  ["primera division", "argentina"],
-    "CLI":  ["libertadores", "copa libertadores"],
-    "NBA":  ["nba", "national basketball"],
-    "EUROLEAGUE": ["euroleague", "euro league"],
-    "ATP_FRENCH_OPEN": ["roland garros", "french open"],
+    # slug exacto (odds-api.io) o subcadena que lo identifique unívocamente
+    "PL":   ["england-premier-league"],
+    "ELC":  ["england-championship"],
+    "PD":   ["spain-primera-division", "spain-laliga"],
+    "SD":   ["spain-segunda", "spain-laliga2"],
+    "BL1":  ["germany-bundesliga"],
+    "BL2":  ["germany-2-bundesliga"],
+    "SA":   ["italy-serie-a"],
+    "SB":   ["italy-serie-b"],
+    "FL1":  ["france-ligue-1"],
+    "FL2":  ["france-ligue-2"],
+    "CL":   ["uefa-champions-league"],
+    "EL":   ["uefa-europa-league"],
+    "ECL":  ["conference-league"],
+    "PPL":  ["portugal-primeira-liga", "portugal-super-liga"],
+    "DED":  ["netherlands-eredivisie"],
+    "TU1":  ["turkey-super-lig"],
+    "BSA":  ["brazil-brasileiro-serie-a"],
+    "ARG":  ["argentina-primera-division"],
+    "CLI":  ["copa-libertadores"],
+    "NBA":  ["nba", "national-basketball"],
+    "EUROLEAGUE": ["euroleague", "euro-league"],
+    "ATP_FRENCH_OPEN": ["roland-garros", "french-open"],
     "ATP_WIMBLEDON":   ["wimbledon"],
-    "ATP_US_OPEN":     ["us open", "united states open"],
-    "ATP_AUS_OPEN":    ["australian open"],
-    "ATP_MADRID":      ["madrid open", "mutua madrid"],
-    "ATP_ROME":        ["rome", "internazionali", "foro italico"],
-    "ATP_BARCELONA":   ["barcelona open", "conde de godo"],
+    "ATP_US_OPEN":     ["us-open"],
+    "ATP_AUS_OPEN":    ["australian-open"],
+    "ATP_MADRID":      ["madrid-open", "mutua-madrid"],
+    "ATP_ROME":        ["internazionali", "rome"],
+    "ATP_BARCELONA":   ["barcelona-open", "conde-de-godo"],
 }
 
 # Sport category → odds-api.io top-level sport slug (descubierto via /sports)
@@ -99,15 +100,15 @@ _TENNIS_LEAGUES = {"ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN
 # ── Internals ──────────────────────────────────────────────────────────────────
 
 async def _get(path: str, params: dict | None = None) -> dict | list | None:
-    """Llamada GET autenticada a odds-api.io. Auth: Authorization: Bearer {key}."""
+    """Llamada GET autenticada a odds-api.io. Auth: ?apiKey=KEY (query param)."""
     if not ODDSAPIIO_KEY:
         return None
     try:
+        merged = {**(params or {}), "apiKey": ODDSAPIIO_KEY}
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(
                 f"{_BASE}{path}",
-                params=params or {},
-                headers={"Authorization": f"Bearer {ODDSAPIIO_KEY}"},
+                params=merged,
             )
         if resp.status_code == 429:
             logger.warning("odds-api.io: rate limit 429")
@@ -205,12 +206,14 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
         data = await _get("/events", {"sport": sport_slug})
         if data is None:
             return []
-        events = data if isinstance(data, list) else data.get("data", data.get("events", []))
-        if not isinstance(events, list):
+        raw = data if isinstance(data, list) else data.get("data", data.get("events", []))
+        if not isinstance(raw, list):
             logger.warning("odds-api.io: /events respuesta inesperada para %s: %s", sport_slug, str(data)[:300])
             return []
+        # Filtrar solo partidos pendientes (no jugados ni cancelados)
+        events = [e for e in raw if e.get("status") == "pending"]
         _SPORT_EVENTS_CACHE[sport_slug] = (now, events)
-        logger.info("odds-api.io: /events %s → %d eventos cargados", sport_slug, len(events))
+        logger.info("odds-api.io: /events %s → %d pending (de %d totales)", sport_slug, len(events), len(raw))
         return events
 
 
@@ -243,8 +246,12 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
     away = (raw_event.get("awayTeam") or raw_event.get("away_team") or
             raw_event.get("away") or raw_event.get("teamAway") or "")
     ev_id = str(raw_event.get("id") or raw_event.get("eventId") or "")
-    competition = (raw_event.get("competition") or raw_event.get("league") or
-                   raw_event.get("tournament") or raw_event.get("competitionName") or "")
+    lg = raw_event.get("league") or {}
+    if isinstance(lg, dict):
+        competition = lg.get("slug") or lg.get("name") or ""
+    else:
+        competition = (raw_event.get("competition") or str(lg) or
+                       raw_event.get("tournament") or raw_event.get("competitionName") or "")
 
     if not home or not away:
         return None
@@ -415,11 +422,15 @@ async def get_league_odds(league: str) -> list[dict]:
         logger.info("odds-api.io: estructura evento keys=%s sample=%s", list(sample.keys()), str(sample)[:200])
 
     # Filtrar eventos que pertenecen a esta liga
+    # league es dict {"name": "...", "slug": "..."} en esta API
     keywords = _LEAGUE_KEYWORDS.get(league, [])
     filtered = []
     for ev in raw_events:
-        comp = (ev.get("competition") or ev.get("league") or
-                ev.get("tournament") or ev.get("competitionName") or "").lower()
+        lg = ev.get("league") or {}
+        if isinstance(lg, dict):
+            comp = f"{lg.get('slug', '')} {lg.get('name', '')}".lower()
+        else:
+            comp = str(lg).lower()
         if not keywords or any(kw in comp for kw in keywords):
             filtered.append(ev)
 
