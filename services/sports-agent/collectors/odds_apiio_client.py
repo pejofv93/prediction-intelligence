@@ -206,6 +206,17 @@ async def _find_sport_slug(category: str) -> str | None:
 # Slugs a probar en orden para fútbol — "soccer" suele ser el slug real en odds-api.io
 _FOOTBALL_SLUG_CANDIDATES = ["soccer", "football", "soccer_football"]
 
+# Casas de apuestas que /odds/multi requiere obligatoriamente (param "bookmakers").
+# Lista de IDs conocidos en odds-api.io — se envían como CSV.
+# Error "Missing bookmakers" si se omite. Usar los más comunes/disponibles.
+_DEFAULT_BOOKMAKERS = "bet365,bwin,1xbet,betfair,unibet"
+
+# Caché global de odds por eventId: {event_id: odds_item}
+# Compartido entre todas las ligas — se puebla una sola vez por ciclo de analyze.
+_ODDS_MAP_CACHE: dict[str, dict] = {}
+_ODDS_MAP_CACHED_AT: datetime | None = None
+_ODDS_MAP_LOCK = asyncio.Lock()
+
 
 def _cache_ttl(entry: dict) -> timedelta:
     """Devuelve el TTL aplicable a una entrada de caché según su flag error."""
@@ -366,37 +377,27 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
 
 async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
     """
-    GET /odds/multi?eventIds={id1,id2,...}
-    Máximo 10 IDs por llamada. Batchea internamente si hay más.
-    Usa _get_raw() en la primera llamada para loguear el body del 400 y diagnosticar
-    el formato correcto de eventIds que espera la API.
+    GET /odds/multi?eventIds={ids}&bookmakers={_DEFAULT_BOOKMAKERS}
+    Máximo 10 IDs por llamada. El param 'bookmakers' es obligatorio (error "Missing bookmakers" sin él).
+    En la primera llamada usa _get_raw para loguear el body si hay error.
     """
+    if not event_ids:
+        return []
     all_results = []
     _first_call = True
     for i in range(0, len(event_ids), 10):
         batch = event_ids[i:i+10]
+        params = {"eventIds": ",".join(batch), "bookmakers": _DEFAULT_BOOKMAKERS}
         if _first_call:
-            # Primera llamada: usar _get_raw para loguear body del 400 si ocurre
-            status, body, data = await _get_raw("/odds/multi", {"eventIds": ",".join(batch)})
+            status, body, data = await _get_raw("/odds/multi", params)
             _first_call = False
-            if status == 400:
-                logger.warning(
-                    "odds-api.io: /odds/multi 400 — body=%s (posible formato incorrecto de eventIds)",
-                    body[:300],
-                )
-                # Intentar formato alternativo: IDs como lista separada por pipes o espacios
-                status2, body2, data = await _get_raw("/odds/multi", {"eventId": batch[0]})
-                if status2 == 200:
-                    logger.info("odds-api.io: /odds/multi funciona con 'eventId' singular: body=%s", body2[:200])
-                else:
-                    logger.warning("odds-api.io: /odds/multi eventId singular también falla: status=%d body=%s",
-                                   status2, body2[:200])
-                    continue
-            elif status != 200:
-                logger.warning("odds-api.io: /odds/multi HTTP %d body=%s", status, body[:200])
+            if status != 200:
+                logger.warning("odds-api.io: /odds/multi HTTP %d body=%s", status, body[:300])
+                if status == 429:
+                    break  # rate limit — no seguir con más batches
                 continue
         else:
-            data = await _get("/odds/multi", {"eventIds": ",".join(batch)})
+            data = await _get("/odds/multi", params)
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("data", data.get("odds", []))
@@ -404,6 +405,31 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
             all_results.extend(items)
         quota.track_monthly("oddsapiio")
     return all_results
+
+
+async def _fetch_odds_map_for_events(event_ids: list[str]) -> dict[str, dict]:
+    """
+    Obtiene el mapa {event_id: odds_item} para una lista de IDs.
+    Usa _ODDS_MAP_CACHE para compartir resultados entre todas las ligas del mismo analyze.
+    TTL 4h (mismo que los eventos). Si el caché es fresco, devuelve directamente
+    los IDs pedidos sin ningún HTTP extra.
+    """
+    global _ODDS_MAP_CACHED_AT
+    now = datetime.now(timezone.utc)
+
+    async with _ODDS_MAP_LOCK:
+        # Si el caché global de odds es válido, simplemente filtra los IDs pedidos
+        if _ODDS_MAP_CACHED_AT and (now - _ODDS_MAP_CACHED_AT) < _TTL_OK and _ODDS_MAP_CACHE:
+            return {eid: _ODDS_MAP_CACHE[eid] for eid in event_ids if eid in _ODDS_MAP_CACHE}
+
+        # Caché expirado o vacío — poblar con los IDs pedidos
+        items = await _fetch_odds_batch(event_ids)
+        for item in items:
+            eid = str(item.get("eventId") or item.get("id") or "")
+            if eid:
+                _ODDS_MAP_CACHE[eid] = item
+        _ODDS_MAP_CACHED_AT = now
+        return {eid: _ODDS_MAP_CACHE[eid] for eid in event_ids if eid in _ODDS_MAP_CACHE}
 
 
 def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
@@ -554,11 +580,13 @@ def clear_caches() -> dict:
     Limpia todos los cachés en memoria de odds-api.io.
     Útil tras un rate limit 429 para forzar reintento inmediato.
     """
-    global _SPORTS_CACHE, _SPORTS_CACHED_AT
+    global _SPORTS_CACHE, _SPORTS_CACHED_AT, _ODDS_MAP_CACHED_AT
     n_events = len(_SPORT_EVENTS_CACHE)
     n_leagues = len(_EVENT_CACHE)
     _SPORT_EVENTS_CACHE.clear()
     _EVENT_CACHE.clear()
+    _ODDS_MAP_CACHE.clear()
+    _ODDS_MAP_CACHED_AT = None
     _SPORTS_CACHE = {}
     _SPORTS_CACHED_AT = None
     logger.info("odds-api.io: cachés limpiados (sports=%d, events=%d ligas)", n_events, n_leagues)
@@ -685,14 +713,11 @@ async def get_league_odds(league: str) -> list[dict]:
             _EVENT_CACHE[league] = {"events": [], "error": True, "cached_at": now}
             return []
 
-        # Obtener odds en batches de 10
+        # Obtener odds via caché global — compartido entre todas las ligas del analyze
+        # (evita N×batches de /odds/multi, una sola carga para todas las ligas)
         event_ids = [str(ev.get("id") or ev.get("eventId") or "") for ev in filtered
                      if ev.get("id") or ev.get("eventId")]
-        odds_map: dict[str, dict] = {}
-        for item in await _fetch_odds_batch(event_ids):
-            eid = str(item.get("eventId") or item.get("id") or "")
-            if eid:
-                odds_map[eid] = item
+        odds_map = await _fetch_odds_map_for_events(event_ids)
 
         normalised = []
         for ev in filtered:
