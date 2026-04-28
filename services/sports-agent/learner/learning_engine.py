@@ -324,6 +324,34 @@ async def run_daily_learning() -> None:
                 "error_type": error_type,
             })
 
+            # Sincronizar shadow_trade — crea el doc si no existe, luego lo resuelve
+            try:
+                from shared.shadow_engine import track_new_signal, update_trade_result
+                shadow_result = "win" if correct else "loss"
+                existing = list(
+                    col("shadow_trades")
+                    .where("signal_id", "==", str(match_id))
+                    .where("source", "==", "sports")
+                    .limit(1)
+                    .stream()
+                )
+                if existing:
+                    trade_id = existing[0].id
+                    created = False
+                else:
+                    trade_id = await track_new_signal(prediction, "sports")
+                    created = True
+                await update_trade_result(trade_id, shadow_result)
+                logger.info(
+                    "run_daily_learning: shadow_trade %s → %s (%s trade_id=%s)",
+                    match_id, shadow_result, "created" if created else "updated", trade_id,
+                )
+            except Exception:
+                logger.error(
+                    "run_daily_learning: error sincronizando shadow_trade para %s",
+                    match_id, exc_info=True,
+                )
+
             logger.debug(
                 "run_daily_learning: %s → %s | correct=%s error=%s",
                 match_id, actual_result, correct, error_type,
