@@ -425,7 +425,11 @@ async def _fetch_oddsapiio(
     try:
         from collectors.odds_apiio_client import get_league_odds
         events = await get_league_odds(league)
-        _ODDSAPIIO_CACHE[league] = (now, events)
+        # Solo cachear si hay eventos reales — si [] no almacenar aquí:
+        # odds_apiio_client._EVENT_CACHE ya tiene TTL 60s para errores y
+        # cachear (now, []) aquí con 4h bloquearía reintentos (age=0min).
+        if events:
+            _ODDSAPIIO_CACHE[league] = (now, events)
     except Exception:
         logger.error("_fetch_oddsapiio(%s): error llamando cliente", match_id, exc_info=True)
         return None
