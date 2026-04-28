@@ -209,7 +209,7 @@ _FOOTBALL_SLUG_CANDIDATES = ["soccer", "football", "soccer_football"]
 # Casas de apuestas que /odds/multi requiere obligatoriamente (param "bookmakers").
 # Lista de IDs conocidos en odds-api.io — se envían como CSV.
 # Error "Missing bookmakers" si se omite. Usar los más comunes/disponibles.
-_DEFAULT_BOOKMAKERS = "Bet365,Betfair ES,Bwin ES,Unibet,1xbet,888Sport"
+_DEFAULT_BOOKMAKERS = "Bet365,Unibet"
 
 # Caché global de odds por eventId: {event_id: odds_item}
 # Compartido entre todas las ligas — se puebla una sola vez por ciclo de analyze.
