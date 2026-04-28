@@ -296,6 +296,9 @@ async def fetch_bookmaker_odds(
     2b. OddsPapi v1 fallback — usa caché ya cargada en el pre-fetch, lookup en memoria
     Devuelve {bookmaker, home_odds, draw_odds, away_odds, opening_home_odds} o None.
     """
+    # DIAG: si este log no aparece → generate_signal() sale antes de llegar aquí (Poisson guard)
+    logger.warning("DIAG_FBO: iniciando fetch para match_id=%s league=%s", match_id, league)
+    """
     now = datetime.now(timezone.utc)
     cache_ttl = timedelta(hours=4)
 
@@ -898,10 +901,17 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
 
     # Fix 1: futbol sin Poisson valido → descartar siempre (cold-start no genera senales reales)
     if sport == "football" and enriched_match.get("poisson_home_win") is None:
+        # DIAG: elo_home_win_prob=None + form=50/50 → team_stats vacíos en Firestore (collect no corrió)
+        #       elo=valor + form≠50 → team_stats OK pero raw_matches < MIN_MATCHES_TO_FIT (3)
         logger.warning(
-            "generate_signal(%s): futbol sin datos Poisson suficientes — descartado "
-            "(%s vs %s, raw_matches insuficientes para uno o ambos equipos)",
-            match_id, home_team, away_team,
+            "DIAG_POISSON_GUARD: %s vs %s [%s] — poisson=None quality=%s "
+            "elo=%.3f form=%.1f/%.1f — fetch_bookmaker_odds NO se llamará "
+            "(causa: team_stats sin raw_matches suficientes en Firestore)",
+            home_team, away_team, league,
+            enriched_match.get("data_quality", "?"),
+            enriched_match.get("elo_home_win_prob") or -1.0,
+            enriched_match.get("home_form_score", 50.0),
+            enriched_match.get("away_form_score", 50.0),
         )
         return []
 
