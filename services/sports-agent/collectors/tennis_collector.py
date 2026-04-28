@@ -87,15 +87,24 @@ def _get_league_code(tournament_name: str, tour: str = "atp") -> str:
 
 
 async def get_active_tournaments() -> list[dict]:
-    """Devuelve torneos ATP y WTA activos o próximos."""
-    data = await _request("/tournaments")
-    if data is None:
-        return []
-    results = data.get("results", data if isinstance(data, list) else [])
-    if not isinstance(results, list):
-        logger.warning("tennis_collector: formato inesperado en /tournaments: %s", type(results))
-        return []
-    logger.info("tennis_collector: %d torneos obtenidos", len(results))
+    """Devuelve torneos ATP y WTA activos o próximos.
+    tennisapi1 usa /atp/tournaments y /wta/tournaments (no /tournaments).
+    """
+    atp = await _request("/atp/tournaments")
+    wta = await _request("/wta/tournaments")
+    results = []
+    for data, tour_label in [(atp, "atp"), (wta, "wta")]:
+        if data is None:
+            continue
+        items = data.get("results", data.get("tournaments", data if isinstance(data, list) else []))
+        if isinstance(items, list):
+            for t in items:
+                t["_tour"] = tour_label
+            results.extend(items)
+    if not results:
+        logger.warning("tennis_collector: sin torneos obtenidos (atp=%s wta=%s)", atp is not None, wta is not None)
+    else:
+        logger.info("tennis_collector: %d torneos obtenidos", len(results))
     return results
 
 
@@ -233,7 +242,8 @@ async def collect_tennis_matches(days: int = 7) -> list[dict]:
     for t in tournaments[:20]:  # max 20 torneos para no agotar budget
         t_id = t.get("id", t.get("tournament_id", t.get("tournament", {}).get("id")))
         t_name = t.get("name", t.get("tournament", {}).get("name", "Unknown"))
-        tour = t.get("type", t.get("tour", t.get("category", "atp"))).lower()
+        # _tour inyectado por get_active_tournaments; fallback a detección por nombre
+        tour = t.get("_tour", t.get("type", t.get("tour", t.get("category", "atp")))).lower()
         if "wta" in str(tour).lower() or "women" in str(t_name).lower():
             tour = "wta"
         else:

@@ -217,13 +217,14 @@ async def test_tennis() -> dict:
     Llama /tournaments y devuelve status + primeros 2 torneos.
     """
     from collectors.tennis_collector import _request as tennis_request
-    data = await tennis_request("/tournaments")
+    data = await tennis_request("/atp/tournaments")
     if data is None:
         return {"ok": False, "error": "sin respuesta — verificar key o host en tennisapi1"}
-    results = data.get("results", data if isinstance(data, list) else [])
+    results = data.get("results", data.get("tournaments", data if isinstance(data, list) else []))
     return {
         "ok": True,
         "host": "tennisapi1.p.rapidapi.com",
+        "endpoint": "/atp/tournaments",
         "total": len(results) if isinstance(results, list) else "?",
         "sample": results[:2] if isinstance(results, list) else results,
     }
