@@ -1032,6 +1032,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             or (_THE_ODDS_API_EXHAUSTED and quota.all_monthly_exhausted(["oddspapi"]))
         )
         if all_sources_down:
+            # No crear _synthetic si ya existe predicción plain con odds reales
+            try:
+                plain_doc = col("predictions").document(match_id).get()
+                if plain_doc.exists and plain_doc.to_dict().get("data_source") == "statistical_model":
+                    logger.info(
+                        "generate_signal(%s): plain ya existe — omitiendo _synthetic", match_id
+                    )
+                    return []
+            except Exception:
+                pass  # si falla el check, continúa con el flujo normal
             return await _generate_poisson_signal(
                 enriched_match, match_id, str(home_team), str(away_team),
                 league, sport, match_date, weights_version, result_home, result_away,
