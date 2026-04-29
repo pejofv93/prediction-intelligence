@@ -42,9 +42,9 @@ async def check_and_alert(analysis: dict) -> bool:
             analysis.get("market_id"), abs(edge), POLY_MIN_EDGE,
         )
         return False
-    if confidence <= POLY_MIN_CONFIDENCE:
+    if confidence < POLY_MIN_CONFIDENCE:
         logger.debug(
-            "check_and_alert(%s): conf=%.3f <= %.3f — omitida",
+            "check_and_alert(%s): conf=%.3f < %.3f — omitida",
             analysis.get("market_id"), confidence, POLY_MIN_CONFIDENCE,
         )
         return False

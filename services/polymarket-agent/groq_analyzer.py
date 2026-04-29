@@ -267,9 +267,6 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         return None
 
     volume_24h = float(market_data.get("volume_24h", 0))
-    if volume_24h < 5000:
-        logger.debug("analyze_market(%s): volumen insuficiente (%.0f)", market_id, volume_24h)
-        return None
 
     now_utc = datetime.now(timezone.utc)
     end_date = market_data.get("end_date")
