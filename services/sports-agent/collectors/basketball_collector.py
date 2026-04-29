@@ -1,41 +1,96 @@
 """
 Collector de baloncesto — wrapper sobre api_sports_client.py.
 Añade H2H y enriquecimiento de stats para el basketball_analyzer.
+
+Ligas soportadas (api-basketball.p.rapidapi.com):
+  NBA        — vía get_games_today("nba"), sin filtro de liga
+  ACB        — league_id=116  (Liga Endesa, España)
+  EUROLEAGUE — league_id=120  (Turkish Airlines EuroLeague)
+  NCAA       — league_id pendiente; se descubre con discover_leagues("NCAA")
+  EUROBASKET — league_id pendiente; torneo bienal FIBA, puede estar inactivo
 """
 import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from collectors.api_sports_client import get_games_today, get_team_stats_bdl
+from collectors.api_sports_client import (
+    discover_leagues,
+    get_games_by_league,
+    get_games_today,
+    get_team_stats_bdl,
+)
 from collectors.stats_processor import (
-    build_results_list, calculate_form_score, detect_streak,
+    build_results_list,
+    calculate_form_score,
+    detect_streak,
 )
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
+# Ligas con league_id confirmado en api-basketball.p.rapidapi.com
+_LEAGUES_BY_ID: dict[str, int] = {
+    "ACB":        116,   # Liga Endesa — España
+    "EUROLEAGUE": 120,   # Turkish Airlines EuroLeague
+    # NCAA y EuroBasket: descomentar cuando los logs confirmen los IDs
+    # "NCAA":       ???,
+    # "EUROBASKET": ???,
+}
+
+# Términos de búsqueda para discover_leagues() — se ejecuta una vez por collect
+# para loguear los IDs de ligas aún no confirmadas
+_LEAGUES_TO_DISCOVER = ["NCAA", "EuroBasket"]
+
 
 async def collect_basketball_games(days: int = 1) -> list[dict]:
     """
-    Recopila partidos NBA y Euroleague de hoy.
+    Recopila partidos NBA, ACB y Euroleague de hoy.
     Devuelve lista normalizada compatible con save_upcoming_matches.
     """
     if not os.environ.get("FOOTBALL_RAPID_API_KEY"):
         logger.warning("basketball_collector: FOOTBALL_RAPID_API_KEY no configurada — omitiendo baloncesto")
         return []
 
-    sports = ["nba", "euroleague"]
     all_games: list[dict] = []
 
-    for sport in sports:
-        games = await get_games_today(sport)
-        for g in games:
-            g.setdefault("sport", sport)
-            g.setdefault("league", sport.upper())
-        all_games.extend(games)
+    # --- NBA via sport type (sin filtro de liga) ---
+    nba_games = await get_games_today("nba")
+    for g in nba_games:
+        g.setdefault("sport", "nba")
+        g.setdefault("league", "NBA")
+    if nba_games:
+        logger.info("basketball NBA: %d partidos obtenidos", len(nba_games))
+    else:
+        logger.info("basketball NBA: sin partidos (offseason o liga inactiva)")
+    all_games.extend(nba_games)
 
-    logger.info("basketball_collector: %d partidos de baloncesto", len(all_games))
+    # --- Ligas por league_id ---
+    for league_name, league_id in _LEAGUES_BY_ID.items():
+        try:
+            games = await get_games_by_league(league_id)
+            for g in games:
+                g.setdefault("sport", "basketball")
+                g.setdefault("league", league_name)
+            if games:
+                logger.info("basketball %s (id=%d): %d partidos obtenidos",
+                            league_name, league_id, len(games))
+            else:
+                logger.info("basketball %s (id=%d): sin partidos (offseason o liga inactiva)",
+                            league_name, league_id)
+            all_games.extend(games)
+        except Exception:
+            logger.error("basketball_collector: error colectando %s (id=%d)",
+                         league_name, league_id, exc_info=True)
+
+    # --- Discovery de ligas con IDs aún no confirmados (solo loguea, no bloquea) ---
+    for search_term in _LEAGUES_TO_DISCOVER:
+        try:
+            await discover_leagues(search_term)
+        except Exception:
+            logger.error("basketball_collector: error en discover_leagues(%r)", search_term, exc_info=True)
+
+    logger.info("basketball_collector: %d partidos totales de baloncesto", len(all_games))
     return all_games
 
 
@@ -66,7 +121,6 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                 form_score = calculate_form_score(results[:10])
                 streak = detect_streak(results[:10])
 
-                # Extraer nombre del equipo
                 team_name = ""
                 for m in raw:
                     if m.get("home_team_id") == team_id:
@@ -99,7 +153,7 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                     "form_score": form_score,
                     "streak": streak,
                     "raw_matches": raw_matches_fmt,
-                    "xg_per_game": 0.0,   # no aplica baloncesto
+                    "xg_per_game": 0.0,
                     "updated_at": datetime.now(timezone.utc),
                 }
 

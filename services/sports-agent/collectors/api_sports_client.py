@@ -185,6 +185,54 @@ async def get_games_today(sport: str) -> list[dict]:
     return games
 
 
+_BASKETBALL_HOST = "api-basketball.p.rapidapi.com"
+
+
+async def get_games_by_league(league_id: int, date_str: str | None = None) -> list[dict]:
+    """
+    GET /games?date=&league=ID via api-basketball.p.rapidapi.com.
+    Usado para ligas con ID conocido: ACB (116), Euroleague (120), etc.
+    """
+    today = date_str or datetime.now(timezone.utc).date().isoformat()
+    data = await _request(_BASKETBALL_HOST, "/games", {"date": today, "league": league_id})
+    if not data:
+        return []
+
+    games = []
+    for item in data.get("response", []):
+        try:
+            games.append(_parse_game(item, "basketball"))
+        except Exception:
+            logger.error("Error parseando game league_id=%d", league_id, exc_info=True)
+
+    logger.info("get_games_by_league(%d): %d partidos hoy", league_id, len(games))
+    return games
+
+
+async def discover_leagues(search: str) -> list[dict]:
+    """
+    GET /leagues?search=term — descubre league_ids en api-basketball.
+    Solo para diagnóstico: loguea los resultados, no persiste nada.
+    """
+    data = await _request(_BASKETBALL_HOST, "/leagues", {"search": search})
+    if not data:
+        return []
+    results = []
+    for item in data.get("response", []):
+        league = item.get("league", {})
+        country = item.get("country", {})
+        entry = {
+            "id": league.get("id"),
+            "name": league.get("name"),
+            "type": league.get("type"),
+            "country": country.get("name"),
+        }
+        results.append(entry)
+        logger.info("discover_leagues(%r): id=%s name=%r country=%r type=%r",
+                    search, entry["id"], entry["name"], entry["country"], entry["type"])
+    return results
+
+
 async def get_team_stats_bdl(
     sport: str, team_id: int, last_n: int = 10
 ) -> list[dict]:
