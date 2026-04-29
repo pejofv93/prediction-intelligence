@@ -64,13 +64,13 @@ async def price_momentum(market_id: str) -> str:
 
 
 async def volume_spike(market_id: str) -> bool:
-    """True si vol_24h_actual > 3 x media de los ultimos 7 dias."""
+    """True si vol_24h_actual > 3 x media de los ultimos 3 dias (min 2 snapshots)."""
     try:
-        cutoff_7d = datetime.now(timezone.utc) - timedelta(days=7)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=3)
         docs = (
             col("poly_price_history")
             .where("market_id", "==", market_id)
-            .where("timestamp", ">=", cutoff_7d)
+            .where("timestamp", ">=", cutoff)
             .order_by("timestamp")
             .stream()
         )
