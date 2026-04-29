@@ -58,7 +58,7 @@ def _classify_sentiment(text: str) -> float:
 
 def _fetch_ddg_news(query: str) -> list[dict]:
     """Síncrono — se llama desde run_in_executor para no bloquear el event loop."""
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     with DDGS() as ddgs:
         return list(ddgs.news(query, max_results=5))
 

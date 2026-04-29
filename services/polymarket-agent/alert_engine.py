@@ -36,10 +36,12 @@ async def check_and_alert(analysis: dict) -> bool:
     volume_spike = bool(analysis.get("volume_spike", False))
     smart_money = bool(analysis.get("smart_money_detected", False))
 
-    if abs(edge) <= POLY_MIN_EDGE:
+    # Umbral dinámico: conf >= 0.75 acepta edge >= 0.07 (señal sólida, margen menor)
+    effective_min_edge = 0.07 if confidence >= 0.75 else POLY_MIN_EDGE
+    if abs(edge) < effective_min_edge:
         logger.debug(
-            "check_and_alert(%s): abs(edge)=%.3f <= %.3f — omitida",
-            analysis.get("market_id"), abs(edge), POLY_MIN_EDGE,
+            "check_and_alert(%s): abs(edge)=%.3f < %.3f (effective, conf=%.2f) — omitida",
+            analysis.get("market_id"), abs(edge), effective_min_edge, confidence,
         )
         return False
     if confidence < POLY_MIN_CONFIDENCE:
