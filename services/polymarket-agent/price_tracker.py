@@ -76,6 +76,8 @@ async def volume_spike(market_id: str) -> bool:
         )
         snapshots = [d.to_dict() for d in docs]
         if len(snapshots) < 2:
+            if snapshots:
+                return float(snapshots[0].get("volume_24h", 0)) > 50_000
             return False
 
         current_vol = float(snapshots[-1].get("volume_24h", 0))
