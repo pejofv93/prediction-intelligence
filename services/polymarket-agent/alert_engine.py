@@ -61,29 +61,29 @@ def _load_learned_thresholds() -> dict:
 
 async def check_and_alert(analysis: dict) -> bool:
     """
-    Envia alerta Telegram si:
-      abs(edge) > POLY_MIN_EDGE (0.08)
-      confidence > POLY_MIN_CONFIDENCE (0.65)
-    edge positivo → BUY_YES; edge negativo → BUY_NO.
-    volume_spike y smart_money son señales bonus incluidas en el mensaje, no requisito.
-    Verifica en alerts_sent que no se haya enviado ya.
-    NO usa on_snapshot — llama directamente POST {TELEGRAM_BOT_URL}/send-alert.
-      Body: {"type": "polymarket", "data": analysis}
-      Header: x-cloud-token
-      Si falla el POST → loggear y continuar (no bloquear el pipeline)
-    Devuelve True si envio alerta.
+    Envía alerta Telegram si los umbrales aprendidos se cumplen.
+    Deduplicación atómica via transacción Firestore sobre doc de ID determinista
+    (alert_key), eliminando la race condition read-then-write.
+
+    Flujo:
+      1. Validar thresholds (edge / confidence por dirección).
+      2. Transacción Firestore: check-and-claim en un solo op atómico.
+         Si la transacción falla (contention: otro request ya reclamó), no enviar.
+      3. POST Telegram.
+      4. Marcar doc dedup como "sent" y actualizar poly_predictions.alerted.
     """
     import os
     import httpx
-    from datetime import datetime, timezone
-    from shared.firestore_client import col
+    from datetime import datetime, timedelta, timezone
+    from google.cloud import firestore as _firestore
+    from shared.firestore_client import col, get_client
 
     edge = float(analysis.get("edge", 0.0))
     confidence = float(analysis.get("confidence", 0.0))
     volume_spike = bool(analysis.get("volume_spike", False))
     smart_money = bool(analysis.get("smart_money_detected", False))
 
-    # Cargar umbrales aprendidos por dirección desde poly_model_weights
+    # --- Umbrales aprendidos por dirección ---
     thresholds = _load_learned_thresholds()
     direction = "BUY_YES" if edge >= 0 else "BUY_NO"
     dir_key = "buy_yes" if direction == "BUY_YES" else "buy_no"
@@ -103,62 +103,90 @@ async def check_and_alert(analysis: dict) -> bool:
         )
         return False
 
-    logger.info(
-        "check_and_alert(%s): pasa thresholds %s edge=%.3f>=%.3f conf=%.2f>=%.2f vol_spike=%s sm=%s",
-        analysis.get("market_id"), direction,
-        abs(edge), effective_min_edge, confidence, effective_min_conf,
-        volume_spike, smart_money,
-    )
-
     market_id = str(analysis.get("market_id") or "")
     if not market_id:
         logger.warning("check_and_alert: market_id vacío — alerta omitida sin guardar dedup")
         return False
-    current_price = float(analysis.get("market_price_yes", 0.5))
-    alert_key = f"{market_id}_{round(edge, 2)}"
 
-    # Re-alerta permitida si >24h desde la última Y precio cambió >5%
-    try:
-        from datetime import timedelta
-        _cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-        _existing = list(
-            col("alerts_sent")
-            .where("market_id", "==", market_id)
-            .order_by("sent_at", direction="DESCENDING")
-            .limit(1)
-            .stream(timeout=10.0)
-        )
-        if _existing:
-            _last = _existing[0].to_dict()
-            _last_sent = _last.get("sent_at")
-            if _last_sent and hasattr(_last_sent, "tzinfo") and _last_sent.tzinfo is None:
-                _last_sent = _last_sent.replace(tzinfo=timezone.utc)
-            _last_price = float(_last.get("last_price", current_price))
-            _price_chg = abs(current_price - _last_price) / max(_last_price, 0.001)
-            if _last_sent and _last_sent > _cutoff_24h:
-                logger.debug("check_and_alert(%s): alerta reciente (<24h) omitida", market_id)
+    logger.info(
+        "check_and_alert(%s): pasa thresholds %s edge=%.3f>=%.3f conf=%.2f>=%.2f vol_spike=%s sm=%s",
+        market_id, direction,
+        abs(edge), effective_min_edge, confidence, effective_min_conf,
+        volume_spike, smart_money,
+    )
+
+    current_price = float(analysis.get("market_price_yes", 0.5))
+    # ID determinista: misma señal (mismo mercado + misma magnitud de edge) = mismo doc.
+    alert_key = f"{market_id}_{round(edge, 2)}"
+    now = datetime.now(timezone.utc)
+    cutoff_24h = now - timedelta(hours=24)
+
+    db = get_client()
+    dedup_ref = col("alerts_sent").document(alert_key)
+
+    # --- Transacción atómica: check-and-claim ---
+    # Si dos requests concurrentes llegan aquí simultáneamente, solo uno ganará.
+    # El perdedor recibe Aborted/contention y no envía.
+    @_firestore.transactional
+    def _claim(transaction: _firestore.Transaction) -> bool:
+        snap = dedup_ref.get(transaction=transaction)
+        if snap.exists:
+            data = snap.to_dict()
+            sent_at = data.get("sent_at")
+            if sent_at and hasattr(sent_at, "tzinfo") and sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+            last_price = float(data.get("last_price", current_price))
+            price_chg = abs(current_price - last_price) / max(last_price, 0.001)
+
+            if sent_at and sent_at > cutoff_24h:
+                logger.debug("check_and_alert(%s): alerta reciente (<24h) omitida [tx]", market_id)
                 return False
-            if _price_chg <= 0.05:
+            if price_chg <= 0.05:
                 logger.debug(
-                    "check_and_alert(%s): precio sin cambio significativo (%.1f%%) — omitida",
-                    market_id, _price_chg * 100,
+                    "check_and_alert(%s): precio sin cambio (%.1f%%) omitida [tx]",
+                    market_id, price_chg * 100,
                 )
                 return False
             logger.info(
-                "check_and_alert(%s): re-alerta permitida — >24h y precio cambió %.1f%%",
-                market_id, _price_chg * 100,
+                "check_and_alert(%s): re-alerta permitida — >24h y precio cambió %.1f%% [tx]",
+                market_id, price_chg * 100,
             )
-    except Exception:
-        logger.error("check_and_alert(%s): error comprobando dedup", market_id, exc_info=True)
 
-    # Enviar alerta al bot de Telegram
+        # Reclamar el slot atómicamente — status="pending" hasta confirmar el POST
+        transaction.set(dedup_ref, {
+            "alert_key": alert_key,
+            "market_id": market_id,
+            "last_price": current_price,
+            "sent_at": now,
+            "type": "polymarket",
+            "status": "pending",
+        })
+        return True
+
+    try:
+        should_send = _claim(db.transaction())
+    except Exception:
+        logger.error(
+            "check_and_alert(%s): transacción dedup falló (contention o error) — omitida",
+            market_id, exc_info=True,
+        )
+        return False
+
+    if not should_send:
+        return False
+
+    # --- POST Telegram ---
     if not TELEGRAM_BOT_URL:
         logger.warning("check_and_alert: TELEGRAM_BOT_URL no configurada — alerta no enviada")
+        # Revertir claim para no bloquear futuros intentos
+        try:
+            dedup_ref.delete()
+        except Exception:
+            pass
         return False
 
     cloud_run_token = os.environ.get("CLOUD_RUN_TOKEN", "")
 
-    # Serializar a JSON-safe: convertir datetime a ISO string
     def _to_json_safe(obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
@@ -182,24 +210,26 @@ async def check_and_alert(analysis: dict) -> bool:
                 "check_and_alert(%s): telegram-bot respondio %d",
                 market_id, resp.status_code,
             )
+            # Revertir claim para que el error no bloquee futuros reintentos
+            try:
+                dedup_ref.delete()
+            except Exception:
+                pass
             return False
     except Exception:
         logger.error("check_and_alert(%s): error enviando alerta", market_id, exc_info=True)
+        try:
+            dedup_ref.delete()
+        except Exception:
+            pass
         return False
 
-    # Guardar dedup record DESPUÉS del POST exitoso
+    # --- Confirmar: status pending → sent ---
     try:
-        col("alerts_sent").add({
-            "alert_key": alert_key,
-            "market_id": market_id,
-            "last_price": current_price,
-            "sent_at": datetime.now(timezone.utc),
-            "type": "polymarket",
-        })
+        dedup_ref.update({"status": "sent"})
     except Exception:
-        logger.error(
-            "check_and_alert(%s): error guardando dedup en alerts_sent",
-            market_id, exc_info=True,
+        logger.warning(
+            "check_and_alert(%s): no se pudo marcar status=sent (no crítico)", market_id,
         )
 
     # Marcar como alertado en poly_predictions
