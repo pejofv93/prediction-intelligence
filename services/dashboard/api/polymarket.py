@@ -49,7 +49,7 @@ async def get_poly() -> list[dict]:
             "market_id", "question", "market_price_yes", "real_prob",
             "edge", "confidence", "trend", "recommendation",
             "volume_spike", "smart_money_detected", "key_factors",
-            "reasoning", "analyzed_at", "alerted",
+            "reasoning", "analyzed_at", "alerted", "category",
         }
         result = []
         for d in docs:

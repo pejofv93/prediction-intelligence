@@ -9,6 +9,21 @@ interface Stats {
   correct_predictions: number
 }
 
+interface PolyStats {
+  version: number
+  updated_at: string | null
+  buy_yes_min_edge: number
+  buy_yes_min_confidence: number
+  buy_no_min_edge: number
+  buy_no_min_confidence: number
+  accuracy_overall: number
+  accuracy_buy_yes: number
+  accuracy_buy_no: number
+  sample_size: number
+  sample_buy_yes: number
+  sample_buy_no: number
+}
+
 const LEAGUE_NAMES: Record<string, string> = {
   PL: '🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League',
   PD: '🇪🇸 La Liga',
@@ -107,6 +122,66 @@ function WeightsHistoryTable({ history }: { history: Stats['weights_history'] })
   )
 }
 
+function PolyModelSection() {
+  const { data, loading } = useApi<PolyStats>('/api/poly-stats')
+
+  if (loading) return <p style={{ color: '#888', fontSize: 12, padding: '8px 0' }}>Cargando modelo Polymarket...</p>
+  if (!data) return null
+
+  const updatedStr = data.updated_at
+    ? new Date(data.updated_at).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '—'
+  const accuracyColor = data.accuracy_overall >= 0.65 ? '#00C853' : data.accuracy_overall >= 0.50 ? '#F7931A' : '#FF5252'
+
+  return (
+    <div style={{ background: '#141414', border: '1px solid #2a2a2a', borderRadius: 8, padding: '16px 20px', marginTop: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ color: '#444', fontSize: 11, letterSpacing: 0.5 }}>POLYMARKET MODEL v{data.version}</div>
+        <div style={{ color: '#555', fontSize: 11 }}>actualizado {updatedStr}</div>
+      </div>
+
+      {/* KPI row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10, marginBottom: 16 }}>
+        <div style={{ background: '#1e1e1e', border: '1px solid #2e2e2e', borderRadius: 6, padding: '10px 14px' }}>
+          <div style={{ color: '#555', fontSize: 10, marginBottom: 4 }}>ACCURACY GLOBAL</div>
+          <div style={{ color: accuracyColor, fontSize: 24, fontWeight: 'bold', lineHeight: 1 }}>
+            {(data.accuracy_overall * 100).toFixed(1)}%
+          </div>
+          <div style={{ color: '#444', fontSize: 10, marginTop: 4 }}>{data.sample_size} resueltas</div>
+        </div>
+        <div style={{ background: '#1e1e1e', border: '1px solid #2e2e2e', borderRadius: 6, padding: '10px 14px' }}>
+          <div style={{ color: '#555', fontSize: 10, marginBottom: 4 }}>BUY YES</div>
+          <div style={{ color: '#00C853', fontSize: 13, fontWeight: 'bold' }}>
+            edge ≥ {(data.buy_yes_min_edge * 100).toFixed(1)}%
+          </div>
+          <div style={{ color: '#888', fontSize: 12 }}>
+            conf ≥ {(data.buy_yes_min_confidence * 100).toFixed(0)}%
+          </div>
+          <div style={{ color: '#444', fontSize: 10, marginTop: 4 }}>
+            acc {(data.accuracy_buy_yes * 100).toFixed(1)}% ({data.sample_buy_yes})
+          </div>
+        </div>
+        <div style={{ background: '#1e1e1e', border: '1px solid #2e2e2e', borderRadius: 6, padding: '10px 14px' }}>
+          <div style={{ color: '#555', fontSize: 10, marginBottom: 4 }}>BUY NO</div>
+          <div style={{ color: '#FF5252', fontSize: 13, fontWeight: 'bold' }}>
+            edge ≥ {(data.buy_no_min_edge * 100).toFixed(1)}%
+          </div>
+          <div style={{ color: '#888', fontSize: 12 }}>
+            conf ≥ {(data.buy_no_min_confidence * 100).toFixed(0)}%
+          </div>
+          <div style={{ color: '#444', fontSize: 10, marginTop: 4 }}>
+            acc {(data.accuracy_buy_no * 100).toFixed(1)}% ({data.sample_buy_no})
+          </div>
+        </div>
+      </div>
+
+      <div style={{ color: '#444', fontSize: 11, borderTop: '1px solid #222', paddingTop: 10 }}>
+        Umbrales ajustados automáticamente por poly_learning_engine tras cada resolución.
+      </div>
+    </div>
+  )
+}
+
 export default function ModelStats() {
   const { data, loading, error } = useApi<Stats>('/api/stats')
 
@@ -189,6 +264,8 @@ export default function ModelStats() {
           </div>
         </div>
       )}
+
+      <PolyModelSection />
     </div>
   )
 }
