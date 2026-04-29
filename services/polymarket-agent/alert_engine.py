@@ -56,7 +56,10 @@ async def check_and_alert(analysis: dict) -> bool:
         analysis.get("market_id"), edge, confidence, volume_spike, smart_money,
     )
 
-    market_id = analysis.get("market_id", "unknown")
+    market_id = str(analysis.get("market_id") or "")
+    if not market_id:
+        logger.warning("check_and_alert: market_id vacío — alerta omitida sin guardar dedup")
+        return False
     current_price = float(analysis.get("market_price_yes", 0.5))
     alert_key = f"{market_id}_{round(edge, 2)}"
 
