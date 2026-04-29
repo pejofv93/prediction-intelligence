@@ -910,6 +910,18 @@ async def _send_telegram_alert(prediction: dict) -> bool:
         return False
 
 
+# Palabras clave de equipos top-6 por liga para el filtro de underdog extremo.
+# Comparación case-insensitive contra los nombres completos de football-data.org.
+_TOP6_KEYWORDS: dict[str, list[str]] = {
+    "PD":  ["real madrid", "barcelona", "atlético", "atletico", "athletic", "villarreal", "real sociedad"],
+    "SA":  ["inter", "napoli", "atalanta", "juventus", "lazio", "fiorentina"],
+    "PL":  ["manchester city", "arsenal", "liverpool", "chelsea", "manchester united", "aston villa"],
+    "BL1": ["bayern", "leverkusen", "dortmund", "leipzig", "frankfurt", "stuttgart"],
+}
+
+_EXTREME_UNDERDOG_ODDS = 5.0  # cuota máxima permitida cuando el rival es top-6
+
+
 async def generate_signal(enriched_match: dict) -> list[dict]:
     """
     Pipeline completo de generacion de senal para un partido enriquecido.
@@ -1019,6 +1031,20 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             match_id,
         )
 
+    # --- 2b. Filtro empate: descartar si ningún equipo es favorito claro ---
+    prob_home_raw = result_home["prob"]
+    prob_away_raw = result_away["prob"]
+    if prob_home_raw < 0.45 and prob_away_raw < 0.45:
+        prob_draw_est = max(0.0, 1.0 - prob_home_raw - prob_away_raw)
+        if prob_draw_est > 0.30:
+            logger.info(
+                "generate_signal(%s): señal descartada — alta probabilidad de empate estimada "
+                "(p_home=%.2f p_away=%.2f p_draw≈%.2f) [%s vs %s | %s]",
+                match_id, prob_home_raw, prob_away_raw, prob_draw_est,
+                home_team, away_team, league,
+            )
+            return []
+
     # --- 3. Cuotas ---
     odds_data = await fetch_bookmaker_odds(match_id, home_team=str(home_team), away_team=str(away_team), league=league)
     if odds_data is None:
@@ -1081,6 +1107,19 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         best_signals = result_away["signals"]
         best_odds = away_odds
         team_to_back = str(away_team)
+
+    # --- 5b. Filtro underdog extremo: descartar si odds > 5.0 y el rival es top-6 ---
+    rival_team = str(away_team) if team_to_back == str(home_team) else str(home_team)
+    top6_keywords = _TOP6_KEYWORDS.get(league, [])
+    if best_odds > _EXTREME_UNDERDOG_ODDS and top6_keywords:
+        rival_lower = rival_team.lower()
+        if any(kw in rival_lower for kw in top6_keywords):
+            logger.info(
+                "generate_signal(%s): señal descartada — underdog extremo (odds=%.2f) "
+                "vs rival top-6 '%s' [%s]",
+                match_id, best_odds, rival_team, league,
+            )
+            return []
 
     # --- 6. Verificar thresholds ---
     if best_edge <= SPORTS_MIN_EDGE or best_confidence <= SPORTS_MIN_CONFIDENCE:
