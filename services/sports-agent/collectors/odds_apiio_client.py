@@ -397,8 +397,8 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
         if _first_call:
             status, body, data = await _get_raw("/odds/multi", params)
             _first_call = False
+            logger.warning("DIAG_ODDS_BODY: status=%d body=%s", status, body[:500])
             if status != 200:
-                logger.warning("odds-api.io: /odds/multi HTTP %d body=%s", status, body[:300])
                 if status == 429:
                     break  # rate limit — no seguir con más batches
                 continue
@@ -599,6 +599,12 @@ def clear_caches() -> dict:
     return {"cleared": {"sport_events": n_events, "league_events": n_leagues, "sports": True}}
 
 
+async def _diag_bookmakers() -> None:
+    """GET /bookmakers — loguea los IDs exactos que acepta odds-api.io. Solo diagnóstico."""
+    status, body, data = await _get_raw("/bookmakers")
+    logger.warning("DIAG_BOOKMAKERS: status=%d body=%s", status, body[:800])
+
+
 async def _fetch_all_soccer_events() -> list[dict]:
     """
     Un único GET /events?sport=soccer que cubre TODAS las ligas de fútbol.
@@ -620,6 +626,7 @@ async def _fetch_all_soccer_events() -> list[dict]:
             return entry["events"]
 
         logger.info("DIAG_FETCH: llamando /events sport=soccer (request único para todas las ligas)")
+        await _diag_bookmakers()
 
         for slug in _FOOTBALL_SLUG_CANDIDATES:
             status, body, data = await _get_raw("/events", {"sport": slug})
