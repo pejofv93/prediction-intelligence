@@ -212,10 +212,21 @@ _FOOTBALL_SLUG_CANDIDATES = ["soccer", "football", "soccer_football"]
 _DEFAULT_BOOKMAKERS = "Bet365,1xbet,22Bet,888Sport,Unibet"
 
 # Caché global de odds por eventId: {event_id: odds_item}
-# Compartido entre todas las ligas — se puebla una sola vez por ciclo de analyze.
+# Poblado una sola vez por _prefetch_priority_odds() en _fetch_all_soccer_events().
+# _ODDS_MAP_PREFETCHED_AT != None significa "pre-fetch intentado" (aunque cache vacío).
+# Esto evita que _fetch_odds_map_for_events() reintente HTTP por cada liga.
 _ODDS_MAP_CACHE: dict[str, dict] = {}
 _ODDS_MAP_CACHED_AT: datetime | None = None
+_ODDS_MAP_PREFETCHED_AT: datetime | None = None   # None = nunca intentado
 _ODDS_MAP_LOCK = asyncio.Lock()
+
+# Ligas prioritarias para pre-fetch de odds. CLI/BSA/ARG quedan fuera:
+# sus bookmakers (1xbet, etc.) no cubren CONMEBOL sistemáticamente
+# y se sirven con Poisson sintético cuando faltan odds reales.
+_PRIORITY_LEAGUES_FOR_ODDS: frozenset[str] = frozenset({
+    "PD", "SA", "BL1", "PL", "FL1", "CL", "EL", "ECL", "PPL", "DED", "TU1",
+})
+_MAX_ODDS_PREFETCH: int = 50   # 50 IDs / 10 por batch = 5 requests /odds/multi
 
 
 def _cache_ttl(entry: dict) -> timedelta:
@@ -397,8 +408,8 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
         if _first_call:
             status, body, data = await _get_raw("/odds/multi", params)
             _first_call = False
-            logger.warning("DIAG_ODDS_BODY: status=%d body=%s", status, body[:500])
             if status != 200:
+                logger.warning("odds-api.io: /odds/multi HTTP %d body=%s", status, body[:300])
                 if status == 429:
                     break  # rate limit — no seguir con más batches
                 continue
@@ -415,20 +426,24 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
 
 async def _fetch_odds_map_for_events(event_ids: list[str]) -> dict[str, dict]:
     """
-    Obtiene el mapa {event_id: odds_item} para una lista de IDs.
-    Usa _ODDS_MAP_CACHE para compartir resultados entre todas las ligas del mismo analyze.
-    TTL 4h (mismo que los eventos). Si el caché es fresco, devuelve directamente
-    los IDs pedidos sin ningún HTTP extra.
+    Devuelve {event_id: odds_item} para los IDs pedidos.
+    Si _prefetch_priority_odds() ya corrió (PREFETCHED_AT != None y dentro de TTL),
+    retorna del caché sin ningún HTTP — evita N×batches por liga que agotan 100 req/h.
+    Fallback HTTP solo si el pre-fetch nunca ocurrió (instancia fría sin soccer events).
     """
     global _ODDS_MAP_CACHED_AT
     now = datetime.now(timezone.utc)
 
     async with _ODDS_MAP_LOCK:
-        # Si el caché global de odds es válido, simplemente filtra los IDs pedidos
-        if _ODDS_MAP_CACHED_AT and (now - _ODDS_MAP_CACHED_AT) < _TTL_OK and _ODDS_MAP_CACHE:
+        # Pre-fetch ya corrió y su caché sigue vigente → solo lookups, cero HTTP
+        if (_ODDS_MAP_PREFETCHED_AT is not None
+                and (now - _ODDS_MAP_PREFETCHED_AT) < _TTL_OK):
             return {eid: _ODDS_MAP_CACHE[eid] for eid in event_ids if eid in _ODDS_MAP_CACHE}
 
-        # Caché expirado o vacío — poblar con los IDs pedidos
+        # Fallback: instancia que no pasó por _fetch_all_soccer_events (no debería ocurrir)
+        if _ODDS_MAP_CACHED_AT and (now - _ODDS_MAP_CACHED_AT) < _TTL_OK:
+            return {eid: _ODDS_MAP_CACHE[eid] for eid in event_ids if eid in _ODDS_MAP_CACHE}
+
         items = await _fetch_odds_batch(event_ids)
         for item in items:
             eid = str(item.get("eventId") or item.get("id") or "")
@@ -599,10 +614,66 @@ def clear_caches() -> dict:
     return {"cleared": {"sport_events": n_events, "league_events": n_leagues, "sports": True}}
 
 
-async def _diag_bookmakers() -> None:
-    """GET /bookmakers — loguea los IDs exactos que acepta odds-api.io. Solo diagnóstico."""
-    status, body, data = await _get_raw("/bookmakers")
-    logger.warning("DIAG_BOOKMAKERS: status=%d body=%s", status, body[:800])
+async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None:
+    """
+    Pre-carga odds para ligas prioritarias en _ODDS_MAP_CACHE.
+    Selecciona los próximos _MAX_ODDS_PREFETCH eventos de _PRIORITY_LEAGUES_FOR_ODDS,
+    los envía en batches de 10 a /odds/multi → máximo 5 requests HTTP.
+    CLI/BSA/ARG quedan excluidos (Poisson sintético como fallback).
+    Siempre marca _ODDS_MAP_PREFETCHED_AT aunque el resultado sea vacío
+    para que _fetch_odds_map_for_events() no reintente HTTP por liga.
+    """
+    global _ODDS_MAP_PREFETCHED_AT
+
+    priority_keywords = [
+        kw for lg in _PRIORITY_LEAGUES_FOR_ODDS
+        for kw in _LEAGUE_KEYWORDS.get(lg, [])
+    ]
+
+    priority_events: list[dict] = []
+    for ev in all_events:
+        lg = ev.get("league") or {}
+        comp = (
+            f"{lg.get('slug', '')} {lg.get('name', '')}".lower()
+            if isinstance(lg, dict) else str(lg).lower()
+        )
+        if any(kw in comp for kw in priority_keywords):
+            priority_events.append(ev)
+
+    # Ordenar por commence time — priorizar partidos más próximos
+    def _commence_key(ev: dict) -> str:
+        for field in ("commenceTime", "commence_time", "startTime", "start_time", "date", "kickoff"):
+            v = ev.get(field)
+            if v:
+                return str(v)
+        return ""
+
+    priority_events.sort(key=_commence_key)
+    capped = priority_events[:_MAX_ODDS_PREFETCH]
+    event_ids = [
+        str(ev.get("id") or ev.get("eventId") or "")
+        for ev in capped if ev.get("id") or ev.get("eventId")
+    ]
+
+    logger.info(
+        "odds-api.io: pre-fetch odds — %d prioritarios de %d totales → %d IDs (cap=%d, ~%d req)",
+        len(priority_events), len(all_events), len(event_ids),
+        _MAX_ODDS_PREFETCH, -(-len(event_ids) // 10),  # ceil division
+    )
+
+    async with _ODDS_MAP_LOCK:
+        if event_ids:
+            items = await _fetch_odds_batch(event_ids)
+            for item in items:
+                eid = str(item.get("eventId") or item.get("id") or "")
+                if eid:
+                    _ODDS_MAP_CACHE[eid] = item
+        _ODDS_MAP_PREFETCHED_AT = now  # siempre marcar — bloquea reintentos por liga
+
+    logger.info(
+        "odds-api.io: pre-fetch completado — %d odds en cache (de %d IDs pedidos)",
+        len(_ODDS_MAP_CACHE), len(event_ids),
+    )
 
 
 async def _fetch_all_soccer_events() -> list[dict]:
@@ -625,8 +696,7 @@ async def _fetch_all_soccer_events() -> list[dict]:
         if _cache_hit(entry, now):
             return entry["events"]
 
-        logger.info("DIAG_FETCH: llamando /events sport=soccer (request único para todas las ligas)")
-        await _diag_bookmakers()
+        logger.info("odds-api.io: fetch soccer global (1 request para todas las ligas)")
 
         from_dt = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         to_dt   = (now + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -638,7 +708,6 @@ async def _fetch_all_soccer_events() -> list[dict]:
             )
 
             if status == 429:
-                # rate_limited=True → _cache_ttl devuelve _TTL_RATE_LIMIT (3600s)
                 _EVENT_CACHE[_SOCCER_ALL_KEY] = {
                     "events": [], "error": True, "rate_limited": True, "cached_at": now
                 }
@@ -654,11 +723,12 @@ async def _fetch_all_soccer_events() -> list[dict]:
             if data is not None:
                 raw = data if isinstance(data, list) else data.get("data", data.get("events", []))
                 if isinstance(raw, list) and raw:
-                    # Pasar todos los eventos (sin filtrar por status) — get_league_odds filtrará
                     logger.info(
-                        "odds-api.io: slug=%s → %d eventos soccer totales (1 request)", slug, len(raw)
+                        "odds-api.io: slug=%s → %d eventos soccer (1 request)", slug, len(raw)
                     )
                     _EVENT_CACHE[_SOCCER_ALL_KEY] = {"events": raw, "error": False, "cached_at": now}
+                    # Pre-fetch de odds para ligas prioritarias mientras tenemos los eventos frescos
+                    await _prefetch_priority_odds(raw, now)
                     return raw
                 logger.info("odds-api.io: slug=%s → 0 eventos", slug)
 
