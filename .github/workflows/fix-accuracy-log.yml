@@ -1,0 +1,40 @@
+name: fix-accuracy-log
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply_fix:
+        description: 'Write to Firestore? false = dry-run (read only), true = apply fix'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Run fix script (dry-run or apply)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: |
+          if [ "${{ inputs.apply_fix }}" = "true" ]; then
+            python scripts/backfill_accuracy_log.py --apply
+          else
+            python scripts/backfill_accuracy_log.py
+          fi
