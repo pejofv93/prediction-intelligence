@@ -248,7 +248,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     import asyncio
     import json
     import re
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from shared.firestore_client import col
     from shared.groq_client import _get_groq, GROQ_CALL_DELAY
     from shared.config import GROQ_MODEL_ROTATION
