@@ -2,10 +2,11 @@
 
 ## Resumen de la sesión
 
-Sesión larga de corrección de bugs y ampliación de cobertura. Dos bloques principales:
+Sesión larga de corrección de bugs y ampliación de cobertura. Tres bloques principales:
 
 1. **Sports Agent** — 10+ fixes: accuracy real medida por primera vez (16.7%), filtros de calidad (AWAY, underdog extremo, empate), pre-fetch global de odds, TTL dinámico en rate limit.
 2. **Polymarket + Dashboard** — 4 fixes: timedelta, mercados expirados, volume_spike, índice Firestore. Dashboard con accuracy_by_league y reporte semanal completo.
+3. **Polymarket — inteligencia completa** — segunda tanda (tarde): resolver two-pass, poly_learning_engine (72.7%), calibración Groq, race condition fix, dashboard poly weights, alertas Telegram enriquecidas.
 
 ---
 
@@ -23,6 +24,13 @@ Sesión larga de corrección de bugs y ampliación de cobertura. Dos bloques pri
 | `ccca7e6` | feat: soporte ACB (116) y Euroleague (120) en basketball_collector |
 | `135b807` | fix: guard _synthetic vs plain en check_result + backfill 30 docs |
 | `19debda` | fix(odds-api): parse 429 TTL desde body + filtros AWAY anti-sesgo |
+| `c17f8f2` | fix(resolver): lookup directo por ID para mercados fuera del top-100 |
+| `fb8d61d` | feat(poly): poly_learning_engine + umbrales por dirección BUY_YES/BUY_NO |
+| `961021c` | fix(poly): category propagation + calibración Groq (temp 0.5, anclas conf) |
+| `8d6d1fc` | fix(poly): race condition alerts_sent → transacción Firestore atómica |
+| `4154dff` | fix(accuracy_log): backfill category 18 shadow_trades + workflow W17/W18 |
+| `d5e3531` | feat(dashboard): sección poly model weights + /api/poly-stats + category field |
+| `0c4cc28` | feat(alerts): alertas Telegram enriquecidas (intensidad, categoría, cierre, volumen) |
 
 ---
 
@@ -141,6 +149,78 @@ Ligue 1 (`FL1`) y Primeira Liga (`PPL`) añadidas a las ligas activas en el coll
 
 ---
 
+## Sesión tarde — Polymarket intelligence completa
+
+### 17. Resolver two-pass — mercados fuera del top-100 (c17f8f2)
+**Síntoma:** `resolved=0` durante semanas. El resolver solo consultaba los top-100 mercados por volumen de la Gamma API, pero los mercados alertados con poco volumen nunca aparecían ahí.
+**Fix:** Dos pasadas en `polymarket_resolver.py`:
+- Paso 1: top-100 cerrados por volumen (comportamiento anterior)
+- Paso 2: para cada predicción alertada que no se resolvió en el paso 1, hace `GET /markets/{market_id}` directamente (máximo 20 llamadas)
+- Guard: `if not market_id: return False` en `alert_engine` para evitar `market_id=None` en `alerts_sent`
+**Resultado:** primera ejecución post-fix → `resolved=11`, `skipped_unresolved=5` (mercados aún abiertos)
+
+### 18. poly_learning_engine — umbrales adaptativos por dirección (fb8d61d)
+**Qué hace:** analiza los 11 mercados resueltos, calcula accuracy por dirección y ajusta los umbrales de alerta individualmente para BUY_YES y BUY_NO.
+**Resultados primera ejecución:**
+- Accuracy global: **72.7%** (8/11 resueltos correctamente)
+- BUY_YES: `min_edge=0.133`, `min_confidence=0.70`
+- BUY_NO: `min_edge=0.125`, `min_confidence=0.63`
+- Guardado en `prodpoly_model_weights/current` (version=1)
+**Lógica:** si accuracy por dirección > 70% → el modelo es conservador y puede permitir edge ligeramente menor; si < 60% → sube umbral. Ajuste suavizado ±0.01 por ciclo.
+
+### 19. Calibración Groq + category propagation (961021c)
+**Problema 1 — temperatura:** `temperature=0.7` generaba distribuciones de confianza planas (todo 0.5–0.7). Cambiado a `temperature=0.5` → distribución más discriminada.
+**Problema 2 — anclas de confianza:** Groq devolvía `confidence=0.9` para mercados con edge mínimo. Añadidas anclas explícitas en el prompt: si `edge < 0.05` → max conf 0.55; si `edge < 0.10` → max conf 0.70.
+**Problema 3 — category no llegaba al Firestore:** `category` se calculaba en `scanner.py` pero no se pasaba al `enriched_market` que recibía `groq_analyzer`. Fix: `category` ahora se incluye en el dict que fluye por todo el pipeline.
+
+### 20. Race condition en alerts_sent (8d6d1fc)
+**Síntoma:** alertas duplicadas ocasionales cuando dos requests concurrentes del scheduler pasaban el check `edge >= threshold` simultáneamente.
+**Causa:** flujo read-then-write no atómico — dos coroutines podían leer `alerts_sent` vacío al mismo tiempo, las dos decidir "no existe" y las dos enviar.
+**Fix:** `check_and_alert` usa ahora una transacción Firestore `@transactional`:
+- Dentro de la transacción: lee el doc `dedup_ref`, comprueba si existe y si `sent_at > cutoff_24h`
+- Si no existe o ha pasado >24h con cambio de precio >5%: `transaction.set(dedup_ref, {status: "pending"})`
+- Solo después del `transaction.set` exitoso se hace el POST a Telegram
+- El perdedor de la transacción (contention) recibe `Aborted` y no envía
+- Post-envío: `dedup_ref.update({status: "sent"})`; si falla el POST: `dedup_ref.delete()` para no bloquear reintentos
+
+### 21. Backfill category en shadow_trades (4154dff)
+**Problema:** 18 documentos en `prodshadow_trades` tenían `category=None` porque fueron creados antes de que `category` fluyera por el pipeline. Afectaba métricas de accuracy por categoría en el reporte semanal.
+**Fix:** Script de backfill + workflow `backfill-category.yml` que corre una vez y se auto-desactiva. Todos los shadow_trades sin categoría se actualizan a la categoría del mercado correspondiente en `poly_predictions`.
+
+### 22. Dashboard — sección Polymarket Model Weights (d5e3531)
+**Qué se añadió:**
+- `GET /api/poly-stats`: nuevo endpoint que lee `prodpoly_model_weights/current` → devuelve umbrales por dirección, accuracy global/BUY_YES/BUY_NO, sample_size y `updated_at`
+- `ModelStats.tsx`: nueva sección `PolyModelSection` al fondo de la vista Stats con 3 tarjetas (accuracy global, BUY YES con edge/conf/acc, BUY NO con edge/conf/acc) y fecha de última actualización del modelo
+- `api/polymarket.py`: `category` añadido al whitelist de `/api/poly` (se guardaba en Firestore pero se descartaba al serializar)
+**Datos son dinámicos:** cuando `poly_learning_engine` ajuste los umbrales, el dashboard lo refleja en el siguiente refresh.
+
+### 23. Alertas Telegram Polymarket — formato enriquecido (0c4cc28)
+**Problema:** la alerta llegaba sin contexto suficiente para evaluar la señal rápidamente.
+**Antes:**
+```
+🔮 OPORTUNIDAD POLYMARKET
+❓ NBA Playoffs: Timberwolves vs Nuggets
+📈 Precio YES: 57% | Prob: 65% | Edge: +8% | Conf: 80%
+Recomendación: BUY_YES
+```
+**Después:**
+```
+🔮 OPORTUNIDAD POLYMARKET — 🟡 SEÑAL DETECTADA
+🏀 sports
+❓ NBA Playoffs: Timberwolves vs Nuggets
+💰 Precio YES: 57% → IA: 65% (+8% edge)
+🎯 Confianza: 80% | Recomendación: BUY_YES
+⏰ Cierra en 3d (02/05) | 💧 Vol 24h: $42,500
+💭 [reasoning]
+⚠️ Apuesta responsablemente.
+```
+**Cambios en los archivos:**
+- `groq_analyzer.py`: `end_date_iso` y `volume_24h` añadidos al prediction dict y a Firestore
+- `alert_manager.py`: badge de intensidad (🔴 >15% / 🟡 >10% / 🟢 resto), emoji de categoría, días hasta cierre calculados en runtime, volumen formateado ($K/$M), smart money rebautizado 🧠
+- `dashboard/api/polymarket.py`: `end_date_iso` y `volume_24h` añadidos al whitelist para que el frontend los reciba también
+
+---
+
 ## Estado de APIs (2026-04-29 14:00)
 
 | API | Estado | Notas |
@@ -162,18 +242,22 @@ Ligue 1 (`FL1`) y Primeira Liga (`PPL`) añadidas a las ligas activas en el coll
 ## Métricas del día
 
 - **Sports analyze:** 22 señales de 109 enriquecidos en 182s (+4 vs ayer por FL1/PPL)
-- **Accuracy medida (backfill 30 docs):** 16.7% global (5/30) — primera medición real
+- **Sports accuracy (backfill 30 docs):** 16.7% global (5/30) — primera medición real
 - **Polymarket analyze:** analizados=6 / alertas=2 / skip_err=0 (era 19 antes del fix)
-- **Deployments:** sports-agent-00210-dzj / polymarket-agent-00172-z2q
+- **Polymarket resolver:** resolved=11, skipped_unresolved=5 (era 0 durante semanas)
+- **Polymarket accuracy:** 72.7% (8/11) — primera medición real desde que arrancó el sistema
+- **Poly model v1:** BUY_YES edge≥13.3% conf≥70% | BUY_NO edge≥12.5% conf≥63%
+- **Commits del día:** 15 total (7 mañana / 8 tarde)
+- **Deployments:** todos los servicios desplegados (polymarket-agent, telegram-bot, dashboard)
 
 ---
 
 ## Pendientes
 
-### Hoy (después de 14:30)
-1. Verificar pre-fetch global en `/odds/multi` tras reset de rate limit
-2. Buscar en logs: `odds-api.io: slug=soccer → X eventos` + `DIAG_ODDS_BODY` con cuotas reales
-3. Confirmar TTL dinámico en log: `odds-api.io: 429 rate limit — TTL=XXXs`
+### Inmediatos
+1. Verificar en logs que `poly_learning_engine` corre correctamente en el próximo ciclo del scheduler
+2. Confirmar que las próximas alertas incluyen los nuevos campos (categoria, días cierre, volumen)
+3. Verificar pre-fetch global en `/odds/multi` tras reset de rate limit de odds-api.io
 
 ### 1 mayo (reset cuotas)
 4. Renovar The Odds API (500 req/mes) + OddsPapi (250 req/mes)
@@ -185,3 +269,4 @@ Ligue 1 (`FL1`) y Primeira Liga (`PPL`) añadidas a las ligas activas en el coll
 8. `firebase deploy --only firestore:indexes` → activar índice `prodalerts_sent`
 9. Confirmar IDs NCAA/EuroBasket desde logs del collect → descomentar en `_LEAGUES_BY_ID`
 10. Acumular más resultados resueltos → accuracy estadísticamente significativa (objetivo: 50+ picks)
+11. Link directo al mercado en alertas Telegram — requiere capturar `slug` del Gamma API en `scanner.py`
