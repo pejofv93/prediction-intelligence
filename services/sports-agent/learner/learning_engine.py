@@ -91,7 +91,10 @@ async def check_result(match_id: str) -> str | None:
     try:
         from collectors.football_api import get_match_result
         result = await get_match_result(match_id)
-        return result
+        if result is None:
+            return None
+        # get_match_result devuelve un dict {"result": "HOME_WIN", ...}
+        return result.get("result")
     except Exception:
         logger.error("check_result(%s): error consultando API", match_id, exc_info=True)
         return None
