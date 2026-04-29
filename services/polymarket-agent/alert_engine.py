@@ -1,15 +1,62 @@
 """
 Motor de alertas Polymarket → telegram-bot.
-Envia alerta si abs(edge) > POLY_MIN_EDGE + confianza > POLY_MIN_CONFIDENCE.
-edge positivo → BUY_YES (mercado subvalorado).
-edge negativo → BUY_NO (mercado sobrevalorado).
-volume_spike y smart_money son señales extra (no requisito).
+Envia alerta si abs(edge) > min_edge_for_direction + confianza > min_conf_for_direction.
+Los umbrales se cargan desde poly_model_weights/current (ajustados por poly_learning_engine).
+edge positivo → BUY_YES; edge negativo → BUY_NO.
+volume_spike y smart_money son señales bonus (no requisito).
 """
 import logging
 
 from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, TELEGRAM_BOT_URL
 
 logger = logging.getLogger(__name__)
+
+# Cache de umbrales por dirección — cargado una vez al arrancar el servicio
+_LEARNED_THRESHOLDS: dict | None = None
+
+
+def _load_learned_thresholds() -> dict:
+    """
+    Lee poly_model_weights/current desde Firestore.
+    Devuelve dict con buy_yes_min_edge, buy_yes_min_confidence,
+    buy_no_min_edge, buy_no_min_confidence.
+    Fallback a POLY_MIN_EDGE / POLY_MIN_CONFIDENCE si no existe.
+    """
+    global _LEARNED_THRESHOLDS
+    if _LEARNED_THRESHOLDS is not None:
+        return _LEARNED_THRESHOLDS
+
+    defaults = {
+        "buy_yes_min_edge": POLY_MIN_EDGE,
+        "buy_yes_min_confidence": POLY_MIN_CONFIDENCE,
+        "buy_no_min_edge": POLY_MIN_EDGE,
+        "buy_no_min_confidence": POLY_MIN_CONFIDENCE,
+    }
+    try:
+        from shared.firestore_client import col
+        doc = col("poly_model_weights").document("current").get()
+        if doc.exists:
+            data = doc.to_dict()
+            loaded = {
+                "buy_yes_min_edge":        float(data.get("buy_yes_min_edge", POLY_MIN_EDGE)),
+                "buy_yes_min_confidence":  float(data.get("buy_yes_min_confidence", POLY_MIN_CONFIDENCE)),
+                "buy_no_min_edge":         float(data.get("buy_no_min_edge", POLY_MIN_EDGE)),
+                "buy_no_min_confidence":   float(data.get("buy_no_min_confidence", POLY_MIN_CONFIDENCE)),
+            }
+            _LEARNED_THRESHOLDS = loaded
+            logger.info(
+                "_load_learned_thresholds: cargados v%s "
+                "BUY_YES(edge=%.3f conf=%.2f) BUY_NO(edge=%.3f conf=%.2f)",
+                data.get("version", "?"),
+                loaded["buy_yes_min_edge"], loaded["buy_yes_min_confidence"],
+                loaded["buy_no_min_edge"],  loaded["buy_no_min_confidence"],
+            )
+            return loaded
+    except Exception:
+        logger.warning("_load_learned_thresholds: error leyendo Firestore — usando defaults", exc_info=True)
+
+    _LEARNED_THRESHOLDS = defaults
+    return defaults
 
 
 async def check_and_alert(analysis: dict) -> bool:
@@ -36,24 +83,31 @@ async def check_and_alert(analysis: dict) -> bool:
     volume_spike = bool(analysis.get("volume_spike", False))
     smart_money = bool(analysis.get("smart_money_detected", False))
 
-    # Umbral dinámico: conf >= 0.75 acepta edge >= 0.07 (señal sólida, margen menor)
-    effective_min_edge = 0.07 if confidence >= 0.75 else POLY_MIN_EDGE
+    # Cargar umbrales aprendidos por dirección desde poly_model_weights
+    thresholds = _load_learned_thresholds()
+    direction = "BUY_YES" if edge >= 0 else "BUY_NO"
+    dir_key = "buy_yes" if direction == "BUY_YES" else "buy_no"
+    effective_min_edge = thresholds[f"{dir_key}_min_edge"]
+    effective_min_conf = thresholds[f"{dir_key}_min_confidence"]
+
     if abs(edge) < effective_min_edge:
         logger.debug(
-            "check_and_alert(%s): abs(edge)=%.3f < %.3f (effective, conf=%.2f) — omitida",
-            analysis.get("market_id"), abs(edge), effective_min_edge, confidence,
+            "check_and_alert(%s): abs(edge)=%.3f < %.3f (%s learned) — omitida",
+            analysis.get("market_id"), abs(edge), effective_min_edge, direction,
         )
         return False
-    if confidence < POLY_MIN_CONFIDENCE:
+    if confidence < effective_min_conf:
         logger.debug(
-            "check_and_alert(%s): conf=%.3f < %.3f — omitida",
-            analysis.get("market_id"), confidence, POLY_MIN_CONFIDENCE,
+            "check_and_alert(%s): conf=%.3f < %.3f (%s learned) — omitida",
+            analysis.get("market_id"), confidence, effective_min_conf, direction,
         )
         return False
 
     logger.info(
-        "check_and_alert(%s): pasa thresholds edge=%.3f conf=%.2f vol_spike=%s sm=%s",
-        analysis.get("market_id"), edge, confidence, volume_spike, smart_money,
+        "check_and_alert(%s): pasa thresholds %s edge=%.3f>=%.3f conf=%.2f>=%.2f vol_spike=%s sm=%s",
+        analysis.get("market_id"), direction,
+        abs(edge), effective_min_edge, confidence, effective_min_conf,
+        volume_spike, smart_money,
     )
 
     market_id = str(analysis.get("market_id") or "")

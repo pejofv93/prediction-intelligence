@@ -1,6 +1,6 @@
 """
 polymarket-agent — FastAPI service
-Endpoints: /run-scan /run-enrich /run-analyze /run-poly-backtest /run-websocket /health
+Endpoints: /run-scan /run-enrich /run-analyze /run-poly-backtest /run-websocket /run-learn /health
 Todos los endpoints /run-* devuelven 202 Accepted inmediatamente.
 """
 import asyncio
@@ -205,6 +205,37 @@ async def run_resolve() -> JSONResponse:
     """Síncrono: resuelve shadow_trades pendientes de Polymarket contra resultados reales."""
     result = await _bg_resolve()
     return JSONResponse(status_code=200, content=result)
+
+
+@app.post("/run-learn", dependencies=[Depends(verify_token)])
+async def run_learn() -> JSONResponse:
+    """Síncrono: ejecuta poly_learning_engine — ajusta umbrales en poly_model_weights."""
+    try:
+        from datetime import datetime, timezone
+        start = datetime.now(timezone.utc)
+        from poly_learning_engine import run_poly_learning
+        doc = run_poly_learning()
+        # Invalida cache de umbrales en alert_engine para el próximo run-analyze
+        import alert_engine as _ae
+        _ae._LEARNED_THRESHOLDS = None
+        elapsed = round((datetime.now(timezone.utc) - start).total_seconds(), 1)
+        if not doc:
+            return JSONResponse(status_code=200, content={"status": "skipped", "reason": "no resolved trades"})
+        return JSONResponse(status_code=200, content={
+            "status": "ok",
+            "elapsed_s": elapsed,
+            "version": doc.get("version"),
+            "accuracy_overall": doc.get("accuracy_overall"),
+            "accuracy_buy_yes": doc.get("accuracy_buy_yes"),
+            "accuracy_buy_no":  doc.get("accuracy_buy_no"),
+            "sample_size": doc.get("sample_size"),
+            "min_edge": doc.get("min_edge"),
+            "buy_yes_min_edge": doc.get("buy_yes_min_edge"),
+            "buy_no_min_edge":  doc.get("buy_no_min_edge"),
+        })
+    except Exception as e:
+        logger.error("run-learn: error no controlado — %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/run-poly-backtest", dependencies=[Depends(verify_token)])

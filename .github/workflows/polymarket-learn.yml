@@ -1,0 +1,19 @@
+name: polymarket-learn
+on:
+  schedule:
+    # 03:30 UTC — después del resolver (03:00) para que los outcomes ya estén resueltos
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run Poly Learning Engine
+        run: |
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-learn" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 120 \
+            --fail --silent --show-error
