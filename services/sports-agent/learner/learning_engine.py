@@ -461,16 +461,29 @@ async def run_daily_learning() -> None:
 
     # --- 7. Actualizar cada prediction con result/correct/error_type ---
     for upd in processed_predictions:
+        payload = {
+            "result": upd["result"],
+            "correct": upd["correct"],
+            "error_type": upd["error_type"],
+        }
+        mid = upd["match_id"]
+        # Actualizar el doc principal
         try:
-            mid = upd["match_id"]
-            col("predictions").document(str(mid)).update({
-                "result": upd["result"],
-                "correct": upd["correct"],
-                "error_type": upd["error_type"],
-            })
+            col("predictions").document(str(mid)).update(payload)
         except Exception:
             logger.error(
-                "run_daily_learning: error actualizando prediction %s", upd.get("match_id"), exc_info=True
+                "run_daily_learning: error actualizando prediction %s", mid, exc_info=True
+            )
+        # Actualizar también {match_id}_synthetic si existe
+        try:
+            synthetic_ref = col("predictions").document(f"{mid}_synthetic")
+            snap = synthetic_ref.get()
+            if snap.exists:
+                synthetic_ref.update(payload)
+                logger.debug("run_daily_learning: %s_synthetic actualizado", mid)
+        except Exception:
+            logger.warning(
+                "run_daily_learning: error actualizando %s_synthetic", mid, exc_info=True
             )
 
     logger.info(
