@@ -231,30 +231,84 @@ def _format_sports_alert(prediction: dict) -> str:
     return header + match_line + bet_line + stats_block + kelly_line + footer
 
 
+_CATEGORY_EMOJI = {
+    "crypto":      "🪙",
+    "sports":      "🏀",
+    "geopolitics": "🌍",
+    "economy":     "📉",
+    "politics":    "🗳️",
+}
+
+
 def _format_poly_alert(analysis: dict) -> str:
-    """Formatea senal de Polymarket segun el formato del spec."""
+    """Formatea senal de Polymarket con categoria, intensidad, cierre y volumen."""
+    from datetime import datetime, timezone
+
     question = _escape_md(analysis.get("question", "?"))
     market_price_yes = float(analysis.get("market_price_yes", 0))
     real_prob = float(analysis.get("real_prob", 0))
     edge = float(analysis.get("edge") or 0)
+    abs_edge = abs(edge)
     confidence = float(analysis.get("confidence") or 0)
     recommendation = analysis.get("recommendation", "PASS")
     reasoning = _escape_md(_truncate_reasoning(str(analysis.get("reasoning", ""))))
     volume_spike = bool(analysis.get("volume_spike", False))
     smart_money = bool(analysis.get("smart_money_detected", False))
+    category = str(analysis.get("category") or "").lower()
+    volume_24h = float(analysis.get("volume_24h") or 0)
 
-    smart_money_line = ""
-    if volume_spike or smart_money:
-        smart_money_line = "\n🐋 *SMART MONEY detectado*"
+    # Intensidad basada en edge absoluto
+    if abs_edge > 0.15:
+        intensity = "🔴 SEÑAL FUERTE"
+    elif abs_edge > 0.10:
+        intensity = "🟡 SEÑAL DETECTADA"
+    else:
+        intensity = "🟢 SEÑAL MODERADA"
+
+    # Categoría con emoji
+    cat_emoji = _CATEGORY_EMOJI.get(category, "🔮")
+    cat_line = f"{cat_emoji} {category}\n" if category else ""
+
+    # Días hasta cierre
+    close_line = ""
+    end_date_iso = analysis.get("end_date_iso")
+    if end_date_iso:
+        try:
+            end_dt = datetime.fromisoformat(str(end_date_iso))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            days_left = (end_dt - datetime.now(timezone.utc)).days
+            date_label = end_dt.strftime("%d/%m")
+            close_line = f"⏰ Cierra en {days_left}d ({date_label})"
+        except Exception:
+            pass
+
+    # Volumen 24h
+    vol_line = ""
+    if volume_24h > 0:
+        if volume_24h >= 1_000_000:
+            vol_str = f"${volume_24h / 1_000_000:.1f}M"
+        elif volume_24h >= 1_000:
+            vol_str = f"${volume_24h:,.0f}"
+        else:
+            vol_str = f"${volume_24h:.0f}"
+        vol_line = f"💧 Vol 24h: {vol_str}"
+
+    # Línea combinada cierre + volumen
+    meta_parts = [p for p in (close_line, vol_line) if p]
+    meta_line = (" | ".join(meta_parts) + "\n") if meta_parts else ""
+
+    # Smart money
+    smart_line = "\n🧠 *SMART MONEY detectado*\n" if (volume_spike or smart_money) else "\n"
 
     return (
-        f"🔮 OPORTUNIDAD POLYMARKET\n\n"
-        f"❓ {question}\n\n"
-        f"📈 Precio mercado YES: *{market_price_yes:.0%}*\n"
-        f"🎯 Probabilidad estimada: *{real_prob:.0%}*\n"
-        f"💎 Edge: *{edge:+.0%}* | Confianza: *{confidence:.0%}*\n\n"
-        f"Recomendación: *{recommendation}*"
-        f"{smart_money_line}\n\n"
+        f"🔮 OPORTUNIDAD POLYMARKET — {intensity}\n"
+        f"{cat_line}"
+        f"\n❓ {question}\n\n"
+        f"💰 Precio YES: *{market_price_yes:.0%}* → IA: *{real_prob:.0%}* (*{edge:+.0%}* edge)\n"
+        f"🎯 Confianza: *{confidence:.0%}* | Recomendación: *{recommendation}*\n"
+        f"{meta_line}"
+        f"{smart_line}"
         f"💭 {reasoning}\n\n"
         f"⚠️ Apuesta responsablemente. No es asesoramiento financiero."
     )
