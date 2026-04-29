@@ -47,6 +47,7 @@ async def get_predictions(limit: int = 50) -> list[dict]:
             "result", "correct", "sport", "kelly_fraction",
             "market_type", "selection", "bookmaker", "line",
             "elo_sufficient", "h2h_sufficient", "data_source",
+            "filtered_reason", "created_at",
         }
         result = []
         for d in docs:

@@ -15,6 +15,7 @@ interface Prediction {
   result: string | null
   correct: boolean | null
   sport?: string
+  filtered_reason?: string | null
 }
 
 const LEAGUE_FLAGS: Record<string, string> = {
@@ -40,8 +41,17 @@ function PredictionCard({ p }: { p: Prediction }) {
   const dateStr = p.match_date
     ? new Date(p.match_date).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
     : '—'
-  const accentColor = p.correct === true ? '#00C853' : p.correct === false ? '#FF5252' : '#F7931A'
-  const resultLabel = p.correct === true ? '✓ Correcto' : p.correct === false ? '✗ Incorrecto' : 'Pendiente'
+  const isObsolete = Boolean(p.filtered_reason)
+  const accentColor = isObsolete ? '#555555' : p.correct === true ? '#00C853' : p.correct === false ? '#FF5252' : '#F7931A'
+  const REASON_LABELS: Record<string, string> = {
+    underdog_extremo: 'OBSOLETA · underdog extremo',
+    away_zona_muerta: 'OBSOLETA · AWAY zona muerta',
+    away_pd_ded:      'OBSOLETA · AWAY PD/DED',
+    away_gate:        'OBSOLETA · AWAY gate',
+  }
+  const resultLabel = isObsolete
+    ? (REASON_LABELS[p.filtered_reason!] ?? `OBSOLETA · ${p.filtered_reason}`)
+    : p.correct === true ? '✓ Correcto' : p.correct === false ? '✗ Incorrecto' : 'Pendiente'
   const factors = p.factors || {}
   const hasFourFactors = ['poisson', 'elo', 'form', 'h2h'].every(k => k in factors)
 
@@ -91,7 +101,8 @@ export default function SportSignals() {
   if (error) return <p style={{ color: '#F7931A', padding: 24 }}>Error: {error}</p>
   if (!data?.length) return <p style={{ color: '#888', padding: 24 }}>Sin señales activas en este momento.</p>
 
-  const pending = data.filter(p => p.result === null)
+  const pending  = data.filter(p => p.result === null && !p.filtered_reason)
+  const obsolete = data.filter(p => p.result === null && Boolean(p.filtered_reason))
   const resolved = data.filter(p => p.result !== null)
 
   return (
@@ -110,6 +121,12 @@ export default function SportSignals() {
         <>
           <div style={{ color: '#666', fontSize: 11, letterSpacing: 1, margin: '20px 0 10px' }}>RESUELTAS ({resolved.length})</div>
           {resolved.map(p => <PredictionCard key={p.match_id} p={p} />)}
+        </>
+      )}
+      {obsolete.length > 0 && (
+        <>
+          <div style={{ color: '#444', fontSize: 11, letterSpacing: 1, margin: '20px 0 10px' }}>OBSOLETAS — filtros actuales ({obsolete.length})</div>
+          {obsolete.map(p => <PredictionCard key={p.match_id} p={p} />)}
         </>
       )}
     </div>

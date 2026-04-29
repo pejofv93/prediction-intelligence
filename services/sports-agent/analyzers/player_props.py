@@ -1,353 +1,410 @@
 """
 services/sports-agent/analyzers/player_props.py
 
-Mercados de jugadores: goleador (first/anytime) y asistente.
+Goleador probable — modelo Poisson con xG de understat.com
 
-Modelo:
-  P(marca) = 1 - Poisson(0, tasa_gol_90 × λ_equipo / 11)
-  P(asiste) = 1 - Poisson(0, tasa_asist_90 × λ_goles_equipo)
-  tasa_gol/asist_90 desde API-Football /players?fixture (mínimo 300 min jugados)
+Fuentes:
+  1. understat.com POST /main/getPlayersStats/ — xG por jugador, sin key, ~590 jugadores/liga
+  2. Fallback: football-data.org /competitions/{code}/scorers — top 20 goleadores por liga
 
-Odds: The Odds API player_goal_scorer / player_first_assist (EPL, LaLiga, BL1, SA, FL1)
-Quota: gasta 1 req The Odds API por partido. Solo si quota_restante >= 5.
-market = "first_scorer" | "anytime_scorer" | "anytime_assist"
+Fórmula:
+  P(marca) = 1 - Poisson(0, total_xG / partidos_jugados)
+
+Umbral: P > 0.25 sin comparar con bookmaker.
+  The Odds API, odds-api.io y OddsPapi NO tienen mercados de goleadores para soccer en free tier.
+  Señales marcadas como "no_bookmaker": True.
+
+Ligas: PD, PL, BL1, SA, FL1
 """
-import asyncio
+import gzip
+import json
 import logging
-from datetime import datetime, date, timezone
-from typing import Optional
+import unicodedata
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone, timedelta
 
-import httpx
 from scipy.stats import poisson as _poisson
 
-from shared.config import (
-    FOOTBALL_RAPID_API_KEY, ODDS_API_KEY,
-    SPORTS_MIN_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_ALERT_EDGE,
-)
-from shared.api_quota_manager import quota
+from shared.config import FOOTBALL_API_KEY, SPORTS_ALERT_EDGE
 
 logger = logging.getLogger(__name__)
 
-_HTTP_TIMEOUT = 15.0
-_MIN_MINUTES = 300
-_SQUAD_SIZE = 11.0
+_HTTP_TIMEOUT  = 15.0
+_SQUAD_SIZE    = 11.0
+_MIN_GAMES     = 10      # mínimo partidos jugados para que el xG sea significativo
+_P_THRESHOLD   = 0.25   # señal si P(marca) > 25%
+_MAX_PER_TEAM  = 3      # máximo señales por equipo por partido
+_UNDERSTAT_TTL = timedelta(hours=6)
 
-# Ligas con player props en The Odds API
-_PROP_SPORT_KEYS = {
-    "PL":  "soccer_england_premier_league",
-    "PD":  "soccer_spain_la_liga",
-    "BL1": "soccer_germany_bundesliga",
-    "SA":  "soccer_italy_serie_a",
-    "FL1": "soccer_france_ligue_one",
+# Mapeo liga interna → nombre understat
+_UNDERSTAT_LEAGUE_MAP: dict[str, str] = {
+    "PD":  "La_liga",
+    "PL":  "EPL",
+    "BL1": "Bundesliga",
+    "SA":  "Serie_A",
+    "FL1": "Ligue_1",
 }
 
-# Emojis para alertas
-_MARKET_EMOJI = {
-    "first_scorer":   "🥅",
-    "anytime_scorer": "🥅",
-    "anytime_assist": "🎯",
+# Mapeo liga → código football-data.org (fallback)
+_FDORG_LEAGUE_MAP: dict[str, str] = {
+    "PD":  "PD",
+    "PL":  "PL",
+    "BL1": "BL1",
+    "SA":  "SA",
+    "FL1": "FL1",
 }
 
+# Cache: {liga: (fetched_at, {player_name_lower: player_dict})}
+_UNDERSTAT_CACHE: dict[str, tuple[datetime, dict]] = {}
 
-# ── The Odds API — player props por evento ────────────────────────────────────
 
-async def _fetch_player_props(sport_key: str, event_id: str, market: str) -> list[dict]:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _norm(s: str) -> str:
+    """Normaliza texto: minúsculas, sin tildes."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s.lower())
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _team_matches(understat_team: str, match_team: str) -> bool:
     """
-    GET /sports/{sport_key}/events/{event_id}/odds?markets={market}
-    Devuelve lista de {player, odds, bookmaker}.
-    Cuenta como 1 req the_odds_api.
+    True si comparten al menos una palabra significativa (≥4 chars) tras normalizar.
+    Cubre: "Real Madrid" ↔ "Real Madrid CF", "Atlético" ↔ "Atletico Madrid".
     """
-    if not ODDS_API_KEY or not quota.can_call("the_odds_api"):
-        return []
+    a = _norm(understat_team)
+    b = _norm(match_team)
+    for word in a.split():
+        if len(word) >= 4 and word in b:
+            return True
+    for word in b.split():
+        if len(word) >= 4 and word in a:
+            return True
+    return False
 
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{event_id}/odds"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "eu",
-        "markets": market,
-        "oddsFormat": "decimal",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(url, params=params)
 
-        if resp.status_code in (401, 422):
-            return []
-        if resp.status_code != 200:
-            logger.warning("player_props: The Odds API %d para %s", resp.status_code, market)
-            return []
+def _p_score(total_xg: float, games: int) -> float:
+    """P(jugador marca ≥1 gol) usando su xG por partido de la temporada."""
+    xg_per_game = total_xg / max(1, games)
+    return round(1.0 - float(_poisson.pmf(0, max(0.01, xg_per_game))), 4)
 
-        remaining = resp.headers.get("x-requests-remaining")
-        quota.track_call("the_odds_api", remaining=remaining)
-        data = resp.json()
 
-        results: list[dict] = []
-        for bk in data.get("bookmakers", []):
-            for mkt in bk.get("markets", []):
-                if mkt.get("key") != market:
+# ── Fuente 1: understat.com ───────────────────────────────────────────────────
+
+async def _fetch_understat_players(league: str) -> dict[str, dict]:
+    """
+    POST https://understat.com/main/getPlayersStats/
+    Devuelve {player_name_lower: player_dict} para atacantes (position=F)
+    con al menos _MIN_GAMES partidos. Cache _UNDERSTAT_TTL.
+
+    Campos por jugador:
+      name, team, position, games, minutes, goals, xg, assists, xa,
+      xg_per90, xg_per_game, shots, key_passes
+    """
+    now = datetime.now(timezone.utc)
+    cached = _UNDERSTAT_CACHE.get(league)
+    if cached and (now - cached[0]) < _UNDERSTAT_TTL:
+        return cached[1]
+
+    understat_league = _UNDERSTAT_LEAGUE_MAP.get(league)
+    if not understat_league:
+        return {}
+
+    for season in ("2025", "2024"):
+        try:
+            data = urllib.parse.urlencode({
+                "league":  understat_league,
+                "season":  season,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://understat.com/main/getPlayersStats/",
+                data=data,
+                method="POST",
+                headers={
+                    "User-Agent":        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Content-Type":      "application/x-www-form-urlencoded",
+                    "X-Requested-With":  "XMLHttpRequest",
+                    "Accept-Encoding":   "identity",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+                raw = r.read()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            parsed = json.loads(raw.decode("utf-8"))
+            players_raw = parsed.get("players", [])
+            if not players_raw:
+                logger.debug("understat(%s season=%s): lista vacía — probando anterior", league, season)
+                continue
+
+            result: dict[str, dict] = {}
+            for p in players_raw:
+                games = int(p.get("games", 0))
+                if games < _MIN_GAMES:
                     continue
-                for o in mkt.get("outcomes", []):
-                    price = float(o.get("price", 0))
-                    if price <= 1.05:
-                        continue
-                    results.append({
-                        "player": o.get("description", o.get("name", "")),
-                        "team":   o.get("name", ""),
-                        "odds":   price,
-                        "bookmaker": bk.get("key", ""),
-                    })
-        return results
-
-    except Exception:
-        logger.error("player_props: error fetch props", exc_info=True)
-        return []
-
-
-async def _find_event_id(sport_key: str, home_team: str, away_team: str) -> str | None:
-    """Busca el event_id en The Odds API para el partido dado."""
-    if not ODDS_API_KEY:
-        return None
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/events"
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(url, params={"apiKey": ODDS_API_KEY})
-        if resp.status_code != 200:
-            return None
-        for ev in resp.json():
-            h = ev.get("home_team", "").lower()
-            a = ev.get("away_team", "").lower()
-            if home_team.lower()[:6] in h and away_team.lower()[:6] in a:
-                return ev.get("id")
-    except Exception:
-        pass
-    return None
-
-
-# ── API-Football — player stats por fixture ───────────────────────────────────
-
-async def _fetch_player_stats(fixture_id: int) -> list[dict]:
-    """
-    GET /v3/fixtures/players?fixture={fixture_id}
-    Devuelve lista de {name, team, goals, assists, minutes}.
-    Requiere API-Football RapidAPI subscrito.
-    """
-    if not FOOTBALL_RAPID_API_KEY:
-        return []
-    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures/players"
-    headers = {
-        "X-RapidAPI-Key":  FOOTBALL_RAPID_API_KEY,
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(url, headers=headers, params={"fixture": fixture_id})
-        if resp.status_code in (403, 429):
-            # 403: free tier sin acceso a /fixtures/players; 429: rate limit. Ambos no fatales.
-            logger.debug("player_props: RapidAPI %d para fixture %s — saltando", resp.status_code, fixture_id)
-            return []
-        if resp.status_code != 200:
-            return []
-        players = []
-        for team_data in resp.json().get("response", []):
-            team_name = team_data.get("team", {}).get("name", "")
-            for p in team_data.get("players", []):
-                stats = p.get("statistics", [{}])[0]
-                minutes = stats.get("games", {}).get("minutes") or 0
-                if minutes < _MIN_MINUTES:
+                if p.get("position", "") != "F":
                     continue
-                goals = stats.get("goals", {}).get("total") or 0
-                assists = stats.get("goals", {}).get("assists") or 0
-                players.append({
-                    "name":    p.get("player", {}).get("name", ""),
-                    "team":    team_name,
-                    "goals":   goals,
-                    "assists": assists,
-                    "minutes": minutes,
-                    "goals_per90":   round(goals / minutes * 90, 4) if minutes else 0,
-                    "assists_per90": round(assists / minutes * 90, 4) if minutes else 0,
-                })
-        return players
+                mins  = int(p.get("time", 1)) or 1
+                xg    = float(p.get("xG", 0))
+                xa    = float(p.get("xA", 0))
+                name  = p.get("player_name", "")
+                result[_norm(name)] = {
+                    "name":        name,
+                    "team":        p.get("team_title", ""),
+                    "position":    p.get("position", ""),
+                    "games":       games,
+                    "minutes":     mins,
+                    "goals":       int(p.get("goals", 0)),
+                    "xg":          round(xg, 4),
+                    "assists":     int(p.get("assists", 0)),
+                    "xa":          round(xa, 4),
+                    "xg_per90":    round(xg / mins * 90, 4),
+                    "xg_per_game": round(xg / games, 4),
+                    "shots":       int(p.get("shots", 0)),
+                    "key_passes":  int(p.get("key_passes", 0)),
+                    "source":      "understat",
+                }
+            _UNDERSTAT_CACHE[league] = (now, result)
+            logger.info("understat(%s season=%s): %d atacantes cargados", league, season, len(result))
+            return result
+
+        except Exception:
+            logger.warning("understat(%s season=%s): fetch falló", league, season, exc_info=True)
+
+    # Devolver caché antigua si existe aunque esté expirada
+    if cached:
+        logger.warning("understat(%s): usando caché expirada", league)
+        return cached[1]
+    return {}
+
+
+# ── Fuente 2: football-data.org /scorers (fallback) ──────────────────────────
+
+async def _fetch_fdorg_scorers(league: str) -> dict[str, dict]:
+    """
+    GET https://api.football-data.org/v4/competitions/{code}/scorers?limit=20
+    Devuelve el mismo formato que _fetch_understat_players para ser intercambiable.
+    goals_per_game usado como proxy de xG (sobreestima ligeramente).
+    """
+    if not FOOTBALL_API_KEY:
+        return {}
+    code = _FDORG_LEAGUE_MAP.get(league)
+    if not code:
+        return {}
+    try:
+        url = f"https://api.football-data.org/v4/competitions/{code}/scorers?limit=20"
+        req = urllib.request.Request(
+            url,
+            headers={"X-Auth-Token": FOOTBALL_API_KEY},
+        )
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+            data = json.loads(r.read().decode("utf-8"))
+
+        result: dict[str, dict] = {}
+        for s in data.get("scorers", []):
+            p     = s.get("player", {})
+            name  = p.get("name", "")
+            goals = int(s.get("goals", 0))
+            played = max(1, int(s.get("playedMatches", 1)))
+            if played < _MIN_GAMES:
+                continue
+            # proxy: goals como xG (top scorers suelen tener xG ≈ goals)
+            gpg = goals / played
+            result[_norm(name)] = {
+                "name":        name,
+                "team":        s.get("team", {}).get("shortName", ""),
+                "position":    "F",
+                "games":       played,
+                "minutes":     played * 80,  # estimación
+                "goals":       goals,
+                "xg":          round(goals * 0.9, 3),  # pequeño descuento
+                "assists":     int(s.get("assists", 0) or 0),
+                "xa":          0.0,
+                "xg_per90":    round(gpg * 90 / 80, 4),
+                "xg_per_game": round(gpg, 4),
+                "shots":       0,
+                "key_passes":  0,
+                "source":      "fdorg_scorers",
+            }
+        logger.info("fdorg_scorers(%s): %d jugadores cargados", league, len(result))
+        return result
+
     except Exception:
-        logger.debug("player_props: API-Football no disponible para fixture %s", fixture_id)
-        return []
+        logger.warning("fdorg_scorers(%s): fetch falló", league, exc_info=True)
+        return {}
 
 
-# ── Cálculo de probabilidades ─────────────────────────────────────────────────
+# ── Señal sin bookmaker ───────────────────────────────────────────────────────
 
-def _p_score(goals_per90: float, team_xg: float) -> float:
-    """P(jugador marca al menos 1 gol) usando Poisson."""
-    expected = goals_per90 * team_xg / _SQUAD_SIZE
-    return round(1.0 - float(_poisson.pmf(0, max(0.01, expected))), 4)
+def _make_model_signal(
+    match_id: str, home_team: str, away_team: str,
+    league: str, match_date,
+    player: dict, is_home_player: bool,
+    prob: float, weights_version: int,
+) -> dict:
+    """
+    Genera señal de goleador probable SIN comparar con bookmaker.
+    odds = cuota implícita del modelo (1/prob).
+    edge = 0 — sin validación externa.
+    """
+    from analyzers.value_bet_engine import kelly_criterion
+    implied_odds = round(1.0 / max(0.01, prob), 2)
+    team = home_team if is_home_player else away_team
+    return {
+        "match_id":        f"{match_id}_prop_{_norm(player['name'])[:18].replace(' ', '_')}",
+        "home_team":       home_team,
+        "away_team":       away_team,
+        "sport":           "football",
+        "league":          league,
+        "market_type":     "anytime_scorer",
+        "market":          "anytime_scorer",
+        "selection":       player["name"],
+        "team":            team,
+        "odds":            implied_odds,
+        "calculated_prob": prob,
+        "edge":            0.0,
+        "confidence":      round(prob, 4),
+        "kelly_fraction":  0.0,
+        "signals":         {},
+        "factors": {
+            "player_prob":   round(prob, 4),
+            "xg_per_game":   player["xg_per_game"],
+            "xg_per90":      player["xg_per90"],
+            "games":         player["games"],
+            "goals":         player["goals"],
+        },
+        "data_source":     f"player_props_{player['source']}",
+        "odds_source":     "model_only",
+        "no_bookmaker":    True,
+        "match_date":      match_date,
+        "weights_version": weights_version,
+        "created_at":      datetime.now(timezone.utc),
+        "result":          None,
+        "correct":         None,
+        "error_type":      None,
+        "elo_sufficient":  False,
+        "h2h_sufficient":  False,
+    }
 
 
-def _p_assist(assists_per90: float, team_xg: float) -> float:
-    """P(jugador da al menos 1 asistencia)."""
-    expected = assists_per90 * team_xg / _SQUAD_SIZE
-    return round(1.0 - float(_poisson.pmf(0, max(0.01, expected))), 4)
+def _build_player_alert(
+    player_name: str, player_team: str,
+    home_team: str, away_team: str,
+    prob: float, xg_per90: float, xg_per_game: float,
+) -> str:
+    """Formato Telegram específico para goleadores probables."""
+    opponent = away_team if player_team in home_team or any(
+        w in _norm(home_team) for w in _norm(player_team).split() if len(w) >= 4
+    ) else home_team
+    return (
+        f"⚽ GOLEADOR PROBABLE\n"
+        f"{player_name} ({player_team}) vs {opponent}\n"
+        f"Prob. marcar: {prob * 100:.0f}%\n"
+        f"xG/90: {xg_per90:.2f} | xG/partido: {xg_per_game:.2f}\n"
+        f"⚠️ Sin validación de bookmaker"
+    )
 
 
 # ── Generación de señales ─────────────────────────────────────────────────────
-
-def _make_prop_signal(
-    base: dict, market_type: str, player: str, team: str,
-    odds: float, prob: float, bookmaker: str,
-    match_date, weights_version: int,
-) -> dict | None:
-    from analyzers.value_bet_engine import kelly_criterion
-    edge = round(prob - 1.0 / odds, 4) if odds > 1 else 0.0
-    if edge < SPORTS_MIN_EDGE:
-        return None
-    confidence = min(0.95, round(prob * 1.5, 4))  # proxy de confianza para props
-    if confidence < SPORTS_MIN_CONFIDENCE:
-        return None
-    return {
-        **base,
-        "market_type":      market_type,
-        "market":           market_type,
-        "selection":        player,
-        "team":             team,
-        "odds":             round(odds, 3),
-        "calculated_prob":  round(prob, 4),
-        "edge":             edge,
-        "confidence":       confidence,
-        "kelly_fraction":   kelly_criterion(edge, odds),
-        "signals":          {},
-        "factors":          {"player_prob": round(prob, 4)},
-        "data_source":      "player_props",
-        "odds_source":      "theoddsapi",
-        "match_date":       match_date,
-        "weights_version":  weights_version,
-        "created_at":       datetime.now(timezone.utc),
-        "result":           None,
-        "correct":          None,
-        "error_type":       None,
-    }
-
 
 async def generate_player_props_signals(
     enriched_match: dict,
     weights_version: int = 0,
 ) -> list[dict]:
     """
-    Genera señales para goleador (anytime + first) y asistente.
+    Genera señales de goleador probable para un partido.
+
+    Flujo:
+    1. Carga atacantes de understat (con fallback a fdorg_scorers)
+    2. Filtra jugadores que pertenecen a home_team o away_team
+    3. P(marca) = 1 - Poisson(0, xG_total / partidos)
+    4. Si P > 0.25: guarda en Firestore + alerta Telegram
+    5. Máximo _MAX_PER_TEAM señales por equipo (ordenadas por P desc)
     """
     from shared.firestore_client import col
-    from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
+    from analyzers.value_bet_engine import _send_telegram_alert
 
-    match_id   = enriched_match.get("match_id", "")
+    match_id   = str(enriched_match.get("match_id", ""))
     home_team  = enriched_match.get("home_team", "")
     away_team  = enriched_match.get("away_team", "")
     league     = enriched_match.get("league", "")
     match_date = enriched_match.get("match_date")
-    home_xg    = float(enriched_match.get("home_xg") or 1.3)
-    away_xg    = float(enriched_match.get("away_xg") or 1.1)
 
-    sport_key = _PROP_SPORT_KEYS.get(league)
-    if not sport_key:
+    if league not in _UNDERSTAT_LEAGUE_MAP:
         return []
 
-    # Solo si quedan >= 5 requests The Odds API
-    status = quota.get_quota_status().get("the_odds_api", {})
-    if status.get("remaining", 0) < 5:
-        logger.debug("player_props: reservando quota the_odds_api (<5 restantes)")
+    # 1. Cargar stats de jugadores (understat → fdorg fallback)
+    players = await _fetch_understat_players(league)
+    if not players:
+        logger.info("player_props(%s): understat vacío — intentando fdorg_scorers", match_id)
+        players = await _fetch_fdorg_scorers(league)
+    if not players:
+        logger.debug("player_props(%s): sin datos de jugadores para %s", match_id, league)
         return []
 
-    event_id = await _find_event_id(sport_key, home_team, away_team)
-    if not event_id:
+    # 2. Separar jugadores por equipo
+    home_players: list[dict] = []
+    away_players: list[dict] = []
+    for p in players.values():
+        if _team_matches(p["team"], home_team):
+            home_players.append(p)
+        elif _team_matches(p["team"], away_team):
+            away_players.append(p)
+
+    if not home_players and not away_players:
+        logger.debug(
+            "player_props(%s): sin jugadores localizados — home=%s away=%s",
+            match_id, home_team, away_team,
+        )
         return []
 
-    base = {
-        "match_id": match_id,
-        "home_team": home_team,
-        "away_team": away_team,
-        "sport": "football",
-        "league": league,
-        "elo_sufficient": False,
-        "h2h_sufficient": False,
-    }
-
-    # Fetch props odds (2 calls: scorer + assist)
-    scorer_odds, assist_odds = await asyncio.gather(
-        _fetch_player_props(sport_key, event_id, "player_goal_scorer"),
-        _fetch_player_props(sport_key, event_id, "player_first_assist"),
-    )
-
-    # Intentar stats de jugadores desde API-Football (puede fallar)
-    fixture_numeric_id = int(match_id) if str(match_id).isdigit() else 0
-    player_stats: list[dict] = []
-    if fixture_numeric_id:
-        player_stats = await _fetch_player_stats(fixture_numeric_id)
-
-    # Diccionario rápido de stats por nombre
-    stats_by_name: dict[str, dict] = {p["name"].lower(): p for p in player_stats}
-
+    # 3 & 4. Calcular P(marca) y generar señales
     predictions: list[dict] = []
 
-    # ── Anytime scorer ────────────────────────────────────────────────────────
-    for o in scorer_odds:
-        player_name = o["player"]
-        team        = o["team"]
-        odds        = o["odds"]
-        bookmaker   = o["bookmaker"]
-        team_xg = home_xg if team.lower() in home_team.lower() else away_xg
+    for is_home, team_players in ((True, home_players), (False, away_players)):
+        candidates: list[tuple[float, dict]] = []
+        for p in team_players:
+            prob = _p_score(p["xg"], p["games"])
+            if prob >= _P_THRESHOLD:
+                candidates.append((prob, p))
+            logger.info(
+                "PLAYER_PROP: %s P=%.0f%% xG/90=%.2f partido=%s vs %s",
+                p["name"], prob * 100, p["xg_per90"], home_team, away_team,
+            )
 
-        # Probabilidad: desde stats si disponibles, sino heurística
-        stats = stats_by_name.get(player_name.lower())
-        if stats and stats["minutes"] >= _MIN_MINUTES:
-            prob = _p_score(stats["goals_per90"], team_xg)
-        else:
-            # Heurística: jugador promedio = xg_equipo / 11
-            prob = _p_score(team_xg / _SQUAD_SIZE, team_xg)
-
-        pred = _make_prop_signal(
-            base, "anytime_scorer", player_name, team,
-            odds, prob, bookmaker, match_date, weights_version,
-        )
-        if pred:
-            doc_id = f"{match_id}_anyscorer_{player_name.lower().replace(' ','_')[:20]}"
-            pred["match_id"] = doc_id
+        # Ordenar por P desc, limitar a _MAX_PER_TEAM
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        for prob, p in candidates[:_MAX_PER_TEAM]:
+            signal = _make_model_signal(
+                match_id, home_team, away_team, league, match_date,
+                p, is_home, prob, weights_version,
+            )
+            doc_id = signal["match_id"]
             try:
-                col("predictions").document(doc_id).set(pred)
+                col("predictions").document(doc_id).set(signal)
             except Exception:
-                pass
-            if pred["edge"] > SPORTS_ALERT_EDGE:
-                payload = _build_alert_payload(pred, enriched_match)
-                payload["market_emoji"] = "🥅"
-                await _send_telegram_alert(payload)
-            predictions.append(pred)
+                logger.error("player_props: error guardando %s", doc_id, exc_info=True)
 
-    # ── Anytime assist ────────────────────────────────────────────────────────
-    for o in assist_odds:
-        player_name = o["player"]
-        team        = o["team"]
-        odds        = o["odds"]
-        bookmaker   = o["bookmaker"]
-        team_xg = home_xg if team.lower() in home_team.lower() else away_xg
-
-        stats = stats_by_name.get(player_name.lower())
-        if stats and stats["minutes"] >= _MIN_MINUTES:
-            prob = _p_assist(stats["assists_per90"], team_xg)
-        else:
-            prob = _p_assist((team_xg - 0.2) / _SQUAD_SIZE, team_xg)  # ligeramente menor que scorer
-
-        pred = _make_prop_signal(
-            base, "anytime_assist", player_name, team,
-            odds, prob, bookmaker, match_date, weights_version,
-        )
-        if pred:
-            doc_id = f"{match_id}_assist_{player_name.lower().replace(' ','_')[:20]}"
-            pred["match_id"] = doc_id
-            try:
-                col("predictions").document(doc_id).set(pred)
-            except Exception:
-                pass
-            if pred["edge"] > SPORTS_ALERT_EDGE:
-                payload = _build_alert_payload(pred, enriched_match)
-                payload["market_emoji"] = "🎯"
-                await _send_telegram_alert(payload)
-            predictions.append(pred)
+            # Alerta Telegram si P > umbral de alerta (reutilizamos SPORTS_ALERT_EDGE como proxy)
+            if prob >= max(_P_THRESHOLD, SPORTS_ALERT_EDGE + 0.5):
+                alert_text = _build_player_alert(
+                    p["name"], p["team"], home_team, away_team,
+                    prob, p["xg_per90"], p["xg_per_game"],
+                )
+                await _send_telegram_alert({
+                    **signal,
+                    "telegram_text":  alert_text,
+                    "market_emoji":   "⚽",
+                    "intensity":      "🔥" if prob >= 0.45 else "✅",
+                    "no_bookmaker":   True,
+                })
+            predictions.append(signal)
 
     if predictions:
-        logger.info("player_props(%s): %d señales — %s vs %s",
-                    match_id, len(predictions), home_team, away_team)
+        logger.info(
+            "player_props(%s): %d señales — %s vs %s",
+            match_id, len(predictions), home_team, away_team,
+        )
     return predictions
