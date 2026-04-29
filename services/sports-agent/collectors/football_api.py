@@ -190,6 +190,9 @@ async def get_match_result(match_id: str) -> dict | None:
     GET /matches/{match_id}. Devuelve resultado si FINISHED, None si no.
     Usado por learning_engine para verificar resultados pendientes.
     """
+    if not str(match_id).isdigit():
+        logger.debug("get_match_result: ignorando match_id no entero (%s)", match_id)
+        return None
     data = await _request(f"/matches/{match_id}")
     if not data:
         return None
