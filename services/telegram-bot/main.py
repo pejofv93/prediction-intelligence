@@ -212,17 +212,21 @@ async def send_weekly_report() -> JSONResponse:
 
     try:
         now = datetime.now(timezone.utc)
-        iso = now.isocalendar()
-        current_week = f"{iso[0]}-W{iso[1]:02d}"
 
-        # Inicio de la semana actual (lunes 00:00 UTC)
-        week_start = now - timedelta(days=now.weekday())
-        week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        # El reporte del lunes cubre la semana que ACABA DE TERMINAR (lun-dom anterior).
+        # week_end = este lunes 00:00 UTC  |  week_start = el lunes anterior 00:00 UTC
+        week_end = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        week_start = week_end - timedelta(weeks=1)
+        prev_week_dt = week_end - timedelta(days=1)  # domingo de la semana que acaba
+        prev_iso = prev_week_dt.isocalendar()
+        prev_week = f"{prev_iso[0]}-W{prev_iso[1]:02d}"
 
-        # 1. accuracy_log semana actual
+        # 1. accuracy_log semana anterior (la que acaba de terminar)
         log_docs = list(
             col("accuracy_log")
-            .where("week", "==", current_week)
+            .where("week", "==", prev_week)
             .limit(1)
             .stream()
         )
@@ -234,10 +238,11 @@ async def send_weekly_report() -> JSONResponse:
         weights_after = weights_data.get("weights", {})
         weights_before = log.get("weights_start", weights_after)
 
-        # 3. predictions de la semana actual
+        # 3. predictions de la semana anterior
         pred_docs = list(
             col("predictions")
             .where("created_at", ">=", week_start)
+            .where("created_at", "<", week_end)
             .stream()
         )
         week_preds = [d.to_dict() for d in pred_docs]
@@ -268,10 +273,11 @@ async def send_weekly_report() -> JSONResponse:
                 worst_edge = float(worst_pred.get("edge", 0))
                 worst_error = worst_pred.get("error_type", "N/A") or "N/A"
 
-        # 4. poly_predictions de la semana actual
+        # 4. poly_predictions de la semana anterior
         poly_docs = list(
             col("poly_predictions")
             .where("analyzed_at", ">=", week_start)
+            .where("analyzed_at", "<", week_end)
             .stream()
         )
         poly_preds = [d.to_dict() for d in poly_docs]
@@ -283,9 +289,17 @@ async def send_weekly_report() -> JSONResponse:
             else 0.0
         )
 
+        # Bankroll virtual (shadow trades)
+        try:
+            from shared.shadow_engine import calculate_metrics
+            shadow_metrics = calculate_metrics()
+        except Exception:
+            logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
+            shadow_metrics = {}
+
         # Construir week_stats
         week_stats = {
-            "week": current_week,
+            "week": prev_week,
             "predictions_total": int(log.get("predictions_total", 0)),
             "predictions_correct": int(log.get("predictions_correct", 0)),
             "accuracy": float(log.get("accuracy", 0.0)),
@@ -300,6 +314,12 @@ async def send_weekly_report() -> JSONResponse:
             "poly_total": poly_total,
             "poly_alerts": poly_alerts,
             "poly_avg_edge": poly_avg_edge,
+            "bankroll_current": shadow_metrics.get("current_bankroll", 50.0),
+            "roi_total": shadow_metrics.get("roi_total", 0.0),
+            "roi_sports": shadow_metrics.get("roi_sports", 0.0),
+            "win_rate": shadow_metrics.get("win_rate", 0.0),
+            "closed_trades": shadow_metrics.get("closed_trades", 0),
+            "streak": shadow_metrics.get("streak", 0),
         }
 
         report_text = generate_weekly_report(week_stats, weights_before, weights_after)
@@ -307,7 +327,7 @@ async def send_weekly_report() -> JSONResponse:
 
         logger.info(
             "send-weekly-report: enviado para %s (%d preds, %d poly)",
-            current_week,
+            prev_week,
             week_stats["predictions_total"],
             poly_total,
         )

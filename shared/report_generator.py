@@ -8,6 +8,7 @@ def generate_weekly_report(
     week_stats: dict,
     weights_before: dict,
     weights_after: dict,
+    bankroll_metrics: dict | None = None,
 ) -> str:
     """
     Genera string Markdown formateado para Telegram.
@@ -16,9 +17,11 @@ def generate_weekly_report(
         week, predictions_total, predictions_correct, accuracy,
         accuracy_by_league, best_match, best_edge, best_result,
         worst_match, worst_edge, worst_error, poly_total, poly_alerts,
-        poly_avg_edge, prev_week_accuracy
+        poly_avg_edge, prev_week_accuracy,
+        bankroll_current, roi_total, roi_sports, win_rate, closed_trades, streak
 
     weights_before / weights_after: dicts con claves poisson, elo, form, h2h.
+    bankroll_metrics: resultado de shadow_engine.calculate_metrics() (opcional).
     Devuelve el mensaje listo para enviar por Telegram (Markdown).
     """
     week = week_stats.get("week", "N/A")
@@ -37,6 +40,13 @@ def generate_weekly_report(
     poly_total = week_stats.get("poly_total", 0)
     poly_alerts = week_stats.get("poly_alerts", 0)
     poly_avg_edge = week_stats.get("poly_avg_edge", 0.0)
+
+    bankroll_current = week_stats.get("bankroll_current", 50.0)
+    roi_total = week_stats.get("roi_total", 0.0)
+    roi_sports = week_stats.get("roi_sports", 0.0)
+    win_rate = week_stats.get("win_rate", 0.0)
+    closed_trades = week_stats.get("closed_trades", 0)
+    streak = week_stats.get("streak", 0)
 
     # Delta respecto a semana anterior
     if prev_accuracy is not None:
@@ -58,20 +68,44 @@ def generate_weekly_report(
         else:
             arrow = "─"
         weight_lines.append(f"  {k}: {before:.2f} → {after:.2f} {arrow}")
-
     weights_block = "\n".join(weight_lines)
+
+    # Accuracy por liga (solo ligas con al menos 1 prediccion)
+    accuracy_by_league = week_stats.get("accuracy_by_league", {})
+    league_lines = []
+    for lg, acc in sorted(accuracy_by_league.items()):
+        try:
+            acc_f = float(acc)
+        except (TypeError, ValueError):
+            continue
+        if acc_f > 0:
+            league_lines.append(f"  {lg}: {acc_f:.1%}")
 
     # Construir mensaje segun formato del spec
     if total == 0:
-        # Semana sin predicciones
-        return (
-            f"📈 REPORTE SEMANAL — Semana {week}\n\n"
-            "🏟 Sports Agent:\n"
-            "  Sin predicciones esta semana.\n\n"
-            f"🔮 Polymarket:\n"
-            f"  Mercados analizados: {poly_total} | Alertas: {poly_alerts}\n"
-            f"  Edge medio detectado: +{poly_avg_edge:.1%}"
-        )
+        lines = [
+            f"📈 REPORTE SEMANAL — Semana {week}",
+            "",
+            "🏟 Sports Agent:",
+            "  Sin predicciones esta semana.",
+        ]
+        if league_lines:
+            lines += ["", "📊 Accuracy por liga:"] + league_lines
+        lines += [
+            "",
+            "🔮 Polymarket:",
+            f"  Mercados analizados: {poly_total} | Alertas: {poly_alerts}",
+            f"  Edge medio detectado: +{poly_avg_edge:.1%}",
+        ]
+        if closed_trades > 0:
+            streak_str = f"+{streak}" if streak > 0 else str(streak)
+            lines += [
+                "",
+                "💰 Bankroll virtual:",
+                f"  Saldo: {bankroll_current:.2f}u | ROI: {roi_total:+.1%}",
+                f"  Win rate: {win_rate:.1%} ({closed_trades} cerradas) | Racha: {streak_str}",
+            ]
+        return "\n".join(lines)
 
     lines = [
         f"📈 REPORTE SEMANAL — Semana {week}",
@@ -83,6 +117,9 @@ def generate_weekly_report(
         "⚙️ Ajustes de pesos aplicados:",
         weights_block,
     ]
+
+    if league_lines:
+        lines += ["", "📊 Accuracy por liga:"] + league_lines
 
     if best_match and best_match != "N/A":
         lines += [
@@ -99,5 +136,14 @@ def generate_weekly_report(
         f"  Mercados analizados: {poly_total} | Alertas: {poly_alerts}",
         f"  Edge medio detectado: +{poly_avg_edge:.1%}",
     ]
+
+    if closed_trades > 0:
+        streak_str = f"+{streak}" if streak > 0 else str(streak)
+        lines += [
+            "",
+            "💰 Bankroll virtual:",
+            f"  Saldo: {bankroll_current:.2f}u | ROI total: {roi_total:+.1%} | Sports: {roi_sports:+.1%}",
+            f"  Win rate: {win_rate:.1%} ({closed_trades} trades cerradas) | Racha: {streak_str}",
+        ]
 
     return "\n".join(lines)
