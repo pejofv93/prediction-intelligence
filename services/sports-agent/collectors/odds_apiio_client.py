@@ -209,7 +209,7 @@ _FOOTBALL_SLUG_CANDIDATES = ["soccer", "football", "soccer_football"]
 # Casas de apuestas que /odds/multi requiere obligatoriamente (param "bookmakers").
 # Lista de IDs conocidos en odds-api.io — se envían como CSV.
 # Error "Missing bookmakers" si se omite. Usar los más comunes/disponibles.
-_DEFAULT_BOOKMAKERS = "Bet365,Unibet"
+_DEFAULT_BOOKMAKERS = "Bet365,1xbet,22Bet,888Sport,Unibet"
 
 # Caché global de odds por eventId: {event_id: odds_item}
 # Compartido entre todas las ligas — se puebla una sola vez por ciclo de analyze.
@@ -628,8 +628,14 @@ async def _fetch_all_soccer_events() -> list[dict]:
         logger.info("DIAG_FETCH: llamando /events sport=soccer (request único para todas las ligas)")
         await _diag_bookmakers()
 
+        from_dt = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_dt   = (now + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         for slug in _FOOTBALL_SLUG_CANDIDATES:
-            status, body, data = await _get_raw("/events", {"sport": slug})
+            status, body, data = await _get_raw(
+                "/events",
+                {"sport": slug, "commenceTimeFrom": from_dt, "commenceTimeTo": to_dt},
+            )
 
             if status == 429:
                 # rate_limited=True → _cache_ttl devuelve _TTL_RATE_LIMIT (3600s)
