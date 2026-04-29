@@ -22,7 +22,8 @@ async def fetch_active_markets(
 ) -> list[dict]:
     """
     GET /markets?active=true&order=volume24hr&limit={limit}
-    Filtra: volume_24h >= min_volume AND end_date > now + 2 days.
+    Filtra: volume_24h >= min_volume AND end_date > now + 24h.
+    Mercados sin end_date se descartan (no verificables).
     Guarda en Firestore poly_markets. Devuelve lista de mercados procesados.
     """
     now = datetime.now(timezone.utc)
@@ -60,11 +61,12 @@ async def fetch_active_markets(
             if market["volume_24h"] < min_volume:
                 continue
             end_date = market.get("end_date")
-            if end_date and isinstance(end_date, datetime):
-                if end_date.tzinfo is None:
-                    end_date = end_date.replace(tzinfo=timezone.utc)
-                if end_date < min_end_date:
-                    continue
+            if not end_date or not isinstance(end_date, datetime):
+                continue
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=timezone.utc)
+            if end_date < min_end_date:
+                continue
             try:
                 col("poly_markets").document(market["market_id"]).set(market)
                 saved += 1
