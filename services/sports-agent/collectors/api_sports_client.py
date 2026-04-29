@@ -31,6 +31,8 @@ API_SPORTS_DELAY = 2.0  # segundos entre requests — conservador dado el limite
 # Mapeo deporte abreviado → sport_type key (para buscar en API_SPORTS_HOSTS)
 _LEAGUE_TO_SPORT_TYPE = {v: k for k, v in SUPPORTED_SPORTS_APISPORTS.items()}
 # {"nba": "basketball", "nfl": "american-football", "mlb": "baseball", "nhl": "hockey", "ufc": "mma"}
+# Euroleague usa el mismo host que NBA (api-basketball.p.rapidapi.com)
+_LEAGUE_TO_SPORT_TYPE["euroleague"] = "basketball"
 
 # Mapeo sport abreviado → nombre de liga en Firestore
 _SPORT_TO_LEAGUE = {
@@ -40,6 +42,7 @@ _SPORT_TO_LEAGUE = {
     "nhl": "NHL",
     "mma": "MMA",
     "ufc": "MMA",
+    "euroleague": "EUROLEAGUE",
 }
 
 

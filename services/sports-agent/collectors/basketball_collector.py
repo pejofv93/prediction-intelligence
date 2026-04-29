@@ -4,6 +4,7 @@ Añade H2H y enriquecimiento de stats para el basketball_analyzer.
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from collectors.api_sports_client import get_games_today, get_team_stats_bdl
@@ -20,7 +21,11 @@ async def collect_basketball_games(days: int = 1) -> list[dict]:
     Recopila partidos NBA y Euroleague de hoy.
     Devuelve lista normalizada compatible con save_upcoming_matches.
     """
-    sports = ["nba"]
+    if not os.environ.get("FOOTBALL_RAPID_API_KEY"):
+        logger.warning("basketball_collector: FOOTBALL_RAPID_API_KEY no configurada — omitiendo baloncesto")
+        return []
+
+    sports = ["nba", "euroleague"]
     all_games: list[dict] = []
 
     for sport in sports:
