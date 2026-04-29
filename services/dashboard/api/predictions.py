@@ -28,16 +28,17 @@ def _serialize(doc: dict) -> dict:
 
 
 @router.get("/predictions")
-async def get_predictions() -> list[dict]:
+async def get_predictions(limit: int = 50) -> list[dict]:
     """
-    Ultimas 50 predicciones ordenadas por created_at DESC.
+    Ultimas N predicciones ordenadas por created_at DESC (max 200).
     Incluye todos los campos necesarios para mercados múltiples.
     """
+    limit = max(1, min(limit, 200))
     try:
         docs = (
             col("predictions")
             .order_by("created_at", direction="DESCENDING")
-            .limit(50)
+            .limit(limit)
             .stream()
         )
         fields = {

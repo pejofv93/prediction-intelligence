@@ -914,12 +914,22 @@ async def _send_telegram_alert(prediction: dict) -> bool:
 # Comparación case-insensitive contra los nombres completos de football-data.org.
 _TOP6_KEYWORDS: dict[str, list[str]] = {
     "PD":  ["real madrid", "barcelona", "atlético", "atletico", "athletic", "villarreal", "real sociedad"],
-    "SA":  ["inter", "napoli", "atalanta", "juventus", "lazio", "fiorentina"],
+    "SA":  ["inter", "napoli", "atalanta", "juventus", "lazio", "fiorentina", "milan"],
     "PL":  ["manchester city", "arsenal", "liverpool", "chelsea", "manchester united", "aston villa"],
     "BL1": ["bayern", "leverkusen", "dortmund", "leipzig", "frankfurt", "stuttgart"],
+    "DED": ["feyenoord", "ajax", "psv", "az alkmaar", "utrecht", "twente"],
+    "BSA": ["palmeiras", "flamengo", "atlético mineiro", "atletico mineiro", "fluminense", "botafogo", "corinthians"],
 }
 
-_EXTREME_UNDERDOG_ODDS = 5.0  # cuota máxima permitida cuando el rival es top-6
+# Umbral de cuota por liga: ligas con dominancia extrema usan 4.5, más competitivas 5.0.
+_EXTREME_UNDERDOG_ODDS: dict[str, float] = {
+    "PD":  4.5,
+    "SA":  4.5,
+    "PL":  4.5,
+    "BL1": 5.0,
+    "DED": 5.0,
+    "BSA": 5.0,
+}
 
 
 async def generate_signal(enriched_match: dict) -> list[dict]:
@@ -1108,16 +1118,17 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         best_odds = away_odds
         team_to_back = str(away_team)
 
-    # --- 5b. Filtro underdog extremo: descartar si odds > 5.0 y el rival es top-6 ---
+    # --- 5b. Filtro underdog extremo: umbral dinámico por liga vs rival top-6 ---
     rival_team = str(away_team) if team_to_back == str(home_team) else str(home_team)
     top6_keywords = _TOP6_KEYWORDS.get(league, [])
-    if best_odds > _EXTREME_UNDERDOG_ODDS and top6_keywords:
+    underdog_threshold = _EXTREME_UNDERDOG_ODDS.get(league, 5.0)
+    if best_odds > underdog_threshold and top6_keywords:
         rival_lower = rival_team.lower()
         if any(kw in rival_lower for kw in top6_keywords):
             logger.info(
-                "generate_signal(%s): señal descartada — underdog extremo (odds=%.2f) "
+                "generate_signal(%s): señal descartada — underdog extremo (odds=%.2f > %.1f) "
                 "vs rival top-6 '%s' [%s]",
-                match_id, best_odds, rival_team, league,
+                match_id, best_odds, underdog_threshold, rival_team, league,
             )
             return []
 
