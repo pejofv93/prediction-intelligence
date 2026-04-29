@@ -64,6 +64,7 @@ _MONTHLY_LIMITS: dict[str, int] = {
     "oddsapiio":    72_000, # odds-api.io free: 5000 req/h × 24h × ~15 días activos
     "the_odds_api":    500, # 500/mes — verificado. Header x-requests-remaining fiable.
     "oddspapi":        250, # 250/mes — confirmado. Agotada hasta ~May 1.
+    "opticodds":     1_000, # optic-odds.io free: 1000/mes (fallback cuaternario)
 }
 
 # ── Umbral de alerta (% del límite) ──────────────────────────────────────────

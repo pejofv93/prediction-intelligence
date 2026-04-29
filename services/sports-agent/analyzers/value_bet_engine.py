@@ -166,6 +166,10 @@ _LEAGUE_CACHE_TTL = timedelta(hours=8)
 _ODDSAPIIO_CACHE: dict[str, tuple[datetime, list]] = {}
 _ODDSAPIIO_CACHE_TTL = timedelta(hours=4)
 
+# Cache de optic-odds en memoria: {league_code: (fetched_at, [events_normalised])}
+_OPTICODDS_CACHE: dict[str, tuple[datetime, list]] = {}
+_OPTICODDS_CACHE_TTL = timedelta(hours=4)
+
 # Mutex para serializar los track_call concurrentes del pre-fetch (evita race condition
 # donde N coroutines leen can_call=True y hacen N llamadas antes de que se actualice used)
 _THE_ODDS_API_LOCK = asyncio.Lock()
@@ -352,6 +356,21 @@ async def fetch_bookmaker_odds(
         except Exception:
             logger.error("fetch_bookmaker_odds(%s): error en OddsPapi fallback", match_id, exc_info=True)
 
+    # --- 5. Optic Odds (cuaternaria — 1000/mes, fallback cuando todo lo anterior falla) ---
+    if home_team and away_team:
+        try:
+            from shared.config import OPTIC_ODDS_KEY as _OPTIC_KEY
+            if _OPTIC_KEY:
+                optic = await _fetch_opticodds(match_id, home_team, away_team, league, now)
+                if optic:
+                    await _save_odds_cache(match_id, optic, now)
+                    logger.info("fetch_bookmaker_odds(%s): opticodds — %s @ home=%.2f away=%.2f",
+                                match_id, optic.get("bookmaker", "opticodds"),
+                                optic.get("home_odds", 0), optic.get("away_odds", 0))
+                    return {**optic, "source": "opticodds"}
+        except Exception:
+            logger.error("fetch_bookmaker_odds(%s): error en opticodds fallback", match_id, exc_info=True)
+
     # RapidAPI /odds no está disponible en el plan free de API-Football (siempre 403).
     # apifootball_odds.py cubre BTTS/AH/DC via /v3/odds en generate_football_extra_signals.
     logger.debug("fetch_bookmaker_odds(%s): sin cuotas h2h disponibles", match_id)
@@ -459,6 +478,32 @@ def _search_oddsapiio_event(events: list, home_team: str, away_team: str, match_
             match_id, _normalize_team(home_team), _normalize_team(away_team), len(events),
         )
     return None
+
+
+async def _fetch_opticodds(
+    match_id: str, home_team: str, away_team: str, league: str, now: datetime
+) -> dict | None:
+    """
+    Obtiene cuotas de optic-odds.io (fallback cuaternario — 1000 req/mes).
+    Mismo patrón que _fetch_oddsapiio: caché en memoria por liga TTL 4h.
+    Reutiliza _search_oddsapiio_event porque el formato normalizado es idéntico.
+    """
+    cached = _OPTICODDS_CACHE.get(league)
+    if cached is not None:
+        fetched_at, events = cached
+        if (now - fetched_at) < _OPTICODDS_CACHE_TTL:
+            return _search_oddsapiio_event(events, home_team, away_team, match_id)
+
+    try:
+        from collectors.opticodds_client import get_league_odds as _optic_get
+        events = await _optic_get(league)
+        if events:
+            _OPTICODDS_CACHE[league] = (now, events)
+    except Exception:
+        logger.error("_fetch_opticodds(%s): error llamando cliente", match_id, exc_info=True)
+        return None
+
+    return _search_oddsapiio_event(events, home_team, away_team, match_id)
 
 
 async def _fetch_the_odds_api(
