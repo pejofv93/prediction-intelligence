@@ -29,20 +29,7 @@ def categorize_market(question: str) -> str:
 
 
 def _get_current_crypto_price(question: str) -> float | None:
-    """Devuelve precio actual aproximado del activo crypto mencionado en la pregunta."""
-    q = question.lower()
-    if any(kw in q for kw in ["btc", "bitcoin"]):
-        return 94000.0
-    if any(kw in q for kw in ["eth", "ethereum"]):
-        return 3200.0
-    if any(kw in q for kw in ["sol", "solana"]):
-        return 140.0
-    if any(kw in q for kw in ["bnb"]):
-        return 600.0
-    if any(kw in q for kw in ["xrp", "ripple"]):
-        return 2.2
-    if any(kw in q for kw in ["ada", "cardano"]):
-        return 0.7
+    """Precio spot del activo crypto. Deshabilitado — precios hardcodeados eliminados."""
     return None
 
 
@@ -224,14 +211,22 @@ SYSTEM_PROMPT = (
     "BUSCA ACTIVAMENTE estas ineficiencias. "
     "Si el precio YES es 0.30 pero los fundamentales apuntan a 0.45, edge = +0.15 — es una oportunidad. "
     "Si el precio YES es 0.70 pero la evidencia es debil, edge = -0.15 — es oportunidad en NO. "
-    "No seas conservador: los mercados eficientes no existen en Polymarket. "
+    "Se preciso: sobreestimar confianza es peor que subestimarla. "
+    "Una senal con confianza inflada destruye la calibracion del sistema — prefiere PASS antes que un BUY con confianza falsa. "
     "Analiza: (1) buy_pressure del orderbook vs precio, (2) momentum del precio, "
     "(3) smart money, (4) sentiment de noticias vs precio, (5) arbitrage signals. "
     "Responde SOLO en JSON valido: "
     '{"real_prob": float, "edge": float, "confidence": float, '
     '"trend": "RISING|FALLING|STABLE", "recommendation": "BUY_YES|BUY_NO|PASS|WATCH", '
     '"key_factors": list[str], "reasoning": string} '
-    "donde edge = real_prob - market_price_yes (positivo = comprar YES, negativo = comprar NO)."
+    "donde edge = real_prob - market_price_yes (positivo = comprar YES, negativo = comprar NO). "
+    "ESCALA DE CONFIANZA (confidence): "
+    "0.50 = muy incierto, datos insuficientes o contradictorios; "
+    "0.65 = evidencia moderada, una o dos senales alineadas; "
+    "0.75 = evidencia solida, multiples senales convergentes; "
+    "0.85 = muy alta certeza, reservar para eventos casi seguros con evidencia inequivoca. "
+    "La mayoria de mercados deberia quedar entre 0.55 y 0.72. "
+    "Solo supera 0.80 si tienes 3 o mas senales independientes alineadas."
 )
 
 
@@ -331,6 +326,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     user_prompt = (
         f"Mercado: {question}\n"
+        f"Categoría: {category}\n"
         f"Precio actual YES: {price_yes:.3f} (= {price_yes*100:.1f}%)\n"
         f"Volumen 24h: ${volume_24h:,.0f}\n"
         f"Dias al cierre: {days_to_close}\n"
@@ -377,7 +373,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 model=model,
                 messages=messages,
                 max_tokens=500,
-                temperature=0.3,
+                temperature=0.5,
             )
             raw_response = resp.choices[0].message.content
             all_tpd = False

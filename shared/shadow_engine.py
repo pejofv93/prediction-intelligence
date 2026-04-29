@@ -150,7 +150,7 @@ async def retroactive_eval(db=None) -> dict:
                     "pnl_virtual": None,
                     "bankroll_after": None,
                     "signal_data": p,
-                    "category": None,
+                    "category": p.get("category"),
                     "unified_score": None,
                 }
                 col("shadow_trades").document(trade_id).set(trade)
@@ -198,7 +198,7 @@ async def track_new_signal(signal: dict, source: str) -> str:
             edge = float(signal.get("edge") or 0.0)
             confidence = float(signal.get("confidence") or 0.0)
             kelly = min(0.25, max(0.01, edge / 2))
-            category = None
+            category = signal.get("category")
 
         virtual_stake = _calc_virtual_stake(kelly)
 
