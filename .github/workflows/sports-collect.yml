@@ -8,9 +8,26 @@ jobs:
   trigger:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    continue-on-error: true
     steps:
       - name: Trigger Cloud Run (sync)
         run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-collect" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 2400 \
+            --no-buffer \
+            --fail --silent --show-error
+
+  retry:
+    needs: trigger
+    if: ${{ needs.trigger.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Retry Trigger Cloud Run (sync)
+        run: |
+          echo "Reintentando collect tras fallo (runner no disponible o error de red)"
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-collect" \
             -H "Content-Type: application/json" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
