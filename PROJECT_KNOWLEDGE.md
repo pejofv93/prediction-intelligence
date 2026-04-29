@@ -1,5 +1,5 @@
 # prediction-intelligence — Knowledge Base
-**Última actualización:** 2026-04-28  
+**Última actualización:** 2026-04-29  
 **Repo:** github.com/pejofv93/prediction-intelligence  
 **Proyecto GCP:** prediction-intelligence  
 **Región Cloud Run:** europe-west1
@@ -110,7 +110,7 @@ En `groq_analyzer._validate_crypto_price_prediction()`:
 /run-collect → football_api.py (football-data.org, 6.5s rate limit)
             → allsports_client.py (selecciones + Sudamérica)
             → tennis_collector.py (ATP/WTA)
-            → basketball_collector.py (NBA + EuroLeague)
+            → basketball_collector.py (NBA + ACB/116 + Euroleague/120; NCAA/EuroBasket en discovery)
             → api_sports_client.py (NFL/MLB/NHL/MMA — sin analyzer aún)
             → upcoming_matches en Firestore
 
@@ -155,15 +155,15 @@ Para Corners / Bookings (1X2):
   → guarda en prodpredictions
 ```
 
-**Estado APIs (2026-04-28):**
+**Estado APIs (2026-04-29):**
 | API | Estado | Límite | Notas |
 |---|---|---|---|
-| **odds-api.io** | ✅ Activa | 100 req/hora | Free tier. 1 req/analyze para events. `/odds/multi` necesita param `bookmakers`. TTL 3600s en 429. |
-| **football-data.org** | ✅ Activa | 10 req/min | 6.5s delay. Team stats tardan ~30min con 89 partidos. |
-| **The Odds API** | ⏳ Agotada | 500/mes | Renova ~1 mayo 2026 |
-| **OddsPapi v1+v4** | ⏳ Agotada | 250/mes | Renova ~1 mayo; pendiente GitHub Secret `ODDSPAPI_KEY` |
+| **odds-api.io** | ✅ Activa | 100 req/hora | Free tier. 1 req/analyze para events. `/odds/multi` con `bookmakers`. TTL 3600s en 429. |
+| **football-data.org** | ✅ Activa | 10 req/min | 6.5s delay. IDs con `_totals` filtrados (fix 2026-04-29). |
+| **The Odds API** | ⏳ 0 créditos | 500/mes | Reset ~1 mayo 2026 |
+| **OddsPapi v1+v4** | ⏳ 0 créditos | 250/mes | Reset ~1 mayo; pendiente GitHub Secret `ODDSPAPI_KEY` |
 | **API-Football** (RapidAPI) | ✅ Activa | 100 req/día | `FOOTBALL_RAPID_API_KEY`. apifootball_odds.py fallback activo. |
-| **API-Basketball** (RapidAPI) | ❌ No suscrito | 500/mes free | Necesita suscripción manual en rapidapi.com |
+| **API-Basketball** (RapidAPI) | ✅ Activo | 100 req/día | NBA + ACB (116) + Euroleague (120) añadidas. NCAA/EuroBasket en discovery. |
 | **Tennis API** (tennisapi1) | ✅ Activa | — | Host corregido, endpoint `/atp/tournaments` |
 | **allsports_client** | 🚫 Desactivado | — | `COLLECTOR_DISABLED=True`. Endpoint `/football/` → 404 |
 | **api-mma (MMA)** | 🚫 Desactivado | — | `_DISABLED_SPORTS`. api-mma.p.rapidapi.com → 404 |
@@ -303,8 +303,8 @@ Recomendación: BUY_YES|BUY_NO|PASS|WATCH
 
 | Servicio | Revisión (aprox.) | Memory | Timeout |
 |---|---|---|---|
-| sports-agent | post-commit 4179158 | 512Mi | 1800s |
-| polymarket-agent | post-commit 4179158 | 256Mi | 300s |
+| sports-agent | sports-agent-00195-vr9 | 512Mi | 1800s |
+| polymarket-agent | polymarket-agent-00172-z2q | 256Mi | 300s |
 | telegram-bot | — | 256Mi | 60s |
 | dashboard | — | 512Mi | 60s |
 
@@ -412,67 +412,68 @@ python scripts/reset_threshold.py
 
 ---
 
-## ESTADO OPERATIVO (2026-04-28)
+## ESTADO OPERATIVO (2026-04-29)
 
 ### Servicios Cloud Run activos
-| Servicio | URL | Último commit | Estado |
+| Servicio | URL | Última revisión | Estado |
 |---|---|---|---|
-| sports-agent | sports-agent-cragcibmwq-ew.a.run.app | 3190693 | ✅ OK |
-| polymarket-agent | — | — | ✅ OK |
+| sports-agent | sports-agent-327240737877.europe-west1.run.app | sports-agent-00195-vr9 | ✅ OK |
+| polymarket-agent | polymarket-agent-327240737877.europe-west1.run.app | polymarket-agent-00172-z2q | ✅ OK |
 | telegram-bot | telegram-bot-327240737877.europe-west1.run.app | — | ✅ OK |
 | dashboard | — | — | ✅ OK |
 
 ### Colectores sports-agent
 | Colector | Archivo | Estado | Razón |
 |---|---|---|---|
-| Football (football-data.org) | `football_api.py` | ✅ Activo | Fuente principal ligas europeas + Copa Lib |
+| Football (football-data.org) | `football_api.py` | ✅ Activo | Fuente principal ligas europeas + Copa Lib. IDs `_totals` filtrados. |
 | Odds primarias | `odds_apiio_client.py` | ✅ Activo | 1 req/analyze para todos los eventos soccer |
 | Tennis | `tennis_collector.py` | ✅ Activo | Host: tennisapi1.p.rapidapi.com, endpoint: /atp/tournaments |
-| Basketball | `basketball_collector.py` | ✅ Activo | Euroleague + NBA (NBA sin suscripción API-Basketball) |
+| Basketball | `basketball_collector.py` | ✅ Activo | NBA + ACB (id=116) + Euroleague (id=120). NCAA/EuroBasket en discovery. |
 | AllSports | `allsports_client.py` | 🚫 Desactivado | `COLLECTOR_DISABLED=True` — /football/ → 404 |
 | MMA/UFC | `api_sports_client.py` | 🚫 Desactivado | `_DISABLED_SPORTS` — api-mma 404 |
 
-### Pipeline diario (última ejecución exitosa: 2026-04-28)
-- **Collect**: 30min (89 partidos, 167 equipos, team_stats con raw_matches ≥ 3)
+### Pipeline diario (última ejecución exitosa: 2026-04-29)
+- **Collect**: ~30min (109 partidos, FL1 + PPL activas)
 - **Enrich**: ~30s si docs frescos (<6h), ~15min si todos stale
-- **Analyze**: ~149s, **18 señales generadas** (POISSON_SYNTHETIC, sin odds reales)
-  - Señales europeas (PL, BL1, SA, DED): Poisson real del collect
+- **Analyze**: ~182s, **22 señales generadas** (+4 vs ayer por FL1/PPL; POISSON_SYNTHETIC, cuotas agotadas hasta 1 mayo)
+  - Señales europeas (PL, BL1, SA, DED, FL1, PPL): Poisson real
   - Señales Copa Lib (CLI, BSA): ELO sintético (exención Poisson activa)
+- **Polymarket analyze**: total=20 analizados=6 alertas=2 skip_err=0 (era 19 antes del fix timedelta)
 
 ---
 
-## BUGS CONOCIDOS / PENDIENTES (2026-04-28)
+## BUGS CONOCIDOS / PENDIENTES (2026-04-29)
 
 ### 🔴 Alta prioridad
 
-**1. odds-api.io — /odds/multi sin cuotas reales**
-- `/odds/multi?eventIds=...&bookmakers=bet365,bwin,...` añadido (param era obligatorio → 400 "Missing bookmakers")
-- No confirmado funcionando: rate limit 429 activo al testearlo. Verificar en próximo analyze post-reset (~18:30 UTC)
-- Si funciona: 18 señales POISSON_SYNTHETIC → señales con edge real de bookmaker
-
-**2. NBA — sin suscripción API-Basketball**
-- `api-basketball.p.rapidapi.com` → 403 "You are not subscribed"
-- Fix: suscribirse en rapidapi.com (plan Free, 500 req/mes, misma key `FOOTBALL_RAPID_API_KEY`)
-- Sin acción de código — solo activación manual
-
-**3. The Odds API + OddsPapi agotadas**
-- Ambas resetean ~1 mayo 2026
+**1. The Odds API + OddsPapi agotadas hasta 1 mayo**
+- Ambas con 0 créditos. Reset ~1 mayo 2026.
 - Al renovar OddsPapi: añadir `ODDSPAPI_KEY` como GitHub Secret
+- Mientras tanto: todas las señales son POISSON_SYNTHETIC sin edge real de bookmaker
+
+**2. odds-api.io /odds/multi — sin confirmación con cuotas reales**
+- El param `bookmakers=bet365,bwin,...` está implementado y correcto
+- No verificado con edge real porque The Odds API y OddsPapi (fuentes alternativas) están a 0
+- Verificar el 1 mayo tras reset: buscar "con odds" > 0 en logs de analyze
+
+**3. NCAA y EuroBasket — league_ids sin confirmar**
+- `discover_leagues("NCAA")` y `discover_leagues("EuroBasket")` logueando IDs en próximo collect
+- Tras ver los logs: descomentar en `_LEAGUES_BY_ID` en basketball_collector.py
 
 ### 🟡 Media prioridad
 
-**4. shadow_trades ROI 0% / win_rate 0%**
-- Fix desplegado (2026-04-28): `learning_engine.run_daily_learning()` ahora sincroniza shadow_trades
-- Efectivo en el próximo run del learning-engine (02:00 UTC)
-- Hasta entonces, daily-report muestra ROI/win_rate 0%
-
-**5. allsports_client desactivado — ligas sin cobertura**
+**4. allsports_client desactivado — ligas sin cobertura**
 - Afecta: NL (UEFA Nations League), WCQ Europa (1182), ARG (Liga Argentina), CSUD (Copa Sudamericana), CAM
 - Necesita nuevo endpoint o nueva API para estas ligas
 
-**6. Enrich timeout con 89 partidos**
+**5. Enrich timeout con 109 partidos**
 - Con stale_threshold 6h, si todos los docs tienen >6h el enrich procesa todos (~15-30min)
 - `sports-enrich.yml` tiene `--max-time 1800` y `timeout-minutes: 35` — debería aguantar
+
+**6. Índice Firestore prodalerts_sent — pendiente firebase deploy**
+- `firestore.indexes.json` versionado pero índice puede no estar creado en Firestore
+- Fix: `firebase deploy --only firestore:indexes --project prediction-intelligence`
+- O crear manualmente desde la URL en los logs de Cloud Run
 
 ### 🟢 Baja prioridad / backlog
 
@@ -487,7 +488,7 @@ python scripts/reset_threshold.py
 - WCQ_CONCACAF / WCQ_AFC / WCQ_CAF
 - INTL (friendlies)
 - Fútbol femenino (W_WSL, W_NWSL, W_LIGA_F, W_D1F, W_FRAUEN_BL)
-- Baloncesto adicional (ACB, NCAA_BB, FIBA_WC, EUROBASKET)
+- Baloncesto: NCAA y EuroBasket pendientes de IDs (discovery en curso)
 
 **10. `min-instances=1` en sports-agent**
 - Evita cold-start y truncado de análisis >8min (~$15-30/mes)
@@ -505,17 +506,18 @@ python scripts/reset_threshold.py
 - [x] **Sesión 5** — API-Football fallback (apifootball_odds.py), prob consistency validator polymarket
 - [x] **Sesión 6** — Diagnóstico completo sports-agent: Poisson guard, collect team_stats, enrich timeout, shadow_trades sync (2026-04-28)
 - [x] **Sesión 7** — odds-api.io: 1 request/analyze, bookmakers param, rate-limited TTL 3600s, colectores muertos desactivados, NBA/tenis hosts (2026-04-28)
+- [x] **Sesión 8** — 8 fixes Polymarket + sports-agent: timedelta, end_date scan, índice Firestore, workflow retry, _totals IDs, volume_spike 7d→3d, basketball ACB/Euroleague, discovery NCAA/EuroBasket (2026-04-29)
 
-### Métricas actuales (2026-04-28 17:39 UTC)
-- **Señales generadas hoy:** 18 (POISSON_SYNTHETIC — sin odds externas reales aún)
-- **Predicciones totales:** 29 (15 resueltas, 14 pendientes)
-- **Collect:** 30min / 89 partidos / 167 equipos
-- **odds-api.io rate limit:** 100 req/hora — agotado en el analyze de 17:18 UTC; reset ~18:18 UTC
+### Métricas actuales (2026-04-29)
+- **Señales deportivas hoy:** 22 (POISSON_SYNTHETIC — cuotas agotadas hasta 1 mayo)
+- **Polymarket analyze:** analizados=6 / alertas=2 / skip_err=0 (era 19 antes)
+- **Collect:** ~30min / 109 partidos / FL1 + PPL activas
+- **The Odds API + OddsPapi:** 0 créditos, reset ~1 mayo
 
 ### Próximos pasos prioritarios
-1. **[URGENTE] Verificar /odds/multi con bookmakers** → lanzar analyze post-reset 18:30 UTC y buscar "con odds" > 0
-2. **[URGENTE] Suscribir NBA en RapidAPI** → rapidapi.com, API-Basketball, plan Free
-3. **[MEDIA] Renovar The Odds API + OddsPapi ~1 mayo** → añadir `ODDSPAPI_KEY` GitHub Secret al renovar
+1. **[URGENTE 1 mayo] Renovar The Odds API + OddsPapi** → añadir `ODDSPAPI_KEY` GitHub Secret; verificar que /odds/multi devuelve odds reales
+2. **[URGENTE] Confirmar IDs NCAA/EuroBasket** → buscar en logs del próximo collect `discover_leagues('NCAA')` y `discover_leagues('EuroBasket')`; descomentar en `_LEAGUES_BY_ID`
+3. **[MEDIA] Firebase deploy índices** → `firebase deploy --only firestore:indexes` para crear índice `prodalerts_sent`
 4. **[MEDIA] Añadir IAM Firestore** a pejofeve@gmail.com para diagnóstico local
 5. **[BAJA] Reactivar allsports_client** → encontrar nuevo endpoint o API para NL/WCQ/ARG/CSUD
 6. **[BAJA] Colector fútbol femenino** — WSL + NWSL primer paso
