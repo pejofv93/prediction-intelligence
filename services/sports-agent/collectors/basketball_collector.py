@@ -4,10 +4,13 @@ Añade H2H y enriquecimiento de stats para el basketball_analyzer.
 
 Ligas soportadas (api-basketball.p.rapidapi.com):
   NBA        — vía get_games_today("nba"), sin filtro de liga
-  ACB        — league_id=116  (Liga Endesa, España)
-  EUROLEAGUE — league_id=120  (Turkish Airlines EuroLeague)
-  NCAA       — league_id pendiente; se descubre con discover_leagues("NCAA")
-  EUROBASKET — league_id pendiente; torneo bienal FIBA, puede estar inactivo
+  ACB        — league_id=116  (Liga Endesa, España)   ← confirmado 2026-04-29
+  EUROLEAGUE — league_id=120  (Turkish Airlines EuroLeague) ← confirmado 2026-04-29
+  NCAA       — league_id=51   (NCAA Men's D1) ← pendiente verificar en temporada
+  EUROBASKET — torneo bienal FIBA; ID varía por edición — activar cuando haya torneo
+
+Nota: /leagues?search= devuelve 403 en plan free de RapidAPI — IDs hardcodeados
+desde documentación oficial de API-Sports.
 """
 import asyncio
 import logging
@@ -15,7 +18,6 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from collectors.api_sports_client import (
-    discover_leagues,
     get_games_by_league,
     get_games_today,
     get_team_stats_bdl,
@@ -29,18 +31,15 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-# Ligas con league_id confirmado en api-basketball.p.rapidapi.com
+# Ligas con league_id en api-basketball.p.rapidapi.com
+# Fuente: documentación oficial API-Sports + verificación en prod 2026-04-29
 _LEAGUES_BY_ID: dict[str, int] = {
-    "ACB":        116,   # Liga Endesa — España
-    "EUROLEAGUE": 120,   # Turkish Airlines EuroLeague
-    # NCAA y EuroBasket: descomentar cuando los logs confirmen los IDs
-    # "NCAA":       ???,
+    "ACB":        116,   # Liga Endesa — España (confirmado: 200 OK)
+    "EUROLEAGUE": 120,   # Turkish Airlines EuroLeague (confirmado: 200 OK)
+    "NCAA":        51,   # NCAA Men's D1 — activar en temporada (nov-marzo)
+    # EuroBasket FIBA: torneo bienal, ID varía por edición — descomentar cuando haya torneo
     # "EUROBASKET": ???,
 }
-
-# Términos de búsqueda para discover_leagues() — se ejecuta una vez por collect
-# para loguear los IDs de ligas aún no confirmadas
-_LEAGUES_TO_DISCOVER = ["NCAA", "EuroBasket"]
 
 
 async def collect_basketball_games(days: int = 1) -> list[dict]:
@@ -82,13 +81,6 @@ async def collect_basketball_games(days: int = 1) -> list[dict]:
         except Exception:
             logger.error("basketball_collector: error colectando %s (id=%d)",
                          league_name, league_id, exc_info=True)
-
-    # --- Discovery de ligas con IDs aún no confirmados (solo loguea, no bloquea) ---
-    for search_term in _LEAGUES_TO_DISCOVER:
-        try:
-            await discover_leagues(search_term)
-        except Exception:
-            logger.error("basketball_collector: error en discover_leagues(%r)", search_term, exc_info=True)
 
     logger.info("basketball_collector: %d partidos totales de baloncesto", len(all_games))
     return all_games
