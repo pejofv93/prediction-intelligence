@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "prodalerts_sent",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "market_id", "order": "ASCENDING" },
+        { "fieldPath": "sent_at", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
