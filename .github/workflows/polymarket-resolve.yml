@@ -1,0 +1,18 @@
+name: polymarket-resolve
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger Cloud Run
+        run: |
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-resolve" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 300 \
+            --fail --silent --show-error

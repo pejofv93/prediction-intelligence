@@ -200,6 +200,13 @@ async def test_gamma_price() -> JSONResponse:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/run-resolve", dependencies=[Depends(verify_token)])
+async def run_resolve() -> JSONResponse:
+    """Síncrono: resuelve shadow_trades pendientes de Polymarket contra resultados reales."""
+    result = await _bg_resolve()
+    return JSONResponse(status_code=200, content=result)
+
+
 @app.post("/run-poly-backtest", dependencies=[Depends(verify_token)])
 async def run_poly_backtest() -> JSONResponse:
     """202 inmediato → background: backtester/backtest_poly.py. Ejecutar UNA SOLA VEZ."""
@@ -538,6 +545,33 @@ async def _bg_analyze() -> dict:
     except Exception as e:
         logger.error("analyze: error no controlado — %s", e, exc_info=True)
         return {"status": "error", "error": str(e), "analyzed": 0, "alerts": 0}
+
+
+async def _bg_resolve() -> dict:
+    """Resuelve shadow_trades pendientes de Polymarket contra resultados reales de Gamma API."""
+    try:
+        from datetime import datetime, timezone
+        start = datetime.now(timezone.utc)
+        logger.info("resolve: iniciando pipeline")
+
+        from polymarket_resolver import resolve_closed_markets
+        result = await resolve_closed_markets()
+
+        elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+        logger.info(
+            "resolve: completado en %.1fs — resolved=%d skipped_no_pred=%d skipped_unresolved=%d errors=%d",
+            elapsed,
+            result.get("resolved", 0),
+            result.get("skipped_no_pred", 0),
+            result.get("skipped_unresolved", 0),
+            result.get("errors", 0),
+        )
+        result["elapsed_s"] = round(elapsed, 1)
+        return result
+
+    except Exception as e:
+        logger.error("resolve: error no controlado — %s", e, exc_info=True)
+        return {"status": "error", "error": str(e), "resolved": 0}
 
 
 async def _bg_poly_backtest() -> None:
