@@ -1132,6 +1132,32 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             )
             return []
 
+    # --- 5c. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
+    _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
+    if _lado == "AWAY":
+        # F1: zona muerta 2.5–3.5 (0% acierto histórico en este rango)
+        if 2.5 <= best_odds < 3.5:
+            logger.info(
+                "generate_signal(%s): AWAY zona muerta descartada (odds=%.2f entre 2.5-3.5) [%s vs %s | %s]",
+                match_id, best_odds, home_team, away_team, league,
+            )
+            return []
+        # F2: AWAY en PD/DED con odds > 2.5 — 0% accuracy histórico en ambas ligas
+        if league in ("PD", "DED") and best_odds > 2.5:
+            logger.info(
+                "generate_signal(%s): AWAY underdog descartada en %s (odds=%.2f > 2.5) [%s vs %s]",
+                match_id, league, best_odds, home_team, away_team,
+            )
+            return []
+        # F3: gate final — solo favorito visitante (<2.5) o underdog extremo (>3.5 + conf>0.85)
+        if not (best_odds < 2.5 or (best_odds > 3.5 and best_confidence > 0.85)):
+            logger.info(
+                "generate_signal(%s): AWAY gate descartada "
+                "(odds=%.2f conf=%.2f — requiere odds<2.5 o odds>3.5+conf>0.85) [%s vs %s | %s]",
+                match_id, best_odds, best_confidence, home_team, away_team, league,
+            )
+            return []
+
     # --- 6. Verificar thresholds ---
     if best_edge <= SPORTS_MIN_EDGE or best_confidence <= SPORTS_MIN_CONFIDENCE:
         logger.debug(

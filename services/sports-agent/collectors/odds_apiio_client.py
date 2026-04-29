@@ -231,11 +231,14 @@ _MAX_ODDS_PREFETCH: int = 50   # 50 IDs / 10 por batch = 5 requests /odds/multi
 
 def _cache_ttl(entry: dict) -> timedelta:
     """Devuelve el TTL aplicable a una entrada de caché.
-    rate_limited=True → _TTL_RATE_LIMIT (3600s) — esperar reset del límite horario
+    rate_limited=True → ttl_override si presente, si no _TTL_RATE_LIMIT (3600s)
     error=True        → _TTL_ERR (60s)         — reintento rápido
     sin error         → _TTL_OK  (4h)           — resultado real
     """
     if entry.get("rate_limited"):
+        override = entry.get("ttl_override")
+        if override:
+            return timedelta(seconds=override)
         return _TTL_RATE_LIMIT
     return _TTL_ERR if entry.get("error") else _TTL_OK
 
@@ -708,11 +711,18 @@ async def _fetch_all_soccer_events() -> list[dict]:
             )
 
             if status == 429:
+                import re as _re
+                _m = _re.search(r"resets in (\d+) minutes? and (\d+) seconds?", body)
+                if _m:
+                    _ttl = int(_m.group(1)) * 60 + int(_m.group(2)) + 30
+                else:
+                    _ttl = 3600
                 _EVENT_CACHE[_SOCCER_ALL_KEY] = {
-                    "events": [], "error": True, "rate_limited": True, "cached_at": now
+                    "events": [], "error": True, "rate_limited": True,
+                    "cached_at": now, "ttl_override": _ttl,
                 }
                 logger.warning(
-                    "odds-api.io: 429 rate limit — body=%s — TTL 3600s hasta reset", body[:200]
+                    "odds-api.io: 429 rate limit — TTL=%ds — body=%s", _ttl, body[:200]
                 )
                 return []
 
