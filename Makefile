@@ -14,7 +14,7 @@ deploy-sports:
 		--source services/sports-agent \
 		--project $(PROJECT) --region $(REGION) \
 		--allow-unauthenticated \
-		--timeout=900 \
+		--timeout=1800 \
 		--min-instances=0 \
 		--memory=512Mi --cpu=1 \
 		--set-env-vars="GOOGLE_CLOUD_PROJECT=$(PROJECT),FOOTBALL_API_KEY=$(FOOTBALL_API_KEY),FOOTBALL_RAPID_API_KEY=$(FOOTBALL_RAPID_API_KEY),CLOUD_RUN_TOKEN=$(CLOUD_RUN_TOKEN),TELEGRAM_BOT_URL=$(TELEGRAM_BOT_URL),FIRESTORE_COLLECTION_PREFIX=$(FIRESTORE_COLLECTION_PREFIX)"
