@@ -420,15 +420,26 @@ async def _bg_analyze() -> dict:
         _now_utc = datetime.now(timezone.utc)
         _cutoff_end_date = _now_utc + timedelta(hours=24)
 
+        # Cargar poly_markets una vez como fallback para docs enriched que aún no
+        # tienen end_date/price_yes (enriquecidos antes del fix de market_enricher)
+        _poly_cache: dict[str, dict] = {}
+        try:
+            for _pd in col("poly_markets").stream():
+                _poly_cache[_pd.id] = _pd.to_dict()
+            logger.info("analyze: poly_cache cargado (%d docs)", len(_poly_cache))
+        except Exception as _pce:
+            logger.warning("analyze: error cargando poly_cache — %s", _pce)
+
         _markets_by_cat: dict[str, list[dict]] = {}
         _skipped_rotation = 0
         _skipped_prefilter = 0
         for _raw in raw_docs:
             _m = _raw.to_dict()
             _mid = _m.get("market_id", "")
+            _poly = _poly_cache.get(_mid, {})
 
             # Pre-filtro 1: end_date < now + 24h (expiran pronto o ya expirados)
-            _end = _m.get("end_date")
+            _end = _m.get("end_date") or _poly.get("end_date")
             if _end:
                 if hasattr(_end, "tzinfo") and _end.tzinfo is None:
                     _end = _end.replace(tzinfo=timezone.utc)
@@ -438,7 +449,7 @@ async def _bg_analyze() -> dict:
                     continue
 
             # Pre-filtro 2: price_yes prácticamente resuelto
-            _py = float(_m.get("price_yes") or 0.5)
+            _py = float(_m.get("price_yes") or _poly.get("price_yes") or 0.5)
             if _py < 0.05 or _py > 0.95:
                 _skipped_prefilter += 1
                 logger.debug("analyze: %s pre-filtrado — price_yes=%.3f extremo", _mid, _py)

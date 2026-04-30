@@ -89,6 +89,8 @@ async def enrich_market(market: dict, all_markets: list[dict] | None = None) -> 
         "market_id": market_id,
         "question": question,
         "volume_24h": float(market.get("volume_24h", 0)),
+        "end_date": market.get("end_date"),
+        "price_yes": float(market.get("price_yes") or 0.5),
         "price_momentum": momentum,
         "volume_spike": vol_spike,
         "smart_money": smart_money,
