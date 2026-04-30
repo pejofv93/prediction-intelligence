@@ -417,15 +417,37 @@ async def _bg_analyze() -> dict:
         except Exception as _rpe:
             logger.warning("analyze: error leyendo poly_predictions recientes — %s", _rpe)
 
+        _now_utc = datetime.now(timezone.utc)
+        _cutoff_end_date = _now_utc + timedelta(hours=24)
+
         _markets_by_cat: dict[str, list[dict]] = {}
         _skipped_rotation = 0
+        _skipped_prefilter = 0
         for _raw in raw_docs:
             _m = _raw.to_dict()
             _mid = _m.get("market_id", "")
+
+            # Pre-filtro 1: end_date < now + 24h (expiran pronto o ya expirados)
+            _end = _m.get("end_date")
+            if _end:
+                if hasattr(_end, "tzinfo") and _end.tzinfo is None:
+                    _end = _end.replace(tzinfo=timezone.utc)
+                if _end < _cutoff_end_date:
+                    _skipped_prefilter += 1
+                    logger.debug("analyze: %s pre-filtrado — end_date=%s <24h", _mid, _end.date())
+                    continue
+
+            # Pre-filtro 2: price_yes prácticamente resuelto
+            _py = float(_m.get("price_yes") or 0.5)
+            if _py < 0.05 or _py > 0.95:
+                _skipped_prefilter += 1
+                logger.debug("analyze: %s pre-filtrado — price_yes=%.3f extremo", _mid, _py)
+                continue
+
+            # Filtro rotación: analizado <12h sin Δprecio >3%
             if _mid in _recent_preds:
                 _last_price = _recent_preds[_mid]["price"]
-                _cur_price = float(_m.get("price_yes", 0.5))
-                _price_chg = abs(_cur_price - _last_price) / max(_last_price, 0.001)
+                _price_chg = abs(_py - _last_price) / max(_last_price, 0.001)
                 if _price_chg <= 0.03:
                     _skipped_rotation += 1
                     logger.debug(
@@ -433,9 +455,14 @@ async def _bg_analyze() -> dict:
                         _mid, _price_chg * 100,
                     )
                     continue
+
             _cat = categorize_market(_m.get("question", ""))
             _markets_by_cat.setdefault(_cat, []).append(_m)
 
+        logger.info(
+            "analyze: pre-filtro descartó %d (expirados/resueltos) | rotación %d",
+            _skipped_prefilter, _skipped_rotation,
+        )
         if _skipped_rotation:
             logger.info(
                 "analyze: %d mercados excluidos por rotación (analiz. <12h sin Δprecio >3%%)",
