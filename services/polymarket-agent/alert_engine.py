@@ -91,6 +91,14 @@ async def check_and_alert(analysis: dict) -> bool:
     from google.cloud import firestore as _firestore
     from shared.firestore_client import col, get_client
 
+    rec = str(analysis.get("recommendation", "")).upper()
+    if rec not in ("BUY_YES", "BUY_NO"):
+        logger.debug(
+            "check_and_alert(%s): rec=%s — solo alertamos BUY_YES/BUY_NO",
+            analysis.get("market_id"), rec,
+        )
+        return False
+
     edge = float(analysis.get("edge", 0.0))
     confidence = float(analysis.get("confidence", 0.0))
     volume_spike = bool(analysis.get("volume_spike", False))
