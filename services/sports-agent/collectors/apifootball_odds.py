@@ -47,7 +47,6 @@ _ODDS_TTL   = timedelta(hours=1)
 _LEAGUE_IDS: dict[str, int] = {
     # ── Fútbol masculino Europa ───────────────────────────────────────────────
     "PL":  39,    # Premier League
-    "ELC": 40,    # Championship
     "PD":  140,   # La Liga
     "SD":  141,   # La Liga 2 (Segunda División)
     "BL1": 78,    # Bundesliga
@@ -59,8 +58,6 @@ _LEAGUE_IDS: dict[str, int] = {
     "CL":  2,     # Champions League
     "EL":  3,     # Europa League
     "ECL": 848,   # Europa Conference League
-    "PPL": 94,    # Primeira Liga
-    "DED": 88,    # Eredivisie
     "TU1": 203,   # Süper Lig
 
     # ── Fútbol masculino internacional (selecciones) ──────────────────────────
@@ -76,9 +73,7 @@ _LEAGUE_IDS: dict[str, int] = {
     "WCQ_CAF":       29,   # WC 2026 Qualifiers CAF (África) — ⚠️ verify
 
     # ── Fútbol masculino Sudamérica ───────────────────────────────────────────
-    "BSA":  71,   # Brasileirao Serie A
     "ARG":  128,  # Primera División Argentina
-    "CLI":  13,   # Copa Libertadores
     "CSUD": 11,   # Copa Sudamericana
 
     # ── Fútbol femenino (sin colector activo — IDs listos para cuando se implemente)

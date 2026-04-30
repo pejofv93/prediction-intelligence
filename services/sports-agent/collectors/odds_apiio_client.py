@@ -66,7 +66,6 @@ _SOCCER_ALL_LOCK = asyncio.Lock()
 _LEAGUE_KEYWORDS: dict[str, list[str]] = {
     # slug exacto (odds-api.io) o subcadena que lo identifique unívocamente
     "PL":   ["england-premier-league"],
-    "ELC":  ["england-championship"],
     "PD":   ["spain-primera-division", "spain-laliga"],
     "SD":   ["spain-segunda", "spain-laliga2"],
     "BL1":  ["germany-bundesliga"],
@@ -78,12 +77,8 @@ _LEAGUE_KEYWORDS: dict[str, list[str]] = {
     "CL":   ["uefa-champions-league"],
     "EL":   ["uefa-europa-league"],
     "ECL":  ["conference-league"],
-    "PPL":  ["portugal-primeira-liga", "portugal-super-liga"],
-    "DED":  ["netherlands-eredivisie"],
     "TU1":  ["turkey-super-lig"],
-    "BSA":  ["brazil-brasileiro-serie-a"],
     "ARG":  ["argentina-primera-division"],
-    "CLI":  ["copa-libertadores"],
     "NBA":  ["nba", "national-basketball"],
     "EUROLEAGUE": ["euroleague", "euro-league"],
     "ATP_FRENCH_OPEN": ["roland-garros", "french-open"],
@@ -104,8 +99,8 @@ _SPORT_FALLBACK_SLUGS: dict[str, list[str]] = {
 }
 
 # Ligas que son fútbol / baloncesto / tenis (para decidir qué sport slug buscar)
-_FOOTBALL_LEAGUES = {"PL","ELC","PD","SD","BL1","BL2","SA","SB","FL1","FL2",
-                     "CL","EL","ECL","PPL","DED","TU1","BSA","ARG","CLI"}
+_FOOTBALL_LEAGUES = {"PL","PD","SD","BL1","BL2","SA","SB","FL1","FL2",
+                     "CL","EL","ECL","TU1","ARG"}
 _BASKETBALL_LEAGUES = {"NBA","EUROLEAGUE","ACB"}
 _TENNIS_LEAGUES = {"ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN",
                    "ATP_MADRID","ATP_ROME","ATP_BARCELONA",
@@ -224,7 +219,7 @@ _ODDS_MAP_LOCK = asyncio.Lock()
 # sus bookmakers (1xbet, etc.) no cubren CONMEBOL sistemáticamente
 # y se sirven con Poisson sintético cuando faltan odds reales.
 _PRIORITY_LEAGUES_FOR_ODDS: frozenset[str] = frozenset({
-    "PD", "SA", "BL1", "PL", "FL1", "CL", "EL", "ECL", "PPL", "DED", "TU1",
+    "PD", "SA", "BL1", "PL", "FL1", "CL", "EL", "ECL", "TU1",
 })
 _MAX_ODDS_PREFETCH: int = 50   # 50 IDs / 10 por batch = 5 requests /odds/multi
 

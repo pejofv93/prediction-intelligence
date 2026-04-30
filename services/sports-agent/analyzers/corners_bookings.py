@@ -58,8 +58,6 @@ _TOURNAMENT_IDS: dict[str, int] = {
     "BL1": 4,    # Bundesliga
     "SA":  5,    # Serie A
     "FL1": 2,    # Ligue 1
-    "DED": 10,   # Eredivisie
-    "PPL": 13,   # Primeira Liga
     "SD":  9,    # Segunda División
     "BL2": 78,   # Bundesliga 2
     "SB":  11,   # Serie B

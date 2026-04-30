@@ -79,7 +79,6 @@ _HTTP_TIMEOUT = 15.0
 _ODDSPAPI_LEAGUE_MAP = {
     # Europa
     "PL":  "PremierLeague",
-    "ELC": "Championship",
     "PD":  "LaLiga",
     "SD":  "LaLiga2",
     "BL1": "Bundesliga",
@@ -91,13 +90,9 @@ _ODDSPAPI_LEAGUE_MAP = {
     "CL":  "ChampionsLeague",
     "EL":  "EuropaLeague",
     "ECL": "ConferenceLeague",
-    "PPL": "PrimeiraLiga",
-    "DED": "Eredivisie",
     "TU1": "SuperLig",
     # Sudamérica
-    "BSA":  "BrasileiraoSerieA",
     "ARG":  "PrimeraDivision",
-    "CLI":  "CopaLibertadores",
     "CSUD": "CopaSudamericana",
 }
 
@@ -111,17 +106,12 @@ _ODDSPAPI_TOURNAMENT_IDS: dict[str, int] = {
     "CL":  7,    # Champions League
     "PD":  8,    # La Liga
     "SD":  9,    # Segunda División
-    "DED": 10,   # Eredivisie
     "SB":  11,   # Serie B
-    "PPL": 13,   # Primeira Liga
-    "ELC": 40,   # Championship (mismo ID que API-Football)
     "BL2": 78,   # Bundesliga 2
     "FL2": 65,   # Ligue 2
     "ECL": 480,  # Conference League
     "TU1": 203,  # Süper Lig
-    "BSA": 71,   # Brasileirao Serie A
     "ARG": 128,  # Primera División Argentina
-    "CLI": 13,   # Copa Libertadores
 }
 
 

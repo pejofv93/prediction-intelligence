@@ -36,7 +36,6 @@ _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 _ODDS_SPORT_MAP: dict[str, str] = {
     # ── Fútbol masculino Europa (football-data.org) ────────────────────────────
     "PL":  "soccer_england_premier_league",
-    "ELC": "soccer_england_championship",
     "PD":  "soccer_spain_la_liga",
     "SD":  "soccer_spain_segunda_division",
     "BL1": "soccer_germany_bundesliga",
@@ -48,13 +47,10 @@ _ODDS_SPORT_MAP: dict[str, str] = {
     "CL":  "soccer_uefa_champs_league",
     "EL":  "soccer_uefa_europa_league",
     "ECL": "soccer_uefa_europa_conference_league",
-    "PPL": "soccer_portugal_primeira_liga",
-    "DED": "soccer_netherlands_eredivisie",
     "TU1": "soccer_turkey_super_league",
 
     # ── Fútbol masculino internacional (selecciones) ───────────────────────────
     # Competiciones de clubes por confederación
-    "CLI":  "soccer_conmebol_libertadores",
     "CSUD": "soccer_conmebol_sudamericana",
     # Competiciones de selecciones — Europa
     "NL":  "soccer_uefa_nations_league",
@@ -71,7 +67,6 @@ _ODDS_SPORT_MAP: dict[str, str] = {
     "WC":            "soccer_fifa_world_cup",                    # solo activo durante torneo
 
     # ── Fútbol masculino Sudamérica / ligas domésticas ────────────────────────
-    "BSA": "soccer_brazil_campeonato",
     "ARG": "soccer_argentina_primera_division",
 
     # ── Fútbol femenino (sin colector activo — listo para cuando se implemente) ─
@@ -917,8 +912,7 @@ _TOP6_KEYWORDS: dict[str, list[str]] = {
     "SA":  ["inter", "napoli", "atalanta", "juventus", "lazio", "fiorentina", "milan"],
     "PL":  ["manchester city", "arsenal", "liverpool", "chelsea", "manchester united", "aston villa"],
     "BL1": ["bayern", "leverkusen", "dortmund", "leipzig", "frankfurt", "stuttgart"],
-    "DED": ["feyenoord", "ajax", "psv", "az alkmaar", "utrecht", "twente"],
-    "BSA": ["palmeiras", "flamengo", "atlético mineiro", "atletico mineiro", "fluminense", "botafogo", "corinthians"],
+    "FL1": ["psg", "paris saint-germain", "marseille", "monaco", "lens", "nice"],
 }
 
 # Umbral de cuota por liga: ligas con dominancia extrema usan 4.5, más competitivas 5.0.
@@ -927,8 +921,7 @@ _EXTREME_UNDERDOG_ODDS: dict[str, float] = {
     "SA":  4.5,
     "PL":  4.5,
     "BL1": 5.0,
-    "DED": 5.0,
-    "BSA": 5.0,
+    "FL1": 5.0,
 }
 
 
@@ -971,7 +964,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
 
     # Ligas donde Poisson no es viable: Copa Lib/BSA tienen <3 partidos de fase de grupos
     # en la primera mitad de la temporada. Se permite continuar con ELO solo si está disponible.
-    _POISSON_EXEMPT_LEAGUES = {"CLI", "BSA", "ARG", "CSUD", "CAM"}
+    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM"}
 
     # Fix 1: futbol sin Poisson valido → descartar, EXCEPTO ligas exentas con ELO disponible
     if sport == "football" and enriched_match.get("poisson_home_win") is None:
@@ -1143,7 +1136,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             )
             return []
         # F2: AWAY en PD/DED con odds > 2.5 — 0% accuracy histórico en ambas ligas
-        if league in ("PD", "DED") and best_odds > 2.5:
+        if league == "PD" and best_odds > 2.5:
             logger.info(
                 "generate_signal(%s): AWAY underdog descartada en %s (odds=%.2f > 2.5) [%s vs %s]",
                 match_id, league, best_odds, home_team, away_team,

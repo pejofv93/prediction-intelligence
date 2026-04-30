@@ -40,7 +40,6 @@ _TTL_ERR = timedelta(minutes=10)
 # Verificar slugs exactos tras registro en opticodds.io con: GET /api/v3/sports
 _LEAGUE_MAP: dict[str, tuple[str, str]] = {
     "PL":   ("soccer", "EPL"),
-    "ELC":  ("soccer", "Championship"),
     "PD":   ("soccer", "LaLiga"),
     "SD":   ("soccer", "LaLiga2"),
     "BL1":  ("soccer", "Bundesliga"),
@@ -52,12 +51,8 @@ _LEAGUE_MAP: dict[str, tuple[str, str]] = {
     "CL":   ("soccer", "UCL"),
     "EL":   ("soccer", "UEL"),
     "ECL":  ("soccer", "UECL"),
-    "PPL":  ("soccer", "PrimeiraLiga"),
-    "DED":  ("soccer", "Eredivisie"),
     "TU1":  ("soccer", "SuperLig"),
-    "BSA":  ("soccer", "Brasileirao"),
     "ARG":  ("soccer", "PrimeraDivision"),
-    "CLI":  ("soccer", "CopaLibertadores"),
     "NBA":  ("basketball", "NBA"),
     "EUROLEAGUE": ("basketball", "Euroleague"),
     "ACB":  ("basketball", "ACB"),

@@ -33,8 +33,6 @@ FDCO_LEAGUES: dict[str, tuple[str, str]] = {
     "BL1": ("D1",  "Bundesliga"),
     "SA":  ("I1",  "Serie A"),
     "FL1": ("F1",  "Ligue 1"),
-    "DED": ("N1",  "Eredivisie"),
-    "PPL": ("P1",  "Primeira Liga"),
     "SD":  ("SP2", "Segunda"),
     "BL2": ("D2",  "Bundesliga 2"),
     "SB":  ("I2",  "Serie B"),
