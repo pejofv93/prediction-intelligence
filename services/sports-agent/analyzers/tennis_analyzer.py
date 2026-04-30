@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 _HTTP_TIMEOUT = 15.0
 _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
-_CACHE_TTL = timedelta(hours=2)
+_CACHE_TTL = timedelta(hours=24)
 
 # Sport keys de The Odds API para tenis
 # Claves específicas mejoran precisión; genéricas (ATP/WTA/ITF) actúan de fallback.
