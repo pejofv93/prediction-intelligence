@@ -372,7 +372,13 @@ async def send_poly_alert(analysis: dict) -> bool:
     key = _alert_key(analysis, edge)
 
     try:
-        existing = list(col("alerts_sent").where("alert_key", "==", key).limit(1).stream())
+        existing = list(
+            col("alerts_sent")
+            .where("alert_key", "==", key)
+            .where("status", "==", "sent")
+            .limit(1)
+            .stream()
+        )
         if existing:
             logger.debug("send_poly_alert: alerta duplicada omitida (%s)", key)
             return False
