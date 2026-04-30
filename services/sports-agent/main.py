@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 load_dotenv()
 
@@ -242,7 +243,7 @@ async def get_corners_signals(league: str = "PD", days: int = 3) -> dict:
     try:
         docs = (
             col("corners_signals")
-            .where("generated_at", ">=", cutoff)
+            .where(filter=FieldFilter("generated_at", ">=", cutoff))
             .limit(50)
             .stream()
         )
@@ -313,7 +314,7 @@ async def _cleanup_stale_upcoming() -> int:
     try:
         docs = list(
             col("upcoming_matches")
-            .where("status", "in", ["FINISHED", "PAUSED"])
+            .where(filter=FieldFilter("status", "in", ["FINISHED", "PAUSED"]))
             .stream()
         )
     except Exception as exc:
@@ -616,7 +617,7 @@ async def _bg_analyze() -> None:
 
             upcoming_docs_raw = list(
                 col("upcoming_matches")
-                    .where("status", "in", ["SCHEDULED", "TIMED"])
+                    .where(filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"]))
                     .stream()
             )
             # Solo IDs de partidos en las próximas 24h
@@ -683,8 +684,8 @@ async def _bg_analyze() -> None:
             try:
                 _tennis_raw = list(
                     col("upcoming_matches")
-                    .where("sport", "==", "tennis")
-                    .where("status", "in", ["SCHEDULED", "TIMED"])
+                    .where(filter=FieldFilter("sport", "==", "tennis"))
+                    .where(filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"]))
                     .limit(100)
                     .stream()
                 )
@@ -953,7 +954,7 @@ async def _bg_arb() -> None:
         try:
             raw_docs = list(
                 col("enriched_matches")
-                .where("odds_current", "!=", None)
+                .where(filter=FieldFilter("odds_current", "!=", None))
                 .stream()
             )
         except Exception as e:
