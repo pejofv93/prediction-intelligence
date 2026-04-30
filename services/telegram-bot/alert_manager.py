@@ -99,9 +99,7 @@ _SPORT_EMOJI = {
 
 _LEAGUE_LABEL = {
     "SA": "Serie A", "PD": "La Liga", "BL1": "Bundesliga", "FL1": "Ligue 1",
-    "BL2": "2. Bundesliga", "FL2": "Ligue 2", "CL": "Champions League",
-    "EL": "Europa League", "ECL": "Conference League", "PPL": "Primeira Liga",
-    "DED": "Eredivisie", "SD": "Segunda División", "SB": "Serie B",
+    "CL": "Champions League", "EL": "Europa League", "ECL": "Conference League",
     "TU1": "Süper Lig", "NBA": "NBA", "EUROLEAGUE": "EuroLeague",
     "ATP_FRENCH_OPEN": "ATP Roland Garros", "WTA_FRENCH_OPEN": "WTA Roland Garros",
     "ATP_WIMBLEDON": "ATP Wimbledon", "WTA_WIMBLEDON": "WTA Wimbledon",
@@ -337,7 +335,7 @@ async def send_sports_alert(prediction: dict) -> bool:
     key = _alert_key(prediction, edge)
 
     try:
-        existing = list(col("alerts_sent").where("alert_key", "==", key).limit(1).stream())
+        existing = list(col("alerts_sent").where(filter=FieldFilter("alert_key", "==", key)).limit(1).stream())
         if existing:
             logger.debug("send_sports_alert: alerta duplicada omitida (%s)", key)
             return False
@@ -379,8 +377,8 @@ async def send_poly_alert(analysis: dict) -> bool:
     try:
         existing = list(
             col("alerts_sent")
-            .where("alert_key", "==", key)
-            .where("status", "==", "sent")
+            .where(filter=FieldFilter("alert_key", "==", key))
+            .where(filter=FieldFilter("status", "==", "sent"))
             .limit(1)
             .stream()
         )

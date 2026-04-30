@@ -33,9 +33,6 @@ FDCO_LEAGUES: dict[str, tuple[str, str]] = {
     "BL1": ("D1",  "Bundesliga"),
     "SA":  ("I1",  "Serie A"),
     "FL1": ("F1",  "Ligue 1"),
-    "SD":  ("SP2", "Segunda"),
-    "BL2": ("D2",  "Bundesliga 2"),
-    "SB":  ("I2",  "Serie B"),
 }
 
 # Número de partidos recientes a considerar para los promedios

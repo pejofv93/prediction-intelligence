@@ -52,7 +52,7 @@ _SPORT_EVENTS_LOCK = asyncio.Lock()
 _EVENT_CACHE: dict[str, dict] = {}
 
 # TTLs diferenciados
-_TTL_OK         = timedelta(hours=4)      # respuesta real con eventos
+_TTL_OK         = timedelta(hours=24)     # respuesta real con eventos
 _TTL_ERR        = timedelta(seconds=60)   # error genérico (400, sin slug, etc.)
 _TTL_RATE_LIMIT = timedelta(seconds=3600) # 429 — esperar reset completo de 1h
 
@@ -67,13 +67,9 @@ _LEAGUE_KEYWORDS: dict[str, list[str]] = {
     # slug exacto (odds-api.io) o subcadena que lo identifique unívocamente
     "PL":   ["england-premier-league"],
     "PD":   ["spain-primera-division", "spain-laliga"],
-    "SD":   ["spain-segunda", "spain-laliga2"],
     "BL1":  ["germany-bundesliga"],
-    "BL2":  ["germany-2-bundesliga"],
     "SA":   ["italy-serie-a"],
-    "SB":   ["italy-serie-b"],
     "FL1":  ["france-ligue-1"],
-    "FL2":  ["france-ligue-2"],
     "CL":   ["uefa-champions-league"],
     "EL":   ["uefa-europa-league"],
     "ECL":  ["conference-league"],
@@ -99,7 +95,7 @@ _SPORT_FALLBACK_SLUGS: dict[str, list[str]] = {
 }
 
 # Ligas que son fútbol / baloncesto / tenis (para decidir qué sport slug buscar)
-_FOOTBALL_LEAGUES = {"PL","PD","SD","BL1","BL2","SA","SB","FL1","FL2",
+_FOOTBALL_LEAGUES = {"PL","PD","BL1","SA","FL1",
                      "CL","EL","ECL","TU1","ARG"}
 _BASKETBALL_LEAGUES = {"NBA","EUROLEAGUE","ACB"}
 _TENNIS_LEAGUES = {"ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN",

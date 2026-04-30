@@ -41,20 +41,16 @@ _FIXTURES_TTL   = timedelta(hours=12)
 
 # Cache de odds: {fixture_id: (fetched_at, parsed_odds_dict)}
 _ODDS_CACHE: dict[int, tuple[datetime, dict]] = {}
-_ODDS_TTL   = timedelta(hours=1)
+_ODDS_TTL   = timedelta(hours=24)
 
 # Mapeo código de liga interno → API-Football league_id (season 2025)
 _LEAGUE_IDS: dict[str, int] = {
     # ── Fútbol masculino Europa ───────────────────────────────────────────────
     "PL":  39,    # Premier League
     "PD":  140,   # La Liga
-    "SD":  141,   # La Liga 2 (Segunda División)
     "BL1": 78,    # Bundesliga
-    "BL2": 79,    # Bundesliga 2
     "SA":  135,   # Serie A
-    "SB":  136,   # Serie B
     "FL1": 61,    # Ligue 1
-    "FL2": 62,    # Ligue 2
     "CL":  2,     # Champions League
     "EL":  3,     # Europa League
     "ECL": 848,   # Europa Conference League

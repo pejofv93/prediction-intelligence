@@ -32,7 +32,7 @@ _HTTP_TIMEOUT = 15.0
 
 # Caché en memoria: {league: {"events": list, "error": bool, "cached_at": datetime}}
 _CACHE: dict[str, dict] = {}
-_TTL_OK  = timedelta(hours=4)
+_TTL_OK  = timedelta(hours=24)
 _TTL_ERR = timedelta(minutes=10)
 
 
@@ -41,13 +41,9 @@ _TTL_ERR = timedelta(minutes=10)
 _LEAGUE_MAP: dict[str, tuple[str, str]] = {
     "PL":   ("soccer", "EPL"),
     "PD":   ("soccer", "LaLiga"),
-    "SD":   ("soccer", "LaLiga2"),
     "BL1":  ("soccer", "Bundesliga"),
-    "BL2":  ("soccer", "Bundesliga2"),
     "SA":   ("soccer", "SerieA"),
-    "SB":   ("soccer", "SerieB"),
     "FL1":  ("soccer", "Ligue1"),
-    "FL2":  ("soccer", "Ligue2"),
     "CL":   ("soccer", "UCL"),
     "EL":   ("soccer", "UEL"),
     "ECL":  ("soccer", "UECL"),

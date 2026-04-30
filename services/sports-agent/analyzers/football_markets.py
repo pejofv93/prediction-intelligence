@@ -63,6 +63,42 @@ def _intensity(edge: float) -> str:
 
 logger = logging.getLogger(__name__)
 
+
+def _has_upcoming_matches_for_league(league_code: str, within_hours: int) -> bool:
+    """
+    True si hay partidos SCHEDULED/TIMED para esta liga en las próximas `within_hours` horas.
+    Fail-open: si Firestore falla devuelve True para no bloquear la llamada.
+    """
+    from datetime import datetime, timezone, timedelta
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        from shared.firestore_client import col
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=within_hours)
+        docs = col("upcoming_matches").where(
+            filter=FieldFilter("league", "==", league_code)
+        ).where(
+            filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"])
+        ).stream()
+        for doc in docs:
+            match_date_str = doc.to_dict().get("match_date", "")
+            if not match_date_str:
+                continue
+            try:
+                if "T" in str(match_date_str):
+                    md = datetime.fromisoformat(str(match_date_str).replace("Z", "+00:00"))
+                else:
+                    md = datetime.strptime(str(match_date_str), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                if now <= md <= cutoff:
+                    return True
+            except (ValueError, TypeError):
+                continue
+        return False
+    except Exception:
+        logger.warning("_has_upcoming_matches_for_league(%s): error Firestore — fail-open", league_code)
+        return True
+
+
 # Líneas de AH que buscamos (negativas = home da ventaja)
 _AH_LINES = (-0.5, -1.0, -1.5, 0.5, 1.0, 1.5)
 
@@ -70,9 +106,9 @@ _AH_LINES = (-0.5, -1.0, -1.5, 0.5, 1.0, 1.5)
 # v1 API (api.oddspapi.com) está deprecada y su dominio no resuelve DNS.
 # Usamos v4 (api.oddspapi.io) que es el dominio activo.
 _ODDSPAPI_BASE = "https://api.oddspapi.io"
-# Cache por liga (una sola llamada devuelve TODOS los mercados) — TTL 1h
+# Cache por liga — TTL 24h (con guard upcoming_matches)
 _ODDSPAPI_LEAGUE_CACHE: dict[str, tuple[datetime, list]] = {}
-_ODDSPAPI_TTL = timedelta(hours=1)
+_ODDSPAPI_TTL = timedelta(hours=24)
 _HTTP_TIMEOUT = 15.0
 
 # Mapeo de league code → competition name (usado como filtro de fallback en v4)
@@ -80,13 +116,9 @@ _ODDSPAPI_LEAGUE_MAP = {
     # Europa
     "PL":  "PremierLeague",
     "PD":  "LaLiga",
-    "SD":  "LaLiga2",
     "BL1": "Bundesliga",
-    "BL2": "Bundesliga2",
     "SA":  "SerieA",
-    "SB":  "SerieB",
     "FL1": "Ligue1",
-    "FL2": "Ligue2",
     "CL":  "ChampionsLeague",
     "EL":  "EuropaLeague",
     "ECL": "ConferenceLeague",
@@ -105,10 +137,6 @@ _ODDSPAPI_TOURNAMENT_IDS: dict[str, int] = {
     "EL":  6,    # Europa League
     "CL":  7,    # Champions League
     "PD":  8,    # La Liga
-    "SD":  9,    # Segunda División
-    "SB":  11,   # Serie B
-    "BL2": 78,   # Bundesliga 2
-    "FL2": 65,   # Ligue 2
     "ECL": 480,  # Conference League
     "TU1": 203,  # Süper Lig
     "ARG": 128,  # Primera División Argentina
@@ -141,6 +169,11 @@ async def _fetch_oddspapi_league(league: str) -> list:
     cached = _ODDSPAPI_LEAGUE_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _ODDSPAPI_TTL:
         return cached[1]
+
+    # Guard: skip si no hay partidos en las próximas 24h (ahorra quota mensual)
+    if not _has_upcoming_matches_for_league(league, within_hours=24):
+        logger.info("OddsPapi: %s — sin partidos en 24h, skip", league)
+        return []
 
     from datetime import date as _date, timedelta as _td
     today = _date.today()

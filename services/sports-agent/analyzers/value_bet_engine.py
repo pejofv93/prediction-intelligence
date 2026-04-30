@@ -37,13 +37,9 @@ _ODDS_SPORT_MAP: dict[str, str] = {
     # ── Fútbol masculino Europa (football-data.org) ────────────────────────────
     "PL":  "soccer_england_premier_league",
     "PD":  "soccer_spain_la_liga",
-    "SD":  "soccer_spain_segunda_division",
     "BL1": "soccer_germany_bundesliga",
-    "BL2": "soccer_germany_bundesliga2",
     "SA":  "soccer_italy_serie_a",
-    "SB":  "soccer_italy_serie_b",
     "FL1": "soccer_france_ligue_one",
-    "FL2": "soccer_france_ligue_two",
     "CL":  "soccer_uefa_champs_league",
     "EL":  "soccer_uefa_europa_league",
     "ECL": "soccer_uefa_europa_conference_league",
@@ -114,11 +110,11 @@ _ODDS_SPORT_MAP: dict[str, str] = {
 _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
     # ── Ligas domésticas masculinas (modelo Poisson+ELO completo) ─────────────
     # Europa
-    "soccer_england_premier_league",        "soccer_england_championship",
-    "soccer_spain_la_liga",                 "soccer_spain_segunda_division",
-    "soccer_germany_bundesliga",            "soccer_germany_bundesliga2",
-    "soccer_italy_serie_a",                 "soccer_italy_serie_b",
-    "soccer_france_ligue_one",              "soccer_france_ligue_two",
+    "soccer_england_premier_league",
+    "soccer_spain_la_liga",
+    "soccer_germany_bundesliga",
+    "soccer_italy_serie_a",
+    "soccer_france_ligue_one",
     "soccer_uefa_champs_league",            "soccer_uefa_europa_league",
     "soccer_uefa_europa_conference_league",
     "soccer_portugal_primeira_liga",        "soccer_netherlands_eredivisie",
@@ -151,19 +147,18 @@ _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
 _FOOTBALL_TOTALS_LINE: float = 2.5
 
 # Cache en memoria de odds por liga: {sport_key: (fetched_at, [events])}
-# TTL 8h: cubre los 4 ciclos diarios (01/07/13/19 UTC) con una sola llamada por liga.
+# TTL 24h: con guard de upcoming_matches se llama solo cuando hay partidos.
 # Además se persiste en Firestore (league_odds_cache) para sobrevivir reinicios Cloud Run.
 _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
-_LEAGUE_CACHE_TTL = timedelta(hours=8)
+_LEAGUE_CACHE_TTL = timedelta(hours=24)
 
 # Cache de odds-api.io en memoria: {league_code: (fetched_at, [events_normalised])}
-# TTL 4h — la propia caché del cliente odds_apiio_client también es 4h
 _ODDSAPIIO_CACHE: dict[str, tuple[datetime, list]] = {}
-_ODDSAPIIO_CACHE_TTL = timedelta(hours=4)
+_ODDSAPIIO_CACHE_TTL = timedelta(hours=24)
 
 # Cache de optic-odds en memoria: {league_code: (fetched_at, [events_normalised])}
 _OPTICODDS_CACHE: dict[str, tuple[datetime, list]] = {}
-_OPTICODDS_CACHE_TTL = timedelta(hours=4)
+_OPTICODDS_CACHE_TTL = timedelta(hours=24)
 
 # Mutex para serializar los track_call concurrentes del pre-fetch (evita race condition
 # donde N coroutines leen can_call=True y hacen N llamadas antes de que se actualice used)
@@ -175,6 +170,39 @@ _THE_ODDS_API_EXHAUSTED: bool = False
 
 # Timeout para llamadas HTTP a API externa
 _HTTP_TIMEOUT = 15.0
+
+
+def _has_upcoming_matches_for_league(league_code: str, within_hours: int) -> bool:
+    """
+    True si hay partidos SCHEDULED/TIMED para esta liga en las próximas `within_hours` horas.
+    Fail-open: si Firestore falla devuelve True para no bloquear la llamada.
+    """
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=within_hours)
+        docs = col("upcoming_matches").where(
+            filter=FieldFilter("league", "==", league_code)
+        ).where(
+            filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"])
+        ).stream()
+        for doc in docs:
+            match_date_str = doc.to_dict().get("match_date", "")
+            if not match_date_str:
+                continue
+            try:
+                if "T" in str(match_date_str):
+                    md = datetime.fromisoformat(str(match_date_str).replace("Z", "+00:00"))
+                else:
+                    md = datetime.strptime(str(match_date_str), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                if now <= md <= cutoff:
+                    return True
+            except (ValueError, TypeError):
+                continue
+        return False
+    except Exception:
+        logger.warning("_has_upcoming_matches_for_league(%s): error Firestore — fail-open", league_code)
+        return True
 
 
 def load_weights() -> dict:
@@ -298,7 +326,7 @@ async def fetch_bookmaker_odds(
     # DIAG: si este log no aparece → generate_signal() sale antes de llegar aquí (Poisson guard)
     logger.warning("DIAG_FBO: iniciando fetch para match_id=%s league=%s", match_id, league)
     now = datetime.now(timezone.utc)
-    cache_ttl = timedelta(hours=4)
+    cache_ttl = timedelta(hours=24)
 
     # --- 1. Verificar cache ---
     try:
@@ -510,6 +538,13 @@ async def _fetch_the_odds_api(
     hace 1 sola llamada HTTP en vez de N.
     """
     sport_key = _ODDS_SPORT_MAP[league]
+
+    # Guard: skip si no hay partidos en las próximas 48h (ahorra quota)
+    cached = _LEAGUE_ODDS_CACHE.get(sport_key)
+    cache_fresh = cached is not None and (now - cached[0]) < _LEAGUE_CACHE_TTL
+    if not cache_fresh and not _has_upcoming_matches_for_league(league, within_hours=48):
+        logger.info("_fetch_the_odds_api: %s — sin partidos en 48h, skip", league)
+        return None
 
     # --- Cache en memoria por liga ---
     events = await _get_league_events(sport_key, match_id, now)

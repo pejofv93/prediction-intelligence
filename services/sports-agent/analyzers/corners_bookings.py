@@ -58,16 +58,13 @@ _TOURNAMENT_IDS: dict[str, int] = {
     "BL1": 4,    # Bundesliga
     "SA":  5,    # Serie A
     "FL1": 2,    # Ligue 1
-    "SD":  9,    # Segunda División
-    "BL2": 78,   # Bundesliga 2
-    "SB":  11,   # Serie B
     "CL":  7,    # Champions League
     "EL":  6,    # Europa League
 }
 
-# Cache de fixtures v4 (TTL 1h, clave = fecha)
+# Cache de fixtures v4 (TTL 24h, clave = fecha)
 _FIXTURES_CACHE: dict[str, tuple[datetime, list]] = {}
-_CACHE_TTL = timedelta(hours=1)
+_CACHE_TTL = timedelta(hours=24)
 
 
 # ── Fetch fixtures OddsPapi v4 ─────────────────────────────────────────────────
