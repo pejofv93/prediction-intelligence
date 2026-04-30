@@ -56,6 +56,9 @@ def _classify_sentiment(text: str) -> float:
     return round((pos - neg) / total, 3)
 
 
+_DDG_RETRY_WAITS = (1, 2, 4)  # segundos entre intentos
+
+
 def _fetch_ddg_news(query: str) -> list[dict]:
     """Síncrono — se llama desde run_in_executor para no bloquear el event loop."""
     from ddgs import DDGS
@@ -66,7 +69,7 @@ def _fetch_ddg_news(query: str) -> list[dict]:
 async def fetch_news_sentiment(market_question: str) -> dict:
     """
     Busca noticias con DuckDuckGo y calcula sentiment ponderado por fuente.
-    Máx 5 llamadas DDG concurrentes, timeout de 6s por llamada.
+    Máx 5 llamadas DDG concurrentes, timeout de 6s por llamada, retry x3 con backoff.
     Devuelve:
       sentiment_score: float (-1.0 a 1.0)
       news_count: int
@@ -74,21 +77,40 @@ async def fetch_news_sentiment(market_question: str) -> dict:
       sentiment_trend: "IMPROVING" | "DETERIORATING" | "STABLE" | "NO_DATA"
     """
     async with _get_ddg_sem():
-        try:
-            loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
+        articles: list[dict] = []
+
+        for attempt in range(3):
+            if attempt > 0:
+                wait = _DDG_RETRY_WAITS[attempt - 1]
+                logger.info(
+                    "fetch_news_sentiment DDG retry %d/3: %s... (wait %ds)",
+                    attempt + 1, market_question[:40], wait,
+                )
+                await asyncio.sleep(wait)
             try:
                 articles = await asyncio.wait_for(
                     loop.run_in_executor(None, _fetch_ddg_news, market_question),
                     timeout=6.0,
                 )
+                break  # éxito
             except asyncio.TimeoutError:
                 logger.warning(
-                    "fetch_news_sentiment(%s...): DDG timeout (>6s) — NO_DATA",
+                    "fetch_news_sentiment(%s...): DDG timeout intento %d/3",
+                    market_question[:40], attempt + 1,
+                )
+            except Exception as _e:
+                logger.warning(
+                    "fetch_news_sentiment(%s...): DDG error intento %d/3 — %s",
+                    market_question[:40], attempt + 1, _e,
+                )
+
+        try:
+            if not articles:
+                logger.warning(
+                    "fetch_news_sentiment(%s...): 3/3 intentos DDG fallaron → NO_DATA",
                     market_question[:40],
                 )
-                return dict(_NO_DATA)
-
-            if not articles:
                 return dict(_NO_DATA)
 
             weighted_score = 0.0
