@@ -56,17 +56,27 @@ async def find_odds(req: FindOddsRequest) -> dict:
     from shared.config import GROQ_MODEL, GROQ_FALLBACK_MODEL
 
     system_prompt = (
-        "Eres un experto en apuestas deportivas. Busca las cuotas actuales para el evento indicado "
-        "en las principales casas de apuestas (Bet365, Bwin, William Hill, Betfair, Codere, Betway, etc). "
+        "Eres un experto en apuestas deportivas en España. "
+        "Busca las cuotas actuales SOLO de estas casas españolas: "
+        "Bet365 España, Betfair Exchange, Codere, Sportium, Bwin España, Unibet España, 1xBet España. "
         "Responde SOLO en JSON con este formato exacto (sin texto adicional):\n"
-        '{"odds": [{"bookmaker": "Nombre", "home": 2.1, "draw": 3.4, "away": 3.2}], '
-        '"best_back": {"bookmaker": "Nombre", "odds": 2.1}, '
-        '"best_lay": {"bookmaker": "Betfair", "odds": 2.0}}'
+        '{"odds": ['
+        '{"bookmaker": "Bet365 España", "home": 2.1, "draw": 3.4, "away": 3.2, "is_exchange": false}, '
+        '{"bookmaker": "Betfair Exchange", "home": 2.08, "draw": 3.35, "away": 3.15, "is_exchange": true}'
+        '], '
+        '"best_back": {"bookmaker": "Bet365 España", "selection": "Local", "odds": 2.1}, '
+        '"best_lay": {"bookmaker": "Betfair Exchange", "odds": 2.08}}\n'
+        "IMPORTANTE: Betfair Exchange siempre lleva is_exchange=true. "
+        "Omite casas para las que no encuentres datos reales. "
+        "No inventes cuotas."
     )
 
     try:
         tavily = _get_tavily()
-        search_results = tavily.search(query=f"cuotas apuestas {req.event} hoy", max_results=5)
+        search_results = tavily.search(
+            query=f"cuotas {req.event} Bet365 Betfair Codere Sportium Bwin España hoy",
+            max_results=5,
+        )
         context = "\n\n".join(
             f"[{r['title']}]\n{r['content']}"
             for r in search_results.get("results", [])
@@ -76,9 +86,15 @@ async def find_odds(req: FindOddsRequest) -> dict:
         context = ""
 
     user_prompt = (
-        f"Evento: {req.event}\n\n"
-        + (f"Contexto de búsqueda web:\n{context}\n\n" if context else "")
-        + "Proporciona las cuotas en JSON como se indicó."
+        f"Busca las cuotas actuales para el partido {req.event}.\n"
+        "Necesito cuotas de estas casas españolas específicamente:\n"
+        "Bet365 España, Betfair Exchange, Codere, Sportium, Bwin España, Unibet España, 1xBet España.\n"
+        "Para cada casa devuelve: Local, Empate, Visitante.\n"
+        "Indica la mejor cuota back (Local o Visitante) y la mejor cuota lay (Betfair Exchange).\n"
+        "Si no encuentras alguna casa, omítela.\n"
+        "Responde solo con los datos de cuotas, sin explicaciones adicionales.\n"
+        + (f"\nContexto de búsqueda web:\n{context}\n" if context else "")
+        + "\nProporciona las cuotas en JSON como se indicó."
     )
 
     raw = ""

@@ -12,10 +12,18 @@ interface CalcResult {
   steps: string[]
 }
 
+interface OddsEntry {
+  bookmaker: string
+  home: number
+  draw?: number
+  away: number
+  is_exchange?: boolean
+}
+
 interface OddsResult {
   event: string
-  odds: Array<{ bookmaker: string; home: number; draw?: number; away: number }>
-  best_back: { bookmaker: string; odds: number } | null
+  odds: OddsEntry[]
+  best_back: { bookmaker: string; selection?: string; odds: number } | null
   best_lay: { bookmaker: string; odds: number } | null
   warning: string
   fetched_at: string
@@ -306,7 +314,7 @@ function TabBuscarCuotas() {
             <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
               {result.best_back && (
                 <div style={{ ...card, flex: 1, minWidth: 160, borderLeft: '3px solid #00C853', marginBottom: 0 }}>
-                  <div style={{ color: '#555', fontSize: 11, marginBottom: 4 }}>MEJOR BACK</div>
+                  <div style={{ color: '#555', fontSize: 11, marginBottom: 4 }}>MEJOR BACK{result.best_back.selection ? ` — ${result.best_back.selection}` : ''}</div>
                   <div style={{ fontWeight: 'bold', color: '#00C853', fontSize: 20 }}>{result.best_back.odds}</div>
                   <div style={{ color: '#888', fontSize: 12 }}>{result.best_back.bookmaker}</div>
                 </div>
@@ -322,32 +330,48 @@ function TabBuscarCuotas() {
           )}
 
           {/* Odds table */}
-          {result.odds.length > 0 && (
-            <div style={card}>
-              <div style={{ color: '#444', fontSize: 11, marginBottom: 12, letterSpacing: 0.5 }}>TODAS LAS CASAS</div>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ borderBottom: '1px solid #222' }}>
-                      {['Casa', 'Local', 'Empate', 'Visitante'].map(h => (
-                        <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: '#555', fontWeight: 'normal' }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.odds.map((o, i) => (
-                      <tr key={i} style={{ borderBottom: '1px solid #1a1a1a' }}>
-                        <td style={{ padding: '8px', color: '#ccc', fontWeight: 'bold' }}>{o.bookmaker}</td>
-                        <td style={{ padding: '8px', color: '#fff' }}>{o.home?.toFixed(2) ?? '—'}</td>
-                        <td style={{ padding: '8px', color: '#888' }}>{o.draw?.toFixed(2) ?? '—'}</td>
-                        <td style={{ padding: '8px', color: '#fff' }}>{o.away?.toFixed(2) ?? '—'}</td>
+          {result.odds.length > 0 && (() => {
+            const isExchange = (o: OddsEntry) => o.is_exchange === true || o.bookmaker.toLowerCase().includes('betfair')
+            const sorted = [...result.odds].sort((a, b) => (isExchange(b) ? 1 : 0) - (isExchange(a) ? 1 : 0))
+            return (
+              <div style={card}>
+                <div style={{ color: '#444', fontSize: 11, marginBottom: 12, letterSpacing: 0.5 }}>CASAS ESPAÑOLAS</div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid #222' }}>
+                        {['Casa', 'Local', 'Empate', 'Visitante'].map(h => (
+                          <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: '#555', fontWeight: 'normal' }}>{h}</th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {sorted.map((o, i) => {
+                        const exchange = isExchange(o)
+                        const rowBg = exchange ? '#1a1208' : 'transparent'
+                        return (
+                          <tr key={i} style={{ borderBottom: '1px solid #1a1a1a', background: rowBg }}>
+                            <td style={{ padding: '8px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                <span style={{ color: exchange ? '#F7931A' : '#ccc', fontWeight: 'bold' }}>{o.bookmaker}</span>
+                                <span style={{ background: '#0d1f3c', color: '#5b9bd5', border: '1px solid #1a3a6e', borderRadius: 3, padding: '1px 5px', fontSize: 10, lineHeight: 1.4 }}>🇪🇸 España</span>
+                                {exchange && (
+                                  <span style={{ background: '#F7931A22', color: '#F7931A', border: '1px solid #F7931A44', borderRadius: 3, padding: '1px 5px', fontSize: 10, lineHeight: 1.4 }}>EXCHANGE (LAY)</span>
+                                )}
+                              </div>
+                            </td>
+                            <td style={{ padding: '8px', color: '#fff' }}>{o.home?.toFixed(2) ?? '—'}</td>
+                            <td style={{ padding: '8px', color: '#888' }}>{o.draw?.toFixed(2) ?? '—'}</td>
+                            <td style={{ padding: '8px', color: '#fff' }}>{o.away?.toFixed(2) ?? '—'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          )}
+            )
+          })()}
         </div>
       )}
     </div>
