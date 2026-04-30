@@ -301,6 +301,10 @@ def _format_poly_alert(analysis: dict) -> str:
     # Smart money
     smart_line = "\n🧠 *SMART MONEY detectado*\n" if (volume_spike or smart_money) else "\n"
 
+    # Link directo al mercado
+    slug = str(analysis.get("slug") or "")
+    link_line = f"🔗 [Ver mercado](https://polymarket.com/event/{slug})\n" if slug else ""
+
     return (
         f"🔮 OPORTUNIDAD POLYMARKET — {intensity}\n"
         f"{cat_line}"
@@ -308,6 +312,7 @@ def _format_poly_alert(analysis: dict) -> str:
         f"💰 Precio YES: *{market_price_yes:.0%}* → IA: *{real_prob:.0%}* (*{edge:+.0%}* edge)\n"
         f"🎯 Confianza: *{confidence:.0%}* | Recomendación: *{recommendation}*\n"
         f"{meta_line}"
+        f"{link_line}"
         f"{smart_line}"
         f"💭 {reasoning}\n\n"
         f"⚠️ Apuesta responsablemente. No es asesoramiento financiero."

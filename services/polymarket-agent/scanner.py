@@ -163,10 +163,13 @@ def _parse_market(raw: dict) -> dict | None:
                 logger.debug("_parse_market(%s): expirado (end_date=%s) — descartado", market_id, _end_tz.date())
                 return None
 
+        slug = str(raw.get("slug", raw.get("market_slug", "")))
+
         return {
             "market_id": market_id,
             "condition_id": condition_id,
             "question": question,
+            "slug": slug,
             "end_date": end_date,
             "volume_24h": volume_24h,
             "price_yes": price_yes,

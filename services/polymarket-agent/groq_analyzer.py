@@ -539,6 +539,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "fear_greed_index": fear_greed.get("value") if fear_greed else None,
         "fear_greed_label": fear_greed.get("label") if fear_greed else None,
         "end_date_iso": end_date.isoformat() if end_date else None,
+        "slug": market_data.get("slug", ""),
         "volume_24h": volume_24h,
         "analyzed_at": datetime.now(timezone.utc),
         "alerted": False,
