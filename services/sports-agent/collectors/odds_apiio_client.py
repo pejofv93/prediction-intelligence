@@ -469,6 +469,7 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
         return None
 
     bookmakers_out = []
+    markets_agg: dict[str, list] = {}
 
     if odds_item:
         # odds_item puede ser: {eventId, bookmakers: [{name, markets: {...}}]}
@@ -485,16 +486,29 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
                     for mkt_key, mkt_data in raw_markets.items():
                         outcomes = _parse_market(mkt_key, mkt_data, home)
                         if outcomes:
-                            markets_out.append({"key": _normalise_market_key(mkt_key), "outcomes": outcomes})
+                            norm_key = _normalise_market_key(mkt_key)
+                            markets_out.append({"key": norm_key, "outcomes": outcomes})
+                            markets_agg.setdefault(norm_key, []).append(
+                                {"bookmaker": bkm_key, "outcomes": outcomes}
+                            )
                 elif isinstance(raw_markets, list):
                     for mkt in raw_markets:
                         mkt_key = mkt.get("key") or mkt.get("type") or mkt.get("name") or ""
                         outcomes = _parse_market(mkt_key, mkt.get("outcomes", []), home)
                         if outcomes:
-                            markets_out.append({"key": _normalise_market_key(mkt_key), "outcomes": outcomes})
+                            norm_key = _normalise_market_key(mkt_key)
+                            markets_out.append({"key": norm_key, "outcomes": outcomes})
+                            markets_agg.setdefault(norm_key, []).append(
+                                {"bookmaker": bkm_key, "outcomes": outcomes}
+                            )
 
                 if markets_out:
                     bookmakers_out.append({"key": bkm_key, "markets": markets_out})
+
+    extra_keys = [k for k in markets_agg if k != "h2h"]
+    if extra_keys:
+        logger.info("MARKETS_PARSED: %s vs %s → %s", home, away, extra_keys)
+    markets_best = _extract_markets_summary(markets_agg, home) if markets_agg else {}
 
     return {
         "id": ev_id,
@@ -502,6 +516,7 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
         "away_team": away,
         "competition": competition,
         "bookmakers": bookmakers_out,
+        "markets": markets_best,
     }
 
 
@@ -586,6 +601,97 @@ def _to_float(v) -> float | None:
         return f if f > 1.0 else None
     except (TypeError, ValueError):
         return None
+
+
+def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
+    """
+    Construye el mejor precio por mercado a partir de los datos de todos los bookmakers.
+    Entrada: {norm_key: [{bookmaker, outcomes: [{name, price[, point]}]}]}
+    Salida:  {h2h: {...}, btts: {...}, totals: [...], spreads: [...]}
+    """
+    out: dict = {}
+    for mkt_key, entries in markets_agg.items():
+
+        if mkt_key == "h2h":
+            bh = bd = ba = 0.0
+            bk = ""
+            for e in entries:
+                for o in e["outcomes"]:
+                    p = float(o.get("price") or 0)
+                    if o.get("name") == home and p > bh:
+                        bh, bk = p, e["bookmaker"]
+                    elif o.get("name") == "Draw" and p > bd:
+                        bd = p
+                    elif o.get("name") not in (home, "Draw") and p > ba:
+                        ba = p
+            if bh and ba:
+                out["h2h"] = {
+                    "home_odds": round(bh, 3),
+                    "draw_odds": round(bd, 3) if bd else None,
+                    "away_odds": round(ba, 3),
+                    "bookmaker": bk,
+                }
+
+        elif mkt_key == "btts":
+            by_ = bn = 0.0
+            bk = ""
+            for e in entries:
+                for o in e["outcomes"]:
+                    p = float(o.get("price") or 0)
+                    if o.get("name") == "Yes" and p > by_:
+                        by_, bk = p, e["bookmaker"]
+                    elif o.get("name") == "No" and p > bn:
+                        bn = p
+            if by_:
+                out["btts"] = {
+                    "yes_odds": round(by_, 3),
+                    "no_odds": round(bn, 3) if bn else None,
+                    "bookmaker": bk,
+                }
+
+        elif mkt_key == "totals":
+            by_line: dict[float, dict] = {}
+            for e in entries:
+                bk = e["bookmaker"]
+                for o in e["outcomes"]:
+                    ln = round(float(o.get("point") or 2.5), 1)
+                    if ln not in by_line:
+                        by_line[ln] = {"line": ln, "over_odds": 0.0, "under_odds": 0.0, "bookmaker": ""}
+                    p = float(o.get("price") or 0)
+                    if o.get("name") == "Over" and p > by_line[ln]["over_odds"]:
+                        by_line[ln]["over_odds"] = p
+                        by_line[ln]["bookmaker"] = bk
+                    elif o.get("name") == "Under" and p > by_line[ln]["under_odds"]:
+                        by_line[ln]["under_odds"] = p
+            out["totals"] = [
+                {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
+                for entry in by_line.values()
+                if entry["over_odds"] and entry["under_odds"]
+            ]
+
+        elif mkt_key == "spreads":
+            by_pt: dict[float, dict] = {}
+            for e in entries:
+                bk = e["bookmaker"]
+                for idx, o in enumerate(e["outcomes"]):
+                    pt = round(float(o.get("point") or 0.0), 2)
+                    if pt not in by_pt:
+                        by_pt[pt] = {"point": pt, "home_odds": 0.0, "away_odds": 0.0, "bookmaker": ""}
+                    p = float(o.get("price") or 0)
+                    name = o.get("name", "")
+                    is_home = (name == home) or (not name and idx == 0)
+                    if is_home and p > by_pt[pt]["home_odds"]:
+                        by_pt[pt]["home_odds"] = p
+                        by_pt[pt]["bookmaker"] = bk
+                    elif not is_home and p > by_pt[pt]["away_odds"]:
+                        by_pt[pt]["away_odds"] = p
+            out["spreads"] = [
+                {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
+                for entry in by_pt.values()
+                if entry["home_odds"] and entry["away_odds"]
+            ]
+
+    return out
 
 
 # ── Public interface ───────────────────────────────────────────────────────────

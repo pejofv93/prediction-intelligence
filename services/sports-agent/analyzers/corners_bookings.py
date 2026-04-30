@@ -51,6 +51,16 @@ MARKET_DEFS: dict[str, tuple[str, dict[str, str]]] = {
     "101120": ("bookings_1x2_1h", {"101120": "home", "101121": "draw", "101122": "away"}),
 }
 
+# Mercados binarios (BTTS, Over/Under, Asian Handicap)
+# {marketId: (name, type)}  type∈{btts, ou, ah}
+# Primer precio activo → opción A (Yes/Over/Home); segundo → opción B (No/Under/Away).
+MARKET_DEFS_BINARY: dict[str, tuple[str, str]] = {
+    "104":  ("btts",   "btts"),
+    "106":  ("ou_ft",  "ou"),
+    "1010": ("ou_2_5", "ou"),
+    "1068": ("ah_m0_5","ah"),
+}
+
 # Mapeo liga interna → tournamentId OddsPapi (verificado)
 _TOURNAMENT_IDS: dict[str, int] = {
     "PD":  8,    # La Liga
@@ -231,6 +241,58 @@ def _extract_market_odds(fixture: dict, market_id: str, outcome_map: dict[str, s
     return results
 
 
+def _extract_binary_odds(fixture: dict, market_id: str) -> list[dict]:
+    """
+    Extrae dos cuotas (A y B) para mercados binarios OddsPapi (BTTS, OU, AH).
+    No asume outcomeIds — usa el primer y segundo precio activo encontrado (sorted por outcomeId).
+    Devuelve lista de {bookmaker, a_odds, b_odds}.
+    """
+    results = []
+    bk_odds = fixture.get("bookmakerOdds", {})
+    for bk_name, bk_data in bk_odds.items():
+        if not isinstance(bk_data, dict):
+            continue
+        mkt = bk_data.get("markets", {}).get(market_id)
+        if not mkt or not isinstance(mkt, dict):
+            continue
+        outcomes_data = mkt.get("outcomes", {})
+        prices: list[float] = []
+        for oid in sorted(outcomes_data.keys()):
+            outcome = outcomes_data[oid]
+            players = outcome.get("players", {})
+            for player in players.values():
+                if not isinstance(player, dict) or not player.get("active", False):
+                    continue
+                price = player.get("price")
+                if price and isinstance(price, (int, float)) and float(price) > 1.05:
+                    prices.append(float(price))
+                    break
+            if len(prices) == 2:
+                break
+        if len(prices) == 2:
+            results.append({"bookmaker": bk_name, "a_odds": prices[0], "b_odds": prices[1]})
+    return results
+
+
+def _consensus_binary(binary_list: list[dict]) -> dict:
+    """Mediana de implied probs vig-removida para mercados binarios."""
+    probs = []
+    for e in binary_list:
+        if e["a_odds"] > 1 and e["b_odds"] > 1:
+            ra = 1.0 / e["a_odds"]
+            rb = 1.0 / e["b_odds"]
+            total = ra + rb
+            if total > 0:
+                probs.append({"a": ra / total, "b": rb / total})
+    if not probs:
+        return {}
+    return {
+        "a": float(np.median([p["a"] for p in probs])),
+        "b": float(np.median([p["b"] for p in probs])),
+        "n_bookmakers": len(probs),
+    }
+
+
 # ── Implied probabilities y consensus ─────────────────────────────────────────
 
 def _implied_probs(home_odds: float, draw_odds: float, away_odds: float) -> dict[str, float]:
@@ -379,6 +441,16 @@ async def generate_corners_signals(
         logger.debug("corners_bookings: fixture no encontrado para %s vs %s", home_team, away_team)
         return []
 
+    # Log mercados binarios disponibles en el fixture
+    _all_market_ids: set[str] = set()
+    for _bk in fixture_data.get("bookmakerOdds", {}).values():
+        if isinstance(_bk, dict):
+            _all_market_ids.update(_bk.get("markets", {}).keys())
+    _binary_found = [k for k in MARKET_DEFS_BINARY if k in _all_market_ids]
+    if _binary_found:
+        logger.info("ODDSPAPI_MARKETS: %s vs %s → mercados binarios: %s",
+                    home_team, away_team, _binary_found)
+
     # Cargar stats FDCO
     home_stats, away_stats = await _load_team_stats(league, home_team, away_team)
     has_fdco = bool(home_stats and away_stats)
@@ -437,6 +509,49 @@ async def generate_corners_signals(
                 logger.info(
                     "corners_bookings: SEAL %s %s @ %.2f (%s) edge=%.3f conf=%.3f",
                     market_key, sel, best_price, best_bk, edge, confidence,
+                )
+
+    # ── Mercados binarios: BTTS, OU, AH (line-shopping, sin Poisson) ──────────
+    _LABEL_A = {"btts": "Yes",  "ou": "Over",  "ah": "Home"}
+    _LABEL_B = {"btts": "No",   "ou": "Under", "ah": "Away"}
+
+    for market_id, (market_key, mtype) in MARKET_DEFS_BINARY.items():
+        binary_list = _extract_binary_odds(fixture_data, market_id)
+        if len(binary_list) < _MIN_BOOKMAKERS:
+            continue
+
+        cons = _consensus_binary(binary_list)
+        if not cons:
+            continue
+
+        best_a_entry = max(binary_list, key=lambda e: e["a_odds"])
+        best_b_entry = max(binary_list, key=lambda e: e["b_odds"])
+        n_bk = cons["n_bookmakers"]
+
+        for sel_label, best_entry, best_price, consensus_p in (
+            (_LABEL_A[mtype], best_a_entry, best_a_entry["a_odds"], cons["a"]),
+            (_LABEL_B[mtype], best_b_entry, best_b_entry["b_odds"], cons["b"]),
+        ):
+            if best_price <= 1.05 or consensus_p <= 0:
+                continue
+            # Line-shopping edge: fair price vs best available
+            fair_price = 1.0 / consensus_p
+            edge = round(fair_price - best_price, 4)
+            confidence = round(min(1.0, n_bk / 15), 4)
+
+            sig = _make_signal(
+                market_key, sel_label, best_price, best_entry["bookmaker"],
+                edge, confidence,
+                {"home": consensus_p, "draw": 0.0, "away": 1.0 - consensus_p,
+                 "n_bookmakers": n_bk},
+                None, match_date, home_team, away_team,
+            )
+            if sig:
+                signals.append(sig)
+                logger.info(
+                    "corners_bookings: SEAL %s %s @ %.2f (%s) edge=%.3f conf=%.3f",
+                    market_key, sel_label, best_price, best_entry["bookmaker"],
+                    edge, confidence,
                 )
 
     return signals

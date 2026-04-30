@@ -146,6 +146,16 @@ _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
 
 _FOOTBALL_TOTALS_LINE: float = 2.5
 
+# Ligas que reciben markets=h2h,h2h_h1 en The Odds API (top ligas con máxima cobertura)
+_TOP_LEAGUES_H2H_H1: frozenset[str] = frozenset({
+    "soccer_uefa_champs_league",
+    "soccer_england_premier_league",
+    "soccer_spain_la_liga",
+    "soccer_italy_serie_a",
+    "soccer_germany_bundesliga",
+    "soccer_france_ligue_one",
+})
+
 # Cache en memoria de odds por liga: {sport_key: (fetched_at, [events])}
 # TTL 24h: con guard de upcoming_matches se llama solo cuando hay partidos.
 # Además se persiste en Firestore (league_odds_cache) para sobrevivir reinicios Cloud Run.
@@ -480,19 +490,22 @@ async def _fetch_oddsapiio(
 
 
 def _search_oddsapiio_event(events: list, home_team: str, away_team: str, match_id: str) -> dict | None:
-    """Busca el partido en la lista de eventos de odds-api.io y extrae cuotas h2h."""
+    """Busca el partido en la lista de eventos de odds-api.io y extrae cuotas h2h + all_markets."""
     for ev in events:
         api_home = ev.get("home_team", "")
         api_away = ev.get("away_team", "")
         if not (_teams_match(home_team, api_home) and _teams_match(away_team, api_away)):
             continue
-        # El evento está normalizado al formato The Odds API — reutilizar el parser existente
         result = _parse_the_odds_event(ev)
         if result:
+            ev_markets = ev.get("markets", {})
+            if ev_markets:
+                result["all_markets"] = ev_markets
             logger.info(
-                "fetch_bookmaker_odds(%s): odds-api.io — %s @ home=%.2f draw=%.2f away=%.2f",
+                "fetch_bookmaker_odds(%s): odds-api.io — %s @ home=%.2f draw=%.2f away=%.2f markets=%s",
                 match_id, result["bookmaker"],
                 result["home_odds"], result["draw_odds"], result["away_odds"],
+                list(ev_markets.keys()) if ev_markets else [],
             )
             return result
     if events:
@@ -649,13 +662,12 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
         url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
         try:
+            markets_param = "h2h,h2h_h1" if sport_key in _TOP_LEAGUES_H2H_H1 else "h2h"
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
                     "regions": "eu",
-                    # Solo h2h para el primer fix funcional. spreads/totals se añaden
-                    # cuando confirmemos que h2h devuelve 200 para football EU.
-                    "markets": "h2h",
+                    "markets": markets_param,
                     "oddsFormat": "decimal",
                 })
 
@@ -814,6 +826,197 @@ def _calculate_totals_prob(enriched_match: dict, line: float = _FOOTBALL_TOTALS_
     except Exception:
         logger.error("_calculate_totals_prob: error", exc_info=True)
         return None
+
+
+def _calculate_btts_prob(enriched_match: dict) -> dict | None:
+    """P(BTTS) = P(home≥1) × P(away≥1) usando Poisson independiente."""
+    from scipy.stats import poisson as _poisson
+    home_xg = enriched_match.get("home_xg")
+    away_xg = enriched_match.get("away_xg")
+    if home_xg is None or away_xg is None:
+        return None
+    try:
+        lh = max(0.01, float(home_xg))
+        la = max(0.01, float(away_xg))
+        p_yes = (1.0 - float(_poisson.pmf(0, lh))) * (1.0 - float(_poisson.pmf(0, la)))
+        p_yes = max(0.0, min(1.0, p_yes))
+        return {"btts_prob": round(p_yes, 4), "no_btts_prob": round(1.0 - p_yes, 4)}
+    except Exception:
+        logger.error("_calculate_btts_prob: error", exc_info=True)
+        return None
+
+
+def _calculate_ah_prob(enriched_match: dict, line: float = -0.5) -> dict | None:
+    """
+    P(home covers AH line).
+    AH -0.5 para home = P(home wins) — equivalente a poisson_home_win si disponible.
+    """
+    if abs(line + 0.5) < 0.01:
+        p_home = enriched_match.get("poisson_home_win")
+        if p_home is None:
+            return None
+        p_home = max(0.0, min(1.0, float(p_home)))
+        return {"home_covers": round(p_home, 4), "away_covers": round(1.0 - p_home, 4), "line": line}
+    return None
+
+
+async def _generate_oddsapiio_extra_signals(
+    enriched_match: dict,
+    all_markets: dict,
+    match_id: str,
+    home_team: str,
+    away_team: str,
+    league: str,
+    sport: str,
+    match_date,
+    weights_version: int,
+) -> list[dict]:
+    """
+    Emite señales BTTS, Over/Under 2.5 y Asian Handicap -0.5 usando:
+      - Probabilidades Poisson del enriched_match
+      - Cuotas de odds-api.io (all_markets dict del evento normalizado)
+    """
+    results: list[dict] = []
+    now = datetime.now(timezone.utc)
+
+    # ── BTTS ──────────────────────────────────────────────────────────────────
+    btts_mkt = all_markets.get("btts")
+    if btts_mkt:
+        btts_probs = _calculate_btts_prob(enriched_match)
+        if btts_probs:
+            yes_odds = btts_mkt.get("yes_odds") or 0.0
+            if yes_odds > 1.05:
+                edge = calculate_edge(btts_probs["btts_prob"], yes_odds)
+                conf = round(min(1.0, max(0.0, btts_probs["btts_prob"] + 0.1)), 4)
+                if edge > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE:
+                    doc_id = f"{match_id}_btts"
+                    pred = {
+                        "match_id": doc_id, "home_team": home_team, "away_team": away_team,
+                        "sport": sport, "league": league, "market_type": "btts",
+                        "selection": "Yes", "bookmaker": btts_mkt.get("bookmaker", ""),
+                        "odds": round(yes_odds, 3),
+                        "calculated_prob": btts_probs["btts_prob"],
+                        "edge": round(edge, 4), "confidence": conf,
+                        "kelly_fraction": kelly_criterion(edge, yes_odds),
+                        "factors": {
+                            "btts_prob": btts_probs["btts_prob"],
+                            "home_xg": enriched_match.get("home_xg"),
+                            "away_xg": enriched_match.get("away_xg"),
+                        },
+                        "signals": {}, "data_source": "poisson_btts", "odds_source": "oddsapiio",
+                        "match_date": match_date, "weights_version": weights_version,
+                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                    }
+                    try:
+                        col("predictions").document(doc_id).set(pred)
+                        logger.info("generate_signal(%s): BTTS Yes @ %.2f edge=%.1f%%",
+                                    match_id, yes_odds, edge * 100)
+                    except Exception:
+                        logger.error("generate_signal(%s): error guardando btts", match_id, exc_info=True)
+                    if edge > SPORTS_ALERT_EDGE:
+                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+                    results.append(pred)
+
+    # ── Over/Under 2.5 ────────────────────────────────────────────────────────
+    totals_list = all_markets.get("totals", [])
+    t25 = next((t for t in totals_list if abs(t.get("line", 0) - 2.5) < 0.01), None)
+    if t25:
+        totals_probs = _calculate_totals_prob(enriched_match, line=2.5)
+        if totals_probs:
+            over_odds = t25.get("over_odds") or 0.0
+            under_odds = t25.get("under_odds") or 0.0
+            over_edge = calculate_edge(totals_probs["over_prob"], over_odds) if over_odds > 1.05 else -1
+            under_edge = calculate_edge(totals_probs["under_prob"], under_odds) if under_odds > 1.05 else -1
+
+            if over_edge >= under_edge and over_edge > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge = "Over", totals_probs["over_prob"], over_odds, over_edge
+            elif under_edge > over_edge and under_edge > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge = "Under", totals_probs["under_prob"], under_odds, under_edge
+            else:
+                sel = None
+
+            if sel:
+                sel_conf = round(max(0.0, 1.0 - abs(sel_p - 0.5) * 2), 4)
+                if sel_conf > SPORTS_MIN_CONFIDENCE:
+                    doc_id = f"{match_id}_ou25_oaio"
+                    pred = {
+                        "match_id": doc_id, "home_team": home_team, "away_team": away_team,
+                        "sport": sport, "league": league, "market_type": "totals",
+                        "selection": f"{sel} 2.5", "line": 2.5,
+                        "bookmaker": t25.get("bookmaker", ""),
+                        "odds": round(sel_odds, 3), "calculated_prob": sel_p,
+                        "edge": round(sel_edge, 4), "confidence": sel_conf,
+                        "kelly_fraction": kelly_criterion(sel_edge, sel_odds),
+                        "factors": {
+                            "expected_total": totals_probs["expected_total"],
+                            "home_xg": enriched_match.get("home_xg"),
+                            "away_xg": enriched_match.get("away_xg"),
+                        },
+                        "signals": {}, "data_source": "poisson_totals", "odds_source": "oddsapiio",
+                        "match_date": match_date, "weights_version": weights_version,
+                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                    }
+                    try:
+                        col("predictions").document(doc_id).set(pred)
+                        logger.info("generate_signal(%s): %s 2.5 @ %.2f edge=%.1f%%",
+                                    match_id, sel, sel_odds, sel_edge * 100)
+                    except Exception:
+                        logger.error("generate_signal(%s): error guardando ou25_oaio", match_id, exc_info=True)
+                    results.append(pred)
+
+    # ── Asian Handicap -0.5 ───────────────────────────────────────────────────
+    spreads_list = all_markets.get("spreads", [])
+    ah_m05 = next(
+        (s for s in spreads_list if s.get("point") is not None and abs(s.get("point", 0) + 0.5) < 0.01),
+        None,
+    )
+    if ah_m05:
+        ah_probs = _calculate_ah_prob(enriched_match, line=-0.5)
+        if ah_probs:
+            home_ah_odds = ah_m05.get("home_odds") or 0.0
+            away_ah_odds = ah_m05.get("away_odds") or 0.0
+            home_edge = calculate_edge(ah_probs["home_covers"], home_ah_odds) if home_ah_odds > 1.05 else -1
+            away_edge = calculate_edge(ah_probs["away_covers"], away_ah_odds) if away_ah_odds > 1.05 else -1
+
+            if home_edge >= away_edge and home_edge > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge = home_team, ah_probs["home_covers"], home_ah_odds, home_edge
+            elif away_edge > home_edge and away_edge > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge = away_team, ah_probs["away_covers"], away_ah_odds, away_edge
+            else:
+                sel = None
+
+            if sel:
+                sel_conf = round(min(1.0, abs(sel_p - 0.5) * 3), 4)
+                if sel_conf > SPORTS_MIN_CONFIDENCE:
+                    doc_id = f"{match_id}_ah05"
+                    pred = {
+                        "match_id": doc_id, "home_team": home_team, "away_team": away_team,
+                        "sport": sport, "league": league, "market_type": "asian_handicap",
+                        "selection": sel, "line": -0.5,
+                        "bookmaker": ah_m05.get("bookmaker", ""),
+                        "odds": round(sel_odds, 3), "calculated_prob": sel_p,
+                        "edge": round(sel_edge, 4), "confidence": sel_conf,
+                        "kelly_fraction": kelly_criterion(sel_edge, sel_odds),
+                        "factors": {
+                            "home_covers": ah_probs["home_covers"],
+                            "home_xg": enriched_match.get("home_xg"),
+                            "away_xg": enriched_match.get("away_xg"),
+                        },
+                        "signals": {}, "data_source": "poisson_ah", "odds_source": "oddsapiio",
+                        "match_date": match_date, "weights_version": weights_version,
+                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                    }
+                    try:
+                        col("predictions").document(doc_id).set(pred)
+                        logger.info("generate_signal(%s): AH -0.5 %s @ %.2f edge=%.1f%%",
+                                    match_id, sel, sel_odds, sel_edge * 100)
+                    except Exception:
+                        logger.error("generate_signal(%s): error guardando ah05", match_id, exc_info=True)
+                    if sel_edge > SPORTS_ALERT_EDGE:
+                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+                    results.append(pred)
+
+    return results
 
 
 def _parse_odds_response(fixture_data: dict) -> dict | None:
@@ -1352,6 +1555,20 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                                     pass
 
                         results.append(totals_pred)
+
+    # --- Señales BTTS, OU 2.5, AH -0.5 desde odds-api.io all_markets ---
+    if sport_key in _FOOTBALL_SPORT_KEYS and odds_data and odds_data.get("source") == "oddsapiio":
+        _all_mkt = odds_data.get("all_markets", {})
+        if _all_mkt:
+            try:
+                extra_oaio = await _generate_oddsapiio_extra_signals(
+                    enriched_match, _all_mkt, match_id,
+                    str(home_team), str(away_team),
+                    league, sport, match_date, weights_version,
+                )
+                results.extend(extra_oaio)
+            except Exception:
+                logger.error("generate_signal(%s): error en oddsapiio extra signals", match_id, exc_info=True)
 
     # --- Señales extra de fútbol (BTTS, Double Chance, AH, Totals 3.5) ---
     if sport_key in _FOOTBALL_SPORT_KEYS:
