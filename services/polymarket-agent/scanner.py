@@ -157,6 +157,11 @@ def _parse_market(raw: dict) -> dict | None:
                 )
         if end_date is None:
             logger.warning("_parse_market(%s): end_date no encontrado en campos conocidos", market_id)
+        else:
+            _end_tz = end_date if end_date.tzinfo else end_date.replace(tzinfo=timezone.utc)
+            if _end_tz < datetime.now(timezone.utc) - timedelta(hours=24):
+                logger.debug("_parse_market(%s): expirado (end_date=%s) — descartado", market_id, _end_tz.date())
+                return None
 
         return {
             "market_id": market_id,
@@ -206,6 +211,6 @@ async def fetch_market_orderbook(condition_id: str) -> dict:
             except Exception:
                 pass
         return {"bids": bids[:10], "asks": asks[:10], "spread": spread, "buy_ratio": round(buy_ratio, 4)}
-    except Exception:
-        logger.error("fetch_market_orderbook(%s): error — devolviendo neutral", condition_id, exc_info=True)
+    except Exception as e:
+        logger.warning("fetch_market_orderbook(%s): error — devolviendo neutral: %s", condition_id, e)
         return neutral

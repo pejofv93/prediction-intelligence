@@ -14,29 +14,42 @@ logger = logging.getLogger(__name__)
 # Cache de umbrales por dirección — cargado una vez al arrancar el servicio
 _LEARNED_THRESHOLDS: dict | None = None
 
+# Umbrales base usados cuando hay < 20 outcomes resueltos
+_BASE_THRESHOLDS = {
+    "buy_yes_min_edge": 0.08,
+    "buy_yes_min_confidence": POLY_MIN_CONFIDENCE,
+    "buy_no_min_edge": 0.07,
+    "buy_no_min_confidence": POLY_MIN_CONFIDENCE,
+}
+_MIN_OUTCOMES_FOR_LEARNED = 20
+
 
 def _load_learned_thresholds() -> dict:
     """
     Lee poly_model_weights/current desde Firestore.
-    Devuelve dict con buy_yes_min_edge, buy_yes_min_confidence,
-    buy_no_min_edge, buy_no_min_confidence.
-    Fallback a POLY_MIN_EDGE / POLY_MIN_CONFIDENCE si no existe.
+    Aplica umbrales aprendidos solo si hay >= 20 outcomes resueltos;
+    si no, usa umbrales base más permisivos para no bloquear señales tempranas.
     """
     global _LEARNED_THRESHOLDS
     if _LEARNED_THRESHOLDS is not None:
         return _LEARNED_THRESHOLDS
 
-    defaults = {
-        "buy_yes_min_edge": POLY_MIN_EDGE,
-        "buy_yes_min_confidence": POLY_MIN_CONFIDENCE,
-        "buy_no_min_edge": POLY_MIN_EDGE,
-        "buy_no_min_confidence": POLY_MIN_CONFIDENCE,
-    }
     try:
         from shared.firestore_client import col
         doc = col("poly_model_weights").document("current").get()
         if doc.exists:
             data = doc.to_dict()
+            sample_size = int(data.get("sample_size", 0))
+            if sample_size < _MIN_OUTCOMES_FOR_LEARNED:
+                logger.info(
+                    "_load_learned_thresholds: umbral_mode=base (%d outcomes < %d) "
+                    "BUY_YES(edge=%.2f conf=%.2f) BUY_NO(edge=%.2f conf=%.2f)",
+                    sample_size, _MIN_OUTCOMES_FOR_LEARNED,
+                    _BASE_THRESHOLDS["buy_yes_min_edge"], _BASE_THRESHOLDS["buy_yes_min_confidence"],
+                    _BASE_THRESHOLDS["buy_no_min_edge"], _BASE_THRESHOLDS["buy_no_min_confidence"],
+                )
+                _LEARNED_THRESHOLDS = dict(_BASE_THRESHOLDS)
+                return _LEARNED_THRESHOLDS
             loaded = {
                 "buy_yes_min_edge":        float(data.get("buy_yes_min_edge", POLY_MIN_EDGE)),
                 "buy_yes_min_confidence":  float(data.get("buy_yes_min_confidence", POLY_MIN_CONFIDENCE)),
@@ -45,18 +58,18 @@ def _load_learned_thresholds() -> dict:
             }
             _LEARNED_THRESHOLDS = loaded
             logger.info(
-                "_load_learned_thresholds: cargados v%s "
+                "_load_learned_thresholds: umbral_mode=learned (%d outcomes) v%s "
                 "BUY_YES(edge=%.3f conf=%.2f) BUY_NO(edge=%.3f conf=%.2f)",
-                data.get("version", "?"),
+                sample_size, data.get("version", "?"),
                 loaded["buy_yes_min_edge"], loaded["buy_yes_min_confidence"],
                 loaded["buy_no_min_edge"],  loaded["buy_no_min_confidence"],
             )
             return loaded
     except Exception:
-        logger.warning("_load_learned_thresholds: error leyendo Firestore — usando defaults", exc_info=True)
+        logger.warning("_load_learned_thresholds: error leyendo Firestore — usando base", exc_info=True)
 
-    _LEARNED_THRESHOLDS = defaults
-    return defaults
+    _LEARNED_THRESHOLDS = dict(_BASE_THRESHOLDS)
+    return _LEARNED_THRESHOLDS
 
 
 async def check_and_alert(analysis: dict) -> bool:

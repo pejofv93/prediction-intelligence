@@ -40,7 +40,11 @@ async def analyze_orderbook(market_id: str) -> dict:
             return dict(_NEUTRAL)
 
         from scanner import fetch_market_orderbook
-        ob = await fetch_market_orderbook(condition_id)
+        try:
+            ob = await fetch_market_orderbook(condition_id)
+        except Exception as e:
+            logger.warning("analyze_orderbook(%s): CLOB fetch falló — %s", market_id, e)
+            return dict(_NEUTRAL)
 
         buy_pressure = float(ob.get("buy_ratio", 0.5))
         spread = float(ob.get("spread", 0.0))
