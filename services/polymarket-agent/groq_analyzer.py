@@ -226,7 +226,10 @@ SYSTEM_PROMPT = (
     "0.75 = evidencia solida, multiples senales convergentes; "
     "0.85 = muy alta certeza, reservar para eventos casi seguros con evidencia inequivoca. "
     "La mayoria de mercados deberia quedar entre 0.55 y 0.72. "
-    "Solo supera 0.80 si tienes 3 o mas senales independientes alineadas."
+    "Solo supera 0.80 si tienes 3 o mas senales independientes alineadas. "
+    "CONSISTENCIA: Si este mercado ya fue analizado previamente, tu estimacion debe ser coherente. "
+    "Una variacion de mas de 15 puntos porcentuales respecto al analisis anterior indica un error "
+    "de razonamiento — revisa la evidencia antes de cambiar drasticamente tu estimacion."
 )
 
 
@@ -318,6 +321,21 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     else:
         fear_greed_line = ""
 
+    # Leer análisis anterior para ancla de consistencia (solo si < 24h)
+    _last_prob: float | None = None
+    try:
+        _prev = col("poly_predictions").document(market_id).get()
+        if _prev.exists:
+            _prev_data = _prev.to_dict()
+            _prev_at = _prev_data.get("analyzed_at")
+            if _prev_at:
+                if hasattr(_prev_at, "tzinfo") and _prev_at.tzinfo is None:
+                    _prev_at = _prev_at.replace(tzinfo=timezone.utc)
+                if (now_utc - _prev_at).total_seconds() < 86400:
+                    _last_prob = float(_prev_data.get("real_prob") or 0)
+    except Exception as _lpe:
+        logger.debug("groq_analyzer(%s): error leyendo pred anterior — %s", market_id, _lpe)
+
     # Construir user_prompt con todos los datos del enriched_market
     orderbook = enriched_market.get("orderbook", {})
     news = enriched_market.get("news_sentiment", {})
@@ -353,6 +371,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     )
     if fear_greed_line:
         user_prompt += f"\n{fear_greed_line}"
+    if _last_prob is not None:
+        user_prompt += (
+            f"\nANCLA DE CONSISTENCIA: tu análisis anterior de este mercado estimó "
+            f"probabilidad real = {_last_prob:.1%}. "
+            f"Si tu nueva estimación difiere en más de 15pp ({_last_prob - 0.15:.1%}–{_last_prob + 0.15:.1%}), "
+            f"justifica explícitamente qué cambió."
+        )
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
 
@@ -373,7 +398,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 model=model,
                 messages=messages,
                 max_tokens=500,
-                temperature=0.5,
+                temperature=0.35,
             )
             raw_response = resp.choices[0].message.content
             all_tpd = False

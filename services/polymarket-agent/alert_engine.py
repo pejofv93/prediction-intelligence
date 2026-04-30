@@ -142,6 +142,35 @@ async def check_and_alert(analysis: dict) -> bool:
     now = datetime.now(timezone.utc)
     cutoff_24h = now - timedelta(hours=24)
 
+    # --- Guard: contradicción con alerta opuesta en las últimas 6h ---
+    _opposite = "BUY_NO" if direction == "BUY_YES" else "BUY_YES"
+    try:
+        _cutoff_6h = now - timedelta(hours=6)
+        _opp_docs = list(
+            col("alerts_sent")
+            .where("market_id", "==", market_id)
+            .where("direction", "==", _opposite)
+            .where("status", "==", "sent")
+            .limit(1)
+            .stream()
+        )
+        if _opp_docs:
+            _opp_sent_at = _opp_docs[0].to_dict().get("sent_at")
+            if _opp_sent_at:
+                if hasattr(_opp_sent_at, "tzinfo") and _opp_sent_at.tzinfo is None:
+                    _opp_sent_at = _opp_sent_at.replace(tzinfo=timezone.utc)
+                if _opp_sent_at >= _cutoff_6h:
+                    logger.warning(
+                        "check_and_alert(%s): CONTRADICCIÓN detectada — alertamos %s hace %.0fmin, "
+                        "ahora %s — omitida",
+                        market_id, _opposite,
+                        (now - _opp_sent_at).total_seconds() / 60,
+                        direction,
+                    )
+                    return False
+    except Exception:
+        logger.warning("check_and_alert(%s): error en guard contradicción — continuando", market_id, exc_info=True)
+
     db = get_client()
     dedup_ref = col("alerts_sent").document(alert_key)
 
@@ -177,6 +206,7 @@ async def check_and_alert(analysis: dict) -> bool:
         transaction.set(dedup_ref, {
             "alert_key": alert_key,
             "market_id": market_id,
+            "direction": direction,
             "last_price": current_price,
             "sent_at": now,
             "type": "polymarket",
