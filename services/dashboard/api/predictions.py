@@ -53,6 +53,7 @@ async def get_predictions(limit: int = 50) -> list[dict]:
         for d in docs:
             raw = d.to_dict()
             filtered = {k: v for k, v in raw.items() if k in fields}
+            filtered["low_confidence"] = float(raw.get("confidence") or 1.0) < 0.65
             result.append(_serialize(filtered))
         return result
     except Exception:
