@@ -203,10 +203,10 @@ async def _find_sport_slug(category: str) -> str | None:
 # Slugs a probar en orden para fútbol — "soccer" suele ser el slug real en odds-api.io
 _FOOTBALL_SLUG_CANDIDATES = ["soccer", "football", "soccer_football"]
 
-# Casas de apuestas que /odds/multi requiere obligatoriamente (param "bookmakers").
-# Lista de IDs conocidos en odds-api.io — se envían como CSV.
-# Error "Missing bookmakers" si se omite. Usar los más comunes/disponibles.
-_DEFAULT_BOOKMAKERS = "Bet365,1xbet,22Bet,888Sport,Unibet"
+# Casas de apuestas para /odds/multi — plan free de odds-api.io permite max 2.
+# Bookmakers permitidos en el plan actual: Bet365, Unibet.
+# Enviar más de 2 devuelve 403 "Access denied. You're allowed max 2 bookmakers."
+_DEFAULT_BOOKMAKERS = "Bet365,Unibet"
 
 # Caché global de odds por eventId: {event_id: odds_item}
 # Poblado una sola vez por _prefetch_priority_odds() en _fetch_all_soccer_events().
