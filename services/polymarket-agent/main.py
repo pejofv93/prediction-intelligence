@@ -14,6 +14,7 @@ load_dotenv()
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from google.api_core.exceptions import DeadlineExceeded, ServiceUnavailable
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -407,7 +408,7 @@ async def _bg_analyze() -> dict:
         try:
             _pred_docs = list(
                 col("poly_predictions")
-                .where("analyzed_at", ">=", _cutoff_12h)
+                .where(filter=FieldFilter("analyzed_at", ">=", _cutoff_12h))
                 .stream(timeout=20.0)
             )
             for _pd in _pred_docs:

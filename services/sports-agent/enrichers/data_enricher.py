@@ -296,8 +296,8 @@ async def run_enrichment() -> int:
     """
     # football-data.org devuelve "TIMED" para partidos programados, no "SCHEDULED"
     try:
-        scheduled_matches = list(col("upcoming_matches").where("status", "==", "SCHEDULED").stream())
-        timed_matches = list(col("upcoming_matches").where("status", "==", "TIMED").stream())
+        scheduled_matches = list(col("upcoming_matches").where(filter=FieldFilter("status", "==", "SCHEDULED")).stream())
+        timed_matches = list(col("upcoming_matches").where(filter=FieldFilter("status", "==", "TIMED")).stream())
         scheduled_matches = scheduled_matches + timed_matches
     except Exception:
         logger.error("run_enrichment: error leyendo upcoming_matches", exc_info=True)

@@ -11,6 +11,8 @@ Colecciones usadas:
 import logging
 from datetime import datetime, timezone
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.config import POLY_MIN_EDGE, POLY_MIN_CONFIDENCE
 from shared.firestore_client import col
 
@@ -34,7 +36,7 @@ def _load_resolved_trades() -> list[dict]:
     try:
         docs = (
             col("shadow_trades")
-            .where("source", "==", "polymarket")
+            .where(filter=FieldFilter("source", "==", "polymarket"))
             .stream()
         )
         trades = []
@@ -212,6 +214,72 @@ def _new_threshold(
 
 
 # ---------------------------------------------------------------------------
+# Calibración por bucket de edge y sesgo LLM por categoría
+# ---------------------------------------------------------------------------
+
+def _bucket_stats(trades: list[dict]) -> dict:
+    """
+    Accuracy histórica por bucket de abs(edge):
+      low:  0.08 ≤ |edge| < 0.12
+      mid:  0.12 ≤ |edge| < 0.15
+      high: |edge| ≥ 0.15
+    """
+    buckets: dict[str, list[bool]] = {"low": [], "mid": [], "high": []}
+    for t in trades:
+        edge = abs(float(t.get("edge", 0)))
+        result = t.get("result")
+        if result not in ("win", "loss"):
+            continue
+        win = result == "win"
+        if 0.08 <= edge < 0.12:
+            buckets["low"].append(win)
+        elif 0.12 <= edge < 0.15:
+            buckets["mid"].append(win)
+        elif edge >= 0.15:
+            buckets["high"].append(win)
+    return {
+        k: {
+            "n": len(v),
+            "accuracy": round(sum(v) / len(v), 4) if v else 0.0,
+        }
+        for k, v in buckets.items()
+    }
+
+
+def _category_llm_bias(trades: list[dict]) -> dict:
+    """
+    Sesgo de calibración del LLM por categoría:
+      bias = mean(real_prob - binary_yes_outcome) sobre trades resueltos.
+    bias > 0 → LLM sobreestima YES; bias < 0 → subestima.
+    Se aplica como corrección: real_prob_corr = real_prob - bias.
+    """
+    by_cat: dict[str, list[float]] = {}
+    for t in trades:
+        signal_data = t.get("signal_data") or {}
+        real_prob = float(signal_data.get("real_prob") or t.get("real_prob") or 0)
+        result = t.get("result")
+        category = t.get("category") or "other"
+        selection = str(t.get("selection", "")).upper()
+        if result not in ("win", "loss") or not real_prob:
+            continue
+        # Reconstruir binary_yes_outcome desde selection+result
+        if selection in ("BUY_YES", "YES"):
+            binary_yes = 1.0 if result == "win" else 0.0
+        elif selection in ("BUY_NO", "NO"):
+            binary_yes = 0.0 if result == "win" else 1.0
+        else:
+            continue
+        by_cat.setdefault(category, []).append(real_prob - binary_yes)
+    return {
+        cat: {
+            "n": len(biases),
+            "bias": round(sum(biases) / len(biases), 4) if biases else 0.0,
+        }
+        for cat, biases in by_cat.items()
+    }
+
+
+# ---------------------------------------------------------------------------
 # Pipeline principal
 # ---------------------------------------------------------------------------
 
@@ -234,6 +302,9 @@ def run_poly_learning() -> dict:
 
     # 2. Análisis
     stats = _analyze(trades)
+    bucket_stats = _bucket_stats(trades)
+    llm_bias = _category_llm_bias(trades)
+    logger.info("run_poly_learning: buckets=%s bias_cats=%s", list(bucket_stats.keys()), list(llm_bias.keys()))
     logger.info(
         "run_poly_learning: total=%d acc=%.0f%% | BUY_YES %d/%.0f%% | BUY_NO %d/%.0f%%",
         stats["total"], stats["accuracy"] * 100,
@@ -287,6 +358,9 @@ def run_poly_learning() -> dict:
         # Herencia de versión anterior para trazabilidad
         "prev_min_edge": current.get("min_edge", POLY_MIN_EDGE),
         "prev_min_confidence": current.get("min_confidence", POLY_MIN_CONFIDENCE),
+        # Calibración: accuracy por bucket de edge + sesgo LLM por categoría
+        "accuracy_by_bucket": bucket_stats,
+        "llm_bias_by_category": llm_bias,
     }
 
     # 6. Guardar

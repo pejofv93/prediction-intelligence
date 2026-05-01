@@ -7,6 +7,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 logger = logging.getLogger(__name__)
 
 BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
@@ -78,7 +80,7 @@ async def get_latest_btc() -> dict:
 
     docs = list(
         col("binance_snapshots")
-        .where("symbol", "==", "BTCUSDT")
+        .where(filter=FieldFilter("symbol", "==", "BTCUSDT"))
         .order_by("recorded_at", direction="DESCENDING")
         .limit(1)
         .stream()

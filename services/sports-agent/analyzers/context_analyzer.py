@@ -154,12 +154,8 @@ async def enrich_signal_with_context(match: dict, signal: dict, quota_mgr=None) 
                 continue
             try:
                 # Buscar partidos del equipo en los últimos 14 días (como local o visitante)
-                home_q = col("matches").where("home_team_id", "==", team_id).where(
-                    "match_date", ">=", cutoff_14d
-                )
-                away_q = col("matches").where("away_team_id", "==", team_id).where(
-                    "match_date", ">=", cutoff_14d
-                )
+                home_q = col("matches").where(filter=FieldFilter("home_team_id", "==", team_id)).where(filter=FieldFilter("match_date", ">=", cutoff_14d))
+                away_q = col("matches").where(filter=FieldFilter("away_team_id", "==", team_id)).where(filter=FieldFilter("match_date", ">=", cutoff_14d))
                 home_docs = list(home_q.stream())
                 away_docs = list(away_q.stream())
                 total_matches = len(home_docs) + len(away_docs)
@@ -216,19 +212,19 @@ async def enrich_signal_with_context(match: dict, signal: dict, quota_mgr=None) 
             try:
                 cl_home = list(
                     col("matches")
-                    .where("home_team_id", "==", team_id)
-                    .where("competition", "==", "CL")
-                    .where("match_date", ">=", week_start)
-                    .where("match_date", "<=", week_end)
+                    .where(filter=FieldFilter("home_team_id", "==", team_id))
+                    .where(filter=FieldFilter("competition", "==", "CL"))
+                    .where(filter=FieldFilter("match_date", ">=", week_start))
+                    .where(filter=FieldFilter("match_date", "<=", week_end))
                     .limit(1)
                     .stream()
                 )
                 cl_away = list(
                     col("matches")
-                    .where("away_team_id", "==", team_id)
-                    .where("competition", "==", "CL")
-                    .where("match_date", ">=", week_start)
-                    .where("match_date", "<=", week_end)
+                    .where(filter=FieldFilter("away_team_id", "==", team_id))
+                    .where(filter=FieldFilter("competition", "==", "CL"))
+                    .where(filter=FieldFilter("match_date", ">=", week_start))
+                    .where(filter=FieldFilter("match_date", "<=", week_end))
                     .limit(1)
                     .stream()
                 )
@@ -368,11 +364,11 @@ async def analyze_motivation(match: dict, signal: dict) -> dict:
                 continue
             try:
                 docs = list(
-                    col("standings").where("team_id", "==", team_id).limit(1).stream()
+                    col("standings").where(filter=FieldFilter("team_id", "==", team_id)).limit(1).stream()
                 )
                 if not docs:
                     docs = list(
-                        col("team_stats").where("team_id", "==", team_id).limit(1).stream()
+                        col("team_stats").where(filter=FieldFilter("team_id", "==", team_id)).limit(1).stream()
                     )
                 if docs:
                     data = docs[0].to_dict() or {}
@@ -414,19 +410,19 @@ async def analyze_motivation(match: dict, signal: dict) -> dict:
             try:
                 cl_home = list(
                     col("matches")
-                    .where("home_team_id", "==", team_id)
-                    .where("competition", "in", ["CL", "UCL"])
-                    .where("match_date", ">=", window_start)
-                    .where("match_date", "<=", window_end)
+                    .where(filter=FieldFilter("home_team_id", "==", team_id))
+                    .where(filter=FieldFilter("competition", "in", ["CL", "UCL"]))
+                    .where(filter=FieldFilter("match_date", ">=", window_start))
+                    .where(filter=FieldFilter("match_date", "<=", window_end))
                     .limit(1)
                     .stream()
                 )
                 cl_away = list(
                     col("matches")
-                    .where("away_team_id", "==", team_id)
-                    .where("competition", "in", ["CL", "UCL"])
-                    .where("match_date", ">=", window_start)
-                    .where("match_date", "<=", window_end)
+                    .where(filter=FieldFilter("away_team_id", "==", team_id))
+                    .where(filter=FieldFilter("competition", "in", ["CL", "UCL"]))
+                    .where(filter=FieldFilter("match_date", ">=", window_start))
+                    .where(filter=FieldFilter("match_date", "<=", window_end))
                     .limit(1)
                     .stream()
                 )
@@ -510,9 +506,9 @@ async def detect_rotation_risk(match: dict, signal: dict) -> dict:
                         docs = list(
                             col("matches")
                             .where(home_away_field, "==", team_id)
-                            .where("competition", "==", comp)
-                            .where("match_date", ">=", window_start)
-                            .where("match_date", "<=", window_end_4)
+                            .where(filter=FieldFilter("competition", "==", comp))
+                            .where(filter=FieldFilter("match_date", ">=", window_start))
+                            .where(filter=FieldFilter("match_date", "<=", window_end_4))
                             .limit(1)
                             .stream()
                         )

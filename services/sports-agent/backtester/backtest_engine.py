@@ -119,8 +119,8 @@ def _read_fixtures_from_firestore(league_id: int, season: int) -> list[dict]:
     try:
         docs = (
             col("backtest_fixtures")
-            .where("league_id", "==", league_id)
-            .where("season", "==", season)
+            .where(filter=FieldFilter("league_id", "==", league_id))
+            .where(filter=FieldFilter("season", "==", season))
             .stream()
         )
         return [d.to_dict() for d in docs]

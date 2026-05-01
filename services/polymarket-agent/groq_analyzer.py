@@ -4,9 +4,91 @@ Recibe enriched_market → prob real + edge + reasoning.
 """
 import logging
 import re
+import time as _time
 
 from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE
 from shared.groq_client import GROQ_CALL_DELAY
+
+# ---------------------------------------------------------------------------
+# Cuota Groq — estado persistido en Firestore agent_state/groq_quota
+# ---------------------------------------------------------------------------
+_QUOTA_CACHE: dict = {}
+_QUOTA_CACHE_TS: float = 0.0
+_QUOTA_CACHE_TTL: float = 300.0  # re-read Firestore cada 5 min
+
+# Cache de poly_model_weights para calibración (Fix 4 + Fix 7)
+_WEIGHTS_CACHE: dict = {}
+_WEIGHTS_CACHE_TS: float = 0.0
+_WEIGHTS_CACHE_TTL: float = 600.0  # 10 min
+
+
+def _is_groq_quota_exhausted() -> bool:
+    """Lee agent_state/groq_quota. True si TPD agotado y aún no ha pasado la medianoche UTC."""
+    global _QUOTA_CACHE, _QUOTA_CACHE_TS
+    from datetime import datetime, timezone
+    from shared.firestore_client import col
+    now_ts = _time.monotonic()
+    now_utc = datetime.now(timezone.utc)
+    if now_ts - _QUOTA_CACHE_TS < _QUOTA_CACHE_TTL and _QUOTA_CACHE:
+        resets_at = _QUOTA_CACHE.get("resets_at")
+        if resets_at:
+            if hasattr(resets_at, "tzinfo") and resets_at.tzinfo is None:
+                resets_at = resets_at.replace(tzinfo=timezone.utc)
+            if now_utc >= resets_at:
+                _QUOTA_CACHE = {}
+                return False
+        return bool(_QUOTA_CACHE.get("exhausted"))
+    try:
+        doc = col("agent_state").document("groq_quota").get()
+        _QUOTA_CACHE = doc.to_dict() if doc.exists else {}
+        _QUOTA_CACHE_TS = now_ts
+        resets_at = _QUOTA_CACHE.get("resets_at")
+        if resets_at:
+            if hasattr(resets_at, "tzinfo") and resets_at.tzinfo is None:
+                resets_at = resets_at.replace(tzinfo=timezone.utc)
+            if now_utc >= resets_at:
+                _QUOTA_CACHE = {}
+                return False
+        return bool(_QUOTA_CACHE.get("exhausted"))
+    except Exception:
+        return False
+
+
+def _set_groq_quota_exhausted() -> None:
+    """Persiste el estado TPD exhausted en Firestore (reset a medianoche UTC)."""
+    global _QUOTA_CACHE, _QUOTA_CACHE_TS
+    from datetime import datetime, timedelta, timezone
+    from shared.firestore_client import col
+    now = datetime.now(timezone.utc)
+    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    doc = {"exhausted": True, "exhausted_at": now, "resets_at": next_midnight}
+    try:
+        col("agent_state").document("groq_quota").set(doc)
+        _QUOTA_CACHE = doc
+        _QUOTA_CACHE_TS = _time.monotonic()
+        logger.warning(
+            "groq_analyzer: TPD agotado en todos los modelos — "
+            "persistido en agent_state/groq_quota (reset %s UTC)",
+            next_midnight.isoformat(),
+        )
+    except Exception:
+        logger.error("groq_analyzer: error persistiendo quota state", exc_info=True)
+
+
+def _get_poly_weights() -> dict:
+    """Lee poly_model_weights/current con caché de 10 min."""
+    global _WEIGHTS_CACHE, _WEIGHTS_CACHE_TS
+    from shared.firestore_client import col
+    now_ts = _time.monotonic()
+    if now_ts - _WEIGHTS_CACHE_TS < _WEIGHTS_CACHE_TTL and _WEIGHTS_CACHE:
+        return _WEIGHTS_CACHE
+    try:
+        doc = col("poly_model_weights").document("current").get()
+        _WEIGHTS_CACHE = doc.to_dict() if doc.exists else {}
+        _WEIGHTS_CACHE_TS = now_ts
+    except Exception:
+        pass
+    return _WEIGHTS_CACHE
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +110,19 @@ def categorize_market(question: str) -> str:
     return "other"
 
 
-def _get_current_crypto_price(question: str) -> float | None:
-    """Precio spot del activo crypto. Deshabilitado — precios hardcodeados eliminados."""
+def _get_current_crypto_price(question: str, enriched_market: dict | None = None) -> float | None:
+    """
+    Precio spot del activo crypto.
+    Lee de enriched_market['ctc_price'] si está disponible (ya fetcheado por el enricher).
+    Evita fetch HTTP separado que genera rate-limits.
+    """
+    if enriched_market:
+        price = enriched_market.get("ctc_price")
+        if price:
+            try:
+                return float(price)
+            except (TypeError, ValueError):
+                pass
     return None
 
 
@@ -62,6 +155,7 @@ def _validate_crypto_price_prediction(
     market_price_yes: float,
     days_to_close: int,
     reasoning: str,
+    current_price: float | None = None,
 ) -> tuple[float, float, str]:
     """
     Aplica caps de probabilidad para predicciones de precio crypto históricamente improbables.
@@ -70,8 +164,8 @@ def _validate_crypto_price_prediction(
       variación > 100% en < 12 meses      → prob máxima 0.25
       variación > 50%  en < 3 meses       → prob máxima 0.35
     Retorna (real_prob_ajustada, edge_ajustado, reasoning_actualizado).
+    current_price: precio spot del activo, leído de enriched_market['ctc_price'].
     """
-    current_price = _get_current_crypto_price(question)
     if current_price is None:
         return real_prob, round(real_prob - market_price_yes, 4), reasoning
 
@@ -389,33 +483,42 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         {"role": "user", "content": user_prompt},
     ]
 
-    all_tpd = True
-    for attempt, model in enumerate(GROQ_MODEL_ROTATION):
-        try:
-            if attempt > 0:
-                messages[-1]["content"] = user_prompt + "\n\nResponde SOLO JSON, sin texto adicional."
-            resp = groq_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=500,
-                temperature=0.35,
-            )
-            raw_response = resp.choices[0].message.content
-            all_tpd = False
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            if "model_not_found" in err_str or "404" in err_str:
-                logger.warning("analyze_market(%s): modelo %s no encontrado — probando siguiente", market_id, model)
-                continue
-            if "429" in err_str or "rate_limit" in err_str or "quota" in err_str or "daily" in err_str:
-                logger.warning("analyze_market(%s): TPD agotado en %s — probando siguiente", market_id, model)
-                continue
-            logger.error("analyze_market(%s): error Groq en %s — %s", market_id, model, e, exc_info=True)
-            return None
+    # Fix 3: si la cuota ya está persistida como agotada, ir directo al fallback
+    if _is_groq_quota_exhausted():
+        logger.info(
+            "analyze_market(%s): Groq TPD agotado (agent_state) — usando fallback básico",
+            market_id,
+        )
+        all_tpd = True
+    else:
+        all_tpd = True
+        for attempt, model in enumerate(GROQ_MODEL_ROTATION):
+            try:
+                if attempt > 0:
+                    messages[-1]["content"] = user_prompt + "\n\nResponde SOLO JSON, sin texto adicional."
+                resp = groq_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=500,
+                    temperature=0.35,
+                )
+                raw_response = resp.choices[0].message.content
+                all_tpd = False
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if "model_not_found" in err_str or "404" in err_str:
+                    logger.warning("analyze_market(%s): modelo %s no encontrado — probando siguiente", market_id, model)
+                    continue
+                if "429" in err_str or "rate_limit" in err_str or "quota" in err_str or "daily" in err_str:
+                    logger.warning("analyze_market(%s): TPD agotado en %s — probando siguiente", market_id, model)
+                    continue
+                logger.error("analyze_market(%s): error Groq en %s — %s", market_id, model, e, exc_info=True)
+                return None
 
     # Fallback básico sin LLM cuando todos los modelos Groq están agotados
     if not raw_response and all_tpd:
+        _set_groq_quota_exhausted()
         logger.warning("analyze_market(%s): todos los modelos Groq agotados — usando análisis básico", market_id)
         orderbook_fb = enriched_market.get("orderbook", {})
         buy_pressure = float(orderbook_fb.get("buy_pressure", 0.5))
@@ -478,15 +581,35 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     key_factors = result.get("key_factors", [])
     reasoning = result.get("reasoning", "")
 
+    # Fix 7: corrección de sesgo LLM por categoría (calibración histórica)
+    try:
+        _weights = _get_poly_weights()
+        _llm_bias = _weights.get("llm_bias_by_category", {})
+        _bd = _llm_bias.get(category, {})
+        if int(_bd.get("n", 0)) >= 5 and abs(float(_bd.get("bias", 0.0))) > 0.03:
+            _bias_val = float(_bd["bias"])
+            real_prob = round(max(0.05, min(0.95, real_prob - _bias_val)), 4)
+            edge = round(real_prob - price_yes, 4)
+            logger.debug(
+                "analyze_market(%s): bias LLM cat=%s bias=%.3f n=%d → real_prob=%.3f",
+                market_id, category, _bias_val, int(_bd["n"]), real_prob,
+            )
+    except Exception:
+        pass
+
     # Garantizar coherencia: si el texto del reasoning menciona una prob distinta
     # a real_prob en >0.10, prepender nota aclaratoria para el mensaje Telegram.
     # real_prob del JSON estructurado es siempre el valor canónico.
     reasoning = _validate_prob_in_reasoning(real_prob, reasoning)
 
-    # Validador de precio crypto — caps para predicciones históricamente improbables
+    # Fix 6: precio crypto desde enriched_market['ctc_price'] — evita fetch HTTP separado
+    # Fix 4 + validador de precio crypto — caps para predicciones históricamente improbables
     if category == "crypto" and _extract_target_price(question) is not None:
+        _ctc = enriched_market.get("ctc_price")
+        _ctc_price = float(_ctc) if _ctc else None
         real_prob, edge, reasoning = _validate_crypto_price_prediction(
-            question, real_prob, price_yes, days_to_close, reasoning
+            question, real_prob, price_yes, days_to_close, reasoning,
+            current_price=_ctc_price,
         )
         # Recalcular recommendation tras ajuste
         if edge >= POLY_MIN_EDGE:
@@ -511,6 +634,26 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             market_id, edge,
         )
         return None
+
+    # Fix 4: calibrar confidence con accuracy histórica por bucket de edge
+    try:
+        _weights = _get_poly_weights()
+        _by_bucket = _weights.get("accuracy_by_bucket", {})
+        _abs_edge = abs(edge)
+        _bucket = "high" if _abs_edge >= 0.15 else ("mid" if _abs_edge >= 0.12 else "low")
+        _bs = _by_bucket.get(_bucket, {})
+        _bn = int(_bs.get("n", 0))
+        _bacc = float(_bs.get("accuracy", 0.0))
+        if _bn >= 10 and _bacc > 0:
+            _conf_cap = round(min(1.0, _bacc + 0.10), 4)
+            if confidence > _conf_cap:
+                logger.debug(
+                    "analyze_market(%s): conf capped bucket=%s acc=%.0f%% n=%d: %.2f→%.2f",
+                    market_id, _bucket, _bacc * 100, _bn, confidence, _conf_cap,
+                )
+                confidence = _conf_cap
+    except Exception:
+        pass
 
     # Aplicar ajuste Fear & Greed si es crypto
     if fear_greed and category == "crypto":
@@ -565,6 +708,7 @@ async def run_maintenance() -> None:
     Usar batch writes de Firestore (max 500 ops/batch) para no exceder limites.
     """
     from datetime import datetime, timedelta, timezone
+    from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col, get_client
 
     now = datetime.now(timezone.utc)
@@ -591,7 +735,7 @@ async def run_maintenance() -> None:
 
     try:
         deleted_history = await _batch_delete(
-            col("poly_price_history").where("timestamp", "<", cutoff_30d),
+            col("poly_price_history").where(filter=FieldFilter("timestamp", "<", cutoff_30d)),
             "poly_price_history",
         )
         logger.info("run_maintenance: %d docs poly_price_history eliminados (>30d)", deleted_history)
@@ -600,7 +744,7 @@ async def run_maintenance() -> None:
 
     try:
         deleted_enriched = await _batch_delete(
-            col("enriched_markets").where("enriched_at", "<", cutoff_7d),
+            col("enriched_markets").where(filter=FieldFilter("enriched_at", "<", cutoff_7d)),
             "enriched_markets",
         )
         logger.info("run_maintenance: %d docs enriched_markets eliminados (>7d)", deleted_enriched)

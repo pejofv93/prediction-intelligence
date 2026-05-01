@@ -6,8 +6,12 @@ Flujo:
   fetch_pending_results → check_result (football_api) → evaluate_prediction
   → update_weights → update_all_elos → actualiza model_weights + accuracy_log
 """
+import asyncio
 import logging
+import unicodedata
 from datetime import datetime, timedelta, timezone
+
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.config import DEFAULT_WEIGHTS, LEARNING_RATE, SUPPORTED_FOOTBALL_LEAGUES
 from shared.firestore_client import col
@@ -38,6 +42,15 @@ ERROR_TO_WEIGHT: dict[str, str | None] = {
 _FOOTBALL_LEAGUES = set(SUPPORTED_FOOTBALL_LEAGUES.keys())
 
 
+def _norm(s: str) -> str:
+    """Normaliza string para comparación: strip, lower, sin acentos."""
+    return (
+        unicodedata.normalize("NFD", str(s).strip().lower())
+        .encode("ascii", "ignore")
+        .decode()
+    )
+
+
 async def fetch_pending_results() -> list[dict]:
     """
     Busca predicciones en Firestore donde:
@@ -51,7 +64,7 @@ async def fetch_pending_results() -> list[dict]:
     try:
         # Query equality en result — el filtro de match_date se aplica en Python
         # para evitar requerir indice compuesto en Firestore
-        docs = col("predictions").where("result", "==", None).stream()
+        docs = col("predictions").where(filter=FieldFilter("result", "==", None)).stream()
         pending = []
         for doc in docs:
             data = doc.to_dict()
@@ -111,14 +124,16 @@ def evaluate_prediction(prediction: dict, actual_result: str) -> dict:
 
     Devuelve {"correct": bool, "error_type": str | None}
     """
-    team_to_back = prediction.get("team_to_back", "")
-    home_team = prediction.get("home_team", "")
-    away_team = prediction.get("away_team", "")
+    team_to_back = _norm(prediction.get("team_to_back", ""))
+    home_team = _norm(prediction.get("home_team", ""))
+    away_team = _norm(prediction.get("away_team", ""))
+    home_id = str(prediction.get("home_team_id", "")).strip()
+    away_id = str(prediction.get("away_team_id", "")).strip()
 
-    # Determinar si la prediccion fue correcta
-    if team_to_back == home_team or team_to_back == str(prediction.get("home_team_id", "")):
+    # Determinar si la prediccion fue correcta (comparación normalizada)
+    if team_to_back == home_team or team_to_back == home_id:
         correct = (actual_result == "HOME_WIN")
-    elif team_to_back == away_team or team_to_back == str(prediction.get("away_team_id", "")):
+    elif team_to_back == away_team or team_to_back == away_id:
         correct = (actual_result == "AWAY_WIN")
     else:
         # No se puede determinar — considerar incorrecto
@@ -281,13 +296,30 @@ async def run_daily_learning() -> None:
     finished_matches_for_elo: list[dict] = []
     accuracy_by_league: dict[str, list[bool]] = {k: [] for k in _FOOTBALL_LEAGUES}
 
-    for prediction in pending:
+    # 3a. Paralelizar todas las llamadas check_result (I/O bound → asyncio.gather)
+    _match_ids = [str(p.get("match_id", "")) for p in pending]
+    _raw_results = await asyncio.gather(
+        *[check_result(mid) for mid in _match_ids],
+        return_exceptions=True,
+    )
+    logger.info(
+        "run_daily_learning: check_result paralelo completado — %d/%d con resultado",
+        sum(1 for r in _raw_results if r is not None and not isinstance(r, Exception)),
+        len(_raw_results),
+    )
+
+    # 3b. Procesar resultados en orden (weight updates son acumulativos)
+    for prediction, actual_result in zip(pending, _raw_results):
         match_id = prediction.get("match_id", "")
         league = prediction.get("league", "")
 
         try:
-            # Obtener resultado real
-            actual_result = await check_result(str(match_id))
+            if isinstance(actual_result, Exception):
+                logger.error(
+                    "run_daily_learning: check_result(%s) excepción — %s",
+                    match_id, actual_result,
+                )
+                continue
             if actual_result is None:
                 # Partido sin resultado todavia — omitir
                 continue
@@ -333,8 +365,8 @@ async def run_daily_learning() -> None:
                 shadow_result = "win" if correct else "loss"
                 existing = list(
                     col("shadow_trades")
-                    .where("signal_id", "==", str(match_id))
-                    .where("source", "==", "sports")
+                    .where(filter=FieldFilter("signal_id", "==", str(match_id)))
+                    .where(filter=FieldFilter("source", "==", "sports"))
                     .limit(1)
                     .stream()
                 )

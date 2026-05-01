@@ -7,6 +7,8 @@ volume_spike y smart_money son señales bonus (no requisito).
 """
 import logging
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, TELEGRAM_BOT_URL
 
 logger = logging.getLogger(__name__)
@@ -148,9 +150,9 @@ async def check_and_alert(analysis: dict) -> bool:
         _cutoff_6h = now - timedelta(hours=6)
         _opp_docs = list(
             col("alerts_sent")
-            .where("market_id", "==", market_id)
-            .where("direction", "==", _opposite)
-            .where("status", "==", "sent")
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("direction", "==", _opposite))
+            .where(filter=FieldFilter("status", "==", "sent"))
             .limit(1)
             .stream()
         )

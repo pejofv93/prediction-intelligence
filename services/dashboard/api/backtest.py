@@ -44,9 +44,9 @@ async def get_backtest_results(
 
         # Aplicar filtros si no son "all"
         if league and league != "all":
-            query = query.where("league", "==", league)
+            query = query.where(filter=FieldFilter("league", "==", league))
         if market and market != "all":
-            query = query.where("market", "==", market)
+            query = query.where(filter=FieldFilter("market", "==", market))
 
         docs = list(query.stream())
         results = [_serialize_doc(d.to_dict()) for d in docs]

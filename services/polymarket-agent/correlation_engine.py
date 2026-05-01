@@ -6,6 +6,8 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -123,8 +125,8 @@ async def build_correlation_graph() -> dict[str, list[dict]]:
                 try:
                     docs = (
                         col("poly_price_history")
-                        .where("market_id", "==", mid)
-                        .where("timestamp", ">=", cutoff_72h)
+                        .where(filter=FieldFilter("market_id", "==", mid))
+                        .where(filter=FieldFilter("timestamp", ">=", cutoff_72h))
                         .order_by("timestamp")
                         .stream()
                     )
@@ -202,10 +204,10 @@ async def propagate_signal(
 
         # Buscar todos los pares donde este mercado aparece
         pairs_as_a = list(
-            col("market_correlations").where("market_a", "==", market_id).stream()
+            col("market_correlations").where(filter=FieldFilter("market_a", "==", market_id)).stream()
         )
         pairs_as_b = list(
-            col("market_correlations").where("market_b", "==", market_id).stream()
+            col("market_correlations").where(filter=FieldFilter("market_b", "==", market_id)).stream()
         )
         all_pairs = [d.to_dict() for d in pairs_as_a + pairs_as_b]
 

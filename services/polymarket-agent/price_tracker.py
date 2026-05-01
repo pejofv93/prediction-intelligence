@@ -5,6 +5,8 @@ Persiste en Firestore poly_price_history para analisis posterior.
 import logging
 from datetime import datetime, timedelta, timezone
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -36,8 +38,8 @@ async def price_momentum(market_id: str) -> str:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
         docs = (
             col("poly_price_history")
-            .where("market_id", "==", market_id)
-            .where("timestamp", ">=", cutoff)
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff))
             .order_by("timestamp")
             .stream()
         )
@@ -69,8 +71,8 @@ async def volume_spike(market_id: str) -> bool:
         cutoff = datetime.now(timezone.utc) - timedelta(days=3)
         docs = (
             col("poly_price_history")
-            .where("market_id", "==", market_id)
-            .where("timestamp", ">=", cutoff)
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff))
             .order_by("timestamp")
             .stream()
         )
@@ -103,8 +105,8 @@ async def smart_money_detection(market_id: str) -> dict:
         cutoff_2h = datetime.now(timezone.utc) - timedelta(hours=2)
         docs = (
             col("poly_price_history")
-            .where("market_id", "==", market_id)
-            .where("timestamp", ">=", cutoff_2h)
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff_2h))
             .order_by("timestamp")
             .stream()
         )
@@ -172,8 +174,8 @@ async def detect_whale_activity(market_id: str) -> dict:
         cutoff_1h = datetime.now(timezone.utc) - timedelta(hours=1)
         docs = (
             col("poly_price_history")
-            .where("market_id", "==", market_id)
-            .where("timestamp", ">=", cutoff_1h)
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff_1h))
             .order_by("timestamp")
             .stream()
         )

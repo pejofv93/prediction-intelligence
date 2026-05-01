@@ -163,7 +163,7 @@ async def _bg_daily_report() -> None:
         try:
             docs = list(
                 col("predictions")
-                .where("result", "==", None)
+                .where(filter=FieldFilter("result", "==", None))
                 .order_by("unified_score", direction="DESCENDING")
                 .limit(1)
                 .stream()
@@ -173,7 +173,7 @@ async def _bg_daily_report() -> None:
             else:
                 docs = list(
                     col("poly_predictions")
-                    .where("alerted", "==", False)
+                    .where(filter=FieldFilter("alerted", "==", False))
                     .order_by("edge", direction="DESCENDING")
                     .limit(1)
                     .stream()
@@ -226,7 +226,7 @@ async def send_weekly_report() -> JSONResponse:
         # 1. accuracy_log semana anterior (la que acaba de terminar)
         log_docs = list(
             col("accuracy_log")
-            .where("week", "==", prev_week)
+            .where(filter=FieldFilter("week", "==", prev_week))
             .limit(1)
             .stream()
         )
@@ -241,8 +241,8 @@ async def send_weekly_report() -> JSONResponse:
         # 3. predictions de la semana anterior
         pred_docs = list(
             col("predictions")
-            .where("created_at", ">=", week_start)
-            .where("created_at", "<", week_end)
+            .where(filter=FieldFilter("created_at", ">=", week_start))
+            .where(filter=FieldFilter("created_at", "<", week_end))
             .stream()
         )
         week_preds = [d.to_dict() for d in pred_docs]
@@ -276,8 +276,8 @@ async def send_weekly_report() -> JSONResponse:
         # 4. poly_predictions de la semana anterior
         poly_docs = list(
             col("poly_predictions")
-            .where("analyzed_at", ">=", week_start)
-            .where("analyzed_at", "<", week_end)
+            .where(filter=FieldFilter("analyzed_at", ">=", week_start))
+            .where(filter=FieldFilter("analyzed_at", "<", week_end))
             .stream()
         )
         poly_preds = [d.to_dict() for d in poly_docs]

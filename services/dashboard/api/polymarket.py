@@ -40,7 +40,7 @@ async def get_poly() -> list[dict]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
         docs = (
             col("poly_predictions")
-            .where("analyzed_at", ">=", cutoff)
+            .where(filter=FieldFilter("analyzed_at", ">=", cutoff))
             .order_by("analyzed_at", direction="DESCENDING")
             .limit(50)
             .stream()

@@ -66,8 +66,8 @@ async def handle_sports(update: dict) -> None:
     try:
         docs = (
             col("predictions")
-            .where("edge", ">", SPORTS_MIN_EDGE)
-            .where("result", "==", None)
+            .where(filter=FieldFilter("edge", ">", SPORTS_MIN_EDGE))
+            .where(filter=FieldFilter("result", "==", None))
             .order_by("edge", direction="DESCENDING")
             .limit(3)
             .stream()
@@ -122,7 +122,7 @@ async def handle_poly(update: dict) -> None:
         # Consulta por edge > threshold (los alertados tienen edge > threshold por definicion)
         docs = (
             col("poly_predictions")
-            .where("edge", ">", POLY_MIN_EDGE)
+            .where(filter=FieldFilter("edge", ">", POLY_MIN_EDGE))
             .order_by("edge", direction="DESCENDING")
             .limit(5)
             .stream()
@@ -176,7 +176,7 @@ async def handle_stats(update: dict) -> None:
         # accuracy_log de la semana actual
         log_docs = list(
             col("accuracy_log")
-            .where("week", "==", current_week)
+            .where(filter=FieldFilter("week", "==", current_week))
             .limit(1)
             .stream()
         )
@@ -392,7 +392,7 @@ async def handle_bankroll(update: dict) -> None:
     try:
         trades_raw = list(
             col("shadow_trades")
-            .where("result", "in", ["win", "loss"])
+            .where(filter=FieldFilter("result", "in", ["win", "loss"]))
             .order_by("closed_at", direction="DESCENDING")
             .limit(10)
             .stream()
@@ -436,7 +436,7 @@ async def handle_arb(update: dict) -> None:
         now = datetime.now(timezone.utc)
         docs = list(
             col("arb_opportunities")
-            .where("expires_at", ">", now)
+            .where(filter=FieldFilter("expires_at", ">", now))
             .order_by("expires_at", direction="DESCENDING")
             .limit(5)
             .stream()
@@ -488,7 +488,7 @@ async def handle_btc(update: dict) -> None:
         try:
             docs = list(
                 col("binance_snapshots")
-                .where("symbol", "==", "BTCUSDT")
+                .where(filter=FieldFilter("symbol", "==", "BTCUSDT"))
                 .order_by("recorded_at", direction="DESCENDING")
                 .limit(1)
                 .stream()
@@ -515,8 +515,8 @@ async def handle_btc(update: dict) -> None:
         try:
             docs = list(
                 col("poly_predictions")
-                .where("category", "==", "crypto")
-                .where("alerted", "==", False)
+                .where(filter=FieldFilter("category", "==", "crypto"))
+                .where(filter=FieldFilter("alerted", "==", False))
                 .order_by("edge", direction="DESCENDING")
                 .limit(3)
                 .stream()

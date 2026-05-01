@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from statistics import mean, stdev
 from typing import Optional
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -73,7 +75,7 @@ async def retroactive_eval(db=None) -> dict:
     try:
         docs = (
             col("predictions")
-            .where("result", "!=", None)
+            .where(filter=FieldFilter("result", "!=", None))
             .limit(200)
             .stream()
         )
@@ -118,7 +120,7 @@ async def retroactive_eval(db=None) -> dict:
     try:
         docs = (
             col("poly_predictions")
-            .where("alerted", "==", True)
+            .where(filter=FieldFilter("alerted", "==", True))
             .limit(200)
             .stream()
         )

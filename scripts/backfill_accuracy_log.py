@@ -14,6 +14,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
+from google.cloud.firestore_v1.base_query import FieldFilter
 from google.oauth2 import service_account
 from google.cloud import firestore
 
@@ -81,8 +82,8 @@ for week, (start, end) in WEEKS.items():
     try:
         docs = list(
             col("predictions")
-            .where("created_at", ">=", start)
-            .where("created_at", "<", end)
+            .where(filter=FieldFilter("created_at", ">=", start))
+            .where(filter=FieldFilter("created_at", "<", end))
             .stream()
         )
     except Exception as e:

@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.firestore_client import col
 from shared.shadow_engine import update_trade_result
 
@@ -116,8 +118,8 @@ async def _resolve_market(market_id: str, raw: dict, now: datetime) -> tuple[int
         try:
             shadow_docs = list(
                 col("shadow_trades")
-                .where("signal_id", "==", market_id)
-                .where("source", "==", "polymarket")
+                .where(filter=FieldFilter("signal_id", "==", market_id))
+                .where(filter=FieldFilter("source", "==", "polymarket"))
                 .limit(1)
                 .stream()
             )
@@ -216,7 +218,7 @@ async def resolve_closed_markets() -> dict:
 
     # --- Paso 2: Lookup directo para alertados no encontrados en top-100 ---
     try:
-        pending_docs = list(col("poly_predictions").where("alerted", "==", True).stream())
+        pending_docs = list(col("poly_predictions").where(filter=FieldFilter("alerted", "==", True)).stream())
     except Exception:
         logger.error("POLY_RESOLVE: error consultando poly_predictions pendientes", exc_info=True)
         pending_docs = []

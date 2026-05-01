@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from statistics import mean
 from typing import Optional
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -60,7 +62,7 @@ def check_model_health(trades: Optional[list[dict]] = None) -> dict:
             try:
                 docs = (
                     col("shadow_trades")
-                    .where("result", "in", ["win", "loss"])
+                    .where(filter=FieldFilter("result", "in", ["win", "loss"]))
                     .order_by("closed_at", direction="DESCENDING")
                     .limit(20)
                     .stream()

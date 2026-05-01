@@ -122,7 +122,7 @@ async def detect_line_movement(fixture_id: str) -> dict:
         from shared.firestore_client import col
 
         docs = list(
-            col("odds_history").where("fixture_id", "==", fixture_id).stream()
+            col("odds_history").where(filter=FieldFilter("fixture_id", "==", fixture_id)).stream()
         )
 
         if not docs:
@@ -358,7 +358,7 @@ async def calculate_odds_drift(fixture_id: str) -> dict:
     try:
         from shared.firestore_client import col
 
-        docs = list(col("odds_history").where("fixture_id", "==", fixture_id).stream())
+        docs = list(col("odds_history").where(filter=FieldFilter("fixture_id", "==", fixture_id)).stream())
         if not docs:
             return result
 
@@ -498,7 +498,7 @@ async def detect_sharp_money(fixture_id: str, team_to_back: str) -> dict:
         from shared.firestore_client import col
 
         docs = list(
-            col("odds_history").where("fixture_id", "==", fixture_id).stream()
+            col("odds_history").where(filter=FieldFilter("fixture_id", "==", fixture_id)).stream()
         )
 
         if not docs:
