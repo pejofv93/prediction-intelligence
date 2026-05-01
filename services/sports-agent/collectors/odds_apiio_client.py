@@ -61,29 +61,35 @@ _TTL_RATE_LIMIT = timedelta(seconds=3600) # 429 — esperar reset completo de 1h
 _SOCCER_ALL_KEY  = "__soccer_all__"
 _SOCCER_ALL_LOCK = asyncio.Lock()
 
-# Mapeo liga interna → palabras clave del nombre de competición en odds-api.io
-# El cliente busca el slug cuyo "name" o "competition" contenga estas palabras.
+# Mapeo liga interna → palabras clave del nombre de competición en odds-api.io.
+# Múltiples variantes por liga porque odds-api.io puede cambiar slugs entre versiones.
+# Se compara contra _build_comp_string(ev) que agrega slug+name+competition+tournament+…
 _LEAGUE_KEYWORDS: dict[str, list[str]] = {
-    # slug exacto (odds-api.io) o subcadena que lo identifique unívocamente
-    "PL":   ["england-premier-league"],
-    "PD":   ["spain-primera-division", "spain-laliga"],
-    "BL1":  ["germany-bundesliga"],
-    "SA":   ["italy-serie-a"],
-    "FL1":  ["france-ligue-1"],
-    "CL":   ["uefa-champions-league"],
-    "EL":   ["uefa-europa-league"],
-    "ECL":  ["conference-league"],
-    "TU1":  ["turkey-super-lig"],
-    "ARG":  ["argentina-primera-division"],
+    "PL":   ["england-premier-league", "premier-league", "premier league",
+             "english premier", "epl"],
+    "PD":   ["spain-primera-division", "spain-laliga", "laliga", "la-liga",
+             "la liga", "primera division", "primera-division"],
+    "BL1":  ["germany-bundesliga", "bundesliga", "1. bundesliga", "1.bundesliga",
+             "german bundesliga"],
+    "SA":   ["italy-serie-a", "serie-a", "serie a", "italian serie"],
+    "FL1":  ["france-ligue-1", "ligue-1", "ligue 1", "french ligue",
+             "ligue 1 uber"],
+    "CL":   ["uefa-champions-league", "champions-league", "champions league",
+             "ucl", "uefa cl"],
+    "EL":   ["uefa-europa-league", "europa-league", "europa league", "uel"],
+    "ECL":  ["conference-league", "europa-conference", "uecl"],
+    "TU1":  ["turkey-super-lig", "super-lig", "super lig", "turkish super"],
+    "ARG":  ["argentina-primera-division", "primera-division-argentina",
+             "liga profesional"],
     "NBA":  ["nba", "national-basketball"],
-    "EUROLEAGUE": ["euroleague", "euro-league"],
-    "ATP_FRENCH_OPEN": ["roland-garros", "french-open"],
+    "EUROLEAGUE": ["euroleague", "euro-league", "turkish airlines euroleague"],
+    "ATP_FRENCH_OPEN": ["roland-garros", "french-open", "french open"],
     "ATP_WIMBLEDON":   ["wimbledon"],
-    "ATP_US_OPEN":     ["us-open"],
-    "ATP_AUS_OPEN":    ["australian-open"],
-    "ATP_MADRID":      ["madrid-open", "mutua-madrid"],
-    "ATP_ROME":        ["internazionali", "rome"],
-    "ATP_BARCELONA":   ["barcelona-open", "conde-de-godo"],
+    "ATP_US_OPEN":     ["us-open", "us open"],
+    "ATP_AUS_OPEN":    ["australian-open", "australian open"],
+    "ATP_MADRID":      ["madrid-open", "mutua-madrid", "madrid open"],
+    "ATP_ROME":        ["internazionali", "rome", "italian open"],
+    "ATP_BARCELONA":   ["barcelona-open", "conde-de-godo", "barcelona open"],
 }
 
 # Sport category → odds-api.io top-level sport slug (descubierto via /sports)
@@ -603,6 +609,43 @@ def _to_float(v) -> float | None:
         return None
 
 
+def _build_comp_string(ev: dict) -> str:
+    """
+    Agrega todos los campos de competición de un evento en una cadena lowercase.
+    odds-api.io cambia los nombres de campos entre versiones de la API;
+    esta función comprueba todos los candidatos conocidos para maximizar el matching.
+    """
+    parts: list[str] = []
+    lg = ev.get("league") or {}
+    if isinstance(lg, dict):
+        for k in ("slug", "name", "id", "title", "shortName"):
+            v = lg.get(k)
+            if v and isinstance(v, str):
+                parts.append(v.lower())
+    elif lg:
+        parts.append(str(lg).lower())
+
+    for field in (
+        "competition", "competitionName", "competitionSlug",
+        "tournament", "tournamentName",
+        "category", "categoryName",
+        "sport_title", "leagueName", "league_name",
+        "division", "cup", "groupName", "name",
+    ):
+        v = ev.get(field)
+        if not v:
+            continue
+        if isinstance(v, str):
+            parts.append(v.lower())
+        elif isinstance(v, dict):
+            for sub in ("slug", "name", "id", "title"):
+                sv = v.get(sub)
+                if sv and isinstance(sv, str):
+                    parts.append(sv.lower())
+
+    return " ".join(parts)
+
+
 def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
     """
     Construye el mejor precio por mercado a partir de los datos de todos los bookmakers.
@@ -732,12 +775,7 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
 
     priority_events: list[dict] = []
     for ev in all_events:
-        lg = ev.get("league") or {}
-        comp = (
-            f"{lg.get('slug', '')} {lg.get('name', '')}".lower()
-            if isinstance(lg, dict) else str(lg).lower()
-        )
-        if any(kw in comp for kw in priority_keywords):
+        if any(kw in _build_comp_string(ev) for kw in priority_keywords):
             priority_events.append(ev)
 
     # Ordenar por commence time — priorizar partidos más próximos
@@ -749,7 +787,21 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
         return ""
 
     priority_events.sort(key=_commence_key)
-    capped = priority_events[:_MAX_ODDS_PREFETCH]
+
+    if not priority_events and all_events:
+        _sample_fields = ("id", "league", "competition", "competitionName",
+                          "tournament", "sport_title", "leagueName", "name")
+        _sample = [{k: ev.get(k) for k in _sample_fields if ev.get(k)}
+                   for ev in all_events[:5]]
+        logger.warning(
+            "odds-api.io: pre-fetch — 0 prioritarios de %d eventos con keywords EU. "
+            "Fallback: primeros %d sin filtro liga. Sample campos: %s",
+            len(all_events), _MAX_ODDS_PREFETCH, str(_sample)[:800],
+        )
+        capped = all_events[:_MAX_ODDS_PREFETCH]
+    else:
+        capped = priority_events[:_MAX_ODDS_PREFETCH]
+
     event_ids = [
         str(ev.get("id") or ev.get("eventId") or "")
         for ev in capped if ev.get("id") or ev.get("eventId")
@@ -893,18 +945,20 @@ async def get_league_odds(league: str) -> list[dict]:
         keywords = _LEAGUE_KEYWORDS.get(league, [])
         filtered = []
         for ev in all_events:
-            lg = ev.get("league") or {}
-            if isinstance(lg, dict):
-                comp = f"{lg.get('slug', '')} {lg.get('name', '')}".lower()
-            else:
-                comp = str(lg).lower()
-            if not keywords or any(kw in comp for kw in keywords):
+            if not keywords or any(kw in _build_comp_string(ev) for kw in keywords):
                 filtered.append(ev)
 
         logger.info("odds-api.io: %d eventos soccer totales, %d para %s (keywords=%s)",
                     all_count, len(filtered), league, keywords)
 
         if not filtered:
+            if all_events:
+                _sample_comps = [_build_comp_string(ev) for ev in all_events[:5]]
+                logger.warning(
+                    "odds-api.io: %s — 0 de %d eventos coinciden con keywords=%s. "
+                    "Comp strings muestra: %s",
+                    league, all_count, keywords, _sample_comps,
+                )
             _EVENT_CACHE[league] = {"events": [], "error": True, "cached_at": now}
             return []
 
@@ -950,8 +1004,7 @@ async def get_league_odds(league: str) -> list[dict]:
 
     keywords = _LEAGUE_KEYWORDS.get(league, [])
     filtered = [ev for ev in raw_events if not keywords or any(
-        kw in f"{(ev.get('league') or {}).get('slug', '')} {(ev.get('league') or {}).get('name', '')}".lower()
-        for kw in keywords
+        kw in _build_comp_string(ev) for kw in keywords
     )]
 
     if not filtered:
