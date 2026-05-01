@@ -71,18 +71,14 @@ def _norm(s: str) -> str:
 
 def _team_matches(understat_team: str, match_team: str) -> bool:
     """
-    True si comparten al menos una palabra significativa (≥4 chars) tras normalizar.
-    Cubre: "Real Madrid" ↔ "Real Madrid CF", "Atlético" ↔ "Atletico Madrid".
+    True si comparten al menos una palabra completa significativa (≥4 chars).
+    Usa intersección de conjuntos de palabras — evita falsos positivos por
+    substring (ej. "bayer" en "bayern munchen" causaba que Kane apareciera
+    en partidos de Leverkusen).
     """
-    a = _norm(understat_team)
-    b = _norm(match_team)
-    for word in a.split():
-        if len(word) >= 4 and word in b:
-            return True
-    for word in b.split():
-        if len(word) >= 4 and word in a:
-            return True
-    return False
+    a_words = {w for w in _norm(understat_team).split() if len(w) >= 4}
+    b_words = {w for w in _norm(match_team).split() if len(w) >= 4}
+    return bool(a_words & b_words)
 
 
 def _p_score(total_xg: float, games: int) -> float:
@@ -381,6 +377,8 @@ async def generate_player_props_signals(
                 match_id, home_team, away_team, league, match_date,
                 p, is_home, prob, weights_version,
             )
+            if signal["edge"] <= 0:
+                continue
             doc_id = signal["match_id"]
             try:
                 col("predictions").document(doc_id).set(signal)
