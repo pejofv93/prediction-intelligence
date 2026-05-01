@@ -8,6 +8,7 @@ Flujo por llamada a generate_signal():
   → calculate_edge → si supera threshold → kelly_criterion → guarda predictions
 """
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -1121,11 +1122,18 @@ async def _send_telegram_alert(prediction: dict) -> bool:
 
     try:
         payload = {"type": "sports", "data": prediction}
+        payload_bytes = json.dumps(
+            payload,
+            default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o),
+        ).encode()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{TELEGRAM_BOT_URL}/send-alert",
-                json=payload,
-                headers={"x-cloud-token": CLOUD_RUN_TOKEN},
+                content=payload_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-cloud-token": CLOUD_RUN_TOKEN,
+                },
             )
         if resp.status_code not in (200, 202):
             logger.warning("_send_telegram_alert: bot respondio %d", resp.status_code)
