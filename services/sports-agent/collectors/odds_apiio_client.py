@@ -760,25 +760,15 @@ def clear_caches() -> dict:
 async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None:
     """
     Pre-carga odds para ligas prioritarias en _ODDS_MAP_CACHE.
-    Selecciona los próximos _MAX_ODDS_PREFETCH eventos de _PRIORITY_LEAGUES_FOR_ODDS,
-    los envía en batches de 10 a /odds/multi → máximo 5 requests HTTP.
-    CLI/BSA/ARG quedan excluidos (Poisson sintético como fallback).
-    Siempre marca _ODDS_MAP_PREFETCHED_AT aunque el resultado sea vacío
-    para que _fetch_odds_map_for_events() no reintente HTTP por liga.
+    Muestreo por liga: _PREFETCH_PER_LEAGUE eventos más próximos por cada liga
+    prioritaria usando su keyword más específico (primero de la lista, incluye país).
+    Esto evita que el orden cronológico global llene la caché con ligas asiáticas
+    que empiezan antes que las ligas EU (BL1/PD/SA/PL juegan a las 14-21h UTC).
     """
     global _ODDS_MAP_PREFETCHED_AT
 
-    priority_keywords = [
-        kw for lg in _PRIORITY_LEAGUES_FOR_ODDS
-        for kw in _LEAGUE_KEYWORDS.get(lg, [])
-    ]
+    _PREFETCH_PER_LEAGUE = 5  # eventos por liga → 9 ligas × 5 = máx 45 IDs
 
-    priority_events: list[dict] = []
-    for ev in all_events:
-        if any(kw in _build_comp_string(ev) for kw in priority_keywords):
-            priority_events.append(ev)
-
-    # Ordenar por commence time — priorizar partidos más próximos
     def _commence_key(ev: dict) -> str:
         for field in ("commenceTime", "commence_time", "startTime", "start_time", "date", "kickoff"):
             v = ev.get(field)
@@ -786,7 +776,39 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
                 return str(v)
         return ""
 
-    priority_events.sort(key=_commence_key)
+    # Muestreo por liga con el keyword más específico (primero = incluye país)
+    seen_ids: set[str] = set()
+    priority_events: list[dict] = []
+
+    for lg in _PRIORITY_LEAGUES_FOR_ODDS:
+        lg_keywords = _LEAGUE_KEYWORDS.get(lg, [])
+        if not lg_keywords:
+            continue
+        # Usar el keyword más específico (primero de la lista: "england-premier-league" etc.)
+        specific_kw = lg_keywords[0]
+        lg_events = sorted(
+            [ev for ev in all_events if specific_kw in _build_comp_string(ev)],
+            key=_commence_key,
+        )
+        if not lg_events:
+            # Fallback: intentar con todos los keywords de la liga
+            lg_events = sorted(
+                [ev for ev in all_events
+                 if any(kw in _build_comp_string(ev) for kw in lg_keywords)],
+                key=_commence_key,
+            )
+        added = 0
+        for ev in lg_events:
+            if added >= _PREFETCH_PER_LEAGUE:
+                break
+            eid = str(ev.get("id") or ev.get("eventId") or "")
+            if eid and eid not in seen_ids:
+                seen_ids.add(eid)
+                priority_events.append(ev)
+                added += 1
+        if lg_events:
+            logger.info("odds-api.io: pre-fetch %s → %d candidatos → %d añadidos",
+                        lg, len(lg_events), added)
 
     if not priority_events and all_events:
         _sample_fields = ("id", "league", "competition", "competitionName",
@@ -795,22 +817,20 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
                    for ev in all_events[:5]]
         logger.warning(
             "odds-api.io: pre-fetch — 0 prioritarios de %d eventos con keywords EU. "
-            "Fallback: primeros %d sin filtro liga. Sample campos: %s",
+            "Fallback: primeros %d sin filtro liga. Sample: %s",
             len(all_events), _MAX_ODDS_PREFETCH, str(_sample)[:800],
         )
-        capped = all_events[:_MAX_ODDS_PREFETCH]
-    else:
-        capped = priority_events[:_MAX_ODDS_PREFETCH]
+        priority_events = all_events[:_MAX_ODDS_PREFETCH]
 
+    capped = priority_events[:_MAX_ODDS_PREFETCH]
     event_ids = [
         str(ev.get("id") or ev.get("eventId") or "")
         for ev in capped if ev.get("id") or ev.get("eventId")
     ]
 
     logger.info(
-        "odds-api.io: pre-fetch odds — %d prioritarios de %d totales → %d IDs (cap=%d, ~%d req)",
-        len(priority_events), len(all_events), len(event_ids),
-        _MAX_ODDS_PREFETCH, -(-len(event_ids) // 10),  # ceil division
+        "odds-api.io: pre-fetch odds — %d prioritarios → %d IDs (~%d req)",
+        len(priority_events), len(event_ids), -(-len(event_ids) // 10),
     )
 
     async with _ODDS_MAP_LOCK:
