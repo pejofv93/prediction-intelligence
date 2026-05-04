@@ -184,10 +184,10 @@ async def _bg_daily_report() -> None:
             pass
 
         report = format_daily_report(health, shadow_metrics, top_signal, pred_stats)
-        await send_message(report)
+        await send_message(report, message_thread_id=4)
 
         if health.get("degraded"):
-            await send_message(format_health_alert(health))
+            await send_message(format_health_alert(health), message_thread_id=4)
 
         logger.info("daily-report: enviado correctamente")
     except Exception as e:
@@ -323,7 +323,7 @@ async def send_weekly_report() -> JSONResponse:
         }
 
         report_text = generate_weekly_report(week_stats, weights_before, weights_after)
-        await send_message(report_text)
+        await send_message(report_text, message_thread_id=4)
 
         logger.info(
             "send-weekly-report: enviado para %s (%d preds, %d poly)",
@@ -331,14 +331,14 @@ async def send_weekly_report() -> JSONResponse:
             week_stats["predictions_total"],
             poly_total,
         )
-        return JSONResponse({"ok": True, "week": current_week})
+        return JSONResponse({"ok": True, "week": prev_week})
 
     except Exception:
         logger.error("send-weekly-report: error no controlado", exc_info=True)
         # Intentar enviar un mensaje de error al dueño
         try:
             from alert_manager import send_message
-            await send_message("⚠️ Error generando reporte semanal. Revisa los logs.")
+            await send_message("⚠️ Error generando reporte semanal. Revisa los logs.", message_thread_id=4)
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Error generando reporte semanal")

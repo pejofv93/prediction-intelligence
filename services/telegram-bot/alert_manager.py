@@ -38,11 +38,17 @@ def _truncate_reasoning(text: str, max_chars: int = 800) -> str:
     return truncated
 
 
-async def send_message(text: str, chat_id: str | int | None = None, parse_mode: str = "Markdown") -> bool:
+async def send_message(
+    text: str,
+    chat_id: str | int | None = None,
+    parse_mode: str = "Markdown",
+    message_thread_id: int | None = None,
+) -> bool:
     """
     Envia mensaje a chat_id via Bot API. Devuelve True si el envio fue exitoso.
     Reintenta hasta 3 veces en 429 usando retry_after del response body.
     Devuelve False sin reintentar en cualquier otro error.
+    message_thread_id: topic thread en supergrupos (Sports=4, Polymarket=2, None=General).
     """
     if not TELEGRAM_TOKEN:
         logger.warning("send_message: TELEGRAM_TOKEN no configurado")
@@ -59,6 +65,8 @@ async def send_message(text: str, chat_id: str | int | None = None, parse_mode: 
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
+    if message_thread_id is not None:
+        payload["message_thread_id"] = message_thread_id
 
     for attempt in range(3):
         try:
@@ -343,7 +351,7 @@ async def send_sports_alert(prediction: dict) -> bool:
         logger.error("send_sports_alert: error comprobando dedup", exc_info=True)
 
     text = _format_alert_unified(prediction)
-    sent = await send_message(text)
+    sent = await send_message(text, message_thread_id=4)
 
     if not sent:
         logger.error("send_sports_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
@@ -389,7 +397,7 @@ async def send_poly_alert(analysis: dict) -> bool:
         logger.error("send_poly_alert: error comprobando dedup", exc_info=True)
 
     text = _format_alert_unified(analysis) if analysis.get("sport") else _format_poly_alert(analysis)
-    sent = await send_message(text)
+    sent = await send_message(text, message_thread_id=2)
 
     if not sent:
         logger.error("send_poly_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
