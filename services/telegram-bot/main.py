@@ -105,7 +105,7 @@ async def send_alert(request: Request) -> JSONResponse:
         elif alert_type == "polymarket_resolution":
             text = data.get("text", "")
             if text:
-                sent = await send_message(text, message_thread_id=2)
+                sent = await send_message(text, message_thread_id=3)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
     except Exception:

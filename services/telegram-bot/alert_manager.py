@@ -404,7 +404,7 @@ async def send_poly_alert(analysis: dict) -> bool:
         logger.error("send_poly_alert: error comprobando dedup", exc_info=True)
 
     text = _format_alert_unified(analysis) if analysis.get("sport") else _format_poly_alert(analysis)
-    sent = await send_message(text, message_thread_id=2)
+    sent = await send_message(text, message_thread_id=3)
 
     if not sent:
         logger.error("send_poly_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
