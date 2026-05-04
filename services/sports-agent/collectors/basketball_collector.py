@@ -111,11 +111,11 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                         logger.debug("basketball_collector: ESPN sin partidos completados para team %d", team_id)
                         continue
 
-                    # Form score desde raw_matches ESPN (was_home ya poblado)
+                    # Form score desde raw_matches ESPN — calculate_form_score espera list[str]
                     results = [
-                        {"result": "win" if (m["goals_home"] > m["goals_away"] and m["was_home"])
-                                        or (m["goals_away"] > m["goals_home"] and not m["was_home"])
-                                  else "loss"}
+                        "win" if (m["goals_home"] > m["goals_away"] and m["was_home"])
+                              or (m["goals_away"] > m["goals_home"] and not m["was_home"])
+                        else "loss"
                         for m in raw_matches_fmt
                     ]
                     form_score = calculate_form_score(results[:10])
