@@ -322,13 +322,20 @@ print(json.dumps(m.volume_health_check(), indent=2))
 ```
 
 **Estado tras fix:**
-- Pipeline: pendiente verificar (ejecutar cleanup + railway up)
-- Primer pipeline post-fix: pendiente (lanzar manualmente después de cleanup)
+- Volumen liberado: 4.02 GB (99.7% → 16.5%) via /volume?confirm=true endpoint FastAPI
+- Pipeline 39113e9b lanzado automáticamente por KAIROS (grace period) tras redeploy
+- Pipeline resultado: quality gate bloqueó — vídeo 60s (<180s) — BUG DESCUBIERTO Y FIXADO
+
+**Bug adicional descubierto y fixado (forge_agent.py):**
+- ECHO + gTTS tarde tarda >300s para guiones largos → ThreadPoolExecutor TimeoutError
+- Tras timeout, ctx.audio_path no se mergeaba → HEPHAESTUS usaba duration=60s fallback
+- Fix: timeout 300→600s + recuperación post-timeout (result() tras executor.shutdown)
+- Commit: 0389502 "fix: recuperar audio_path de ECHO tras timeout en paralelo"
 
 **Pendiente para próxima sesión:**
-- Verificar los 4 bugs originales (resolución, gráfico BTC, thumbnails, quality gate)
-- Validar que los 18 cambios del 30/04 funcionan correctamente
-- ETH/SOL en ticker, Short barras, CALÍOPE inglés, 12 escenas rotación
+- Verificar pipeline con fix de forge_agent: vídeo debe tener duración real (~8-12 min)
+- ETH/SOL en ticker, Short barras negras, CALÍOPE inglés, 12 escenas rotación
+- Validar _cleanup_pipeline_temps() ejecuta tras youtube_url confirmada
 
 ### Sesión 2026-04-16 — Level-up: 18 mejoras en 5 equipos paralelos
 
