@@ -549,6 +549,41 @@ async def run_daily_learning() -> None:
                 "run_daily_learning: error actualizando %s_synthetic", mid, exc_info=True
             )
 
+    # --- 8. Marcar predicciones obsoletas (>48h sin resultado) ---
+    try:
+        cutoff_48h = now - timedelta(hours=48)
+        stale_docs = list(
+            col("predictions")
+            .where(filter=FieldFilter("result", "==", None))
+            .stream()
+        )
+        obsolete_count = 0
+        for doc in stale_docs:
+            data = doc.to_dict()
+            match_date = data.get("match_date")
+            if match_date is None:
+                continue
+            if isinstance(match_date, str):
+                try:
+                    match_date = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+            if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
+                match_date = match_date.replace(tzinfo=timezone.utc)
+            if match_date < cutoff_48h and not data.get("obsolete"):
+                try:
+                    col("predictions").document(doc.id).update({"obsolete": True})
+                    obsolete_count += 1
+                except Exception:
+                    pass
+        if obsolete_count:
+            logger.info(
+                "run_daily_learning: %d predicciones marcadas obsoletas (>48h sin resultado)",
+                obsolete_count,
+            )
+    except Exception:
+        logger.warning("run_daily_learning: error marcando predicciones obsoletas", exc_info=True)
+
     logger.info(
         "run_daily_learning: completado — %d procesadas, accuracy semana=%.1f%%",
         len(processed_predictions), week_accuracy * 100,

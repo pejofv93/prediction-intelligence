@@ -2,7 +2,7 @@
 API endpoints: GET /predictions, GET /stats
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException
 
@@ -49,11 +49,40 @@ async def get_predictions(limit: int = 50) -> list[dict]:
             "elo_sufficient", "h2h_sufficient", "data_source",
             "filtered_reason", "created_at",
         }
+        now = datetime.now(timezone.utc)
         result = []
         for d in docs:
             raw = d.to_dict()
             filtered = {k: v for k, v in raw.items() if k in fields}
             filtered["low_confidence"] = float(raw.get("confidence") or 1.0) < 0.65
+
+            # Compute status based on match_date and result
+            result_v = raw.get("result")
+            if result_v is not None:
+                filtered["status"] = "RESUELTO"
+            else:
+                match_date_v = raw.get("match_date")
+                if match_date_v:
+                    if isinstance(match_date_v, str):
+                        try:
+                            match_date_v = datetime.fromisoformat(match_date_v.replace("Z", "+00:00"))
+                        except Exception:
+                            match_date_v = None
+                    if match_date_v:
+                        if hasattr(match_date_v, "tzinfo") and match_date_v.tzinfo is None:
+                            match_date_v = match_date_v.replace(tzinfo=timezone.utc)
+                        age_h = (now - match_date_v).total_seconds() / 3600
+                        if age_h > 48:
+                            filtered["status"] = "OBSOLETA"
+                        elif age_h > 2:
+                            filtered["status"] = "PENDIENTE_RESULTADO"
+                        else:
+                            filtered["status"] = "PENDIENTE"
+                    else:
+                        filtered["status"] = "PENDIENTE"
+                else:
+                    filtered["status"] = "PENDIENTE"
+
             result.append(_serialize(filtered))
         return result
     except Exception:
