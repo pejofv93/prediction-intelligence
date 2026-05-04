@@ -52,10 +52,39 @@ async def _firestore_set(
     return False
 
 
+_STATUS_MAP: dict[str, str] = {
+    # api-basketball / API-Sports
+    "not started": "SCHEDULED",
+    "scheduled":   "SCHEDULED",
+    "ns":          "SCHEDULED",
+    # tennis API
+    "not_started": "SCHEDULED",
+    "upcoming":    "SCHEDULED",
+    "timed":       "TIMED",
+    # generic
+    "live":        "LIVE",
+    "in play":     "LIVE",
+    "in_play":     "LIVE",
+    "halftime":    "LIVE",
+    "finished":    "FINISHED",
+    "ft":          "FINISHED",
+    "aet":         "FINISHED",
+    "cancelled":   "CANCELLED",
+    "postponed":   "POSTPONED",
+}
+
+
+def _normalise_status(raw: str | None) -> str:
+    if not raw:
+        return "SCHEDULED"
+    return _STATUS_MAP.get(raw.lower().strip(), raw)
+
+
 async def save_upcoming_matches(matches: list[dict]) -> None:
     """
     Guarda lista de upcoming_matches en Firestore. Doc ID = match_id.
     Solo sobreescribe partidos SCHEDULED — no toca los que ya estan FINISHED o LIVE.
+    Normaliza status al formato esperado por el analyze filter ["SCHEDULED","TIMED"].
     """
     if not matches:
         logger.info("save_upcoming_matches: lista vacia, nada que guardar")
@@ -77,9 +106,15 @@ async def save_upcoming_matches(matches: list[dict]) -> None:
             "away_team_id": m.get("away_team_id"),
             "league": m.get("league", ""),
             "match_date": m.get("date", m.get("match_date", "")),
-            "status": m.get("status", "SCHEDULED"),
+            "status": _normalise_status(m.get("status")),
+            "sport": m.get("sport", "football"),
             "collected_at": now,
         }
+        # Campos opcionales por deporte (no sobrescribir con None)
+        for extra_key in ("surface", "tournament", "h2h_advantage", "source"):
+            v = m.get(extra_key)
+            if v is not None:
+                doc[extra_key] = v
 
         ok = await _firestore_set("upcoming_matches", match_id, doc)
         if ok:

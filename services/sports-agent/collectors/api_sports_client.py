@@ -187,14 +187,78 @@ async def get_games_today(sport: str) -> list[dict]:
 
 _BASKETBALL_HOST = "api-basketball.p.rapidapi.com"
 
+# NBA league_id en api-basketball.p.rapidapi.com (documentación oficial API-Sports)
+NBA_LEAGUE_ID = 12
+
+
+def _current_basketball_season() -> str:
+    """Temporada activa de baloncesto, ej. '2025-2026'. Cambia el 1-Oct de cada año."""
+    now = datetime.now(timezone.utc)
+    start = now.year if now.month >= 10 else now.year - 1
+    return f"{start}-{start + 1}"
+
+
+async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
+    """
+    NBA games via ESPN public scoreboard API — sin clave, completamente gratuito.
+    Fallback primario cuando api-basketball.p.rapidapi.com devuelve 403 (suscripción no activada).
+    URL: https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=YYYYMMDD
+    """
+    today = date_str or datetime.now(timezone.utc).date().isoformat()
+    espn_date = today.replace("-", "")  # YYYYMMDD
+    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params={"dates": espn_date})
+        if resp.status_code != 200:
+            logger.warning("ESPN NBA: HTTP %d para fecha %s", resp.status_code, today)
+            return []
+        data = resp.json()
+        games: list[dict] = []
+        for event in data.get("events", []):
+            for comp in event.get("competitions", []):
+                competitors = comp.get("competitors", [])
+                home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+                away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+                state = comp.get("status", {}).get("type", {}).get("state", "pre")
+                if state == "post":
+                    continue  # partido ya terminado
+                status = "LIVE" if state == "in" else "SCHEDULED"
+                home_team = home.get("team", {})
+                away_team = away.get("team", {})
+                games.append({
+                    "match_id": str(event.get("id") or comp.get("id") or ""),
+                    "date": comp.get("date", event.get("date", "")),
+                    "home_team_id": int(home_team.get("id", 0)) or None,
+                    "away_team_id": int(away_team.get("id", 0)) or None,
+                    "home_team_name": home_team.get("displayName", home_team.get("name", "")),
+                    "away_team_name": away_team.get("displayName", away_team.get("name", "")),
+                    "goals_home": None,
+                    "goals_away": None,
+                    "league": "NBA",
+                    "status": status,
+                    "sport": "nba",
+                    "source": "espn",
+                })
+        logger.info("ESPN NBA: %d partidos para %s", len(games), today)
+        return games
+    except Exception:
+        logger.error("ESPN NBA: error fetch", exc_info=True)
+        return []
+
 
 async def get_games_by_league(league_id: int, date_str: str | None = None) -> list[dict]:
     """
-    GET /games?date=&league=ID via api-basketball.p.rapidapi.com.
-    Usado para ligas con ID conocido: ACB (116), Euroleague (120), etc.
+    GET /games?date=&league=ID&season=YYYY-YYYY via api-basketball.p.rapidapi.com.
+    Requiere season además de date+league — sin él la API devuelve [].
+    NOTA: Requiere suscripción activa a api-basketball en RapidAPI.
+          Si devuelve 403, usar get_nba_games_espn() para NBA.
     """
     today = date_str or datetime.now(timezone.utc).date().isoformat()
-    data = await _request(_BASKETBALL_HOST, "/games", {"date": today, "league": league_id})
+    season = _current_basketball_season()
+    data = await _request(_BASKETBALL_HOST, "/games", {
+        "date": today, "league": league_id, "season": season,
+    })
     if not data:
         return []
 

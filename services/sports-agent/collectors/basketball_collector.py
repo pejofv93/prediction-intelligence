@@ -3,14 +3,13 @@ Collector de baloncesto — wrapper sobre api_sports_client.py.
 Añade H2H y enriquecimiento de stats para el basketball_analyzer.
 
 Ligas soportadas (api-basketball.p.rapidapi.com):
-  NBA        — vía get_games_today("nba"), sin filtro de liga
-  ACB        — league_id=116  (Liga Endesa, España)   ← confirmado 2026-04-29
-  EUROLEAGUE — league_id=120  (Turkish Airlines EuroLeague) ← confirmado 2026-04-29
-  NCAA       — league_id=51   (NCAA Men's D1) ← pendiente verificar en temporada
-  EUROBASKET — torneo bienal FIBA; ID varía por edición — activar cuando haya torneo
+  NBA        — league_id=12   (Playoffs mayo 2026)
+  ACB        — league_id=116  (Liga Endesa, España)
+  EUROLEAGUE — league_id=120  (Turkish Airlines EuroLeague, Final Four mayo)
+  NCAA       — league_id=51   (Nov-Marzo — offseason)
 
-Nota: /leagues?search= devuelve 403 en plan free de RapidAPI — IDs hardcodeados
-desde documentación oficial de API-Sports.
+Nota: api-basketball requiere SIEMPRE date + league + season.
+  Sin season devuelve []. /leagues?search= → 403 en plan free.
 """
 import asyncio
 import logging
@@ -19,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 from collectors.api_sports_client import (
     get_games_by_league,
-    get_games_today,
+    get_nba_games_espn,
     get_team_stats_bdl,
 )
 from collectors.stats_processor import (
@@ -31,56 +30,55 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-# Ligas con league_id en api-basketball.p.rapidapi.com
-# Fuente: documentación oficial API-Sports + verificación en prod 2026-04-29
+# Ligas via api-basketball.p.rapidapi.com (requiere suscripción activa en RapidAPI)
+# NBA se recopila via ESPN (gratuito) — no necesita suscripción
+# ACB/EUROLEAGUE requieren suscripción activa a api-basketball
 _LEAGUES_BY_ID: dict[str, int] = {
-    "ACB":        116,   # Liga Endesa — España (confirmado: 200 OK)
-    "EUROLEAGUE": 120,   # Turkish Airlines EuroLeague (confirmado: 200 OK)
-    "NCAA":        51,   # NCAA Men's D1 — activar en temporada (nov-marzo)
-    # EuroBasket FIBA: torneo bienal, ID varía por edición — descomentar cuando haya torneo
-    # "EUROBASKET": ???,
+    "ACB":        116,   # Liga Endesa — España
+    "EUROLEAGUE": 120,   # Turkish Airlines EuroLeague Final Four (mayo)
+    # "NCAA":       51,  # Nov-Marzo — offseason en mayo
 }
 
 
 async def collect_basketball_games(days: int = 1) -> list[dict]:
     """
-    Recopila partidos NBA, ACB y Euroleague de hoy.
-    Devuelve lista normalizada compatible con save_upcoming_matches.
-    """
-    if not os.environ.get("FOOTBALL_RAPID_API_KEY"):
-        logger.warning("basketball_collector: FOOTBALL_RAPID_API_KEY no configurada — omitiendo baloncesto")
-        return []
+    Recopila partidos de baloncesto de hoy.
 
+    NBA: ESPN public scoreboard API (gratuito, sin clave, siempre disponible).
+    ACB/EUROLEAGUE: api-basketball.p.rapidapi.com (requiere suscripción activa).
+      → Si devuelve 403, se omiten silenciosamente.
+    """
     all_games: list[dict] = []
 
-    # --- NBA via sport type (sin filtro de liga) ---
-    nba_games = await get_games_today("nba")
-    for g in nba_games:
-        g.setdefault("sport", "nba")
-        g.setdefault("league", "NBA")
-    if nba_games:
-        logger.info("basketball NBA: %d partidos obtenidos", len(nba_games))
-    else:
-        logger.info("basketball NBA: sin partidos (offseason o liga inactiva)")
-    all_games.extend(nba_games)
+    # --- NBA via ESPN (sin key, sin suscripción) ---
+    try:
+        nba_games = await get_nba_games_espn()
+        if nba_games:
+            logger.info("basketball NBA (ESPN): %d partidos obtenidos", len(nba_games))
+        else:
+            logger.info("basketball NBA (ESPN): sin partidos hoy (offseason o no programados)")
+        all_games.extend(nba_games)
+    except Exception:
+        logger.error("basketball_collector: error colectando NBA via ESPN", exc_info=True)
 
-    # --- Ligas por league_id ---
-    for league_name, league_id in _LEAGUES_BY_ID.items():
-        try:
-            games = await get_games_by_league(league_id)
-            for g in games:
-                g.setdefault("sport", "basketball")
-                g.setdefault("league", league_name)
-            if games:
-                logger.info("basketball %s (id=%d): %d partidos obtenidos",
-                            league_name, league_id, len(games))
-            else:
-                logger.info("basketball %s (id=%d): sin partidos (offseason o liga inactiva)",
-                            league_name, league_id)
-            all_games.extend(games)
-        except Exception:
-            logger.error("basketball_collector: error colectando %s (id=%d)",
-                         league_name, league_id, exc_info=True)
+    # --- ACB y EUROLEAGUE via api-basketball (suscripción requerida) ---
+    if os.environ.get("FOOTBALL_RAPID_API_KEY"):
+        for league_name, league_id in _LEAGUES_BY_ID.items():
+            try:
+                games = await get_games_by_league(league_id)
+                for g in games:
+                    g.setdefault("sport", "basketball")
+                    g.setdefault("league", league_name)
+                if games:
+                    logger.info("basketball %s (id=%d): %d partidos obtenidos",
+                                league_name, league_id, len(games))
+                else:
+                    logger.info("basketball %s (id=%d): sin partidos (offseason o 403 sin suscripción)",
+                                league_name, league_id)
+                all_games.extend(games)
+            except Exception:
+                logger.error("basketball_collector: error colectando %s (id=%d)",
+                             league_name, league_id, exc_info=True)
 
     logger.info("basketball_collector: %d partidos totales de baloncesto", len(all_games))
     return all_games
@@ -90,8 +88,17 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
     """
     Para cada equipo en la lista de partidos, recopila sus últimos 10 partidos
     y guarda team_stats enriquecido en Firestore.
+    Solo se ejecuta para partidos de api-basketball (no ESPN) ya que requiere
+    suscripción activa. Los partidos ESPN usan stats por defecto en el analyzer.
     """
+    # Filtrar partidos de ESPN — api-basketball devuelve 403 (no suscrito)
+    api_games = [g for g in games if g.get("source") != "espn"]
+    if not api_games:
+        logger.info("basketball_collector: team_stats omitido — todos los partidos son de ESPN (sin suscripción api-basketball)")
+        return
+
     teams_seen: set[int] = set()
+    games = api_games  # noqa: F841 — reasignado para el loop
 
     for game in games:
         for team_id_key, sport in [
@@ -149,7 +156,7 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                     "updated_at": datetime.now(timezone.utc),
                 }
 
-                col("team_stats").document(str(team_id)).set(doc)
+                col("team_stats").document(f"bball_{team_id}").set(doc)
                 logger.info("basketball_collector: team_stats(%d) %s form=%.1f",
                             team_id, team_name, form_score)
 

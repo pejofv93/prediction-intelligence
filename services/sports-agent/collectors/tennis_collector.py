@@ -1,7 +1,13 @@
 """
-Collector: Tennis API via RapidAPI (tennisapi1.p.rapidapi.com — API-Dojo).
-host anterior tennis-api-atp-wta-itf.p.rapidapi.com → 404 (endpoint eliminado).
-Recolecta: torneos activos, partidos próximos, rankings, forma por superficie, H2H.
+Collector: Tennis API via RapidAPI.
+
+ESTADO (2026-05-01): tennisapi1.p.rapidapi.com devuelve 404 en todos los endpoints
+  (/atp/tournaments, /wta/tournaments, /tournaments, /calendar → 404).
+  La suscripción existe (no devuelve 403) pero el host/versión de la API es incorrecto.
+  ACCIÓN: verificar el host correcto en RapidAPI Dashboard y actualizar _HOST.
+  Posibles hosts alternativos: tennis-live-data.p.rapidapi.com, api-tennis.p.rapidapi.com
+
+Fuentes de datos: torneos activos, partidos próximos, rankings, forma por superficie, H2H.
 Escribe en Firestore: upcoming_matches + team_stats (usando player_id como clave).
 """
 import asyncio
@@ -87,24 +93,53 @@ def _get_league_code(tournament_name: str, tour: str = "atp") -> str:
 
 
 async def get_active_tournaments() -> list[dict]:
-    """Devuelve torneos ATP y WTA activos o próximos.
-    tennisapi1 usa /atp/tournaments y /wta/tournaments (no /tournaments).
     """
-    atp = await _request("/atp/tournaments")
-    wta = await _request("/wta/tournaments")
-    results = []
-    for data, tour_label in [(atp, "atp"), (wta, "wta")]:
+    Devuelve torneos ATP y WTA activos o próximos.
+    Prueba múltiples variantes de endpoint — tennisapi1 puede cambiar rutas entre versiones.
+    """
+    results: list[dict] = []
+
+    # Intentar en orden: tour-específico primero, genérico como fallback
+    _TOUR_ENDPOINTS: list[tuple[str, str]] = [
+        ("/atp/tournaments", "atp"),
+        ("/wta/tournaments", "wta"),
+        ("/tournaments/atp", "atp"),
+        ("/tournaments/wta", "wta"),
+    ]
+    _GENERIC_ENDPOINTS = ["/tournaments", "/calendar"]
+
+    found_tour_specific = False
+    for path, tour_label in _TOUR_ENDPOINTS:
+        data = await _request(path)
         if data is None:
             continue
         items = data.get("results", data.get("tournaments", data if isinstance(data, list) else []))
-        if isinstance(items, list):
+        if isinstance(items, list) and items:
             for t in items:
                 t["_tour"] = tour_label
             results.extend(items)
+            found_tour_specific = True
+            logger.info("tennis_collector: %d torneos via %s", len(items), path)
+
+    if not found_tour_specific:
+        for path in _GENERIC_ENDPOINTS:
+            data = await _request(path)
+            if data is None:
+                continue
+            items = data.get("results", data.get("tournaments", data if isinstance(data, list) else []))
+            if isinstance(items, list) and items:
+                for t in items:
+                    if "_tour" not in t:
+                        name = t.get("name", "").lower()
+                        t["_tour"] = "wta" if "wta" in name or "women" in name else "atp"
+                results.extend(items)
+                logger.info("tennis_collector: %d torneos via %s (fallback)", len(items), path)
+                break
+
     if not results:
-        logger.warning("tennis_collector: sin torneos obtenidos (atp=%s wta=%s)", atp is not None, wta is not None)
+        logger.warning("tennis_collector: sin torneos — API no responde o endpoints cambiados")
     else:
-        logger.info("tennis_collector: %d torneos obtenidos", len(results))
+        logger.info("tennis_collector: %d torneos totales", len(results))
     return results
 
 
