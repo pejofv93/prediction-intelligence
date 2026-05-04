@@ -247,6 +247,54 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
         return []
 
 
+async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict]:
+    """
+    Últimos partidos del equipo NBA desde el schedule ESPN (gratuito, sin clave).
+    URL: /apis/site/v2/sports/basketball/nba/teams/{id}/schedule
+    Devuelve raw_matches en formato basketball_collector:
+      [{goals_home, goals_away, home_team_id, was_home, match_date}]
+    Solo partidos completados (ambas puntuaciones > 0).
+    """
+    url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{espn_team_id}/schedule"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            logger.warning("ESPN NBA schedule team %d: HTTP %d", espn_team_id, resp.status_code)
+            return []
+        data = resp.json()
+    except Exception:
+        logger.error("ESPN NBA schedule team %d: error fetch", espn_team_id, exc_info=True)
+        return []
+
+    matches: list[dict] = []
+    for event in data.get("events", []):
+        comp = (event.get("competitions") or [{}])[0]
+        competitors = comp.get("competitors", [])
+        home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+        away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+
+        home_score_raw = home.get("score", {})
+        away_score_raw = away.get("score", {})
+        goals_home = float(home_score_raw.get("value", 0)) if isinstance(home_score_raw, dict) else 0.0
+        goals_away = float(away_score_raw.get("value", 0)) if isinstance(away_score_raw, dict) else 0.0
+
+        if goals_home <= 0 or goals_away <= 0:
+            continue  # partido futuro o en curso
+
+        home_tid = int(home.get("team", {}).get("id", 0)) or None
+        matches.append({
+            "goals_home": goals_home,
+            "goals_away": goals_away,
+            "home_team_id": home_tid,
+            "was_home": home_tid == espn_team_id,
+            "match_date": event.get("date", "")[:10],
+        })
+
+    logger.info("ESPN NBA schedule team %d: %d partidos completados", espn_team_id, len(matches))
+    return matches
+
+
 async def get_games_by_league(league_id: int, date_str: str | None = None) -> list[dict]:
     """
     GET /games?date=&league=ID&season=YYYY-YYYY via api-basketball.p.rapidapi.com.

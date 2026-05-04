@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from collectors.api_sports_client import (
     get_games_by_league,
     get_nba_games_espn,
+    get_nba_team_stats_espn,
     get_team_stats_bdl,
 )
 from collectors.stats_processor import (
@@ -86,79 +87,109 @@ async def collect_basketball_games(days: int = 1) -> list[dict]:
 
 async def collect_basketball_team_stats(games: list[dict]) -> None:
     """
-    Para cada equipo en la lista de partidos, recopila sus últimos 10 partidos
+    Para cada equipo en la lista de partidos, recopila sus últimos partidos
     y guarda team_stats enriquecido en Firestore.
-    Solo se ejecuta para partidos de api-basketball (no ESPN) ya que requiere
-    suscripción activa. Los partidos ESPN usan stats por defecto en el analyzer.
-    """
-    # Filtrar partidos de ESPN — api-basketball devuelve 403 (no suscrito)
-    api_games = [g for g in games if g.get("source") != "espn"]
-    if not api_games:
-        logger.info("basketball_collector: team_stats omitido — todos los partidos son de ESPN (sin suscripción api-basketball)")
-        return
 
+    - Partidos ESPN (source='espn'): usa get_nba_team_stats_espn() — gratuito, sin clave.
+    - Partidos api-basketball: usa get_team_stats_bdl() — requiere suscripción activa.
+    """
     teams_seen: set[int] = set()
-    games = api_games  # noqa: F841 — reasignado para el loop
 
     for game in games:
-        for team_id_key, sport in [
-            ("home_team_id", game.get("sport", "nba")),
-            ("away_team_id", game.get("sport", "nba")),
-        ]:
+        source = game.get("source", "")
+        for team_id_key in ("home_team_id", "away_team_id"):
             team_id = game.get(team_id_key)
             if not team_id or team_id in teams_seen:
                 continue
 
             teams_seen.add(team_id)
             try:
-                raw = await get_team_stats_bdl(sport, team_id, last_n=10)
-                if not raw:
-                    logger.debug("basketball_collector: sin stats para team %d", team_id)
-                    continue
+                if source == "espn":
+                    # ESPN schedule → raw_matches ya en formato correcto
+                    raw_matches_fmt = await get_nba_team_stats_espn(team_id)
+                    if not raw_matches_fmt:
+                        logger.debug("basketball_collector: ESPN sin partidos completados para team %d", team_id)
+                        continue
 
-                results = build_results_list(raw, team_id)
-                form_score = calculate_form_score(results[:10])
-                streak = detect_streak(results[:10])
+                    # Form score desde raw_matches ESPN (was_home ya poblado)
+                    results = [
+                        {"result": "win" if (m["goals_home"] > m["goals_away"] and m["was_home"])
+                                        or (m["goals_away"] > m["goals_home"] and not m["was_home"])
+                                  else "loss"}
+                        for m in raw_matches_fmt
+                    ]
+                    form_score = calculate_form_score(results[:10])
+                    streak = detect_streak(results[:10])
 
-                team_name = ""
-                for m in raw:
-                    if m.get("home_team_id") == team_id:
-                        team_name = m.get("home_team_name", "")
-                        break
-                    elif m.get("away_team_id") == team_id:
-                        team_name = m.get("away_team_name", "")
-                        break
+                    # Nombre del equipo desde el game actual
+                    if team_id == game.get("home_team_id"):
+                        team_name = game.get("home_team_name", f"Team_{team_id}")
+                    else:
+                        team_name = game.get("away_team_name", f"Team_{team_id}")
 
-                raw_matches_fmt = [
-                    {
-                        "match_id": m["match_id"],
-                        "date": m["date"],
-                        "home_team_id": m["home_team_id"],
-                        "away_team_id": m["away_team_id"],
-                        "goals_home": m.get("goals_home") or 0,
-                        "goals_away": m.get("goals_away") or 0,
-                        "was_home": m["home_team_id"] == team_id,
+                    doc = {
+                        "team_id": team_id,
+                        "team_name": team_name,
+                        "league": game.get("league", "NBA"),
+                        "sport": "nba",
+                        "last_10": results[:10],
+                        "form_score": form_score,
+                        "streak": streak,
+                        "raw_matches": raw_matches_fmt[:10],
+                        "xg_per_game": 0.0,
+                        "source": "espn",
+                        "updated_at": datetime.now(timezone.utc),
                     }
-                    for m in raw
-                    if m.get("goals_home") is not None and m.get("goals_away") is not None
-                ]
+                else:
+                    sport = game.get("sport", "nba")
+                    raw = await get_team_stats_bdl(sport, team_id, last_n=10)
+                    if not raw:
+                        logger.debug("basketball_collector: sin stats para team %d", team_id)
+                        continue
 
-                doc = {
-                    "team_id": team_id,
-                    "team_name": team_name or f"Team_{team_id}",
-                    "league": game.get("league", "NBA"),
-                    "sport": sport,
-                    "last_10": results[:10],
-                    "form_score": form_score,
-                    "streak": streak,
-                    "raw_matches": raw_matches_fmt,
-                    "xg_per_game": 0.0,
-                    "updated_at": datetime.now(timezone.utc),
-                }
+                    results = build_results_list(raw, team_id)
+                    form_score = calculate_form_score(results[:10])
+                    streak = detect_streak(results[:10])
+
+                    team_name = ""
+                    for m in raw:
+                        if m.get("home_team_id") == team_id:
+                            team_name = m.get("home_team_name", "")
+                            break
+                        elif m.get("away_team_id") == team_id:
+                            team_name = m.get("away_team_name", "")
+                            break
+
+                    raw_matches_fmt = [
+                        {
+                            "goals_home": m.get("goals_home") or 0,
+                            "goals_away": m.get("goals_away") or 0,
+                            "home_team_id": m["home_team_id"],
+                            "was_home": m["home_team_id"] == team_id,
+                            "match_date": m.get("date", ""),
+                        }
+                        for m in raw
+                        if m.get("goals_home") is not None and m.get("goals_away") is not None
+                    ]
+
+                    doc = {
+                        "team_id": team_id,
+                        "team_name": team_name or f"Team_{team_id}",
+                        "league": game.get("league", "NBA"),
+                        "sport": sport,
+                        "last_10": results[:10],
+                        "form_score": form_score,
+                        "streak": streak,
+                        "raw_matches": raw_matches_fmt,
+                        "xg_per_game": 0.0,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
 
                 col("team_stats").document(f"bball_{team_id}").set(doc)
-                logger.info("basketball_collector: team_stats(%d) %s form=%.1f",
-                            team_id, team_name, form_score)
+                logger.info(
+                    "basketball_collector: team_stats(%d) %s form=%.1f src=%s partidos=%d",
+                    team_id, doc["team_name"], form_score, source or "api", len(raw_matches_fmt),
+                )
 
             except Exception:
                 logger.error("basketball_collector: error stats team %d", team_id, exc_info=True)

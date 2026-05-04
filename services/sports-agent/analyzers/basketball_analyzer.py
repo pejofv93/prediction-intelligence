@@ -277,19 +277,15 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         logger.error("basketball_analyzer(%s): error leyendo team_stats", match_id, exc_info=True)
         return []
 
-    _no_hist_data = not home_stats.get("raw_matches") and not away_stats.get("raw_matches")
-    if _no_hist_data:
-        logger.info(
-            "basketball_analyzer(%s): sin team_stats en Firestore — modelo home_adv puro (%s vs %s)",
+    if not home_stats.get("raw_matches") and not away_stats.get("raw_matches"):
+        logger.debug(
+            "basketball_analyzer(%s): sin team_stats para %s vs %s — skip",
             match_id, home_name, away_name,
         )
+        return []
 
     # Ratings
     rats = _build_ratings(home_stats, away_stats, league)
-    if _no_hist_data:
-        # Con ratings simétricos (100/100), std de señales = 0 → conf=1.0 artificialmente.
-        # Limitamos a 0.70 para reflejar incertidumbre real al no tener histórico.
-        rats["confidence"] = 0.70
     sigs = rats["signals"]
     conf = rats["confidence"]
     margin = rats["expected_margin"]
