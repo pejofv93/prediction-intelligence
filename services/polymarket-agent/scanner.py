@@ -39,20 +39,23 @@ def _categorize_for_scan(question: str) -> str:
 
 
 async def _get_alerted_market_ids_48h() -> set[str]:
-    """Devuelve market_ids alertados a Telegram en las últimas 48h."""
+    """Devuelve market_ids alertados a Telegram en las últimas 48h.
+    Usa solo sent_at (un campo) para evitar índice compuesto Firestore.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
     alerted: set[str] = set()
     try:
         docs = list(
             col("alerts_sent")
-            .where(filter=FieldFilter("type", "==", "polymarket"))
             .where(filter=FieldFilter("sent_at", ">=", cutoff))
             .stream()
         )
         for doc in docs:
-            mid = doc.to_dict().get("market_id")
-            if mid:
-                alerted.add(mid)
+            d = doc.to_dict()
+            if d.get("type") == "polymarket":
+                mid = d.get("market_id")
+                if mid:
+                    alerted.add(mid)
     except Exception:
         logger.warning("_get_alerted_market_ids_48h: error leyendo alerts_sent", exc_info=True)
     return alerted

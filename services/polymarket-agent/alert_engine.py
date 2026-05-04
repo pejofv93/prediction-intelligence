@@ -192,17 +192,21 @@ async def check_and_alert(analysis: dict) -> bool:
 
     # MEJORA 3: dedup reforzado por market_id — si ya alertamos este mercado en 24h
     # con precio sin cambio >5%, no volver a alertar aunque el alert_key sea distinto.
+    # Filtra por market_id solo (un campo) para evitar índice compuesto Firestore.
     try:
         _mid_docs = list(
             col("alerts_sent")
             .where(filter=FieldFilter("market_id", "==", market_id))
-            .where(filter=FieldFilter("status", "==", "sent"))
-            .order_by("sent_at", direction="DESCENDING")
-            .limit(1)
+            .limit(10)
             .stream()
         )
-        if _mid_docs:
-            _last = _mid_docs[0].to_dict()
+        # Filtrar sent + recientes en Python
+        _sent_docs = [d.to_dict() for d in _mid_docs if d.to_dict().get("status") == "sent"]
+        if _sent_docs:
+            _last = max(
+                _sent_docs,
+                key=lambda d: d.get("sent_at") or datetime.min.replace(tzinfo=timezone.utc),
+            )
             _last_sent = _last.get("sent_at")
             _last_price_mid = float(_last.get("last_price", current_price))
             if _last_sent:
