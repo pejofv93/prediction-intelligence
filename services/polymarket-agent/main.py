@@ -261,6 +261,22 @@ async def run_poly_backtest() -> JSONResponse:
     return JSONResponse(status_code=202, content={"status": "accepted", "job": "poly-backtest"})
 
 
+@app.post("/run-news-trigger", dependencies=[Depends(verify_token)])
+async def run_news_trigger() -> JSONResponse:
+    """202 inmediato → background: news_trigger.run_news_trigger() — top 10 mercados con DDG."""
+    asyncio.create_task(_bg_news_trigger())
+    return JSONResponse(status_code=202, content={"status": "accepted", "job": "news-trigger"})
+
+
+@app.post("/analyze-urgent", dependencies=[Depends(verify_token)])
+async def analyze_urgent(market_id: str) -> JSONResponse:
+    """Re-analiza un mercado específico inmediatamente (sin esperar rotación de batch)."""
+    if not market_id:
+        raise HTTPException(status_code=400, detail="market_id requerido")
+    asyncio.create_task(_bg_analyze_urgent(market_id))
+    return JSONResponse(status_code=202, content={"status": "accepted", "market_id": market_id})
+
+
 @app.post("/run-websocket", dependencies=[Depends(verify_token)])
 async def run_websocket() -> JSONResponse:
     """202 inmediato → inicia asyncio.create_task(websocket_loop) — loop infinito."""
@@ -712,3 +728,50 @@ async def _bg_websocket() -> None:
         await start_monitoring(top_n_markets=20)
     except Exception as e:
         logger.error("websocket: error no controlado — %s", e, exc_info=True)
+
+
+async def _bg_news_trigger() -> None:
+    """Busca breaking news en top 10 mercados activos y fuerza re-análisis si hay impacto."""
+    try:
+        from news_trigger import run_news_trigger
+        result = await run_news_trigger()
+        logger.info(
+            "news-trigger: checked=%d triggered=%d errors=%d",
+            result.get("checked", 0), result.get("triggered", 0), result.get("errors", 0),
+        )
+    except Exception as e:
+        logger.error("news-trigger: error no controlado — %s", e, exc_info=True)
+
+
+async def _bg_analyze_urgent(market_id: str) -> None:
+    """Re-analiza un mercado específico de forma urgente (fuera del ciclo de batch)."""
+    try:
+        from datetime import datetime, timezone
+        from shared.firestore_client import col
+        from groq_analyzer import analyze_market
+        from alert_engine import check_and_alert
+        from shared.groq_client import GROQ_CALL_DELAY
+
+        logger.info("analyze-urgent: iniciando para market_id=%s", market_id)
+        enriched_doc = col("enriched_markets").document(market_id).get()
+        if not enriched_doc.exists:
+            logger.warning("analyze-urgent(%s): no encontrado en enriched_markets", market_id)
+            return
+
+        enriched = enriched_doc.to_dict()
+        prediction = await analyze_market(enriched)
+        if prediction is None:
+            logger.info("analyze-urgent(%s): sin señal generada", market_id)
+            return
+
+        alerted = await check_and_alert(prediction)
+        if alerted:
+            try:
+                from shared.shadow_engine import track_new_signal
+                await track_new_signal(prediction, "polymarket")
+            except Exception:
+                pass
+        logger.info("analyze-urgent(%s): edge=%.3f rec=%s alerted=%s", market_id, prediction.get("edge", 0), prediction.get("recommendation"), alerted)
+
+    except Exception as e:
+        logger.error("analyze-urgent(%s): error no controlado — %s", market_id, e, exc_info=True)

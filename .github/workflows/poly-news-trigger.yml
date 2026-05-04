@@ -1,0 +1,18 @@
+name: poly-news-trigger
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger news trigger
+        run: |
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-news-trigger" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 120 \
+            --fail --silent --show-error

@@ -130,6 +130,32 @@ async def check_and_alert(analysis: dict) -> bool:
     effective_min_edge = thresholds[f"{dir_key}_min_edge"]
     effective_min_conf = thresholds[f"{dir_key}_min_confidence"]
 
+    # Ajuste dinámico por accuracy de categoría
+    _category = str(analysis.get("category") or "")
+    if _category:
+        try:
+            _wdoc = col("poly_model_weights").document("current").get()
+            if _wdoc.exists:
+                _by_cat = _wdoc.to_dict().get("by_category", {})
+                _cs = _by_cat.get(_category, {})
+                _cn = int(_cs.get("total", 0))
+                _ca = float(_cs.get("accuracy", 0))
+                if _cn >= 5:
+                    if _ca < 0.50:
+                        effective_min_edge = round(effective_min_edge + 0.03, 4)
+                        logger.debug(
+                            "check_and_alert(%s): cat=%s acc=%.0f%% n=%d → +3%% edge (bajo rendimiento)",
+                            analysis.get("market_id"), _category, _ca * 100, _cn,
+                        )
+                    elif _ca > 0.70:
+                        effective_min_edge = round(max(0.05, effective_min_edge - 0.02), 4)
+                        logger.debug(
+                            "check_and_alert(%s): cat=%s acc=%.0f%% n=%d → -2%% edge (alto rendimiento)",
+                            analysis.get("market_id"), _category, _ca * 100, _cn,
+                        )
+        except Exception:
+            pass
+
     if abs(edge) < effective_min_edge:
         logger.debug(
             "check_and_alert(%s): abs(edge)=%.3f < %.3f (%s learned) — omitida",
