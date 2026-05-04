@@ -531,7 +531,7 @@ async def _bg_analyze() -> dict:
                 else:
                     predictions_generated += 1
 
-                    # Whale detection
+                    # Whale detection (heurística de volumen)
                     try:
                         from price_tracker import detect_whale_activity, apply_whale_to_signal
                         whale_data = await detect_whale_activity(enriched.get("market_id", ""))
@@ -544,6 +544,28 @@ async def _bg_analyze() -> dict:
                             )
                     except Exception as _we:
                         logger.debug("analyze: error en whale detection — %s", _we)
+
+                    # Smart wallet tracker (CLOB-based, win_rate > 65%)
+                    try:
+                        from wallet_tracker import get_top_traders, check_wallet_activity
+                        await get_top_traders(enriched.get("market_id", ""))
+                        _wt = await check_wallet_activity(
+                            enriched.get("market_id", ""),
+                            prediction.get("recommendation", "PASS"),
+                        )
+                        if _wt.get("whale_signal"):
+                            _new_conf = round(
+                                max(0.50, min(0.95, float(prediction.get("confidence", 0.65)) + _wt["confidence_adj"])),
+                                4,
+                            )
+                            prediction["confidence"] = _new_conf
+                            prediction["whale_info"] = _wt["message"]
+                            logger.info(
+                                "analyze: wallet_tracker %s — conf→%.2f (%s)",
+                                enriched.get("market_id"), _new_conf, _wt["message"],
+                            )
+                    except Exception as _wte:
+                        logger.debug("analyze: wallet_tracker error — %s", _wte)
 
                     # CLV temporal factor en unified_score
                     try:

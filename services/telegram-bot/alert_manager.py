@@ -340,6 +340,9 @@ def _format_poly_alert(analysis: dict) -> str:
     slug = str(analysis.get("slug") or "")
     link_line = f"🔗 [Ver mercado](https://polymarket.com/event/{slug})\n" if slug else ""
 
+    whale_info = str(analysis.get("whale_info") or "")
+    whale_line = f"{whale_info}\n" if whale_info else ""
+
     return (
         f"🔮 OPORTUNIDAD POLYMARKET — {intensity}\n"
         f"{cat_line}"
@@ -349,6 +352,7 @@ def _format_poly_alert(analysis: dict) -> str:
         f"{meta_line}"
         f"{link_line}"
         f"{smart_line}"
+        f"{whale_line}"
         f"💭 {reasoning}\n\n"
         f"⚠️ Apuesta responsablemente. No es asesoramiento financiero."
     )
