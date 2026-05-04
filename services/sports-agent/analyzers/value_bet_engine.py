@@ -22,6 +22,7 @@ from shared.config import (
     SPORTS_ALERT_EDGE,
     SPORTS_MIN_CONFIDENCE,
     SPORTS_MIN_EDGE,
+    TAVILY_API_KEY,
     TELEGRAM_BOT_URL,
 )
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -1226,6 +1227,95 @@ def _get_table_position(team_id: int | str | None, league: str) -> int | None:
     return None
 
 
+async def _fetch_external_context(home_team: str, away_team: str, match_date_str: str) -> dict:
+    """
+    Busca contexto externo (lesiones, rotaciones) via Tavily.
+    Devuelve dict con:
+      confidence_adj: float (multiplicador, 1.0 = sin cambio)
+      notes: list[str]  (mensajes para la alerta)
+    Nunca lanza excepción — en cualquier error devuelve {"confidence_adj": 1.0, "notes": []}.
+    """
+    if not TAVILY_API_KEY:
+        return {"confidence_adj": 1.0, "notes": []}
+
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+
+        queries = [
+            f"{home_team} lesiones {match_date_str}",
+            f"{away_team} lesiones {match_date_str}",
+            f"{home_team} rotaciones alineación {match_date_str}",
+        ]
+
+        _INJURY_KEYWORDS = {"lesión", "lesionado", "baja confirmada", "out", "doubt", "injured"}
+        _ROTATION_KEYWORDS = {"rotaciones", "rotación confirmada", "descansa", "suplentes", "lineup changes"}
+
+        async def _run_query(q: str) -> list:
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: client.search(q, max_results=3, search_depth="basic"),
+                )
+                return result.get("results", [])
+            except Exception:
+                return []
+
+        all_results = await asyncio.gather(*[_run_query(q) for q in queries])
+
+        confidence_adj = 1.0
+        notes: list[str] = []
+        injury_found = False
+        rotation_found = False
+
+        for results in all_results:
+            for item in results:
+                content = (item.get("content", "") + " " + item.get("title", "")).lower()
+                url = item.get("url", "")
+                title = item.get("title", "")
+
+                if not injury_found:
+                    for kw in _INJURY_KEYWORDS:
+                        if kw in content:
+                            injury_found = True
+                            domain = url.split("/")[2] if url.count("/") >= 2 else url
+                            notes.append(f"{title[:80]} (fuente: {domain})")
+                            break
+
+                if not rotation_found:
+                    for kw in _ROTATION_KEYWORDS:
+                        if kw in content:
+                            rotation_found = True
+                            domain = url.split("/")[2] if url.count("/") >= 2 else url
+                            if not any(domain in n for n in notes):
+                                notes.append(f"Rotaciones detectadas — {title[:60]} (fuente: {domain})")
+                            break
+
+        if injury_found:
+            confidence_adj = round(confidence_adj * 0.85, 4)
+        if rotation_found:
+            confidence_adj = round(confidence_adj * 0.90, 4)
+
+        # Cap: nunca reducir por debajo de 0.75 desde esta función
+        confidence_adj = max(0.75, confidence_adj)
+
+        if confidence_adj < 1.0:
+            logger.info(
+                "_fetch_external_context(%s vs %s): adj=%.2f injuries=%s rotations=%s notes=%s",
+                home_team, away_team, confidence_adj, injury_found, rotation_found, notes,
+            )
+
+        return {"confidence_adj": confidence_adj, "notes": notes}
+
+    except Exception:
+        logger.error(
+            "_fetch_external_context(%s vs %s): error — devolviendo sin ajuste",
+            home_team, away_team, exc_info=True,
+        )
+        return {"confidence_adj": 1.0, "notes": []}
+
+
 async def generate_signal(enriched_match: dict) -> list[dict]:
     """
     Pipeline completo de generacion de senal para un partido enriquecido.
@@ -1385,6 +1475,14 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     home_odds = odds_data["home_odds"]
     away_odds = odds_data["away_odds"]
 
+    # --- 3b. Odds movement detection ---
+    try:
+        from analyzers.line_movement import _detect_odds_movement
+        odds_movement = _detect_odds_movement(match_id)
+    except Exception:
+        odds_movement = {"flag": "NONE", "direction": None, "pct_change_6h": 0.0,
+                        "pct_change_24h": 0.0, "timeframe": None, "message": ""}
+
     # --- 4. Edge para home y away ---
     edge_home = calculate_edge(result_home["prob"], home_odds)
     edge_away = calculate_edge(result_away["prob"], away_odds)
@@ -1495,6 +1593,20 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         if best_confidence <= SPORTS_MIN_CONFIDENCE:
             return []
 
+    # --- 7. Contexto externo (lesiones / rotaciones) ---
+    external_ctx = await _fetch_external_context(
+        str(home_team), str(away_team),
+        str(match_date)[:10] if match_date else "",
+    )
+    if external_ctx["confidence_adj"] < 1.0:
+        best_confidence = round(best_confidence * external_ctx["confidence_adj"], 4)
+        if best_confidence <= SPORTS_MIN_CONFIDENCE:
+            logger.info(
+                "generate_signal(%s): descartado por contexto externo (conf ajustada a %.3f) — %s",
+                match_id, best_confidence, external_ctx["notes"],
+            )
+            return []
+
     kelly = kelly_criterion(best_edge, best_odds)
     results: list[dict] = []
 
@@ -1539,15 +1651,18 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         "result": None,
         "correct": None,
         "error_type": None,
+        "external_context": external_ctx["notes"],
+        "odds_movement": odds_movement,
     }
 
     # --- Guardar en Firestore predictions ---
     try:
         col("predictions").document(match_id).set(prediction)
         logger.info(
-            "generate_signal(%s): %s @ %.2f | edge=%.1f%% conf=%.0f%% kelly=%.1f%%",
+            "generate_signal(%s): %s @ %.2f | edge=%.1f%% conf=%.0f%% kelly=%.1f%% | odds_movement=%s",
             match_id, team_to_back, best_odds,
             best_edge * 100, best_confidence * 100, kelly * 100,
+            odds_movement.get("flag", "NONE"),
         )
     except Exception:
         logger.error("generate_signal(%s): error guardando prediction", match_id, exc_info=True)

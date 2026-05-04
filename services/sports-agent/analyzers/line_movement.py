@@ -231,6 +231,163 @@ async def detect_line_movement(fixture_id: str) -> dict:
     return result
 
 
+def _detect_odds_movement(match_id: str) -> dict:
+    """
+    Compara cuota actual vs 6h y 24h atrás para detectar SMART_MONEY o FADING.
+
+    Returns:
+    {
+        "flag": "SMART_MONEY" | "FADING" | "NONE",
+        "direction": "home" | "away" | None,
+        "pct_change_6h": float,   # e.g. -0.12 para -12%
+        "pct_change_24h": float,
+        "timeframe": "6h" | "24h" | None,
+        "message": str,
+    }
+
+    SMART_MONEY: pct_change_6h < -0.10 (cuota bajó >10% en 6h)
+    FADING:      pct_change_24h > 0.15 (cuota subió >15% en 24h)
+    """
+    result: dict = {
+        "flag": "NONE",
+        "direction": None,
+        "pct_change_6h": 0.0,
+        "pct_change_24h": 0.0,
+        "timeframe": None,
+        "message": "",
+    }
+
+    try:
+        from shared.firestore_client import col
+
+        docs = list(
+            col("odds_history").where(filter=FieldFilter("fixture_id", "==", match_id)).stream()
+        )
+
+        if not docs:
+            return result
+
+        now_utc = datetime.now(timezone.utc)
+        target_6h = now_utc - timedelta(hours=6)
+        target_24h = now_utc - timedelta(hours=24)
+        tolerance = timedelta(hours=2)
+
+        best_pct_6h = 0.0
+        best_pct_24h = 0.0
+        best_direction: str | None = None
+
+        for doc in docs:
+            data = doc.to_dict() or {}
+            history: list = data.get("odds_history", [])
+            odds_current = data.get("odds_current", {})
+
+            cur_home = float(odds_current.get("home", 0) or 0)
+            cur_away = float(odds_current.get("away", 0) or 0)
+
+            if len(history) < 2 or cur_home <= 0:
+                continue
+
+            # Parsear timestamps de cada entrada
+            parsed: list[tuple] = []  # (datetime, home_odds, away_odds)
+            for entry in history:
+                try:
+                    rec_at = entry.get("recorded_at", "")
+                    if not rec_at:
+                        continue
+                    if rec_at.endswith("Z"):
+                        rec_at = rec_at[:-1] + "+00:00"
+                    entry_dt = datetime.fromisoformat(rec_at)
+                    if entry_dt.tzinfo is None:
+                        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                    h = float(entry.get("home_odds", 0) or 0)
+                    a = float(entry.get("away_odds", 0) or 0)
+                    if h > 0:
+                        parsed.append((entry_dt, h, a))
+                except Exception:
+                    continue
+
+            if not parsed:
+                continue
+
+            # Encontrar entrada más cercana a 6h atrás
+            def _closest(target_dt: datetime) -> tuple | None:
+                best_entry = None
+                best_delta = None
+                for p in parsed:
+                    delta = abs(p[0] - target_dt)
+                    if best_delta is None or delta < best_delta:
+                        best_delta = delta
+                        best_entry = p
+                if best_entry and abs(best_entry[0] - target_dt) <= tolerance:
+                    return best_entry
+                return None
+
+            entry_6h = _closest(target_6h)
+            entry_24h = _closest(target_24h)
+
+            # Calcular pct_change_6h
+            if entry_6h is not None:
+                h6 = entry_6h[1]
+                a6 = entry_6h[2]
+                if h6 > 0:
+                    pc6_home = (cur_home - h6) / h6
+                    if abs(pc6_home) > abs(best_pct_6h):
+                        best_pct_6h = pc6_home
+                        # Bajada de cuota home → dinero en home
+                        best_direction = "home" if pc6_home < 0 else "away"
+                if a6 > 0 and cur_away > 0:
+                    pc6_away = (cur_away - a6) / a6
+                    # Solo actualizar dirección desde away si es más significativo
+                    if abs(pc6_away) > abs(best_pct_6h):
+                        best_pct_6h = pc6_away
+                        best_direction = "away" if pc6_away < 0 else "home"
+
+            # Calcular pct_change_24h
+            if entry_24h is not None:
+                h24 = entry_24h[1]
+                a24 = entry_24h[2]
+                if h24 > 0:
+                    pc24_home = (cur_home - h24) / h24
+                    if abs(pc24_home) > abs(best_pct_24h):
+                        best_pct_24h = pc24_home
+
+                if a24 > 0 and cur_away > 0:
+                    pc24_away = (cur_away - a24) / a24
+                    if abs(pc24_away) > abs(best_pct_24h):
+                        best_pct_24h = pc24_away
+
+        result["pct_change_6h"] = round(best_pct_6h, 4)
+        result["pct_change_24h"] = round(best_pct_24h, 4)
+
+        # Clasificar flag
+        if best_pct_6h < -0.10:
+            result["flag"] = "SMART_MONEY"
+            result["direction"] = best_direction
+            result["timeframe"] = "6h"
+            result["message"] = (
+                f"Cuota bajó {abs(best_pct_6h):.0%} en 6h "
+                f"— posible smart money ({best_direction})"
+            )
+        elif best_pct_24h > 0.15:
+            result["flag"] = "FADING"
+            result["direction"] = best_direction
+            result["timeframe"] = "24h"
+            result["message"] = (
+                f"Cuota subió {abs(best_pct_24h):.0%} en 24h "
+                f"— bookmaker alargando ({best_direction})"
+            )
+
+        logger.debug(
+            "_detect_odds_movement(%s): flag=%s pct_6h=%.3f pct_24h=%.3f",
+            match_id, result["flag"], best_pct_6h, best_pct_24h,
+        )
+
+    except Exception as e:
+        logger.warning("_detect_odds_movement: error match_id=%s — %s", match_id, e)
+
+    return result
+
+
 def apply_line_movement_to_signal(signal: dict, movement: dict) -> dict:
     """
     Ajusta confidence según movimiento de cuota.

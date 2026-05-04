@@ -41,6 +41,19 @@ ERROR_TO_WEIGHT: dict[str, str | None] = {
 # Ligas de futbol con modelo estadistico completo
 _FOOTBALL_LEAGUES = set(SUPPORTED_FOOTBALL_LEAGUES.keys())
 
+# Mapeo de market_type → bucket canónico para tracking de accuracy por mercado
+_MARKET_BUCKETS: dict[str, str] = {
+    "h2h":                      "1X2",
+    "totals":                   "OVER_UNDER",
+    "basketball_h1_totals":     "OVER_UNDER",
+    "basketball_q1_totals":     "OVER_UNDER",
+    "btts":                     "BTTS",
+    "asian_handicap":           "ASIAN_HANDICAP",
+    "spread":                   "ASIAN_HANDICAP",
+    "basketball_h1_spread":     "ASIAN_HANDICAP",
+    "double_chance":            "DOUBLE_CHANCE",
+}
+
 
 def _norm(s: str) -> str:
     """Normaliza string para comparación: strip, lower, sin acentos."""
@@ -295,6 +308,9 @@ async def run_daily_learning() -> None:
     processed_predictions: list[dict] = []
     finished_matches_for_elo: list[dict] = []
     accuracy_by_league: dict[str, list[bool]] = {k: [] for k in _FOOTBALL_LEAGUES}
+    accuracy_by_market: dict[str, list[bool]] = {
+        "1X2": [], "OVER_UNDER": [], "BTTS": [], "ASIAN_HANDICAP": [], "DOUBLE_CHANCE": []
+    }
 
     # 3a. Paralelizar todas las llamadas check_result (I/O bound → asyncio.gather)
     _match_ids = [str(p.get("match_id", "")) for p in pending]
@@ -347,9 +363,15 @@ async def run_daily_learning() -> None:
                     "date": str(prediction.get("match_date", "")),
                 })
 
-            # Acumulat accuracy por liga
+            # Acumular accuracy por liga
             if league in accuracy_by_league:
                 accuracy_by_league[league].append(correct)
+
+            # Acumular accuracy por tipo de mercado
+            market_type = prediction.get("market_type") or "h2h"
+            bucket = _MARKET_BUCKETS.get(market_type, "1X2")
+            if bucket in accuracy_by_market:
+                accuracy_by_market[bucket].append(correct)
 
             # Actualizar el documento prediction en Firestore
             processed_predictions.append({
@@ -417,6 +439,12 @@ async def run_daily_learning() -> None:
         for league, results in accuracy_by_league.items()
     }
 
+    # Calcular accuracy por tipo de mercado
+    acc_by_market = {
+        bucket: round(sum(results) / len(results), 4) if results else None
+        for bucket, results in accuracy_by_market.items()
+    }
+
     new_version = current_version + 1
     total_in_db, correct_in_db = _get_historical_counts()
 
@@ -426,6 +454,7 @@ async def run_daily_learning() -> None:
             "updated": now,
             "weights": current_weights,
             "accuracy_by_league": acc_by_league,
+            "accuracy_by_market": acc_by_market,
             "blacklisted_leagues": [],
             "min_edge_threshold": 0.08,
             "min_confidence": 0.65,
@@ -467,6 +496,7 @@ async def run_daily_learning() -> None:
                 "predictions_correct": correct_new,
                 "accuracy": updated_accuracy,
                 "accuracy_by_league": acc_by_league,
+                "accuracy_by_market": acc_by_market,
                 "weights_end": current_weights,
                 "prev_week_accuracy": prev_week_accuracy,
             })
@@ -479,6 +509,7 @@ async def run_daily_learning() -> None:
                 "accuracy": week_accuracy,
                 "prev_week_accuracy": prev_week_accuracy,
                 "accuracy_by_league": acc_by_league,
+                "accuracy_by_market": acc_by_market,
                 "weights_start": weights_start,
                 "weights_end": current_weights,
                 "created_at": now,

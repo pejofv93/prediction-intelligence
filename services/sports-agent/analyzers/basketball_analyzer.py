@@ -22,6 +22,7 @@ import numpy as np
 from shared.config import (
     BASKETBALL_HOME_ADV_NBA, BASKETBALL_HOME_ADV_EURO, BASKETBALL_SPREAD_SIGMA,
     ODDS_API_KEY, SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE,
+    TAVILY_API_KEY,
 )
 from shared.firestore_client import col
 
@@ -253,6 +254,77 @@ def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -> None
             logger.error("basketball_analyzer: error enviando alerta %s", doc_id, exc_info=True)
 
 
+async def _fetch_nba_injury_context(home_name: str, away_name: str) -> dict:
+    """
+    Busca injury reports NBA via Tavily.
+    Si un top-3 scorer es mencionado como 'out' o 'questionable' → reduce prob del equipo en 8%.
+    Devuelve dict con:
+      home_adj: float (multiplicador para p_home_win, 1.0 = sin cambio)
+      away_adj: float (multiplicador para p_home_win por lesión visitante, 1.0 = sin cambio)
+      notes: list[str]
+    Nunca lanza excepción.
+    """
+    if not TAVILY_API_KEY:
+        return {"home_adj": 1.0, "away_adj": 1.0, "notes": []}
+
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+
+        _OUT_KEYWORDS = {"out", "questionable", "doubtful", "baja", "lesionado", "injured"}
+
+        async def _run_query(q: str) -> list:
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: client.search(q, max_results=3, search_depth="basic"),
+                )
+                return result.get("results", [])
+            except Exception:
+                return []
+
+        home_results, away_results = await asyncio.gather(
+            _run_query(f"{home_name} injury report today"),
+            _run_query(f"{away_name} injury report today"),
+        )
+
+        home_adj = 1.0
+        away_adj = 1.0
+        notes: list[str] = []
+
+        for item in home_results:
+            content = (item.get("content", "") + " " + item.get("title", "")).lower()
+            if any(kw in content for kw in _OUT_KEYWORDS):
+                home_adj = round(home_adj * (1.0 - 0.08), 4)
+                domain = item.get("url", "").split("/")[2] if "/" in item.get("url", "") else ""
+                notes.append(f"{home_name} injury concern — {item.get('title', '')[:60]} (fuente: {domain})")
+                break
+
+        for item in away_results:
+            content = (item.get("content", "") + " " + item.get("title", "")).lower()
+            if any(kw in content for kw in _OUT_KEYWORDS):
+                away_adj = round(away_adj * (1.0 - 0.08), 4)
+                domain = item.get("url", "").split("/")[2] if "/" in item.get("url", "") else ""
+                notes.append(f"{away_name} injury concern — {item.get('title', '')[:60]} (fuente: {domain})")
+                break
+
+        if notes:
+            logger.info(
+                "_fetch_nba_injury_context(%s vs %s): home_adj=%.2f away_adj=%.2f notes=%s",
+                home_name, away_name, home_adj, away_adj, notes,
+            )
+
+        return {"home_adj": home_adj, "away_adj": away_adj, "notes": notes}
+
+    except Exception:
+        logger.error(
+            "_fetch_nba_injury_context(%s vs %s): error — devolviendo sin ajuste",
+            home_name, away_name, exc_info=True,
+        )
+        return {"home_adj": 1.0, "away_adj": 1.0, "notes": []}
+
+
 async def generate_basketball_signals(game: dict, weights_version: int = 0) -> list[dict]:
     match_id  = str(game.get("match_id", ""))
     home_name = game.get("home_team_name", game.get("home_team", ""))
@@ -291,6 +363,52 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     conf = rats["confidence"]
     margin = rats["expected_margin"]
 
+    # --- Back-to-back detection ---
+    yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+
+    def _played_yesterday(raw_matches: list) -> bool:
+        for m in raw_matches[-3:]:  # solo últimos 3 para evitar N lecturas
+            d = str(m.get("match_date", ""))[:10]
+            if d == yesterday_iso:
+                return True
+        return False
+
+    home_b2b = _played_yesterday(home_stats.get("raw_matches", []))
+    away_b2b = _played_yesterday(away_stats.get("raw_matches", []))
+
+    p_home = rats["p_home_win"]
+    if home_b2b:
+        p_home = round(max(0.01, p_home - 0.05), 4)
+        logger.info(
+            "basketball_analyzer(%s): %s back-to-back → p_home reducida a %.3f",
+            match_id, home_name, p_home,
+        )
+    if away_b2b:
+        p_home = round(min(0.99, p_home + 0.05), 4)
+        logger.info(
+            "basketball_analyzer(%s): %s back-to-back → p_home aumentada a %.3f (away B2B)",
+            match_id, away_name, p_home,
+        )
+    # Actualizar rats con p_home ajustada
+    rats = {**rats, "p_home_win": p_home}
+
+    # --- NBA injury search via Tavily ---
+    injury_ctx = await _fetch_nba_injury_context(home_name, away_name)
+    if injury_ctx["home_adj"] < 1.0:
+        adj_p = round(max(0.01, rats["p_home_win"] * injury_ctx["home_adj"]), 4)
+        logger.info(
+            "basketball_analyzer(%s): %s injury → p_home %.3f → %.3f",
+            match_id, home_name, rats["p_home_win"], adj_p,
+        )
+        rats = {**rats, "p_home_win": adj_p}
+    if injury_ctx["away_adj"] < 1.0:
+        adj_p = round(min(0.99, rats["p_home_win"] / max(injury_ctx["away_adj"], 0.01)), 4)
+        logger.info(
+            "basketball_analyzer(%s): %s injury → p_home adjusted to %.3f (away injured)",
+            match_id, away_name, adj_p,
+        )
+        rats = {**rats, "p_home_win": adj_p}
+
     # --- Seeding NBA Playoffs ---
     home_seed: int | None = game.get("home_seed")
     away_seed: int | None = game.get("away_seed")
@@ -316,6 +434,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         "league": league,
         "elo_sufficient": False,
         "h2h_sufficient": False,
+        "external_context": injury_ctx["notes"],
     }
 
     predictions: list[dict] = []

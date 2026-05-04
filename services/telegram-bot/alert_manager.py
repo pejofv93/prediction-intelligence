@@ -163,15 +163,34 @@ def _format_alert_unified(prediction: dict) -> str:
     top3 = sorted(signals.items(), key=lambda x: -abs(float(x[1])))[:3]
     factors_text = ", ".join(f"{k.replace('_', ' ')} {float(v):.2f}" for k, v in top3) or "—"
 
-    return (
+    # Odds movement line
+    om = prediction.get("odds_movement") or {}
+    om_flag = om.get("flag", "NONE")
+    om_line = ""
+    if om_flag == "SMART_MONEY":
+        pct = abs(float(om.get("pct_change_6h", 0))) * 100
+        direction = om.get("direction", "")
+        om_line = f"\n📉 Cuota bajó {pct:.0f}% en 6h — posible smart money ({direction})"
+    elif om_flag == "FADING":
+        pct = abs(float(om.get("pct_change_24h", 0))) * 100
+        direction = om.get("direction", "")
+        om_line = f"\n📈 Cuota subió {pct:.0f}% en 24h — bookmaker alargando ({direction})"
+
+    msg = (
         f"{intensity} | {sport_emoji} {league_label}\n"
         f"{home} vs {away}\n"
         f"Mercado: {market_label} | Selección: *{selection}*\n"
         f"Cuota: *{odds:.2f}* | Edge: *+{edge:.1%}* | Confianza: *{conf:.0%}*\n"
-        f"Factores: {factors_text}\n"
-        f"🧮 Kelly: {kelly:.1%} del bankroll\n\n"
-        f"⚠️ Apuesta responsablemente. No es asesoramiento financiero."
+        f"Factores: {factors_text}"
+        f"{om_line}\n"
+        f"🧮 Kelly: {kelly:.1%} del bankroll"
     )
+    ext_ctx = prediction.get("external_context") or []
+    if ext_ctx:
+        ctx_str = "; ".join(str(n) for n in ext_ctx[:3])
+        msg += f"\n⚠️ Contexto: {ctx_str}"
+    msg += "\n\n⚠️ Apuesta responsablemente. No es asesoramiento financiero."
+    return msg
 
 
 def _format_sports_alert(prediction: dict) -> str:

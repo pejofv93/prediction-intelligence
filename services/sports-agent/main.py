@@ -624,6 +624,41 @@ async def _bg_enrich() -> None:
         logger.error("enrich: error no controlado — %s", e, exc_info=True)
 
 
+def _dedup_signals_for_match(base_match_id: str, signals: list[dict]) -> None:
+    """
+    Mantiene máximo 2 señales por partido: mejor 1X2 + mejor mercado alternativo.
+    Las señales ya están guardadas en Firestore; borra las extras.
+    """
+    if len(signals) <= 2:
+        return
+
+    h2h_signals = [s for s in signals if s.get("market_type") in ("h2h", None, "")]
+    alt_signals  = [s for s in signals if s.get("market_type") not in ("h2h", None, "")]
+
+    to_delete: list[str] = []
+
+    if len(h2h_signals) > 1:
+        h2h_signals.sort(key=lambda s: float(s.get("edge", 0)), reverse=True)
+        to_delete += [s.get("match_id", "") for s in h2h_signals[1:]]
+
+    if len(alt_signals) > 1:
+        alt_signals.sort(key=lambda s: float(s.get("edge", 0)), reverse=True)
+        to_delete += [s.get("match_id", "") for s in alt_signals[1:]]
+
+    for doc_id in to_delete:
+        if not doc_id:
+            continue
+        try:
+            from shared.firestore_client import col
+            col("predictions").document(doc_id).delete()
+            logger.debug("dedup: eliminada señal extra %s de %s", doc_id, base_match_id)
+        except Exception as e:
+            logger.warning("dedup: error eliminando %s — %s", doc_id, e)
+
+    if to_delete:
+        logger.info("dedup(%s): %d señales eliminadas, quedan 2 máx", base_match_id, len(to_delete))
+
+
 async def _bg_analyze() -> None:
     """
     Pipeline de analisis:
@@ -789,6 +824,22 @@ async def _bg_analyze() -> None:
             try:
                 signals = await generate_signal(enriched)
                 signals_generated += len(signals)
+                # Deduplicar: incluye también señales de football_markets (btts, ah, etc.)
+                # que generate_signal guarda internamente sin retornarlas.
+                base_match_id = str(enriched.get("match_id", ""))
+                if base_match_id:
+                    try:
+                        from shared.firestore_client import col as _col_dedup
+                        all_match_docs = list(
+                            _col_dedup("predictions")
+                            .where(filter=FieldFilter("match_id", ">=", base_match_id))
+                            .where(filter=FieldFilter("match_id", "<=", base_match_id + ""))
+                            .stream()
+                        )
+                        all_signal_dicts = [d.to_dict() for d in all_match_docs if d.to_dict()]
+                        _dedup_signals_for_match(base_match_id, all_signal_dicts)
+                    except Exception as _dedup_e:
+                        logger.debug("dedup: error leyendo predictions para %s — %s", base_match_id, _dedup_e)
             except Exception:
                 logger.error(
                     "analyze: error en generate_signal para %s",
@@ -857,6 +908,8 @@ async def _bg_analyze() -> None:
                 try:
                     sigs = await generate_basketball_signals(game, weights_version)
                     signals_generated += len(sigs)
+                    if sigs:
+                        _dedup_signals_for_match(str(game.get("match_id", "")), sigs)
                 except Exception:
                     logger.error("analyze: error basketball %s", game.get("match_id"), exc_info=True)
         except Exception:
