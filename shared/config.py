@@ -7,6 +7,9 @@ GOOGLE_CLOUD_PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 # Si una var no esta presente → None. El servicio debe validar antes de usarla.
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")        # solo telegram-bot
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")    # solo telegram-bot
+TELEGRAM_SPORTS_THREAD_ID = int(os.environ.get("TELEGRAM_SPORTS_THREAD_ID", "4"))   # topic Sports
+TELEGRAM_POLY_THREAD_ID   = int(os.environ.get("TELEGRAM_POLY_THREAD_ID",   "3"))   # topic Polymarket
+TELEGRAM_DAILY_THREAD_ID  = int(os.environ.get("TELEGRAM_DAILY_THREAD_ID",  "4"))   # topic Daily Report
 TELEGRAM_BOT_URL = os.environ.get("TELEGRAM_BOT_URL")    # sports-agent + polymarket-agent
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")

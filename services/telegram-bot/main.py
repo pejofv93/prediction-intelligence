@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from shared.config import TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID, TELEGRAM_DAILY_THREAD_ID
 from fastapi.responses import JSONResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -105,7 +106,7 @@ async def send_alert(request: Request) -> JSONResponse:
         elif alert_type == "polymarket_resolution":
             text = data.get("text", "")
             if text:
-                sent = await send_message(text, message_thread_id=3)
+                sent = await send_message(text, message_thread_id=TELEGRAM_POLY_THREAD_ID)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
     except Exception:
@@ -196,10 +197,10 @@ async def _bg_daily_report() -> None:
             pass
 
         report = format_daily_report(health, shadow_metrics, top_signal, pred_stats)
-        await send_message(report, message_thread_id=4)
+        await send_message(report, message_thread_id=TELEGRAM_DAILY_THREAD_ID)
 
         if health.get("degraded"):
-            await send_message(format_health_alert(health), message_thread_id=4)
+            await send_message(format_health_alert(health), message_thread_id=TELEGRAM_DAILY_THREAD_ID)
 
         logger.info("daily-report: enviado correctamente")
     except Exception as e:
@@ -335,7 +336,7 @@ async def send_weekly_report() -> JSONResponse:
         }
 
         report_text = generate_weekly_report(week_stats, weights_before, weights_after)
-        await send_message(report_text, message_thread_id=4)
+        await send_message(report_text, message_thread_id=TELEGRAM_DAILY_THREAD_ID)
 
         logger.info(
             "send-weekly-report: enviado para %s (%d preds, %d poly)",
@@ -350,7 +351,7 @@ async def send_weekly_report() -> JSONResponse:
         # Intentar enviar un mensaje de error al dueño
         try:
             from alert_manager import send_message
-            await send_message("⚠️ Error generando reporte semanal. Revisa los logs.", message_thread_id=4)
+            await send_message("⚠️ Error generando reporte semanal. Revisa los logs.", message_thread_id=TELEGRAM_DAILY_THREAD_ID)
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Error generando reporte semanal")

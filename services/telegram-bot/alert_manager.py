@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 import httpx
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.config import TELEGRAM_CHAT_ID, TELEGRAM_TOKEN
+from shared.config import (
+    TELEGRAM_CHAT_ID, TELEGRAM_TOKEN,
+    TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +361,7 @@ async def send_sports_alert(prediction: dict) -> bool:
         logger.error("send_sports_alert: error comprobando dedup", exc_info=True)
 
     text = _format_alert_unified(prediction)
-    sent = await send_message(text, message_thread_id=4)
+    sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
 
     if not sent:
         logger.error("send_sports_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
@@ -404,7 +407,7 @@ async def send_poly_alert(analysis: dict) -> bool:
         logger.error("send_poly_alert: error comprobando dedup", exc_info=True)
 
     text = _format_alert_unified(analysis) if analysis.get("sport") else _format_poly_alert(analysis)
-    sent = await send_message(text, message_thread_id=3)
+    sent = await send_message(text, message_thread_id=TELEGRAM_POLY_THREAD_ID)
 
     if not sent:
         logger.error("send_poly_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
