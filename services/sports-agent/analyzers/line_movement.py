@@ -5,6 +5,8 @@ Detecta movimientos significativos de cuota y dinero inteligente.
 import logging
 from datetime import datetime, timezone, timedelta
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 logger = logging.getLogger(__name__)
 
 

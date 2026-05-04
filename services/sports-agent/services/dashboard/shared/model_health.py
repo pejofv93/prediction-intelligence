@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from statistics import mean
 from typing import Optional
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)

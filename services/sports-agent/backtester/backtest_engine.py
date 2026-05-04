@@ -11,6 +11,8 @@ from typing import Optional
 
 import httpx
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.api_quota_manager import quota
 from shared.firestore_client import col
 

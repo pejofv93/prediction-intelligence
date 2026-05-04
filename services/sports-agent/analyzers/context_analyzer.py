@@ -11,6 +11,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 logger = logging.getLogger(__name__)
 
 # Máximo de análisis de contexto por ciclo (evita agotar quota)
