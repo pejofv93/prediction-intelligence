@@ -273,6 +273,24 @@ class QuotaManager:
             }
         return status
 
+    def reset_monthly_quota(self, api_name: str) -> dict:
+        """Resetea cuota mensual: used=0, remaining_reported=limit. Útil tras renovación de plan."""
+        month = _this_month()
+        key = f"{api_name}_monthly_{month}"
+        limit = _MONTHLY_LIMITS.get(api_name)
+        doc = {
+            "key": key,
+            "used": 0,
+            "remaining_reported": limit,
+            "last_reset": datetime.now(timezone.utc).isoformat(),
+            "month": month,
+            "api": api_name,
+        }
+        self._set_doc(key, doc)
+        self._alerted.discard(f"{api_name}_{month}_monthly")
+        logger.info("QuotaManager: cuota mensual %s reseteada (used=0, remaining=%s)", api_name, limit)
+        return {"api": api_name, "month": month, "used": 0, "remaining": limit}
+
     def daily_budget(self) -> dict[str, int]:
         return {**_DAILY_LIMITS, **_MONTHLY_LIMITS}
 

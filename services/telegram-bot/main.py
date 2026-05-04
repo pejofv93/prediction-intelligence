@@ -94,7 +94,7 @@ async def send_alert(request: Request) -> JSONResponse:
     if not alert_type or not data:
         raise HTTPException(status_code=400, detail="Faltan campos 'type' o 'data'")
 
-    from alert_manager import send_sports_alert, send_poly_alert
+    from alert_manager import send_sports_alert, send_poly_alert, send_message
 
     sent = False
     try:
@@ -102,6 +102,10 @@ async def send_alert(request: Request) -> JSONResponse:
             sent = await send_sports_alert(data)
         elif alert_type == "polymarket":
             sent = await send_poly_alert(data)
+        elif alert_type == "polymarket_resolution":
+            text = data.get("text", "")
+            if text:
+                sent = await send_message(text, message_thread_id=2)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
     except Exception:
@@ -139,14 +143,22 @@ async def _bg_daily_report() -> None:
         health = check_model_health()
         shadow_metrics = calculate_metrics()
 
-        # Contar predicciones sports directamente — shadow_trades no es fiable para este conteo
-        # (mezcla polymarket retroactivo, poly nuevos y sports retro, todos con lógica distinta)
-        pred_stats = {"total": 0, "pending": 0, "resolved": 0, "correct": 0, "incorrect": 0}
+        # Contar predicciones sports — separando sintéticas (POISSON_SYNTHETIC) de cuotas reales
+        pred_stats = {
+            "total": 0, "pending": 0, "resolved": 0, "correct": 0, "incorrect": 0,
+            "synthetic": 0, "real_odds": 0,
+        }
         try:
             all_preds = list(col("predictions").limit(500).stream())
             for doc in all_preds:
                 d = doc.to_dict()
                 pred_stats["total"] += 1
+                # Detectar señal sintética por campo source o is_synthetic
+                is_synthetic = d.get("is_synthetic", False) or d.get("source", "") == "POISSON_SYNTHETIC"
+                if is_synthetic:
+                    pred_stats["synthetic"] += 1
+                else:
+                    pred_stats["real_odds"] += 1
                 if d.get("result") is None and d.get("correct") is None:
                     pred_stats["pending"] += 1
                 else:

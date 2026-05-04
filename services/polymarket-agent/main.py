@@ -201,6 +201,21 @@ async def test_gamma_price() -> JSONResponse:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/admin/reset-quota/{api_name}", dependencies=[Depends(verify_token)])
+async def admin_reset_quota(api_name: str) -> JSONResponse:
+    """Resetea cuota mensual de una API en Firestore (used=0, remaining=limit).
+    Ejemplo: POST /admin/reset-quota/oddspapi"""
+    from shared.api_quota_manager import quota, _MONTHLY_LIMITS
+    if api_name not in _MONTHLY_LIMITS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"API '{api_name}' no reconocida. Disponibles: {list(_MONTHLY_LIMITS.keys())}",
+        )
+    result = quota.reset_monthly_quota(api_name)
+    logger.info("admin_reset_quota: %s reseteada por request manual", api_name)
+    return JSONResponse(content={"status": "ok", **result})
+
+
 @app.post("/run-resolve", dependencies=[Depends(verify_token)])
 async def run_resolve() -> JSONResponse:
     """Síncrono: resuelve shadow_trades pendientes de Polymarket contra resultados reales."""
@@ -266,10 +281,10 @@ async def _bg_scan() -> None:
         start = datetime.now(timezone.utc)
         logger.info("scan: iniciando pipeline")
 
-        from scanner import fetch_active_markets
+        from scanner import fetch_diverse_markets
         from price_tracker import save_price_snapshot
 
-        markets = await fetch_active_markets(limit=200, min_volume=500)
+        markets = await fetch_diverse_markets(min_volume=500)
         if not markets:
             logger.warning("scan: ningun mercado obtenido")
             return

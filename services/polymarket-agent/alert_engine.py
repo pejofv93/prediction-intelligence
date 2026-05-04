@@ -101,6 +101,23 @@ async def check_and_alert(analysis: dict) -> bool:
         )
         return False
 
+    # MEJORA 5: descartar mercados que cierran en más de 30 días
+    end_date_iso = analysis.get("end_date_iso")
+    if end_date_iso:
+        try:
+            _end_dt = datetime.fromisoformat(str(end_date_iso))
+            if _end_dt.tzinfo is None:
+                _end_dt = _end_dt.replace(tzinfo=timezone.utc)
+            _days_left = (_end_dt - datetime.now(timezone.utc)).days
+            if _days_left > 30:
+                logger.debug(
+                    "check_and_alert(%s): cierra en %dd > 30d — omitida",
+                    analysis.get("market_id"), _days_left,
+                )
+                return False
+        except Exception:
+            pass
+
     edge = float(analysis.get("edge", 0.0))
     confidence = float(analysis.get("confidence", 0.0))
     volume_spike = bool(analysis.get("volume_spike", False))
@@ -172,6 +189,34 @@ async def check_and_alert(analysis: dict) -> bool:
                     return False
     except Exception:
         logger.warning("check_and_alert(%s): error en guard contradicción — continuando", market_id, exc_info=True)
+
+    # MEJORA 3: dedup reforzado por market_id — si ya alertamos este mercado en 24h
+    # con precio sin cambio >5%, no volver a alertar aunque el alert_key sea distinto.
+    try:
+        _mid_docs = list(
+            col("alerts_sent")
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("status", "==", "sent"))
+            .order_by("sent_at", direction="DESCENDING")
+            .limit(1)
+            .stream()
+        )
+        if _mid_docs:
+            _last = _mid_docs[0].to_dict()
+            _last_sent = _last.get("sent_at")
+            _last_price_mid = float(_last.get("last_price", current_price))
+            if _last_sent:
+                if hasattr(_last_sent, "tzinfo") and _last_sent.tzinfo is None:
+                    _last_sent = _last_sent.replace(tzinfo=timezone.utc)
+                _pchg = abs(current_price - _last_price_mid) / max(_last_price_mid, 0.001)
+                if _last_sent > cutoff_24h and _pchg <= 0.05:
+                    logger.debug(
+                        "check_and_alert(%s): dedup market_id — <24h y precio sin cambio (%.1f%%) — omitida",
+                        market_id, _pchg * 100,
+                    )
+                    return False
+    except Exception:
+        logger.warning("check_and_alert(%s): error en dedup reforzado — continuando", market_id, exc_info=True)
 
     db = get_client()
     dedup_ref = col("alerts_sent").document(alert_key)

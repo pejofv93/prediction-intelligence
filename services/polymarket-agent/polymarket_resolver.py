@@ -33,6 +33,38 @@ _YES_THRESHOLD = 0.9
 _NO_THRESHOLD = 0.1
 
 
+async def _send_resolution_notification(pred_data: dict, outcome: str, result: str, now: datetime) -> None:
+    """Envía notificación de resolución al topic Polymarket (thread_id=2)."""
+    from shared.config import TELEGRAM_BOT_URL, CLOUD_RUN_TOKEN
+    if not TELEGRAM_BOT_URL:
+        return
+
+    question = pred_data.get("question", "Mercado desconocido")
+    recommendation = pred_data.get("recommendation", "")
+    edge = float(pred_data.get("edge") or 0)
+    end_date_iso = str(pred_data.get("end_date_iso") or "")
+    close_date = end_date_iso[:10].replace("-", "/") if end_date_iso else now.strftime("%d/%m/%Y")
+
+    result_icon = "✅ ACERTADO" if result == "win" else "❌ FALLADO"
+    text = (
+        f"{result_icon}\n"
+        f"Mercado: {question[:120]}\n"
+        f"Nuestra predicción: {recommendation}\n"
+        f"Resultado: {outcome}\n"
+        f"Edge original: {edge:+.0%}\n"
+        f"Cierre: {close_date}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{TELEGRAM_BOT_URL}/send-alert",
+                json={"type": "polymarket_resolution", "data": {"text": text}},
+                headers={"x-cloud-token": CLOUD_RUN_TOKEN},
+            )
+    except Exception:
+        logger.warning("POLY_RESOLVE: error enviando notificación de resolución", exc_info=True)
+
+
 def _determine_outcome(outcome_prices: list) -> str | None:
     """
     Devuelve "YES" | "NO" | None si el mercado aún no está resuelto.
@@ -153,6 +185,12 @@ async def _resolve_market(market_id: str, raw: dict, now: datetime) -> tuple[int
                 "POLY_RESOLVE: error actualizando poly_predictions/%s", market_id, exc_info=True,
             )
             return 0, 0, 0, 1
+
+        # MEJORA 4: notificación de resolución a Telegram topic Polymarket
+        try:
+            await _send_resolution_notification(pred_data, outcome, result, now)
+        except Exception:
+            logger.warning("POLY_RESOLVE: error en notificación de resolución para %s", market_id, exc_info=True)
 
         return 1, 0, 0, 0
 

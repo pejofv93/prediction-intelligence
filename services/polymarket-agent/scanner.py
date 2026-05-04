@@ -1,5 +1,5 @@
 """
-Scanner Polymarket — fetch top 50 mercados activos por volumen.
+Scanner Polymarket — fetch mercados activos con variedad de categorías.
 Guarda en Firestore poly_markets.
 IMPORTANTE: guardar "conditionId" como "condition_id" — necesario para CLOB orderbook.
 """
@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.firestore_client import col
 
@@ -15,6 +16,46 @@ logger = logging.getLogger(__name__)
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 _HTTP_TIMEOUT = 20.0
+
+# Categorías para rotación diversa — max 5 por categoría, 30 total en el bloque rotado
+_SCAN_CATEGORIES: dict[str, list[str]] = {
+    "crypto":      ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "altcoin", "halving"],
+    "sports":      ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "nfl", "mlb", "wimbledon", "olympic", "copa"],
+    "politics":    ["election", "president", "vote", "congress", "senate", "minister", "parliament", "referendum", "prime minister", "chancellor"],
+    "science":     ["climate", "nasa", "space", "vaccine", "fda", "cancer", "quantum", "discovery", "mission", "ai model"],
+    "pop_culture": ["oscar", "grammy", "emmy", "movie", "album", "singer", "actor", "celebrity", "taylor", "award", "box office"],
+    "business":    ["apple", "tesla", "microsoft", "amazon", "google", "meta", "earnings", "merger", "acquisition", "ipo", "layoffs"],
+}
+_MAX_PER_CATEGORY = 5
+_DIVERSITY_TOTAL = 30
+
+
+def _categorize_for_scan(question: str) -> str:
+    q = question.lower()
+    for cat, kws in _SCAN_CATEGORIES.items():
+        if any(kw in q for kw in kws):
+            return cat
+    return "other"
+
+
+async def _get_alerted_market_ids_48h() -> set[str]:
+    """Devuelve market_ids alertados a Telegram en las últimas 48h."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+    alerted: set[str] = set()
+    try:
+        docs = list(
+            col("alerts_sent")
+            .where(filter=FieldFilter("type", "==", "polymarket"))
+            .where(filter=FieldFilter("sent_at", ">=", cutoff))
+            .stream()
+        )
+        for doc in docs:
+            mid = doc.to_dict().get("market_id")
+            if mid:
+                alerted.add(mid)
+    except Exception:
+        logger.warning("_get_alerted_market_ids_48h: error leyendo alerts_sent", exc_info=True)
+    return alerted
 
 
 async def fetch_active_markets(
@@ -180,6 +221,93 @@ def _parse_market(raw: dict) -> dict | None:
     except Exception:
         logger.error("_parse_market: error", exc_info=True)
         return None
+
+
+async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
+    """
+    Combina top-20 por volumen 24h + hasta 30 mercados rotando por 6 categorías.
+    Categorías: crypto, sports, politics, science, pop_culture, business (máx 5 c/u).
+    El bloque rotado excluye mercados ya alertados en las últimas 48h.
+    Guarda en Firestore poly_markets. Devuelve lista combinada.
+    """
+    now = datetime.now(timezone.utc)
+    min_end_date = now + timedelta(hours=24)
+    alerted_ids = await _get_alerted_market_ids_48h()
+
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.get(
+                f"{GAMMA_API}/markets",
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "order": "volume24hr",
+                    "ascending": "false",
+                    "limit": "200",
+                },
+            )
+        if resp.status_code != 200:
+            logger.error("fetch_diverse_markets: API respondio %d", resp.status_code)
+            return []
+        raw_data = resp.json()
+        raw_markets = raw_data if isinstance(raw_data, list) else raw_data.get("markets", raw_data.get("data", []))
+    except Exception:
+        logger.error("fetch_diverse_markets: error de red", exc_info=True)
+        return []
+
+    parsed: list[dict] = []
+    for raw in raw_markets:
+        try:
+            market = _parse_market(raw)
+            if market is None:
+                continue
+            if market["volume_24h"] < min_volume:
+                continue
+            end_date = market.get("end_date")
+            if not end_date or not isinstance(end_date, datetime):
+                continue
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=timezone.utc)
+            if end_date < min_end_date:
+                continue
+            parsed.append(market)
+        except Exception:
+            logger.error("fetch_diverse_markets: error parseando mercado", exc_info=True)
+
+    # Top-20 por volumen (siempre incluidos)
+    parsed_sorted = sorted(parsed, key=lambda m: m.get("volume_24h", 0), reverse=True)
+    top_20 = parsed_sorted[:20]
+    top_20_ids = {m["market_id"] for m in top_20}
+
+    # Bloque rotado: de los restantes, excluir alertados 48h y rotar por categoría
+    remaining = [m for m in parsed_sorted[20:] if m["market_id"] not in alerted_ids]
+    by_category: dict[str, list[dict]] = {}
+    for m in remaining:
+        cat = _categorize_for_scan(m.get("question", ""))
+        by_category.setdefault(cat, []).append(m)
+
+    rotated: list[dict] = []
+    for cat_markets in by_category.values():
+        rotated.extend(cat_markets[:_MAX_PER_CATEGORY])
+        if len(rotated) >= _DIVERSITY_TOTAL:
+            break
+    rotated = rotated[:_DIVERSITY_TOTAL]
+
+    combined = top_20 + [m for m in rotated if m["market_id"] not in top_20_ids]
+
+    saved = 0
+    for market in combined:
+        try:
+            col("poly_markets").document(market["market_id"]).set(market)
+            saved += 1
+        except Exception:
+            logger.error("fetch_diverse_markets: error guardando %s", market["market_id"], exc_info=True)
+
+    logger.info(
+        "fetch_diverse_markets: top20=%d rotated=%d total=%d saved=%d excl_alertados=%d",
+        len(top_20), len(rotated), len(combined), saved, len(alerted_ids),
+    )
+    return combined
 
 
 async def fetch_market_orderbook(condition_id: str) -> dict:

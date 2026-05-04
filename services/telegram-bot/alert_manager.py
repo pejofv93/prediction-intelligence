@@ -275,7 +275,7 @@ def _format_poly_alert(analysis: dict) -> str:
     cat_emoji = _CATEGORY_EMOJI.get(category, "🔮")
     cat_line = f"{cat_emoji} {category}\n" if category else ""
 
-    # Días hasta cierre
+    # Días hasta cierre — icono según urgencia (>30d filtrado en alert_engine)
     close_line = ""
     end_date_iso = analysis.get("end_date_iso")
     if end_date_iso:
@@ -285,7 +285,13 @@ def _format_poly_alert(analysis: dict) -> str:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
             days_left = (end_dt - datetime.now(timezone.utc)).days
             date_label = end_dt.strftime("%d/%m")
-            close_line = f"⏰ Cierra en {days_left}d ({date_label})"
+            if days_left <= 7:
+                time_icon = "⚡"
+            elif days_left <= 14:
+                time_icon = "📅"
+            else:
+                time_icon = "🕐"
+            close_line = f"{time_icon} Cierra en {days_left}d ({date_label})"
         except Exception:
             pass
 

@@ -206,42 +206,54 @@ def format_daily_report(
 ) -> str:
     """
     Formato reporte diario matutino.
-    pred_stats: {total, pending, resolved, correct, incorrect} desde col("predictions").
+    pred_stats: {total, pending, resolved, correct, incorrect, synthetic, real_odds}.
+    Estado del modelo basado en win_rate real (shadow_trades):
+      > 50% → ✅ SALUDABLE  |  40-50% → ⚠️ ATENCIÓN  |  < 40% → 🔴 REVISAR
     """
     now = datetime.now(timezone.utc)
     fecha = now.strftime("%d/%m/%Y")
-
-    status = health.get("status", "SALUDABLE")
-    if status == "SALUDABLE":
-        status_emoji = "✅"
-    elif status == "DEGRADADO":
-        status_emoji = "⚠️"
-    else:
-        status_emoji = "🚨"
 
     bankroll = float(shadow_metrics.get("current_bankroll") or 50.0)
     avg_clv = float(shadow_metrics.get("avg_clv") or 0.0)
     roi_total = float(shadow_metrics.get("roi_total") or 0.0)
     win_rate = float(shadow_metrics.get("win_rate") or 0.0)
+    closed_trades = int(shadow_metrics.get("closed_trades") or 0)
+    roi_sports = float(shadow_metrics.get("roi_sports") or 0.0)
+
+    # Estado del modelo basado en win rate real (no en pesos internos)
+    if closed_trades < 10:
+        model_status = "SIN DATOS"
+        status_emoji = "⏳"
+    elif win_rate > 0.50:
+        model_status = "SALUDABLE"
+        status_emoji = "✅"
+    elif win_rate >= 0.40:
+        model_status = "ATENCIÓN"
+        status_emoji = "⚠️"
+    else:
+        model_status = "REVISAR"
+        status_emoji = "🔴"
 
     lines = [f"📊 RESUMEN DEL DIA — {fecha}", ""]
 
-    # Bloque de predicciones: usar pred_stats si disponible (fuente fiable)
+    # Bloque de señales deportivas con desglose sintéticas vs cuotas reales
     if pred_stats and pred_stats.get("total", 0) > 0:
         total = pred_stats["total"]
         pending = pred_stats["pending"]
         resolved = pred_stats["resolved"]
         correct = pred_stats["correct"]
         incorrect = pred_stats["incorrect"]
-        lines.append(f"📋 Señales: {total} total")
+        synthetic = pred_stats.get("synthetic", 0)
+        real_odds = pred_stats.get("real_odds", 0)
+
+        lines.append(f"📋 Señales sports: {total} total")
+        if synthetic > 0 or real_odds > 0:
+            lines.append(f"  · Con cuotas reales: {real_odds} | Sintéticas Poisson: {synthetic}")
         if resolved > 0:
             lines.append(f"✅ Resueltas: {resolved} ({correct} correctas · {incorrect} falladas)")
         if pending > 0:
             lines.append(f"⏳ Pendientes: {pending}")
-        elif resolved == total:
-            lines.append("⏳ Pendientes: 0")
     else:
-        # Fallback a shadow_metrics si pred_stats no disponible
         pending_fb = int(shadow_metrics.get("pending_trades") or 0)
         closed_fb = int(shadow_metrics.get("closed_trades") or 0)
         wins_fb = int(shadow_metrics.get("wins") or 0)
@@ -250,24 +262,30 @@ def format_daily_report(
         if closed_fb > 0:
             lines.append(f"✅ Resueltas: {closed_fb} ({wins_fb} correctas · {losses_fb} falladas)")
 
-    lines.append(f"Bankroll virtual: {bankroll:.2f}€")
+    lines.append("")
+
+    # P&L simulado con Kelly
+    pnl_simulated = round((bankroll - 50.0), 2)
+    pnl_sign = "+" if pnl_simulated >= 0 else ""
+    lines.append(f"💰 Bankroll virtual: {bankroll:.2f}€ ({pnl_sign}{pnl_simulated:.2f}€ P&L)")
+    lines.append(f"📈 ROI total: {roi_total:+.1%} | ROI sports: {roi_sports:+.1%}")
 
     if avg_clv != 0.0:
-        lines.append(f"CLV medio: {avg_clv:+.1%}")
+        lines.append(f"📐 CLV medio: {avg_clv:+.1%}")
 
-    lines.append(f"Modelo: {status_emoji} {status}")
+    lines.append("")
+
+    # Estado del modelo (win rate real)
+    if closed_trades >= 10:
+        lines.append(f"🤖 Modelo: {status_emoji} {model_status} — Win rate: {win_rate:.0%} ({closed_trades} cerrados)")
+    else:
+        lines.append(f"🤖 Modelo: {status_emoji} {model_status} (< 10 señales cerradas)")
 
     if top_signal is not None:
         unified_score = top_signal.get("unified_score") or top_signal.get("edge")
         if unified_score is not None:
             market = top_signal.get("market_type") or top_signal.get("market") or top_signal.get("question", "")[:40]
             score_str = f"{unified_score:.0f}/100" if isinstance(unified_score, (int, float)) and unified_score > 1 else f"{float(unified_score):.0%}"
-            lines.append(f"\n🏆 Top senal hoy: {market} — Score: {score_str}")
-
-    lines += [
-        "",
-        f"📈 ROI total: {roi_total:+.1%}",
-        f"🎯 Win rate: {win_rate:.0%}",
-    ]
+            lines.append(f"\n🏆 Top señal hoy: {market} — Score: {score_str}")
 
     return "\n".join(lines)
