@@ -14,6 +14,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared.config import MIN_MATCHES_TO_FIT, SUPPORTED_FOOTBALL_LEAGUES
 from shared.firestore_client import col
 
