@@ -79,6 +79,10 @@ _LEAGUE_KEYWORDS: dict[str, list[str]] = {
     "EL":   ["uefa-europa-league", "europa-league", "europa league", "uel"],
     "ECL":  ["conference-league", "europa-conference", "uecl"],
     "TU1":  ["turkey-super-lig", "super-lig", "super lig", "turkish super"],
+    "CLI":  ["conmebol-libertadores", "copa-libertadores", "libertadores",
+             "copa libertadores"],
+    "BSA":  ["brazil-campeonato", "campeonato-brasileiro", "brasileiro",
+             "serie-a-brasileirao"],
     "ARG":  ["argentina-primera-division", "primera-division-argentina",
              "liga profesional"],
     "NBA":  ["nba", "national-basketball"],
@@ -102,7 +106,7 @@ _SPORT_FALLBACK_SLUGS: dict[str, list[str]] = {
 
 # Ligas que son fútbol / baloncesto / tenis (para decidir qué sport slug buscar)
 _FOOTBALL_LEAGUES = {"PL","PD","BL1","SA","FL1",
-                     "CL","EL","ECL","TU1","ARG"}
+                     "CL","EL","ECL","TU1","ARG","CLI","BSA","CSUD","CAM"}
 _BASKETBALL_LEAGUES = {"NBA","EUROLEAGUE","ACB"}
 _TENNIS_LEAGUES = {"ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN",
                    "ATP_MADRID","ATP_ROME","ATP_BARCELONA",
@@ -478,16 +482,46 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
     markets_agg: dict[str, list] = {}
 
     if odds_item:
-        # odds_item puede ser: {eventId, bookmakers: [{name, markets: {...}}]}
         raw_bkms = (odds_item.get("bookmakers") or odds_item.get("data") or [])
-        if isinstance(raw_bkms, list):
+
+        if isinstance(raw_bkms, dict):
+            # odds-api.io v3 format: {"Bet365": [{name, odds:[{home,draw,away}]}], ...}
+            for bkm_name, mkt_list in raw_bkms.items():
+                bkm_key = bkm_name.lower().replace(" ", "_")
+                markets_out = []
+                if not isinstance(mkt_list, list):
+                    mkt_list = [mkt_list] if mkt_list else []
+                for mkt in mkt_list:
+                    if not isinstance(mkt, dict):
+                        continue
+                    mkt_key = mkt.get("name") or mkt.get("key") or mkt.get("type") or ""
+                    # Odds are nested under "odds": [{"home":..., "draw":..., "away":...}]
+                    raw_odds = mkt.get("odds") or mkt.get("outcomes") or []
+                    if (isinstance(raw_odds, list) and raw_odds
+                            and isinstance(raw_odds[0], dict)
+                            and any(k in raw_odds[0]
+                                    for k in ("home", "draw", "away", "1", "2", "x"))):
+                        mkt_data = raw_odds[0]
+                    else:
+                        mkt_data = raw_odds or mkt
+                    outcomes = _parse_market(mkt_key, mkt_data, home)
+                    if outcomes:
+                        norm_key = _normalise_market_key(mkt_key)
+                        markets_out.append({"key": norm_key, "outcomes": outcomes})
+                        markets_agg.setdefault(norm_key, []).append(
+                            {"bookmaker": bkm_key, "outcomes": outcomes}
+                        )
+                if markets_out:
+                    bookmakers_out.append({"key": bkm_key, "markets": markets_out})
+
+        elif isinstance(raw_bkms, list):
+            # Generic list format: [{name/key, markets: {...}|[...]}]
             for bkm in raw_bkms:
                 bkm_key = (bkm.get("slug") or bkm.get("key") or
                            bkm.get("name") or "unknown").lower().replace(" ", "_")
                 markets_out = []
                 raw_markets = bkm.get("markets") or {}
 
-                # odds-api.io usa dict de mercados {market_key: {...}} o lista
                 if isinstance(raw_markets, dict):
                     for mkt_key, mkt_data in raw_markets.items():
                         outcomes = _parse_market(mkt_key, mkt_data, home)
@@ -744,13 +778,14 @@ def clear_caches() -> dict:
     Limpia todos los cachés en memoria de odds-api.io.
     Útil tras un rate limit 429 para forzar reintento inmediato.
     """
-    global _SPORTS_CACHE, _SPORTS_CACHED_AT, _ODDS_MAP_CACHED_AT
+    global _SPORTS_CACHE, _SPORTS_CACHED_AT, _ODDS_MAP_CACHED_AT, _ODDS_MAP_PREFETCHED_AT
     n_events = len(_SPORT_EVENTS_CACHE)
     n_leagues = len(_EVENT_CACHE)
     _SPORT_EVENTS_CACHE.clear()
     _EVENT_CACHE.clear()
     _ODDS_MAP_CACHE.clear()
     _ODDS_MAP_CACHED_AT = None
+    _ODDS_MAP_PREFETCHED_AT = None
     _SPORTS_CACHE = {}
     _SPORTS_CACHED_AT = None
     logger.info("odds-api.io: cachés limpiados (sports=%d, events=%d ligas)", n_events, n_leagues)

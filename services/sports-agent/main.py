@@ -73,6 +73,24 @@ async def api_quota() -> dict:
     }
 
 
+@app.post("/admin/reset-quota/{api_name}", dependencies=[Depends(verify_token)])
+async def admin_reset_quota(api_name: str) -> dict:
+    """
+    Resetea remaining_reported de una API mensual en Firestore.
+    Útil cuando la cuota se renueva pero el flag persiste del mes anterior.
+    """
+    from shared.api_quota_manager import quota, _this_month
+    month = _this_month()
+    key = f"{api_name}_monthly_{month}"
+    try:
+        quota._col().document(key).set({"remaining_reported": None}, merge=True)
+        logger.info("admin_reset_quota: %s reseteado para %s", api_name, month)
+        return {"ok": True, "api": api_name, "key": key, "month": month}
+    except Exception as e:
+        logger.error("admin_reset_quota: error reseteando %s — %s", api_name, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 async def _stream_job(coro_func, job_name: str):
     """
     Ejecuta coro_func() manteniendo la conexion HTTP abierta hasta completion.
@@ -196,10 +214,11 @@ async def test_nba() -> dict:
     Verifica que api-basketball.p.rapidapi.com responde.
     Llama GET /games?date=hoy y devuelve status + primeros 2 partidos.
     """
-    from collectors.api_sports_client import _request
+    from collectors.api_sports_client import _request, _current_basketball_season, NBA_LEAGUE_ID
     today = __import__("datetime").date.today().isoformat()
     host = "api-basketball.p.rapidapi.com"
-    data = await _request(host, "/games", {"date": today, "league": "12", "season": "2024-2025"})
+    season = _current_basketball_season()
+    data = await _request(host, "/games", {"date": today, "league": NBA_LEAGUE_ID, "season": season})
     if data is None:
         return {"ok": False, "error": "sin respuesta — verificar key o host"}
     games = data.get("response", [])
@@ -300,28 +319,43 @@ async def _bg_collect() -> None:
 
 async def _cleanup_stale_upcoming() -> int:
     """
-    Elimina de upcoming_matches los partidos con status FINISHED/PAUSED
-    cuyo match_date tenga más de 48h de antigüedad.
-    Los partidos ya fueron evaluados por el learning engine; no se necesitan más.
+    Elimina de upcoming_matches partidos que ya no son relevantes:
+    1. FINISHED/PAUSED con match_date > 48h de antigüedad (evaluados por learning engine)
+    2. SCHEDULED/TIMED con match_date > 48h de antigüedad (partidos ya jugados sin actualizar
+       status — ocurre con ligas eliminadas de SUPPORTED_FOOTBALL_LEAGUES como CLI/PPL, y con
+       partidos de fases eliminatorias cuyo status no se actualiza al no re-colectarse)
     Devuelve el número de documentos eliminados.
     """
     from shared.firestore_client import col
-    from datetime import timezone as _tz
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
     deleted = 0
 
+    # Paso 1: FINISHED/PAUSED (comportamiento original)
     try:
-        docs = list(
+        finished_docs = list(
             col("upcoming_matches")
             .where(filter=FieldFilter("status", "in", ["FINISHED", "PAUSED"]))
             .stream()
         )
     except Exception as exc:
-        logger.warning("_cleanup_stale_upcoming: error leyendo Firestore — %s", exc)
-        return 0
+        logger.warning("_cleanup_stale_upcoming: error leyendo FINISHED/PAUSED — %s", exc)
+        finished_docs = []
 
-    for doc in docs:
+    # Paso 2: SCHEDULED/TIMED con fecha pasada (stale sin actualizar)
+    try:
+        scheduled_docs = list(
+            col("upcoming_matches")
+            .where(filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"]))
+            .stream()
+        )
+    except Exception as exc:
+        logger.warning("_cleanup_stale_upcoming: error leyendo SCHEDULED — %s", exc)
+        scheduled_docs = []
+
+    all_docs = finished_docs + scheduled_docs
+
+    for doc in all_docs:
         data = doc.to_dict()
         match_date = data.get("match_date")
         if not match_date:
@@ -498,7 +532,13 @@ async def _collect_other_sports() -> None:
     total_games = 0
     total_teams = 0
 
+    # NBA se recoge via ESPN en _collect_basketball_enhanced — saltar aquí para evitar 403
+    _SKIP_IN_OTHER = {"nba", "basketball"}
+
     for sport_type, sport_name in SUPPORTED_SPORTS_APISPORTS.items():
+        if sport_name.lower() in _SKIP_IN_OTHER:
+            logger.debug("collect.other_sports: %s omitido (manejado por basketball_enhanced via ESPN)", sport_name)
+            continue
         try:
             logger.info("collect.other_sports: obteniendo partidos de %s", sport_name.upper())
             games = await get_games_today(sport_name)
