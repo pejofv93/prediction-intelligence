@@ -189,6 +189,7 @@ class ForgeAgent:
         if self._echo or self._daedalus:
             t_parallel = time.time()
             echo_future = daedalus_future = None
+            _echo_timed_out = False
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 if self._echo:
@@ -200,13 +201,14 @@ class ForgeAgent:
 
                 if echo_future:
                     try:
-                        ctx_echo_out = echo_future.result(timeout=300)
+                        ctx_echo_out = echo_future.result(timeout=600)
                         self._merge_echo_fields(ctx, ctx_echo_out)
                         self._merge_errors_warnings(ctx, ctx_echo_out)
                         logger.info("ECHO completado (paralelo)")
                     except concurrent.futures.TimeoutError:
                         ctx.add_warning("ECHO", "Timeout en paralelo — audio puede faltar")
                         logger.warning("ECHO timeout en thread paralelo")
+                        _echo_timed_out = True
 
                 if daedalus_future:
                     try:
@@ -220,6 +222,21 @@ class ForgeAgent:
 
             elapsed_parallel = time.time() - t_parallel
             logger.info(f"ECHO ∥ DAEDALUS completados en {elapsed_parallel:.1f}s")
+
+            # Recuperar audio si ECHO tuvo timeout pero terminó mientras esperábamos.
+            # ThreadPoolExecutor.shutdown(wait=True) garantiza que ECHO completó
+            # antes de salir del bloque with — sólo falta mergear su resultado.
+            if _echo_timed_out and echo_future is not None and not getattr(ctx, "audio_path", ""):
+                try:
+                    ctx_echo_late = echo_future.result(timeout=5)
+                    if getattr(ctx_echo_late, "audio_path", ""):
+                        self._merge_echo_fields(ctx, ctx_echo_late)
+                        self._merge_errors_warnings(ctx, ctx_echo_late)
+                        logger.info("ECHO recuperado tras timeout — audio_path actualizado")
+                    else:
+                        logger.warning("ECHO recuperado pero sin audio_path — HEPHAESTUS usará silencio")
+                except Exception as _er:
+                    logger.warning(f"ECHO recuperación post-timeout falló: {_er}")
 
         # ── 6. HEPHAESTUS — composición de vídeo ─────────────────────────
         if self._hephaestus:
