@@ -174,20 +174,18 @@ YouTube 1920x1080: Ticker y=0/h=40 | Gráfico y=40/h=950 | Subs y=990/h=90
 Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ticker y=1860/h=60
 
 ## Próximos pasos (orden prioridad negocio)
-1. [URGENTE] Dry-run local antes del próximo pipeline Railway — 4 bugs originales sin verificar:
-   a) Resolución 1920x1080 real (ffprobe confirma, no solo log)
-   b) Gráfico BTC con datos Binance actuales (no caché $74k)
-   c) Thumbnail upload (requiere canal verificado con teléfono en YouTube Studio)
-   d) Quality gate ejecutándose en orden correcto (antes de OLYMPUS)
-   Comando: python main.py --dry-run (o ejecutar pipeline sin --auto)
-2. Verificar pipeline 2026-04-16 10:00 UTC — railway logs --tail 100
-   Esperar: "PROTEUS: Twitter thread guardado", "ARGOS: on-chain signals", "Jaccard (pre-limpieza)"
-3. RAPID/TikTok — subir cookies tiktok-uploader → publicación automática
-4. RECON — añadir YOUTUBE_API_KEY en Railway Dashboard (distinta del OAuth2)
-5. AGORA — añadir YOUTUBE_CLIENT_SECRETS_B64 en Railway (base64 del client_secret.json)
-6. Railway Pro plan → activar cron [[crons]] en railway.toml (actualmente Hobby)
-7. BOT TELEGRAM privado (comandos /estado, /forzar, /parar)
-8. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py
+1. [VERIFICAR] Short generation — pipeline 2026-05-05 10:00 UTC debe generar Short
+   Buscar en logs: "HEPHAESTUS completado" con Short != N/A, luego "OLYMPUS Short publicado"
+   Si Short sigue fallando: ver _compose_short_vertical en paso 8 de hephaestus.py
+2. Short barras negras — verificar visualmente con frame del Short en Railway output/
+3. MERCURY Telegram — verificar mensaje llega correctamente al canal tras fix Markdown
+4. RAPID/TikTok — subir cookies tiktok-uploader → publicación automática
+5. RECON — añadir YOUTUBE_API_KEY en Railway Dashboard (distinta del OAuth2)
+6. AGORA — añadir YOUTUBE_CLIENT_SECRETS_B64 en Railway (base64 del client_secret.json)
+7. ETH/SOL ticker precios incorrectos (bug conocido, pendiente)
+8. CALÍOPE genera inglés en algunos modos (bug conocido, pendiente)
+9. BOT TELEGRAM privado (comandos /estado, /forzar, /parar)
+10. HELIOS v3 — añadir saldo en fal.ai → python test_helios.py
 
 ## Notas críticas de implementación
 
@@ -273,6 +271,41 @@ Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ti
 - tabla ab_swap_queue: pipeline_id, check_at, youtube_video_id, status (añadido ALETHEIA)
 
 ## Historial de sesiones (resumen)
+
+### Sesión 2026-05-04 (2ª parte) — Short QG decoupling + 6 bug fixes post-pipeline
+
+**Pipeline verificado en producción:**
+- Pipeline 183bf153 · 605s (10:05 min) · Quality gate PASSED (6/6 checks)
+- YouTube: https://youtu.be/ybybf4_bh0I
+- Short: N/A (bloqueado por PIL.ANTIALIAS — fixado en esta sesión)
+
+**Bugs encontrados y fixados (commit 2d33adc):**
+
+BUG 1 — Short PIL.ANTIALIAS: `module 'PIL.Image' has no attribute 'ANTIALIAS'` al llamar `src.resize()`
+  Fix: monkey-patch en hephaestus.py: `if not hasattr(Image, 'ANTIALIAS'): Image.ANTIALIAS = Image.LANCZOS`
+  MoviePy 1.0.3 usa ANTIALIAS internamente; Pillow 10+ lo eliminó.
+
+BUG 2 — Short QG acoplado al largo: Si largo falla QG → Short nunca se sube.
+  Fix: `validate_short_before_publish()` en nexus_core.py · `upload_short()` en olympus.py
+  `_run_herald()` ahora evalúa largo y corto de forma independiente.
+
+BUG 3 — MERCURY Telegram parse_entities: URLs con guión bajo (_) en Markdown.
+  Fix: retry automático sin parse_mode si Telegram rechaza el mensaje por entidades.
+
+BUG 4 — MNEME `no such column: youtube_id`: tabla videos usa `video_id`, no `youtube_id`.
+  Fix: `_update_retention_data()` corregido a columna real.
+
+BUG 5 — ARGONAUT marca pipeline activo como timeout: SENTINEL corre DENTRO del loop,
+  antes de `_save_pipeline(final=True)` → pipeline en `running` confundido con stale.
+  Fix: `_fix_stale_pipelines(exclude_id=ctx.pipeline_id)`.
+
+BUG 6 — ab_swap_queue sin columnas: ALETHEIA intenta insertar thumbnail_a/b_path.
+  Fix: migraciones en db.py para añadir columnas faltantes.
+
+**Short nativo (ctx.short_script) — estado:**
+- CALÍOPE genera short_script (~120 palabras) pero ECHO no genera audio separado para él
+- Ruta 1 (nativa, _compose_short_vertical) nunca activa porque short_audio_path vacío
+- Ruta activa: _crop_to_short (fallback desde vídeo largo) — ahora funciona con fix PIL
 
 ### Sesión 2026-05-04 — Fix Volume Full + Monitoreo permanente
 
