@@ -412,7 +412,8 @@ async def fetch_bookmaker_odds(
 
 
 _GENERIC_WORDS = {"fc", "cf", "ac", "sc", "ss", "ca", "cd", "ud", "sd", "rc", "rcd",
-                  "afc", "fk", "sk", "bv", "sv", "vfb", "fsv", "tsg", "rb", "us"}
+                  "afc", "fk", "sk", "bv", "sv", "vfb", "fsv", "tsg", "rb", "us",
+                  "ad", "de", "futbol", "football", "balompie", "club", "sports"}
 
 
 def _normalize_team(name: str) -> str:
@@ -510,9 +511,12 @@ def _search_oddsapiio_event(events: list, home_team: str, away_team: str, match_
             )
             return result
     if events:
+        sample = [f"{_normalize_team(e.get('home_team','?'))} vs {_normalize_team(e.get('away_team','?'))}"
+                  for e in events[:5]]
         logger.info(
-            "fetch_bookmaker_odds(%s): odds-api.io — partido no encontrado (%s vs %s) en %d eventos",
-            match_id, _normalize_team(home_team), _normalize_team(away_team), len(events),
+            "fetch_bookmaker_odds(%s): odds-api.io — partido no encontrado (%s vs %s) en %d eventos | "
+            "muestra normalizados: %s",
+            match_id, _normalize_team(home_team), _normalize_team(away_team), len(events), sample,
         )
     return None
 
