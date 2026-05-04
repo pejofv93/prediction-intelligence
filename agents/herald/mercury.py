@@ -10,7 +10,11 @@ Prioridad de mensaje: ctx.telegram_message > mensaje automático > sin envío.
 
 import asyncio
 import os
+import shutil
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console
 
@@ -214,6 +218,103 @@ class MERCURY(BaseAgent):
             self.logger.warning(
                 f"[yellow]MERCURY[/] no se pudo persistir notificación en DB: {exc}"
             )
+
+    # ── volume health check ───────────────────────────────────────────────────
+    def volume_health_check(self) -> dict:
+        """
+        Verifica uso del volumen /app/output y notifica Telegram según umbrales:
+          >70% → aviso amarillo
+          >85% → alerta roja + lanza cleanup automático
+          >95% → CRISIS, alerta urgente
+        Retorna dict con status, pct, free_gb, used_gb, total_gb.
+        """
+        output_dir = Path(os.getenv("OUTPUT_DIR", "/app/output"))
+        if not output_dir.exists():
+            output_dir = Path(__file__).resolve().parents[3] / "output"
+
+        result = {"status": "ok", "pct": 0.0, "free_gb": 0.0, "used_gb": 0.0, "total_gb": 0.0}
+
+        try:
+            usage = shutil.disk_usage(output_dir)
+            pct = usage.used / usage.total * 100
+            result.update({
+                "pct":      pct,
+                "free_gb":  usage.free  / 1e9,
+                "used_gb":  usage.used  / 1e9,
+                "total_gb": usage.total / 1e9,
+            })
+            self.logger.info(
+                f"MERCURY volume: {pct:.1f}% usado, {result['free_gb']:.2f}GB libres"
+            )
+        except Exception as e:
+            self.logger.warning(f"MERCURY: no se pudo leer disco: {e}")
+            return result
+
+        if result["pct"] < 70:
+            return result
+
+        # Top 3 consumidores (para el mensaje)
+        top_lines = []
+        try:
+            items = []
+            for item in output_dir.iterdir():
+                size = (
+                    sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                    if item.is_dir() else item.stat().st_size
+                )
+                items.append((item.name, size))
+            for name, size in sorted(items, key=lambda x: x[1], reverse=True)[:3]:
+                label = f"{size/1e9:.2f}GB" if size > 1e9 else f"{size/1e6:.0f}MB"
+                top_lines.append(f"  - {name}: {label}")
+        except Exception:
+            pass
+
+        action = "ninguna"
+        if result["pct"] >= 95:
+            result["status"] = "crisis"
+            emoji = "🚨"
+            level = "CRISIS — pipeline puede caer"
+        elif result["pct"] >= 85:
+            result["status"] = "critical"
+            emoji = "🔴"
+            level = "CRITICO — limpieza automática"
+            try:
+                scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+                subprocess.run(
+                    [sys.executable, str(scripts_dir / "cleanup_volume.py"), "--confirm"],
+                    timeout=180, capture_output=True,
+                )
+                action = "cleanup automático ejecutado"
+                self.logger.info("MERCURY: cleanup automático completado")
+            except Exception as ce:
+                action = f"cleanup falló: {ce}"
+                self.logger.warning(f"MERCURY: cleanup falló: {ce}")
+        else:
+            result["status"] = "warning"
+            emoji = "⚠️"
+            level = "ADVERTENCIA"
+
+        top_text = "\n".join(top_lines) if top_lines else "  (no disponible)"
+        msg = (
+            f"{emoji} *NEXUS Volume Alert*\n"
+            f"Nivel: *{level}*\n"
+            f"Uso: `{result['pct']:.1f}%` "
+            f"({result['used_gb']:.2f}GB / {result['total_gb']:.1f}GB)\n"
+            f"Top consumidores:\n{top_text}\n"
+            f"Accion: {action}"
+        )
+        result["message"] = msg
+        self.logger.warning(f"MERCURY volume alert: {level} ({result['pct']:.1f}%)")
+
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "") or os.getenv("TELEGRAM_CHANNEL_ID", "")
+        if token and chat_id:
+            try:
+                asyncio.run(self._send(token, chat_id, msg))
+            except Exception as te:
+                self.logger.warning(f"MERCURY volume alert Telegram falló: {te}")
+
+        return result
 
     # ── helpers ───────────────────────────────────────────────────────────────
     @staticmethod

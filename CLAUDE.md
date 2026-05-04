@@ -128,6 +128,8 @@ NEXUS CORE:   [x] nexus_core.py + context.py + urgency_detector.py + base_agent.
               [x] _run_crisis_pipeline() — 3 escenas, <90s, para CRISIS >=5x volatilidad
               [x] validate_before_publish() — quality gate 5 checks + notif Telegram
               [x] _probe_resolution() + _force_1080p() — ffprobe post-render
+              [x] _check_disk_space() — aborta si <500MB libres + alerta Telegram
+              [x] _cleanup_pipeline_temps() — borra temps tras subida exitosa YouTube
 ORÁCULO:      [x] ARGOS (precios reales + 24h% + _fetch_onchain_signals: mempool/hash/F&G)
               [x] PYTHIA (scoring 7 capas + _deduplicate_articles + 10 RSS feeds)
               [x] THEMIS (_generate_topic_from_news — LLM genera topic desde noticias)
@@ -149,6 +151,7 @@ SENTINEL:     [x] AGORA · SCROLL · CROESUS · ARGONAUT — sentinel_agent.py i
               [~] AGORA comentarios — requiere YOUTUBE_CLIENT_SECRETS_B64 en Railway
 MIND:         [x] MNEME (YouTube Analytics retention: avg_view_percentage, watch_time)
               [x] KAIROS (10:00 UTC + grace 3h + _process_ab_swap_queue)
+              [x] KAIROS VOLUME_GUARDIAN — 03:00 UTC diario + health check 6h via MERCURY
               [x] ALETHEIA (A/B real: _select_ab_thumbnail con confidence + ab_swap_queue)
 PANEL WEB:    [x] web/app.py + 5 templates + /force-pipeline + /pipeline/stream SSE + /analytics
               [x] dashboard.html: Alpine.js live status card conectado al SSE
@@ -270,6 +273,62 @@ Short  1080x1920:  Logo y=10/h=68 | Gráfico y=80/h=1700 | Subs y=1780/h=80 | Ti
 - tabla ab_swap_queue: pipeline_id, check_at, youtube_video_id, status (añadido ALETHEIA)
 
 ## Historial de sesiones (resumen)
+
+### Sesión 2026-05-04 — Fix Volume Full + Monitoreo permanente
+
+**Causa raíz del pipeline parado desde 30/04:**
+nexus-volume Railway al 100% — pipeline crashea silenciosamente al intentar escribir MP4/WAV.
+
+**Acciones implementadas:**
+
+PASO 1 (Diagnóstico): El diagnóstico debe hacerse en Railway con:
+  `railway run bash` → `df -h /app/output` + `du -h --max-depth=2 /app/output`
+  Candidatos más probables: /app/output/video (MP4 acumulados), /app/output/audio (WAVs), temp_frames
+
+PASO 2 (Limpieza):
+- `scripts/cleanup_volume.py` creado — dry-run por defecto, --confirm para borrar
+- Nunca borra: cryptoverdad.db, models/, .json configs, 3 MP4 más recientes, pipelines recientes
+- Borra: media >7 días, temp_frames, MoviePy temps, logs >14 días
+- Ejecutar: `railway run python scripts/cleanup_volume.py --confirm`
+
+PASO 3 (Política permanente):
+- `nexus_core.py._check_disk_space()`: verifica espacio antes de cada pipeline
+  Si <500MB libres → notifica Telegram + aborta con mensaje claro
+- `nexus_core.py._cleanup_pipeline_temps()`: tras subida exitosa a YouTube, borra
+  automáticamente temp_frames, WAV intermedios, clips Pexels, TEMP_MPY_*
+- `kairos.py`: VOLUME_GUARDIAN — limpieza diaria 03:00 UTC via cleanup_volume.py
+- `kairos.py._maybe_run_volume_health_check()`: llama MERCURY.volume_health_check() cada 6h
+
+PASO 4 (Monitoreo):
+- `mercury.py.volume_health_check()`: nuevo método independiente del pipeline
+  >70% → alerta Telegram amarilla
+  >85% → alerta roja + cleanup automático inmediato
+  >95% → CRISIS alert urgente
+  Formato: emoji + nivel + uso% + top 3 consumidores + acción tomada
+- Tabla `volume_cleanup_log` en SQLite: registra cada ejecución del guardian
+
+**Para verificar fix (en Railway):**
+```
+railway run python scripts/cleanup_volume.py                    # ver qué va a borrar
+railway run python scripts/cleanup_volume.py --confirm          # borrar
+railway run python -c "
+from database.db import DBManager
+from agents.herald.mercury import MERCURY
+import json
+db = DBManager('/app/output/cryptoverdad.db')
+m = MERCURY({}, db)
+print(json.dumps(m.volume_health_check(), indent=2))
+"                                                               # estado del volumen
+```
+
+**Estado tras fix:**
+- Pipeline: pendiente verificar (ejecutar cleanup + railway up)
+- Primer pipeline post-fix: pendiente (lanzar manualmente después de cleanup)
+
+**Pendiente para próxima sesión:**
+- Verificar los 4 bugs originales (resolución, gráfico BTC, thumbnails, quality gate)
+- Validar que los 18 cambios del 30/04 funcionan correctamente
+- ETH/SOL en ticker, Short barras, CALÍOPE inglés, 12 escenas rotación
 
 ### Sesión 2026-04-16 — Level-up: 18 mejoras en 5 equipos paralelos
 

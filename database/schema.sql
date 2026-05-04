@@ -133,6 +133,15 @@ CREATE TABLE IF NOT EXISTS _schema_migrations (
     applied TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Registro de ejecuciones del VOLUME_GUARDIAN (KAIROS 03:00 UTC)
+CREATE TABLE IF NOT EXISTS volume_cleanup_log (
+    id          INTEGER   PRIMARY KEY AUTOINCREMENT,
+    freed_bytes INTEGER   DEFAULT 0,
+    action      TEXT,
+    disk_pct    REAL,
+    ran_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- NOTA: Las siguientes columnas se añaden via db.py execute_schema()
 -- si aún no existen (compatibilidad con DBs antiguas):
 --   videos.avg_view_percentage REAL

@@ -7,6 +7,11 @@ KAIROS — Optimizador de horarios de publicación de NEXUS.
 Analiza datos históricos y calcula el mejor momento para publicar.
 """
 
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -22,6 +27,8 @@ console = Console()
 
 # Defaults: 10:00 UTC (12:00 España verano / 11:00 invierno)
 # Elegido para que cualquier redeploy nocturno tenga margen suficiente.
+VOLUME_GUARDIAN_HOUR_UTC = 3  # Hora UTC en que KAIROS ejecuta VOLUME_GUARDIAN
+
 DEFAULT_HOURS: Dict[int, int] = {
     0: 10,  # Lunes
     1: 10,  # Martes
@@ -66,6 +73,11 @@ class KAIROS(BaseAgent):
             console.print(self._build_schedule_table())
             # Procesar cola de verificaciones A/B pendientes
             self._process_ab_swap_queue()
+            # VOLUME_GUARDIAN: limpieza diaria 03:00 UTC
+            if self._should_run_volume_guardian():
+                self._volume_guardian()
+            # Volume health check: alertas cada 6h via MERCURY
+            self._maybe_run_volume_health_check()
         except Exception as exc:
             self.logger.error(f"[red]KAIROS error:[/] {exc}")
             ctx.add_error("KAIROS", str(exc))
@@ -209,6 +221,108 @@ class KAIROS(BaseAgent):
                 break  # primera ocurrencia válida
 
         return candidate
+
+    # ── volume guardian ───────────────────────────────────────────────────────
+    def _should_run_volume_guardian(self) -> bool:
+        """True si el VOLUME_GUARDIAN debe ejecutarse ahora (03:00-03:59 UTC, una vez por día)."""
+        now_utc = datetime.utcnow()
+        if now_utc.hour != VOLUME_GUARDIAN_HOUR_UTC:
+            return False
+        today = now_utc.date().isoformat()
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                row = conn.execute(
+                    "SELECT id FROM volume_cleanup_log WHERE date(ran_at) = ? LIMIT 1",
+                    (today,),
+                ).fetchone()
+                return row is None
+        except Exception:
+            return False
+
+    def _volume_guardian(self) -> None:
+        """
+        Job diario 03:00 UTC: limpia archivos viejos en el volumen Railway
+        y registra el resultado en volume_cleanup_log.
+        """
+        self.logger.info("KAIROS: VOLUME_GUARDIAN iniciado")
+        output_dir = Path(os.getenv("OUTPUT_DIR", "/app/output"))
+        if not output_dir.exists():
+            output_dir = Path(__file__).resolve().parents[3] / "output"
+
+        freed_bytes = 0
+        action = "none"
+        disk_pct = 0.0
+
+        try:
+            before = shutil.disk_usage(output_dir)
+            disk_pct = before.used / before.total * 100
+
+            scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+            result = subprocess.run(
+                [sys.executable, str(scripts_dir / "cleanup_volume.py"), "--confirm"],
+                capture_output=True, text=True, timeout=300,
+            )
+
+            after = shutil.disk_usage(output_dir)
+            freed_bytes = max(0, before.used - after.used)
+            disk_pct_after = after.used / after.total * 100
+            action = "cleanup"
+
+            self.logger.info(
+                f"KAIROS VOLUME_GUARDIAN: liberados {freed_bytes/1e6:.1f}MB, "
+                f"disco {disk_pct:.1f}% → {disk_pct_after:.1f}%"
+            )
+
+            if result.stderr:
+                self.logger.debug(f"VOLUME_GUARDIAN stderr: {result.stderr[-400:]}")
+
+        except Exception as exc:
+            self.logger.error(f"KAIROS VOLUME_GUARDIAN error: {exc}")
+            action = f"error: {exc}"
+
+        self._log_volume_cleanup(freed_bytes, action, disk_pct)
+
+    def _maybe_run_volume_health_check(self) -> None:
+        """Ejecuta MERCURY.volume_health_check() si han pasado >6h desde el último check."""
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT ran_at FROM volume_cleanup_log
+                    ORDER BY ran_at DESC LIMIT 1
+                    """
+                ).fetchone()
+
+            if row:
+                last_check = datetime.fromisoformat(row[0])
+                if (datetime.utcnow() - last_check).total_seconds() < 6 * 3600:
+                    return  # checked recently enough
+
+            from agents.herald.mercury import MERCURY
+            mercury = MERCURY(self.config, self.db)
+            result = mercury.volume_health_check()
+            self.logger.info(
+                f"KAIROS: volume health check completado — "
+                f"status={result.get('status')} pct={result.get('pct', 0):.1f}%"
+            )
+            # Registrar que se hizo el check
+            self._log_volume_cleanup(0, f"health_check:{result.get('status','ok')}")
+        except Exception as exc:
+            self.logger.debug(f"KAIROS: volume health check falló: {exc}")
+
+    def _log_volume_cleanup(self, freed_bytes: int, action: str, disk_pct: float = 0.0) -> None:
+        """Registra resultado en volume_cleanup_log."""
+        try:
+            with sqlite3.connect(self.db.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO volume_cleanup_log (freed_bytes, action, disk_pct)
+                    VALUES (?, ?, ?)
+                    """,
+                    (freed_bytes, action, disk_pct),
+                )
+        except Exception as exc:
+            self.logger.warning(f"KAIROS: no se pudo loguear cleanup en DB: {exc}")
 
     # ── tabla rich ────────────────────────────────────────────────────────────
     def _build_schedule_table(self) -> Table:

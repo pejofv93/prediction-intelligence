@@ -5,9 +5,11 @@ Llama a cada capa en orden: ORACULO → FORGE → (review) → HERALD → MIND
 y persiste el resultado en SQLite.
 """
 
-import uuid
+import shutil
 import subprocess
 import os
+import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -104,6 +106,20 @@ class NexusCore:
         ctx.pipeline_start = datetime.now()
 
         self._print_banner(topic, mode)
+
+        # Verificar espacio disponible antes de iniciar — abortar si <500MB
+        space_ok, free_mb = self._check_disk_space()
+        if not space_ok:
+            ctx.add_error(
+                "NEXUS_CORE",
+                f"CRISIS: Volumen casi lleno ({free_mb}MB libres). "
+                "Ejecutar: railway run python scripts/cleanup_volume.py --confirm"
+            )
+            console.print(
+                f"[bold red]CRISIS: Volumen lleno ({free_mb}MB libres) — pipeline abortado.[/]\n"
+                "[dim]Ejecutar: railway run python scripts/cleanup_volume.py --confirm[/]"
+            )
+            return ctx
 
         # BUG-02: guardar pipeline en DB al inicio para tener registro desde el primer momento
         try:
@@ -555,6 +571,11 @@ class NexusCore:
             ctx = self._herald.run(ctx)
         else:
             ctx.add_warning("NEXUS_CORE", "HeraldAgent no cargado, saltando publicación.")
+
+        # Limpieza post-upload: borrar temporales si la subida fue exitosa
+        if ctx.youtube_url:
+            self._cleanup_pipeline_temps(ctx)
+
         return ctx
 
     def _run_herald_urgent(self, ctx: Context) -> Context:
@@ -645,6 +666,129 @@ class NexusCore:
 
         # Partner Program Progress
         self._print_partner_progress()
+
+    # ── Gestión de volumen ───────────────────────────────────────────────────
+    def _check_disk_space(self) -> tuple:
+        """
+        Verifica espacio libre en el volumen output.
+        Retorna (ok: bool, free_mb: int).
+        Si <500MB → notifica Telegram y retorna (False, free_mb).
+        """
+        output_dir = Path(os.getenv("OUTPUT_DIR", "/app/output"))
+        if not output_dir.exists():
+            output_dir = Path(__file__).resolve().parent.parent / "output"
+            if not output_dir.exists():
+                return True, -1  # no podemos verificar, no bloqueamos
+
+        try:
+            usage = shutil.disk_usage(output_dir)
+            free_mb = int(usage.free / 1e6)
+            pct_used = usage.used / usage.total * 100
+
+            logger.info(
+                f"Espacio en volumen: {free_mb}MB libres ({pct_used:.1f}% usado)"
+            )
+
+            if free_mb < 500:
+                msg = (
+                    f"🚨 *NEXUS CRISIS — Volumen casi lleno*\n"
+                    f"Libre: `{free_mb}MB` ({pct_used:.1f}% usado)\n"
+                    f"Pipeline abortado. Limpiar urgente:\n"
+                    f"  `railway run python scripts/cleanup_volume.py --confirm`"
+                )
+                logger.error(f"CRISIS: volumen lleno — {free_mb}MB libres")
+                try:
+                    import requests as _req
+                    tok = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                    chat = os.getenv("TELEGRAM_CHAT_ID", "")
+                    if tok and chat:
+                        _req.post(
+                            f"https://api.telegram.org/bot{tok}/sendMessage",
+                            json={
+                                "chat_id": chat,
+                                "text": msg,
+                                "parse_mode": "Markdown",
+                            },
+                            timeout=8,
+                        )
+                except Exception as _te:
+                    logger.warning(f"Alerta Telegram volumen falló: {_te}")
+                return False, free_mb
+
+            return True, free_mb
+
+        except Exception as exc:
+            logger.warning(f"No se pudo verificar espacio en disco: {exc}")
+            return True, -1  # no bloquear si no podemos medir
+
+    def _cleanup_pipeline_temps(self, ctx: Context) -> None:
+        """
+        Borra archivos temporales del pipeline tras subida exitosa a YouTube.
+        Conserva: .mp4 final, thumbnails A/B (para ALETHEIA A/B testing).
+        Borra: WAV intermedios de ECHO, clips Pexels, frames de DAEDALUS,
+               MoviePy temp files.
+        """
+        output_dir = Path(os.getenv("OUTPUT_DIR", "/app/output"))
+        if not output_dir.exists():
+            output_dir = Path(__file__).resolve().parent.parent / "output"
+
+        pid = getattr(ctx, "pipeline_id", "")[:8]
+        deleted = 0
+        errors = 0
+
+        # 1. Frames temporales de DAEDALUS
+        for temp_dir in list(output_dir.rglob("temp_frames*")):
+            if temp_dir.is_dir():
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    deleted += 1
+                    logger.info(f"CLEANUP: {temp_dir.name} borrada")
+                except Exception as exc:
+                    errors += 1
+                    logger.warning(f"CLEANUP: no se pudo borrar {temp_dir.name}: {exc}")
+
+        # 2. Segmentos WAV intermedios de ECHO (no el audio final)
+        audio_dir = output_dir / "audio"
+        if audio_dir.exists():
+            for wav in audio_dir.glob("*_segment_*.wav"):
+                try:
+                    wav.unlink()
+                    deleted += 1
+                except Exception:
+                    errors += 1
+            # También WAVs del pipeline actual (no el final)
+            for wav in audio_dir.glob(f"*{pid}*.wav"):
+                final_audio = getattr(ctx, "audio_path", "")
+                if wav != Path(final_audio):
+                    try:
+                        wav.unlink()
+                        deleted += 1
+                    except Exception:
+                        errors += 1
+
+        # 3. Clips Pexels descargados (en /tmp o output/tmp)
+        for tmp_dir in [Path("/tmp"), output_dir / "tmp"]:
+            if tmp_dir.exists():
+                for pexels in tmp_dir.glob("pexels_*.mp4"):
+                    try:
+                        pexels.unlink()
+                        deleted += 1
+                    except Exception:
+                        pass
+
+        # 4. MoviePy temp files en output/
+        for mpy in output_dir.rglob("TEMP_MPY_*"):
+            try:
+                mpy.unlink()
+                deleted += 1
+            except Exception:
+                pass
+
+        if deleted or errors:
+            logger.info(
+                f"CLEANUP post-upload pipeline={pid}: "
+                f"{deleted} elementos borrados, {errors} errores"
+            )
 
     def _print_partner_progress(self) -> None:
         """Muestra el progreso hacia el YouTube Partner Program."""
