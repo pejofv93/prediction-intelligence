@@ -1,8 +1,10 @@
 """
 Tracker de wallets inteligentes en Polymarket.
 Identifica traders con win_rate > 65% y > 10 trades via CLOB API.
+Requiere POLYMARKET_CLOB_KEY en env para llamadas autenticadas al CLOB /trades.
 """
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -18,20 +20,45 @@ _MIN_WIN_RATE = 0.65
 _MIN_USD = 5_000.0
 _WINDOW_H = 6
 
+_CLOB_KEY = os.environ.get("POLYMARKET_CLOB_KEY", "")
+if not _CLOB_KEY:
+    logger.info("wallet_tracker: POLYMARKET_CLOB_KEY no configurado — whale tracking desactivado")
+
+
+def _clob_headers() -> dict:
+    return {"Accept": "application/json", "Authorization": f"Bearer {_CLOB_KEY}"}
+
+
+async def _get_condition_id(market_id: str) -> str:
+    """Lee condition_id (hex) desde poly_markets Firestore — necesario para CLOB /trades."""
+    try:
+        doc = col("poly_markets").document(str(market_id)).get()
+        return doc.to_dict().get("condition_id", "") if doc.exists else ""
+    except Exception:
+        return ""
+
 
 async def get_top_traders(market_id: str) -> list[dict]:
     """
-    Llama CLOB GET /trades?market={market_id}&limit=100.
+    Llama CLOB GET /trades?market={condition_id}&limit=100 (autenticado).
     Agrupa por maker_address, estima win_rate y guarda smart wallets en poly_smart_wallets.
+    Requiere POLYMARKET_CLOB_KEY — si no está configurado, devuelve [] sin llamar al API.
     """
+    if not _CLOB_KEY:
+        return []
     try:
+        condition_id = await _get_condition_id(market_id)
+        if not condition_id:
+            logger.debug("get_top_traders(%s): sin condition_id", market_id)
+            return []
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
                 f"{_CLOB}/trades",
-                params={"market": market_id, "limit": "100"},
-                headers={"Accept": "application/json"},
+                params={"market": condition_id, "limit": "100"},
+                headers=_clob_headers(),
             )
         if resp.status_code != 200:
+            logger.debug("get_top_traders(%s): CLOB %d", market_id, resp.status_code)
             return []
 
         raw = resp.json()
@@ -90,8 +117,11 @@ async def check_wallet_activity(market_id: str, recommendation: str) -> dict:
     Comprueba si alguna smart wallet conocida compró YES/NO en las últimas 6h.
     Si coincide con recomendación: confidence_adj = +0.10
     Si va en contra: confidence_adj = -0.10
+    Requiere POLYMARKET_CLOB_KEY — si no está configurado, devuelve _default.
     """
     _default = {"whale_signal": False, "confidence_adj": 0.0, "message": ""}
+    if not _CLOB_KEY:
+        return _default
     try:
         docs = list(
             col("poly_smart_wallets")
@@ -104,11 +134,14 @@ async def check_wallet_activity(market_id: str, recommendation: str) -> dict:
 
         known = {d.to_dict()["address"]: d.to_dict() for d in docs}
 
+        condition_id = await _get_condition_id(market_id)
+        if not condition_id:
+            return _default
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
                 f"{_CLOB}/trades",
-                params={"market": market_id, "limit": "50"},
-                headers={"Accept": "application/json"},
+                params={"market": condition_id, "limit": "50"},
+                headers=_clob_headers(),
             )
         if resp.status_code != 200:
             return _default
