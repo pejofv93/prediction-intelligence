@@ -529,6 +529,66 @@ class NexusCore:
 
         return passed, failures
 
+    def validate_short_before_publish(self, ctx: Context) -> tuple:
+        """
+        Quality gate específico para Shorts (1080x1920, 15-90s).
+        Independiente del QG del vídeo largo — permite subir el Short
+        incluso si el largo falla su propio QG.
+        Devuelve (passed: bool, failures: list[str]).
+        """
+        import json as _json
+        failures = []
+        short_path = getattr(ctx, "short_video_path", "") or ""
+
+        if not short_path or not Path(short_path).exists():
+            failures.append("Short MP4 no existe en disco")
+            return False, failures
+
+        # Tamaño: 500KB - 100MB
+        size_bytes = Path(short_path).stat().st_size
+        if size_bytes < 500_000:
+            failures.append(f"Short muy pequeño: {size_bytes // 1024}KB (<500KB)")
+        elif size_bytes > 100_000_000:
+            failures.append(f"Short muy grande: {size_bytes // 1024 // 1024}MB (>100MB)")
+        else:
+            logger.info(f"✅ QG Short check 1 — Tamaño {size_bytes // 1024}KB OK")
+
+        # Duración (15-90s) y resolución (1080x1920) via ffprobe
+        try:
+            probe = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=width,height:format=duration',
+                 '-of', 'json', short_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                data = _json.loads(probe.stdout)
+                streams = data.get('streams', [{}])
+                w = streams[0].get('width', 0) if streams else 0
+                h = streams[0].get('height', 0) if streams else 0
+                dur = float(data.get('format', {}).get('duration', 0) or 0)
+
+                if w != 1080 or h != 1920:
+                    failures.append(f"Resolución Short incorrecta: {w}x{h} (esperado 1080x1920)")
+                else:
+                    logger.info(f"✅ QG Short check 2 — Resolución 1080x1920 OK")
+
+                if dur < 15:
+                    failures.append(f"Short demasiado corto: {dur:.0f}s (<15s)")
+                elif dur > 90:
+                    failures.append(f"Short demasiado largo: {dur:.0f}s (>90s, YouTube Shorts límite)")
+                else:
+                    logger.info(f"✅ QG Short check 3 — Duración {dur:.0f}s OK")
+        except Exception as _pe:
+            logger.warning(f"QG Short: ffprobe falló ({_pe}) — saltando checks duración/resolución")
+
+        passed = len(failures) == 0
+        if passed:
+            logger.info("✅ QG Short passed — Short listo para publicar")
+        else:
+            logger.warning(f"QG Short FALLÓ: {failures}")
+        return passed, failures
+
     def _run_herald(self, ctx: Context) -> Context:
         if getattr(ctx, "dry_run", False):
             ctx.add_warning("HERALD", "dry-run: publicación omitida.")
@@ -544,7 +604,7 @@ class NexusCore:
             ctx.add_warning("NEXUS_CORE", msg)
             console.print(f"  [bold red]✗ {msg}[/]")
             return ctx
-        # Garantizar resolución 1920x1080 antes de subir
+        # Garantizar resolución 1920x1080 antes de subir el largo
         if getattr(ctx, "video_path", None):
             console.print("  [dim]Verificando resolución 1920x1080...[/]")
             was_already_1080p = self._force_1080p(ctx.video_path)
@@ -563,18 +623,43 @@ class NexusCore:
         else:
             size_kb = Path(thumb_a).stat().st_size // 1024
             logger.info(f"Thumbnail A listo: {thumb_a!r} ({size_kb}KB)")
-        # Quality gate — bloquear publicación si falla algún check crítico
-        qg_passed, qg_failures = self.validate_before_publish(ctx)
-        if not qg_passed:
-            return ctx  # validate_before_publish ya logueó y notificó Telegram
-        if self._herald:
-            ctx = self._herald.run(ctx)
-        else:
-            ctx.add_warning("NEXUS_CORE", "HeraldAgent no cargado, saltando publicación.")
 
-        # Limpieza post-upload: borrar temporales si la subida fue exitosa
-        if ctx.youtube_url:
-            self._cleanup_pipeline_temps(ctx)
+        # ── Quality gate desacoplado: largo y Short se evalúan de forma independiente ──
+        long_ok, long_failures = self.validate_before_publish(ctx)
+        short_ok, short_failures = self.validate_short_before_publish(ctx)
+
+        if long_ok:
+            # Flujo normal: largo pasa QG → HERALD sube largo + Short (OLYMPUS los gestiona juntos)
+            if self._herald:
+                ctx = self._herald.run(ctx)
+            else:
+                ctx.add_warning("NEXUS_CORE", "HeraldAgent no cargado, saltando publicación.")
+            if ctx.youtube_url:
+                self._cleanup_pipeline_temps(ctx)
+        else:
+            # Largo falló QG: ya notificado por validate_before_publish. Intentar Short de forma independiente.
+            console.print(f"  [yellow]⚠️ Vídeo largo bloqueado por QG — evaluando Short de forma independiente[/]")
+            if short_ok:
+                console.print("  [green]✅ Short pasa QG propio — subiendo Short sin vídeo largo[/]")
+                try:
+                    from agents.herald.olympus import OLYMPUS as _OLYMPUS
+                    olympus = _OLYMPUS(self.config, self.db)
+                    ctx = olympus.upload_short(ctx)
+                    short_url = (ctx.metadata or {}).get("youtube_short_url", "")
+                    if short_url:
+                        console.print(f"  [green]✅ Short publicado: {short_url}[/]")
+                        logger.info(f"Short publicado de forma independiente: {short_url}")
+                    # Notificación Telegram del Short
+                    if self._herald and self._herald._mercury:
+                        ctx = self._herald._mercury.run(ctx)
+                except Exception as _se:
+                    ctx.add_warning("NEXUS_CORE", f"Short-only upload falló: {_se}")
+                    logger.error(f"Short-only upload error: {_se}")
+            else:
+                msg = "❌ Short también falló QG: " + "; ".join(short_failures)
+                ctx.add_warning("NEXUS_CORE", msg)
+                console.print(f"  [red]{msg}[/]")
+                logger.warning(msg)
 
         return ctx
 

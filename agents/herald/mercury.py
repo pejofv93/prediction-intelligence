@@ -10,6 +10,7 @@ Prioridad de mensaje: ctx.telegram_message > mensaje automático > sin envío.
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -201,6 +202,19 @@ class MERCURY(BaseAgent):
                         "MERCURY: demasiados retries por rate limit"
                     ) from exc
             except TelegramError as exc:
+                err_str = str(exc).lower()
+                if "parse" in err_str or "entit" in err_str:
+                    # Markdown parsing failed — retry sin formato
+                    try:
+                        msg = await bot.send_message(
+                            chat_id=chat_id,
+                            text=re.sub(r"[*_`\[\]]", "", text),
+                            parse_mode=None,
+                            disable_web_page_preview=False,
+                        )
+                        return msg.message_id
+                    except TelegramError as exc2:
+                        raise RuntimeError(f"MERCURY: Telegram error: {exc2}") from exc2
                 raise RuntimeError(f"MERCURY: Telegram error: {exc}") from exc
 
     # ── persistencia ──────────────────────────────────────────────────────────

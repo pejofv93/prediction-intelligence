@@ -125,33 +125,7 @@ class OLYMPUS(BaseAgent):
                 self.logger.warning(f"[yellow]OLYMPUS[/] no se pudo actualizar youtube_url en pipeline: {exc}")
 
             # 11. Subir Short a YouTube Shorts (si existe)
-            short_path = getattr(ctx, "short_video_path", "") or ""
-            if short_path and Path(short_path).exists():
-                try:
-                    short_title = f"{ctx.seo_title[:47]} #Shorts"
-                    short_desc = (
-                        f"#Shorts #Bitcoin #Crypto #CryptoVerdad\n\n"
-                        f"Versión corta del análisis completo: {ctx.youtube_url}\n\n"
-                        f"{ctx.seo_description[:500]}"
-                    )
-                    short_body = {
-                        "snippet": {
-                            "title": short_title[:100],
-                            "description": short_desc,
-                            "tags": ctx.seo_tags[:10] + ["Shorts", "CryptoVerdad"],
-                            "categoryId": "25",  # News & Politics
-                            "defaultLanguage": "es",
-                        },
-                        "status": {
-                            "privacyStatus": privacy,
-                            "selfDeclaredMadeForKids": False,
-                        },
-                    }
-                    short_id, short_url = self._upload_video(service, short_path, short_body)
-                    ctx.metadata["youtube_short_url"] = short_url
-                    self.logger.info(f"[green]OLYMPUS Short[/] publicado: {short_url}")
-                except Exception as exc:
-                    self.logger.warning(f"[yellow]OLYMPUS[/] Short upload falló (no crítico): {exc}")
+            self._upload_short_to_youtube(ctx, service, privacy)
 
         except Exception as exc:
             self.logger.error(f"[red]OLYMPUS error:[/] {exc}")
@@ -646,6 +620,62 @@ class OLYMPUS(BaseAgent):
             self.logger.info("[green]OLYMPUS[/] captions SRT subidos")
         except Exception as exc:
             self.logger.warning(f"[yellow]OLYMPUS[/] captions upload falló (no crítico): {exc}")
+
+    # ── short upload ──────────────────────────────────────────────────────────
+    def _upload_short_to_youtube(self, ctx: Context, service, privacy: str) -> None:
+        """Sube el Short a YouTube Shorts. Llamable de forma independiente del vídeo largo."""
+        short_path = getattr(ctx, "short_video_path", "") or ""
+        if not short_path or not Path(short_path).exists():
+            return
+        try:
+            long_url = getattr(ctx, "youtube_url", "") or ""
+            short_title = f"{(ctx.seo_title or 'CryptoVerdad')[:47]} #Shorts"
+            short_desc = (
+                f"#Shorts #Bitcoin #Crypto #CryptoVerdad\n\n"
+                + (f"Análisis completo: {long_url}\n\n" if long_url else "")
+                + f"{(ctx.seo_description or '')[:500]}"
+            )
+            short_body = {
+                "snippet": {
+                    "title": short_title[:100],
+                    "description": short_desc,
+                    "tags": (ctx.seo_tags or [])[:10] + ["Shorts", "CryptoVerdad"],
+                    "categoryId": "25",
+                    "defaultLanguage": "es",
+                },
+                "status": {
+                    "privacyStatus": privacy,
+                    "selfDeclaredMadeForKids": False,
+                },
+            }
+            short_id, short_url = self._upload_video(service, short_path, short_body)
+            if not hasattr(ctx, "metadata") or ctx.metadata is None:
+                ctx.metadata = {}
+            ctx.metadata["youtube_short_url"] = short_url
+            self.logger.info(f"[green]OLYMPUS Short[/] publicado: {short_url}")
+        except Exception as exc:
+            self.logger.warning(f"[yellow]OLYMPUS[/] Short upload falló (no crítico): {exc}")
+
+    def upload_short(self, ctx: Context) -> Context:
+        """
+        Sube SOLO el Short a YouTube. Entrada directa desde nexus_core cuando
+        el vídeo largo falla el quality gate pero el Short pasa el suyo propio.
+        """
+        self.logger.info("[bold yellow]OLYMPUS[/] upload_short — modo Short-only")
+        try:
+            if not getattr(ctx, "short_video_path", "") or \
+               not Path(ctx.short_video_path).exists():
+                ctx.add_warning("OLYMPUS", "upload_short: short_video_path no existe")
+                return ctx
+            service = self._build_service(ctx)
+            if service is None:
+                return ctx
+            privacy = self._resolve_privacy(ctx)
+            self._upload_short_to_youtube(ctx, service, privacy)
+        except Exception as exc:
+            self.logger.error(f"[red]OLYMPUS upload_short error:[/] {exc}")
+            ctx.add_error("OLYMPUS_SHORT", str(exc))
+        return ctx
 
     # ── comentario fijado ─────────────────────────────────────────────────────
     def _pin_first_comment(self, service, video_id: str, ctx: Context) -> None:

@@ -69,7 +69,7 @@ class ARGONAUT(BaseAgent):
         try:
             self._ensure_archive_dirs()
 
-            pipelines_fixed = self._fix_stale_pipelines()
+            pipelines_fixed = self._fix_stale_pipelines(exclude_id=ctx.pipeline_id)
             files_archived = self._archive_orphan_files()
             thumbs_archived = self._archive_stale_thumbnails()
             health = self._compute_health()
@@ -98,7 +98,7 @@ class ARGONAUT(BaseAgent):
         return ctx
 
     # ── 1. Pipelines caducados ────────────────────────────────────────────────
-    def _fix_stale_pipelines(self) -> int:
+    def _fix_stale_pipelines(self, exclude_id: str = "") -> int:
         """Marca como 'timeout' los pipelines pending/running con >2h de antigüedad."""
         fixed = 0
         cutoff = datetime.now() - timedelta(hours=PIPELINE_TIMEOUT_HOURS)
@@ -110,8 +110,9 @@ class ARGONAUT(BaseAgent):
                     SELECT id, status, created_at FROM pipelines
                     WHERE status IN ('pending', 'running')
                     AND created_at < ?
+                    AND id != ?
                     """,
-                    (cutoff_iso,),
+                    (cutoff_iso, exclude_id),
                 ).fetchall()
 
                 for row in rows:

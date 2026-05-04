@@ -300,18 +300,18 @@ class MNEME(BaseAgent):
             # Vídeos sin datos de retención
             with sqlite3.connect(self.db.db_path) as conn:
                 rows = conn.execute("""
-                    SELECT pipeline_id, youtube_id
+                    SELECT pipeline_id, video_id
                     FROM videos
-                    WHERE youtube_id IS NOT NULL
-                      AND youtube_id != ''
+                    WHERE video_id IS NOT NULL
+                      AND video_id != ''
                       AND (avg_view_percentage IS NULL OR avg_view_percentage = 0)
                     ORDER BY created_at DESC
                     LIMIT 10
                 """).fetchall()
 
             updated = 0
-            for pipeline_id, youtube_id in rows:
-                retention = self._fetch_video_retention(youtube_id)
+            for pipeline_id, video_id in rows:
+                retention = self._fetch_video_retention(video_id)
                 if retention:
                     with sqlite3.connect(self.db.db_path) as conn:
                         conn.execute("""
@@ -320,13 +320,13 @@ class MNEME(BaseAgent):
                                 avg_view_percentage = ?,
                                 avg_duration_seconds = ?,
                                 watch_time_minutes = ?
-                            WHERE youtube_id = ?
+                            WHERE video_id = ?
                         """, (
                             retention.get("views", 0),
                             retention.get("avg_view_percentage", 0),
                             retention.get("avg_duration_seconds", 0),
                             retention.get("watch_time_minutes", 0),
-                            youtube_id,
+                            video_id,
                         ))
                     updated += 1
                     self.logger.info(

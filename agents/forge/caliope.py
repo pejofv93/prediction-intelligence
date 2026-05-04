@@ -380,15 +380,16 @@ class CALIOPE(BaseAgent):
                 lines.append(f"PATRONES A EVITAR: {', '.join(avoid)}")
 
         lines.append(
-            "\n\nEstructura del guion (sigue este orden internamente, "
-            "pero NO escribas los nombres de sección en el texto):\n"
-            "1. Gancho inicial impactante (primeras 5 segundos)\n"
-            "2. Introduccion y contexto (siguientes 10-15 segundos)\n"
-            "3. Desarrollo con datos y análisis\n"
-            "4. Conclusion con puntos clave y llamada a la accion\n"
-            "(El aviso legal se añade automáticamente si aplica.)\n\n"
-            "FORMATO OBLIGATORIO: escribe SOLO texto corrido para leer en voz alta. "
-            "Sin headers, sin markdown, sin emoticonos."
+            "\n\nFORMATO OBLIGATORIO:\n"
+            "- Escribe texto corrido para leer en voz alta. Sin headers markdown (##), "
+            "sin asteriscos, sin emoticonos, sin guiones de lista.\n"
+            "- OBLIGATORIO: incluye los marcadores de sección [PRECIO], [ANALISIS], "
+            "[SENTIMIENTO], [DOMINANCIA], [ADOPCION], [PREDICCION] exactamente al inicio "
+            "de cada bloque, tal como indica el prompt del sistema. "
+            "Estos marcadores son TÉCNICOS — no los omitas.\n"
+            "- Cada sección introduce información NUEVA. No resumas ni repitas lo dicho "
+            "en secciones anteriores. El espectador ya escuchó lo anterior.\n"
+            "(El aviso legal se añade automáticamente si aplica.)"
         )
 
         return "\n".join(lines)

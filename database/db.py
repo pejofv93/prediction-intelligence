@@ -47,16 +47,18 @@ class DBManager:
             logger.error(f"Error ejecutando schema: {exc}")
             raise
 
-        # Añadir columnas nuevas a videos si no existen (migraciones incrementales).
-        # ALTER TABLE ADD COLUMN lanza error si la columna ya existe — usar try/except.
-        _video_migrations = [
+        # Migraciones incrementales — ALTER TABLE ADD COLUMN ignora si ya existe (try/except).
+        _migrations = [
             "ALTER TABLE videos ADD COLUMN avg_view_percentage REAL",
             "ALTER TABLE videos ADD COLUMN avg_duration_seconds REAL",
             "ALTER TABLE videos ADD COLUMN watch_time_minutes REAL",
             "ALTER TABLE videos ADD COLUMN impressions INTEGER DEFAULT 0",
             "ALTER TABLE videos ADD COLUMN ctr REAL DEFAULT 0",
+            "ALTER TABLE ab_swap_queue ADD COLUMN thumbnail_a_path TEXT",
+            "ALTER TABLE ab_swap_queue ADD COLUMN thumbnail_b_path TEXT",
+            "ALTER TABLE ab_swap_queue ADD COLUMN current_thumbnail TEXT",
         ]
-        for migration_sql in _video_migrations:
+        for migration_sql in _migrations:
             try:
                 self._conn.execute(migration_sql)
                 self._conn.commit()

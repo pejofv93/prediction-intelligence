@@ -50,6 +50,14 @@ import textwrap
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Pillow 10+ eliminó Image.ANTIALIAS — MoviePy 1.0.3 aún lo usa internamente
+try:
+    from PIL import Image as _PIL_Image
+    if not hasattr(_PIL_Image, "ANTIALIAS"):
+        _PIL_Image.ANTIALIAS = _PIL_Image.LANCZOS
+except Exception:
+    pass
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -1012,16 +1020,17 @@ class HEPHAESTUS:
     # ══════════════════════════════════════════════════════════════════════════
 
     # Regex para etiquetas de escena explícitas de CALÍOPE
-    _TAG_PRECIO      = re.compile(r'^\[PRECIO\]',   re.I)
-    _TAG_NOTICIA     = re.compile(r'^\[NOTICIA\]',  re.I)
-    _TAG_DATO        = re.compile(r'^\[DATO:([^\]]+)\]', re.I)
-    _TAG_ANALISIS    = re.compile(r'^\[AN[AÁ]LISIS\]', re.I)
+    # Permiten variantes largas: [ANALISIS TECNICO], [PRECIO BTC], etc.
+    _TAG_PRECIO      = re.compile(r'^\[PRECIO[^\]]*\]',      re.I)
+    _TAG_NOTICIA     = re.compile(r'^\[NOTICIA[^\]]*\]',     re.I)
+    _TAG_DATO        = re.compile(r'^\[DATO:([^\]]+)\]',     re.I)
+    _TAG_ANALISIS    = re.compile(r'^\[AN[AÁ]LISIS[^\]]*\]', re.I)
     _TAG_GENERAL     = re.compile(r'^\[GENERAL(?::([^\]]*))?\]', re.I)
-    _TAG_SENTIMIENTO = re.compile(r'^\[SENTIMIENTO\]', re.I)
-    _TAG_DOMINANCIA  = re.compile(r'^\[DOMINANCIA\]',  re.I)
-    _TAG_VOLUMEN     = re.compile(r'^\[VOLUMEN\]',      re.I)
-    _TAG_ADOPCION    = re.compile(r'^\[ADOPCI[OÓ]N\]', re.I)
-    _TAG_PREDICCION  = re.compile(r'^\[PREDICCI[OÓ]N\]', re.I)
+    _TAG_SENTIMIENTO = re.compile(r'^\[SENTIMIENTO[^\]]*\]', re.I)
+    _TAG_DOMINANCIA  = re.compile(r'^\[DOMINANCIA[^\]]*\]',  re.I)
+    _TAG_VOLUMEN     = re.compile(r'^\[VOLUMEN[^\]]*\]',     re.I)
+    _TAG_ADOPCION    = re.compile(r'^\[ADOPCI[OÓ]N[^\]]*\]', re.I)
+    _TAG_PREDICCION  = re.compile(r'^\[PREDICCI[OÓ]N[^\]]*\]', re.I)
 
     # Etiquetas modo EDUCATIVO
     _TAG_TITULO_EDU     = re.compile(r'^\[TITULO\]',      re.I)
