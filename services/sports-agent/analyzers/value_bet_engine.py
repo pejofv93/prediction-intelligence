@@ -24,6 +24,7 @@ from shared.config import (
     SPORTS_MIN_EDGE,
     TELEGRAM_BOT_URL,
 )
+from google.cloud.firestore_v1.base_query import FieldFilter
 from shared.firestore_client import col
 from shared.api_quota_manager import quota
 from enrichers.elo_rating import DEFAULT_ELO
@@ -1165,6 +1166,20 @@ _TOP6_KEYWORDS: dict[str, list[str]] = {
     "FL1": ["psg", "paris saint-germain", "marseille", "monaco", "lens", "nice"],
 }
 
+# Subconjunto top-3 por liga: los 3 equipos que dominan cada liga.
+# Usados para el filtro rival-élite y el descuento del 20% en el edge calculado.
+_TOP3_KEYWORDS: dict[str, list[str]] = {
+    "PD":  ["real madrid", "barcelona", "atlético", "atletico"],
+    "SA":  ["inter", "napoli", "atalanta"],
+    "PL":  ["manchester city", "arsenal", "liverpool"],
+    "BL1": ["bayern", "leverkusen", "dortmund"],
+    "FL1": ["psg", "paris saint-germain", "marseille"],
+    "CL":  ["real madrid", "barcelona", "manchester city", "arsenal", "liverpool",
+             "bayern", "inter", "atletico", "atlético"],
+    "EL":  [],  # Europa League: demasiada variabilidad de nivel — sin filtro top-3
+    "ECL": [],
+}
+
 # Umbral de cuota por liga: ligas con dominancia extrema usan 4.5, más competitivas 5.0.
 _EXTREME_UNDERDOG_ODDS: dict[str, float] = {
     "PD":  4.5,
@@ -1173,6 +1188,42 @@ _EXTREME_UNDERDOG_ODDS: dict[str, float] = {
     "BL1": 5.0,
     "FL1": 5.0,
 }
+
+# Número total de equipos por liga (para calcular zona de descenso / bottom-6).
+_LEAGUE_TOTAL_TEAMS: dict[str, int] = {
+    "PD": 20, "SA": 20, "PL": 20, "FL1": 18, "BL1": 18,
+}
+
+# Cache en memoria de posiciones de tabla: {league_team_key: position}
+# TTL no crítico — se invalida al reiniciar el proceso (Cloud Run, max 24h).
+_STANDINGS_CACHE: dict[str, int] = {}
+
+
+def _get_table_position(team_id: int | str | None, league: str) -> int | None:
+    """
+    Lee la posición en tabla de un equipo desde col("standings") con cache en memoria.
+    Devuelve None si el dato no está disponible.
+    """
+    if not team_id:
+        return None
+    key = f"{league}_{team_id}"
+    if key in _STANDINGS_CACHE:
+        return _STANDINGS_CACHE[key]
+    try:
+        docs = list(
+            col("standings")
+            .where(filter=FieldFilter("team_id", "==", int(team_id)))
+            .limit(1)
+            .stream()
+        )
+        if docs:
+            pos = docs[0].to_dict().get("position")
+            if pos:
+                _STANDINGS_CACHE[key] = int(pos)
+                return int(pos)
+    except Exception as e:
+        logger.debug("_get_table_position(%s, %s): %s", team_id, league, e)
+    return None
 
 
 async def generate_signal(enriched_match: dict) -> list[dict]:
@@ -1375,7 +1426,36 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             )
             return []
 
-    # --- 5c. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
+    # --- 5c. Filtro rival élite (top-3 + posición en tabla) ---
+    # Los bookmakers son más eficientes en partidos con equipos top-3 → descuento del 20% en edge.
+    # Si además el equipo seleccionado está en bottom-6 → señal directamente descartada.
+    top3_keywords = _TOP3_KEYWORDS.get(league, [])
+    rival_lower = rival_team.lower()
+    rival_is_top3 = top3_keywords and any(kw in rival_lower for kw in top3_keywords)
+    if rival_is_top3:
+        # Descuento del 20% por eficiencia del mercado en partidos de élite
+        best_edge = round(best_edge * 0.80, 4)
+        logger.info(
+            "generate_signal(%s): rival top-3 '%s' → edge descontado 20%% → edge=%.3f [%s]",
+            match_id, rival_team, best_edge, league,
+        )
+        # Filtro bottom-6: si el equipo seleccionado está en los últimos 6 puestos → descartar
+        total_teams = _LEAGUE_TOTAL_TEAMS.get(league, 20)
+        bottom6_threshold = total_teams - 5  # posición > (total-5) → bottom 6
+        selected_id = (
+            enriched_match.get("home_team_id") if team_to_back == str(home_team)
+            else enriched_match.get("away_team_id")
+        )
+        selected_pos = _get_table_position(selected_id, league)
+        if selected_pos is not None and selected_pos > bottom6_threshold:
+            logger.info(
+                "generate_signal(%s): señal descartada — bottom-6 (pos=%d > %d) "
+                "vs rival top-3 '%s' [%s]",
+                match_id, selected_pos, bottom6_threshold, rival_team, league,
+            )
+            return []
+
+    # --- 5e. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
     _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
     if _lado == "AWAY":
         # F1: zona muerta 2.5–3.5 (0% acierto histórico en este rango)

@@ -209,9 +209,10 @@ def _get_totals_odds(event: dict) -> dict | None:
 
 def _make_pred(base: dict, market: str, selection: str, odds: float,
                prob: float, signals: dict, conf: float, match_date,
-               weights_version: int, bookmaker: str) -> dict | None:
+               weights_version: int, bookmaker: str,
+               edge_discount: float = 1.0) -> dict | None:
     from analyzers.value_bet_engine import kelly_criterion
-    edge = round(prob - 1.0 / odds, 4) if odds > 1 else 0.0
+    edge = round((prob - 1.0 / odds) * edge_discount, 4) if odds > 1 else 0.0
     if edge <= SPORTS_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
         return None
     return {
@@ -290,6 +291,18 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     conf = rats["confidence"]
     margin = rats["expected_margin"]
 
+    # --- Seeding NBA Playoffs ---
+    home_seed: int | None = game.get("home_seed")
+    away_seed: int | None = game.get("away_seed")
+    seed_diff = abs(home_seed - away_seed) if (home_seed and away_seed) else 0
+    # Si la diferencia de seed es >2, reducir confianza al 50% (el modelo subestima la brecha de calidad)
+    if seed_diff > 2:
+        conf = round(conf * 0.5, 4)
+        logger.info(
+            "basketball_analyzer(%s): seed_diff=%d → confianza reducida al 50%% (%.3f) [%s vs %s]",
+            match_id, seed_diff, conf, home_name, away_name,
+        )
+
     # Odds
     sport_key = _SPORT_KEY_MAP.get(league, "basketball_nba")
     events = await _fetch_basketball_odds(sport_key)
@@ -313,12 +326,23 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     if event:
         ml = _get_moneyline_odds(event)
         if ml:
-            for team, prob, odds, tag in [
-                (home_name, rats["p_home_win"], ml["home_odds"], "home"),
-                (away_name, 1.0 - rats["p_home_win"], ml["away_odds"], "away"),
+            for team, prob, odds, tag, team_seed, opp_seed in [
+                (home_name, rats["p_home_win"], ml["home_odds"], "home", home_seed, away_seed),
+                (away_name, 1.0 - rats["p_home_win"], ml["away_odds"], "away", away_seed, home_seed),
             ]:
+                # Filtro seed: si el equipo seleccionado es peor en seed por >3 → no señal
+                if team_seed and opp_seed and (team_seed - opp_seed) > 3:
+                    logger.info(
+                        "basketball_analyzer(%s): señal %s descartada — "
+                        "seed %d vs rival seed %d (diff>3) [%s]",
+                        match_id, tag, team_seed, opp_seed, team,
+                    )
+                    continue
+                # Descuento elite: rival con seed ≤2 → bookmakers más eficientes, −20% edge
+                edge_discount = 0.80 if (opp_seed and opp_seed <= 2) else 1.0
                 pred = _make_pred(base, "h2h", team, odds, prob,
-                                  sigs, conf, match_date, weights_version, ml["bookmaker"])
+                                  sigs, conf, match_date, weights_version, ml["bookmaker"],
+                                  edge_discount=edge_discount)
                 if pred:
                     doc_id = f"{match_id}_ml_{tag}"
                     pred["match_id"] = doc_id

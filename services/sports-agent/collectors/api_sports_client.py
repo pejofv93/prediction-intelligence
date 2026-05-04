@@ -226,6 +226,13 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
                 status = "LIVE" if state == "in" else "SCHEDULED"
                 home_team = home.get("team", {})
                 away_team = away.get("team", {})
+                # Seed durante playoffs (ESPN lo expone como curveSeed o curRank en el competidor)
+                def _extract_seed(c: dict) -> int | None:
+                    raw = c.get("curveSeed") or c.get("curRank") or c.get("seed")
+                    try:
+                        return int(raw) if raw is not None else None
+                    except (TypeError, ValueError):
+                        return None
                 games.append({
                     "match_id": str(event.get("id") or comp.get("id") or ""),
                     "date": comp.get("date", event.get("date", "")),
@@ -233,6 +240,8 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
                     "away_team_id": int(away_team.get("id", 0)) or None,
                     "home_team_name": home_team.get("displayName", home_team.get("name", "")),
                     "away_team_name": away_team.get("displayName", away_team.get("name", "")),
+                    "home_seed": _extract_seed(home),
+                    "away_seed": _extract_seed(away),
                     "goals_home": None,
                     "goals_away": None,
                     "league": "NBA",
