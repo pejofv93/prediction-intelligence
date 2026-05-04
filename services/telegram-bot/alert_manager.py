@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.config import TELEGRAM_CHAT_ID, TELEGRAM_TOKEN
 
