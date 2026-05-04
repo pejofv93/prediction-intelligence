@@ -655,6 +655,46 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     except Exception:
         pass
 
+    # E1. Spread profundo — mercado ilíquido si spread > 8% → reducir confidence 20%
+    try:
+        _ob = enriched_market.get("orderbook", {})
+        _spread = float(_ob.get("spread", 0))
+        if _spread > 0.08:
+            confidence = round(confidence * 0.80, 4)
+            key_factors = [f"illiquid_spread_{_spread:.0%}"] + (key_factors or [])
+            logger.info(
+                "analyze_market(%s): spread=%.0f%% > 8%% — mercado ilíquido, conf→%.2f",
+                market_id, _spread * 100, confidence,
+            )
+    except Exception:
+        pass
+
+    # E2. Corrección por correlación de mercados — pull real_prob si inconsistente
+    try:
+        _correlations = enriched_market.get("correlations", [])
+        _high_corr = [c for c in _correlations if len(c.get("shared_keywords", [])) >= 3]
+        if _high_corr:
+            _corr_prices = [float(c.get("price_yes", 0.5)) for c in _high_corr]
+            _corr_avg = sum(_corr_prices) / len(_corr_prices)
+            _incon = abs(real_prob - _corr_avg)
+            if _incon > 0.15:
+                _old_prob = real_prob
+                # Pull 30% hacia el promedio de mercados correlacionados
+                real_prob = round(real_prob * 0.70 + _corr_avg * 0.30, 4)
+                edge = round(real_prob - price_yes, 4)
+                if edge >= POLY_MIN_EDGE:
+                    recommendation = "BUY_YES"
+                elif edge <= -POLY_MIN_EDGE:
+                    recommendation = "BUY_NO"
+                else:
+                    recommendation = "PASS"
+                logger.info(
+                    "analyze_market(%s): correlación inconsistente (%.0f%%) — prob %.2f→%.2f (corr_avg=%.2f)",
+                    market_id, _incon * 100, _old_prob, real_prob, _corr_avg,
+                )
+    except Exception:
+        pass
+
     # Aplicar ajuste Fear & Greed si es crypto
     if fear_greed and category == "crypto":
         try:
