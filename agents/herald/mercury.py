@@ -230,7 +230,7 @@ class MERCURY(BaseAgent):
         """
         output_dir = Path(os.getenv("OUTPUT_DIR", "/app/output"))
         if not output_dir.exists():
-            output_dir = Path(__file__).resolve().parents[3] / "output"
+            output_dir = Path(__file__).resolve().parents[2] / "output"
 
         result = {"status": "ok", "pct": 0.0, "free_gb": 0.0, "used_gb": 0.0, "total_gb": 0.0}
 
@@ -279,7 +279,7 @@ class MERCURY(BaseAgent):
             emoji = "🔴"
             level = "CRITICO — limpieza automática"
             try:
-                scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+                scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
                 subprocess.run(
                     [sys.executable, str(scripts_dir / "cleanup_volume.py"), "--confirm"],
                     timeout=180, capture_output=True,

@@ -247,7 +247,7 @@ class KAIROS(BaseAgent):
         self.logger.info("KAIROS: VOLUME_GUARDIAN iniciado")
         output_dir = Path(os.getenv("OUTPUT_DIR", "/app/output"))
         if not output_dir.exists():
-            output_dir = Path(__file__).resolve().parents[3] / "output"
+            output_dir = Path(__file__).resolve().parents[2] / "output"
 
         freed_bytes = 0
         action = "none"
@@ -257,7 +257,7 @@ class KAIROS(BaseAgent):
             before = shutil.disk_usage(output_dir)
             disk_pct = before.used / before.total * 100
 
-            scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+            scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
             result = subprocess.run(
                 [sys.executable, str(scripts_dir / "cleanup_volume.py"), "--confirm"],
                 capture_output=True, text=True, timeout=300,

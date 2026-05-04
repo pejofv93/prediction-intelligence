@@ -1247,3 +1247,132 @@ async def force_pipeline(request: Request):
         "mode": forced_mode,
         "msg": "Pipeline starting in background",
     })
+
+
+# ── 23. Volumen — diagnóstico y limpieza ───────────────────────────────────────
+# Autenticado igual que /force-pipeline (CRON_SECRET o sesión web activa).
+# GET  /volume             → estado del disco (JSON)
+# GET  /volume?confirm=true → ejecuta limpieza real y devuelve resultado
+
+@app.get("/volume")
+@app.post("/volume")
+async def volume_endpoint(
+    request: Request,
+    confirm: bool = False,
+    nexus_auth: Optional[str] = Cookie(default=None),
+):
+    """
+    Diagnóstico y limpieza del volumen Railway desde dentro del contenedor.
+    Auth: CRON_SECRET en header X-Cron-Secret / query ?secret= O sesión PIN activa.
+    """
+    import shutil as _sh
+    from pathlib import Path as _P
+
+    # --- Autenticación ---
+    cron_secret = os.getenv("CRON_SECRET", "")
+    provided_secret = (
+        request.headers.get("X-Cron-Secret", "")
+        or request.query_params.get("secret", "")
+    )
+    session_ok = _is_authenticated(nexus_auth)
+    secret_ok = cron_secret and provided_secret == cron_secret
+
+    if not session_ok and not secret_ok:
+        raise HTTPException(
+            status_code=403,
+            detail="Requiere sesión activa o X-Cron-Secret correcto",
+        )
+
+    # --- Estado del disco ---
+    output_dir = _P(os.getenv("OUTPUT_DIR", "/app/output"))
+    if not output_dir.exists():
+        output_dir = BASE_DIR / "output"
+
+    disk_info = {}
+    try:
+        usage = _sh.disk_usage(output_dir)
+        disk_info = {
+            "path": str(output_dir),
+            "total_gb": round(usage.total / 1e9, 2),
+            "used_gb":  round(usage.used  / 1e9, 2),
+            "free_gb":  round(usage.free  / 1e9, 2),
+            "pct_used": round(usage.used / usage.total * 100, 1),
+        }
+    except Exception as exc:
+        disk_info = {"error": str(exc)}
+
+    # Top consumidores
+    top = []
+    try:
+        items = []
+        for item in output_dir.iterdir():
+            size = (
+                sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                if item.is_dir() else item.stat().st_size
+            )
+            items.append({"name": item.name, "size_mb": round(size / 1e6, 1)})
+        top = sorted(items, key=lambda x: x["size_mb"], reverse=True)[:6]
+    except Exception:
+        pass
+
+    # DB size
+    db_size = {}
+    for db_candidate in [output_dir / "cryptoverdad.db", BASE_DIR / "cryptoverdad.db"]:
+        if db_candidate.exists():
+            db_size = {
+                "path": str(db_candidate),
+                "size_mb": round(db_candidate.stat().st_size / 1e6, 2),
+            }
+            break
+
+    response_data = {
+        "disk": disk_info,
+        "top_consumers": top,
+        "database": db_size,
+        "cleaned": False,
+        "freed_mb": 0,
+    }
+
+    if not confirm:
+        # Dry-run: contar qué borraría
+        try:
+            scripts_dir = BASE_DIR / "scripts"
+            import subprocess as _sp
+            result = _sp.run(
+                [sys.executable, str(scripts_dir / "cleanup_volume.py"),
+                 "--output-dir", str(output_dir)],
+                capture_output=True, text=True, timeout=60,
+            )
+            response_data["dry_run_output"] = result.stdout[-3000:] if result.stdout else ""
+        except Exception as exc:
+            response_data["dry_run_error"] = str(exc)
+        return JSONResponse(response_data)
+
+    # Cleanup real
+    try:
+        used_before = _sh.disk_usage(output_dir).used
+        scripts_dir = BASE_DIR / "scripts"
+        import subprocess as _sp
+        result = _sp.run(
+            [sys.executable, str(scripts_dir / "cleanup_volume.py"),
+             "--confirm", "--output-dir", str(output_dir)],
+            capture_output=True, text=True, timeout=300,
+        )
+        used_after = _sh.disk_usage(output_dir).used
+        freed = max(0, used_before - used_after)
+        response_data["cleaned"] = True
+        response_data["freed_mb"] = round(freed / 1e6, 1)
+        response_data["cleanup_output"] = result.stdout[-3000:] if result.stdout else ""
+        # Actualizar info de disco
+        usage2 = _sh.disk_usage(output_dir)
+        response_data["disk"]["used_gb"]  = round(usage2.used  / 1e9, 2)
+        response_data["disk"]["free_gb"]  = round(usage2.free  / 1e9, 2)
+        response_data["disk"]["pct_used"] = round(usage2.used / usage2.total * 100, 1)
+        console.print(
+            f"[green]/volume cleanup: {freed/1e6:.1f}MB liberados[/]"
+        )
+    except Exception as exc:
+        response_data["cleanup_error"] = str(exc)
+        console.print(f"[red]/volume cleanup error: {exc}[/]")
+
+    return JSONResponse(response_data)
