@@ -314,6 +314,11 @@ SYSTEM_PROMPT = (
     '"trend": "RISING|FALLING|STABLE", "recommendation": "BUY_YES|BUY_NO|PASS|WATCH", '
     '"key_factors": list[str], "reasoning": string} '
     "donde edge = real_prob - market_price_yes (positivo = comprar YES, negativo = comprar NO). "
+    "REGLA CRITICA DE CONSISTENCIA (obligatoria): "
+    "Si real_prob < precio_mercado → edge es negativo → recommendation DEBE ser BUY_NO o PASS. NUNCA BUY_YES. "
+    "Si real_prob > precio_mercado → edge es positivo → recommendation DEBE ser BUY_YES o PASS. NUNCA BUY_NO. "
+    "Una recommendation contradictoria con el signo del edge es un error grave — "
+    "verifica siempre que tu recommendation sea coherente con real_prob vs precio_mercado antes de responder. "
     "ESCALA DE CONFIANZA (confidence): "
     "0.50 = muy incierto, datos insuficientes o contradictorios; "
     "0.65 = evidencia moderada, una o dos senales alineadas; "
@@ -461,7 +466,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"Si smart_money = True, hay informacion privilegiada — ajusta real_prob significativamente. "
         f"Si arbitrage.detected = True, hay ineficiencia confirmada — usa inefficiency como lower bound del edge. "
         f"Sé explícito sobre la divergencia: edge = real_prob - {price_yes:.3f}. "
-        f"Un edge de 0.00 o cercano a cero indica mercado eficiente — justificalo con argumentos solidos."
+        f"Un edge de 0.00 o cercano a cero indica mercado eficiente — justificalo con argumentos solidos.\n"
+        f"VERIFICACION FINAL OBLIGATORIA antes de responder:\n"
+        f"  - Si real_prob < {price_yes:.3f} → escribe recommendation=BUY_NO o PASS. NUNCA BUY_YES.\n"
+        f"  - Si real_prob > {price_yes:.3f} → escribe recommendation=BUY_YES o PASS. NUNCA BUY_NO.\n"
+        f"  - Verifica que edge = real_prob - {price_yes:.3f} en tu JSON."
     )
     if fear_greed_line:
         user_prompt += f"\n{fear_greed_line}"
@@ -619,21 +628,22 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         else:
             recommendation = "PASS"
 
-    # URGENTE 2 — Validar que recommendation coincide con la dirección del edge.
-    # edge = real_prob - market_price_yes: positivo → BUY_YES, negativo → BUY_NO.
-    # Si Groq devuelve la combinación contraria, la señal es incoherente → descartar.
+    # Validar consistencia recommendation ↔ edge. Si Groq devuelve combinación contraria,
+    # auto-corregir: el edge (derivado de real_prob) es la verdad, la rec es el error del LLM.
     if edge > 0 and recommendation == "BUY_NO":
-        logger.warning(
-            "analyze_market(%s): señal contradictoria — edge=%.3f>0 pero rec=BUY_NO → descartando",
-            market_id, edge,
+        recommendation = "BUY_YES"
+        logger.info(
+            "analyze_market(%s): rec auto-corregida BUY_NO→BUY_YES "
+            "(edge=%.3f>0, real_prob=%.3f > market=%.3f)",
+            market_id, edge, real_prob, price_yes,
         )
-        return None
-    if edge < 0 and recommendation == "BUY_YES":
-        logger.warning(
-            "analyze_market(%s): señal contradictoria — edge=%.3f<0 pero rec=BUY_YES → descartando",
-            market_id, edge,
+    elif edge < 0 and recommendation == "BUY_YES":
+        recommendation = "BUY_NO"
+        logger.info(
+            "analyze_market(%s): rec auto-corregida BUY_YES→BUY_NO "
+            "(edge=%.3f<0, real_prob=%.3f < market=%.3f)",
+            market_id, edge, real_prob, price_yes,
         )
-        return None
 
     # Fix 4: calibrar confidence con accuracy histórica por bucket de edge
     try:
