@@ -1733,12 +1733,11 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         best_confidence = round(best_confidence * _standings_confidence_adj, 4)
 
     # --- 6. Umbrales de intensidad (FIX 2) ---
-    # FUERTE: edge>15% + conf>80% + odds<5.00
-    # MODERADA: edge>10% + conf>70% + odds<6.00
-    # DETECTADA: edge>_min_edge + conf>65% + odds<4.00 (_min_edge calibrado por liga via backtest)
+    # CL/EL/ECL: umbrales relajados (eliminatorias con mayor varianza, team_stats por nombre)
+    _is_intl_cup = league in {"CL", "EL", "ECL"}
     _is_fuerte    = best_edge > 0.15 and best_confidence > 0.80 and best_odds < 5.00
-    _is_moderada  = best_edge > 0.10 and best_confidence > 0.70 and best_odds < 6.00
-    _is_detectada = best_edge > _min_edge and best_confidence > 0.65 and best_odds < 4.00
+    _is_moderada  = best_edge > 0.10 and best_confidence > (0.65 if _is_intl_cup else 0.70) and best_odds < 6.00
+    _is_detectada = best_edge > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
 
     if not (_is_fuerte or _is_moderada or _is_detectada):
         logger.debug(
