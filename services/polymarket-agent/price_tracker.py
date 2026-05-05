@@ -138,6 +138,95 @@ async def smart_money_detection(market_id: str) -> dict:
         return {"is_smart_money": False, "hours_before_news": None}
 
 
+async def classify_volume_spike(market_id: str) -> str:
+    """
+    Clasifica el origen de un spike de volumen en:
+      SMART_MONEY   — spike gradual (>2h) con precio moviéndose consistentemente
+      MANIPULATION  — spike súbito (<30min) y precio regresa al nivel anterior en <2h
+      WASH_TRADING  — volumen alto pero precio casi sin moverse (<1% variación total)
+      ORGANIC       — spike sin patrón específico (o sin datos suficientes)
+
+    Usa snapshots de poly_price_history de las últimas 4h.
+    Solo se llama cuando volume_spike() retorna True.
+    """
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=4)
+        docs = (
+            col("poly_price_history")
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff))
+            .order_by("timestamp")
+            .stream()
+        )
+        snaps = [d.to_dict() for d in docs]
+        if len(snaps) < 3:
+            return "ORGANIC"
+
+        # Extraer series de tiempo
+        times = []
+        for s in snaps:
+            t = s.get("timestamp")
+            if t is not None and hasattr(t, "tzinfo") and t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            times.append(t)
+
+        volumes = [float(s.get("volume_24h", 0)) for s in snaps]
+        prices = [float(s.get("price_yes", 0.5)) for s in snaps]
+
+        vol_start = volumes[0]
+        vol_peak_idx = volumes.index(max(volumes))
+        vol_peak = volumes[vol_peak_idx]
+        vol_end = volumes[-1]
+
+        # --- WASH_TRADING: volumen alto, precio casi inmóvil ---
+        price_range = max(prices) - min(prices)
+        if vol_peak > vol_start * 3 and price_range < 0.01:
+            logger.info(
+                "classify_volume_spike(%s): WASH_TRADING vol_peak=%.0f price_range=%.3f",
+                market_id, vol_peak, price_range,
+            )
+            return "WASH_TRADING"
+
+        # Tiempo desde inicio hasta pico de volumen
+        if times[0] and times[vol_peak_idx]:
+            minutes_to_peak = abs((times[vol_peak_idx] - times[0]).total_seconds()) / 60
+        else:
+            minutes_to_peak = 120  # desconocido → asumir gradual
+
+        # --- MANIPULATION: spike súbito (<30min) y precio vuelve al inicio ---
+        if minutes_to_peak < 30:
+            price_at_peak = prices[vol_peak_idx]
+            price_at_end = prices[-1]
+            price_returned = abs(price_at_end - prices[0]) < abs(price_at_peak - prices[0]) * 0.40
+            if price_returned:
+                logger.info(
+                    "classify_volume_spike(%s): MANIPULATION spike en %.0fmin precio regresó",
+                    market_id, minutes_to_peak,
+                )
+                return "MANIPULATION"
+
+        # --- SMART_MONEY: spike gradual (>2h) y precio se mueve consistentemente ---
+        if minutes_to_peak >= 120:
+            # Precio se mueve consistentemente: cada snapshot va en la misma dirección
+            price_deltas = [prices[i + 1] - prices[i] for i in range(len(prices) - 1)]
+            positive_moves = sum(1 for d in price_deltas if d > 0.001)
+            negative_moves = sum(1 for d in price_deltas if d < -0.001)
+            dominant_direction = max(positive_moves, negative_moves)
+            total_moves = positive_moves + negative_moves
+            if total_moves > 0 and dominant_direction / total_moves >= 0.70:
+                logger.info(
+                    "classify_volume_spike(%s): SMART_MONEY spike en %.0fmin dirección consistente %.0f%%",
+                    market_id, minutes_to_peak, (dominant_direction / total_moves) * 100,
+                )
+                return "SMART_MONEY"
+
+        return "ORGANIC"
+
+    except Exception:
+        logger.error("classify_volume_spike(%s): error", market_id, exc_info=True)
+        return "ORGANIC"
+
+
 async def detect_whale_activity(market_id: str) -> dict:
     """
     Detecta actividad inusual de ballenas en un mercado.
