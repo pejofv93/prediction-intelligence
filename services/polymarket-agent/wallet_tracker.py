@@ -1,7 +1,10 @@
 """
 Tracker de wallets inteligentes en Polymarket.
 Identifica traders con win_rate > 65% y > 10 trades via CLOB API.
-Requiere POLYMARKET_CLOB_KEY en env para llamadas autenticadas al CLOB /trades.
+
+El endpoint GET /trades?market={condition_id} es PÚBLICO — no requiere autenticación.
+La clave POLYMARKET_CLOB_KEY solo es necesaria para operaciones de escritura
+(colocar/cancelar órdenes), que este módulo nunca realiza.
 """
 import logging
 import os
@@ -20,13 +23,15 @@ _MIN_WIN_RATE = 0.65
 _MIN_USD = 5_000.0
 _WINDOW_H = 6
 
+# CLOB /trades es público — no requiere auth. Clave opcional solo para futuras operaciones.
 _CLOB_KEY = os.environ.get("POLYMARKET_CLOB_KEY", "")
-if not _CLOB_KEY:
-    logger.info("wallet_tracker: POLYMARKET_CLOB_KEY no configurado — whale tracking desactivado")
 
 
 def _clob_headers() -> dict:
-    return {"Accept": "application/json", "Authorization": f"Bearer {_CLOB_KEY}"}
+    headers = {"Accept": "application/json"}
+    if _CLOB_KEY:
+        headers["Authorization"] = f"Bearer {_CLOB_KEY}"
+    return headers
 
 
 async def _get_condition_id(market_id: str) -> str:
@@ -40,12 +45,9 @@ async def _get_condition_id(market_id: str) -> str:
 
 async def get_top_traders(market_id: str) -> list[dict]:
     """
-    Llama CLOB GET /trades?market={condition_id}&limit=100 (autenticado).
+    Llama CLOB GET /trades?market={condition_id}&limit=100 (endpoint público).
     Agrupa por maker_address, estima win_rate y guarda smart wallets en poly_smart_wallets.
-    Requiere POLYMARKET_CLOB_KEY — si no está configurado, devuelve [] sin llamar al API.
     """
-    if not _CLOB_KEY:
-        return []
     try:
         condition_id = await _get_condition_id(market_id)
         if not condition_id:
@@ -120,8 +122,6 @@ async def check_wallet_activity(market_id: str, recommendation: str) -> dict:
     Requiere POLYMARKET_CLOB_KEY — si no está configurado, devuelve _default.
     """
     _default = {"whale_signal": False, "confidence_adj": 0.0, "message": ""}
-    if not _CLOB_KEY:
-        return _default
     try:
         docs = list(
             col("poly_smart_wallets")
