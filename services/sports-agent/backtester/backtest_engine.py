@@ -58,8 +58,18 @@ async def fetch_historical_fixtures(
         )
         return cached
 
-    # 2. Leer de upcoming_matches filtrado por nombre de liga + status FINISHED
-    if not league_name:
+    # 2. Leer de upcoming_matches filtrado por código de liga + status FINISHED
+    # upcoming_matches almacena el código de football-data.org (ej: "PL"), no el nombre
+    _LEAGUE_NAME_TO_CODE = {
+        "Premier League": "PL",
+        "La Liga":        "PD",
+        "Bundesliga":     "BL1",
+        "Serie A":        "SA",
+        "Ligue 1":        "FL1",
+    }
+    league_code = _LEAGUE_NAME_TO_CODE.get(league_name, league_name)
+
+    if not league_code:
         logger.warning("fetch_historical_fixtures: league_name vacío, no se puede filtrar upcoming_matches")
         return []
 
@@ -67,7 +77,7 @@ async def fetch_historical_fixtures(
         from google.cloud.firestore_v1.base_query import FieldFilter as FF
         docs = list(
             col("upcoming_matches")
-            .where(filter=FF("league", "==", league_name))
+            .where(filter=FF("league", "==", league_code))
             .where(filter=FF("status", "==", "FINISHED"))
             .stream()
         )
