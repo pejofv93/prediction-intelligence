@@ -408,7 +408,11 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
     _first_call = True
     for i in range(0, len(event_ids), 10):
         batch = event_ids[i:i+10]
-        params = {"eventIds": ",".join(batch), "bookmakers": _DEFAULT_BOOKMAKERS}
+        params = {
+            "eventIds": ",".join(batch),
+            "bookmakers": _DEFAULT_BOOKMAKERS,
+            "markets": "h2h,btts,total_goals,asian_handicap",
+        }
         if _first_call:
             status, body, data = await _get_raw("/odds/multi", params)
             _first_call = False

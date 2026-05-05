@@ -968,11 +968,11 @@ async def _generate_oddsapiio_extra_signals(
                 logger.info("EXTRA_MARKETS_OU(%s): SKIP — ningún lado supera min_edge=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
-                sel_conf = round(max(0.0, 1.0 - abs(sel_p - 0.5) * 2), 4)
+                sel_conf = round(abs(sel_p - 0.5) * 2, 4)
                 logger.info(
                     "EXTRA_MARKETS_OU(%s): sel=%s sel_p=%.3f conf=%.3f(min=%.3f) → %s",
                     match_id, sel, sel_p, sel_conf, SPORTS_MIN_CONFIDENCE,
-                    "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP (conf formula invertida: prob alta = conf baja)",
+                    "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP",
                 )
                 if sel_conf > SPORTS_MIN_CONFIDENCE:
                     doc_id = f"{match_id}_ou25_oaio"
@@ -1037,10 +1037,9 @@ async def _generate_oddsapiio_extra_signals(
                 logger.info("EXTRA_MARKETS_AH(%s): SKIP — ningún lado supera min_edge=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
-                sel_conf = round(min(1.0, abs(sel_p - 0.5) * 3), 4)
+                sel_conf = round(min(1.0, sel_p), 4)
                 logger.info(
-                    "EXTRA_MARKETS_AH(%s): sel=%s sel_p=%.3f conf=%.3f(min=%.3f) → %s "
-                    "[NOTA: conf requiere sel_p>0.717 para pasar — posible bug fórmula]",
+                    "EXTRA_MARKETS_AH(%s): sel=%s sel_p=%.3f conf=%.3f(min=%.3f) → %s",
                     match_id, sel, sel_p, sel_conf, SPORTS_MIN_CONFIDENCE,
                     "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP",
                 )
