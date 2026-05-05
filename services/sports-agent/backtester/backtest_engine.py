@@ -58,7 +58,7 @@ async def fetch_historical_fixtures(
 
     url = "https://v3.football.api-sports.io/fixtures"
     params = {"league": str(league_id), "season": str(season), "status": "FT"}
-    headers = {"x-rapidapi-key": api_key}
+    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "v3.football.api-sports.io"}
 
     fixtures: list[dict] = []
 

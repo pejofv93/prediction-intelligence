@@ -407,3 +407,7 @@ async def run_backtest(limit: int = 200) -> dict:
         "thresholds":       thresholds,
         "avg_volume":       avg_vol,
     }
+
+
+# Alias para compatibilidad con main.py
+run_poly_backtest = run_backtest
