@@ -67,6 +67,7 @@ async def enrich_match(match: dict) -> dict:
     home_id: int | None = match.get("home_team_id")
     away_id: int | None = match.get("away_team_id")
     sport = match.get("sport") or _detect_sport(match)
+    league = match.get("league", "")
 
     is_football = sport == "football"
     data_quality = "full"
