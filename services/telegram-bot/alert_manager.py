@@ -318,6 +318,8 @@ def _format_poly_alert(analysis: dict) -> str:
             else:
                 time_icon = "🕐"
             close_line = f"{time_icon} Cierra en {days_left}d ({date_label})"
+            if days_left < 3:
+                close_line += " — ⚡ *CIERRA PRONTO* — precio actual muy relevante"
         except Exception:
             pass
 

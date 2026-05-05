@@ -437,11 +437,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         # Descartar si el mercado cierra en menos de 24h (incluyendo ya expirados)
         if end_date < now_utc + timedelta(hours=24):
             logger.info(
-                "analyze_market(%s): mercado cierra/cerró en <24h (end_date=%s) — omitiendo",
+                "analyze_market(%s): CLOSING_SOON_SKIP — mercado cierra en <24h (end_date=%s)",
                 market_id, end_date.isoformat(),
             )
             return None
         days_to_close = (end_date - now_utc).days
+        # Mercados entre 24h y 48h: el precio de mercado es más fiable que la estimación LLM
+        _closing_soon = days_to_close < 2
     else:
         logger.warning(
             "analyze_market(%s): end_date no disponible en Firestore — omitiendo por seguridad",
@@ -662,6 +664,17 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     key_factors = result.get("key_factors", [])
     reasoning = result.get("reasoning", "")
 
+    # Mercados con resolución <48h: blend LLM 50% + precio mercado 50%
+    # El precio de mercado converge a la probabilidad real en los días finales.
+    if _closing_soon:
+        blended = round((real_prob * 0.5) + (price_yes * 0.5), 4)
+        logger.info(
+            "analyze_market(%s): CLOSING_SOON_BLEND days=%d real_prob %.3f→%.3f (blend con price_yes=%.3f)",
+            market_id, days_to_close, real_prob, blended, price_yes,
+        )
+        real_prob = blended
+        edge = round(real_prob - price_yes, 4)
+
     # Fix 7: corrección de sesgo LLM por categoría (calibración histórica)
     try:
         _weights = _get_poly_weights()
@@ -828,6 +841,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "fear_greed_index": fear_greed.get("value") if fear_greed else None,
         "fear_greed_label": fear_greed.get("label") if fear_greed else None,
         "end_date_iso": end_date.isoformat() if end_date else None,
+        "days_to_close": days_to_close,
         "slug": market_data.get("slug", ""),
         "volume_24h": volume_24h,
         "analyzed_at": datetime.now(timezone.utc),
