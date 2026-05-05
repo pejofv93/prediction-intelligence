@@ -39,30 +39,35 @@ _MAX_API_CALLS = 50
 # ---------------------------------------------------------------------------
 
 async def fetch_historical_fixtures(
-    league_id: int, season: int, api_key: str
+    league_id: int, season: int, api_key: str, league_name: str = ""
 ) -> list[dict]:
     """
     Lee partidos FINISHED de upcoming_matches (Firestore) para la liga indicada.
-    Fallback a backtest_fixtures si upcoming_matches no tiene datos para ese league_id.
+    Filtra por el campo string 'league' (ej: "Premier League"), no por league_id entero.
+    Fallback a backtest_fixtures si ya hay datos cacheados.
 
     El plan gratuito de api-football-v1.p.rapidapi.com no incluye fixtures históricos
     (responde 403), así que usamos los datos ya recolectados por el pipeline de collect.
     """
-    # 1. Leer de upcoming_matches (partidos ya jugados recolectados por collect)
+    # 1. Caché backtest_fixtures (si hubo runs anteriores)
     cached = _read_fixtures_from_firestore(league_id, season)
     if cached:
         logger.info(
-            "fetch_historical_fixtures: league=%d season=%d → %d fixtures (backtest_fixtures)",
+            "fetch_historical_fixtures: league=%d season=%d → %d fixtures (backtest_fixtures cache)",
             league_id, season, len(cached),
         )
         return cached
 
-    # 2. Fallback: leer de upcoming_matches filtrado por league_id
+    # 2. Leer de upcoming_matches filtrado por nombre de liga + status FINISHED
+    if not league_name:
+        logger.warning("fetch_historical_fixtures: league_name vacío, no se puede filtrar upcoming_matches")
+        return []
+
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter as FF
         docs = list(
             col("upcoming_matches")
-            .where(filter=FF("league_id", "==", league_id))
+            .where(filter=FF("league", "==", league_name))
             .where(filter=FF("status", "==", "FINISHED"))
             .stream()
         )
@@ -77,33 +82,33 @@ async def fetch_historical_fixtures(
             result = "H" if gh > ga else ("A" if ga > gh else "D")
             fixture_id = hash(d.id) & 0x7FFFFFFF
             fixtures.append({
-                "fixture_id":  fixture_id,
-                "league_id":   league_id,
-                "league":      raw.get("league", ""),
-                "season":      season,
-                "date":        str(raw.get("match_date", ""))[:10],
-                "home_team":   raw.get("home_team", ""),
-                "away_team":   raw.get("away_team", ""),
-                "goals_home":  gh,
-                "goals_away":  ga,
-                "result":      result,
-                "odds_home":   raw.get("odds_home") or raw.get("odds_1") or None,
-                "odds_draw":   raw.get("odds_draw") or raw.get("odds_x") or None,
-                "odds_away":   raw.get("odds_away") or raw.get("odds_2") or None,
-                "odds_over25": raw.get("odds_over25") or None,
-                "odds_under25":raw.get("odds_under25") or None,
+                "fixture_id":    fixture_id,
+                "league_id":     league_id,
+                "league":        raw.get("league", ""),
+                "season":        season,
+                "date":          str(raw.get("match_date", ""))[:10],
+                "home_team":     raw.get("home_team", ""),
+                "away_team":     raw.get("away_team", ""),
+                "goals_home":    gh,
+                "goals_away":    ga,
+                "result":        result,
+                "odds_home":     raw.get("odds_home") or raw.get("odds_1") or None,
+                "odds_draw":     raw.get("odds_draw") or raw.get("odds_x") or None,
+                "odds_away":     raw.get("odds_away") or raw.get("odds_2") or None,
+                "odds_over25":   raw.get("odds_over25") or None,
+                "odds_under25":  raw.get("odds_under25") or None,
                 "odds_btts_yes": raw.get("odds_btts_yes") or None,
                 "odds_btts_no":  raw.get("odds_btts_no") or None,
             })
         logger.info(
-            "fetch_historical_fixtures: league=%d season=%d → %d fixtures (upcoming_matches)",
-            league_id, season, len(fixtures),
+            "fetch_historical_fixtures: league=%s season=%d → %d fixtures (upcoming_matches)",
+            league_name, season, len(fixtures),
         )
         return fixtures
     except Exception as e:
         logger.error(
-            "fetch_historical_fixtures(%d/%d): error leyendo Firestore: %s",
-            league_id, season, e,
+            "fetch_historical_fixtures(%s/%d): error leyendo Firestore: %s",
+            league_name, season, e,
         )
         return []
 
@@ -377,7 +382,7 @@ async def run_backtest(
 
     for season in seasons:
         try:
-            fixtures = await fetch_historical_fixtures(league_id, season, api_key)
+            fixtures = await fetch_historical_fixtures(league_id, season, api_key, league_name)
             if not fixtures:
                 logger.warning(
                     "run_backtest: sin fixtures para %s/%d", league_name, season
