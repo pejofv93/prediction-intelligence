@@ -1080,16 +1080,17 @@ async def _bg_arb() -> None:
         cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
         try:
+            # Firestore no soporta != con None — filtrar por status en Python
             raw_docs = list(
                 col("enriched_matches")
-                .where(filter=FieldFilter("odds_current", "!=", None))
+                .where(filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"]))
                 .stream()
             )
         except Exception as e:
             logger.warning("arb: error leyendo enriched_matches — %s", e)
             raw_docs = []
 
-        # Filtrar por las últimas 24h manualmente (Firestore no soporta != + rango de fecha)
+        # Filtrar por las últimas 24h y que tengan odds_current (en Python)
         enriched_docs: list[dict] = []
         for d in raw_docs:
             data = d.to_dict()
