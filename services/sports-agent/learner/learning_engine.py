@@ -324,6 +324,8 @@ async def run_daily_learning() -> None:
         len(_raw_results),
     )
 
+    groq_predictions_count = 0  # contador de predicciones groq_ai procesadas hoy
+
     # 3b. Procesar resultados en orden (weight updates son acumulativos)
     for prediction, actual_result in zip(pending, _raw_results):
         match_id = prediction.get("match_id", "")
@@ -349,10 +351,11 @@ async def run_daily_learning() -> None:
             factors = prediction.get("factors", {})
             top = _top_factor(factors)
 
-            # Ajustar pesos solo para predicciones con modelo estadistico
-            data_source = prediction.get("data_source", "")
-            if data_source == "statistical_model":
-                current_weights = update_weights(error_type, top, current_weights, correct)
+            # Ajustar pesos para todas las predicciones resueltas — groq_ai incluida
+            data_source = prediction.get("data_source", "statistical_model")
+            if data_source == "groq_ai":
+                groq_predictions_count += 1
+            current_weights = update_weights(error_type, top, current_weights, correct)
 
             # Guardar para actualizacion de ELOs (partidos de futbol verificados)
             if league in _FOOTBALL_LEAGUES and prediction.get("home_team_id") and prediction.get("away_team_id"):
@@ -462,6 +465,7 @@ async def run_daily_learning() -> None:
             "correct_predictions": correct_in_db + sum(
                 1 for p in processed_predictions if p.get("correct")
             ),
+            "groq_predictions_count": groq_predictions_count,
         })
         logger.info(
             "run_daily_learning: model_weights actualizado → version %d pesos=%s",
