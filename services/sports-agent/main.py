@@ -494,6 +494,16 @@ async def _collect_football() -> None:
         len(team_ids_seen), skipped_teams, len(h2h_pairs_seen), skipped_h2h,
     )
 
+    # Actualizar resultados de partidos terminados (últimos 30 días)
+    try:
+        from collectors.football_api import get_finished_matches
+        from collectors.firestore_writer import update_finished_matches
+        finished = await get_finished_matches(days_back=30)
+        updated = await update_finished_matches(finished)
+        logger.info("RESULTS_UPDATE: %d partidos actualizados a FINISHED", updated)
+    except Exception:
+        logger.error("collect.football: error actualizando resultados FINISHED", exc_info=True)
+
 
 async def _collect_allsports_football() -> None:
     """Recolecta fútbol de selecciones y sudamérica via AllSportsApi."""

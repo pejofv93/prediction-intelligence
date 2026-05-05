@@ -185,6 +185,37 @@ async def get_standings(league_id: int) -> list[dict]:
     return standings
 
 
+async def get_finished_matches(days_back: int = 30) -> list[dict]:
+    """
+    GET /matches?status=FINISHED&dateFrom=hace_{days_back}_días&dateTo=ayer
+    Devuelve partidos terminados de todas las ligas soportadas.
+    Usado por el collect pipeline para actualizar resultados en upcoming_matches.
+    """
+    today = datetime.now(timezone.utc).date()
+    date_from = today - timedelta(days=days_back)
+    date_to = today - timedelta(days=1)
+    leagues = ",".join(SUPPORTED_FOOTBALL_LEAGUES.keys())
+
+    data = await _request(
+        f"/matches?dateFrom={date_from}&dateTo={date_to}"
+        f"&competitions={leagues}&status=FINISHED"
+    )
+    if not data:
+        return []
+
+    matches = []
+    for m in data.get("matches", []):
+        parsed = _parse_match(m)
+        if parsed and parsed["goals_home"] is not None and parsed["goals_away"] is not None:
+            matches.append(parsed)
+
+    logger.info(
+        "get_finished_matches: %d partidos terminados (últimos %d días)",
+        len(matches), days_back,
+    )
+    return matches
+
+
 async def get_match_result(match_id: str) -> dict | None:
     """
     GET /matches/{match_id}. Devuelve resultado si FINISHED, None si no.

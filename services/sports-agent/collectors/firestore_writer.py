@@ -196,6 +196,64 @@ async def save_team_stats(team_id: int, raw_api_matches: list[dict]) -> None:
         )
 
 
+async def update_finished_matches(matches: list[dict]) -> int:
+    """
+    Upsert partidos FINISHED en upcoming_matches.
+    Para cada partido: actualiza status, goals_home, goals_away, winner.
+    Si el doc no existe lo crea. Usa set(merge=True) para preservar campos existentes.
+    Devuelve el numero de docs actualizados/creados.
+    """
+    if not matches:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    updated = 0
+
+    for m in matches:
+        match_id = m.get("match_id")
+        if not match_id:
+            continue
+
+        goals_home = m.get("goals_home")
+        goals_away = m.get("goals_away")
+
+        if goals_home is None or goals_away is None:
+            continue
+
+        if goals_home > goals_away:
+            winner = "H"
+        elif goals_away > goals_home:
+            winner = "A"
+        else:
+            winner = "D"
+
+        update_data = {
+            "match_id": match_id,
+            "status": "FINISHED",
+            "goals_home": goals_home,
+            "goals_away": goals_away,
+            "winner": winner,
+            "result_updated_at": now,
+            # campos base para crear doc si no existe
+            "home_team": m.get("home_team_name", m.get("home_team", "")),
+            "away_team": m.get("away_team_name", m.get("away_team", "")),
+            "home_team_id": m.get("home_team_id"),
+            "away_team_id": m.get("away_team_id"),
+            "league": m.get("league", ""),
+            "match_date": m.get("date", m.get("match_date", "")),
+            "sport": m.get("sport", "football"),
+        }
+
+        try:
+            col("upcoming_matches").document(match_id).set(update_data, merge=True)
+            updated += 1
+        except Exception as e:
+            logger.error("update_finished_matches: error en doc %s: %s", match_id, e)
+
+    logger.info("RESULTS_UPDATE: %d partidos actualizados a FINISHED", updated)
+    return updated
+
+
 async def save_h2h(
     team1_id: int, team2_id: int, h2h_matches: list[dict]
 ) -> None:
