@@ -536,6 +536,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"  - Si real_prob > {price_yes:.3f} → escribe recommendation=BUY_YES o PASS. NUNCA BUY_NO.\n"
         f"  - Verifica que edge = real_prob - {price_yes:.3f} en tu JSON."
     )
+    if price_yes < 0.15:
+        user_prompt += (
+            f"\nADVERTENCIA MERCADO DE BAJA PROBABILIDAD: precio YES = {price_yes:.1%} (<15%). "
+            f"Tu estimación máxima razonable de real_prob es {price_yes * 3:.1%} (precio × 3). "
+            f"Superar este límite indica sesgo de confirmación. "
+            f"Para mercados geopolíticos o políticos de tan baja probabilidad, "
+            f"recomienda WATCH o PASS salvo evidencia inequívoca y verificable."
+        )
     if fear_greed_line:
         user_prompt += f"\n{fear_greed_line}"
     if _last_prob is not None:
@@ -692,6 +700,28 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         elif edge <= -POLY_MIN_EDGE:
             recommendation = "BUY_NO"
         else:
+            recommendation = "PASS"
+
+    # Cap para mercados de baja probabilidad (precio < 15%): real_prob ≤ precio × 2.5
+    # El LLM tiende a inflar probs en mercados geopolíticos/políticos extremos.
+    if price_yes < 0.15 and real_prob > price_yes * 2.5:
+        old_prob = real_prob
+        real_prob = round(min(price_yes * 2.5, 0.95), 4)
+        edge = round(real_prob - price_yes, 4)
+        note = f"⚠️ Cap prob baja: precio={price_yes:.1%} → real_prob máx={real_prob:.1%}"
+        reasoning = f"{note}\n{reasoning}" if reasoning else note
+        logger.info(
+            "analyze_market(%s): LOW_PRICE_CAP %.3f→%.3f (price_yes=%.3f, cat=%s)",
+            market_id, old_prob, real_prob, price_yes, category,
+        )
+
+    # Para geopolítica/política con precio < 15%: exigir edge ≥ 0.20 para BUY
+    if price_yes < 0.15 and category in ("geopolitics", "politics"):
+        if abs(edge) < 0.20 and recommendation in ("BUY_YES", "BUY_NO"):
+            logger.info(
+                "analyze_market(%s): LOW_PRICE_GEO_FILTER edge=%.3f<0.20 → PASS (cat=%s price=%.3f)",
+                market_id, abs(edge), category, price_yes,
+            )
             recommendation = "PASS"
 
     # Validar consistencia recommendation ↔ edge. Si Groq devuelve combinación contraria,
