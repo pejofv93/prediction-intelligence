@@ -42,78 +42,70 @@ async def fetch_historical_fixtures(
     league_id: int, season: int, api_key: str
 ) -> list[dict]:
     """
-    GET https://v3.football.api-sports.io/fixtures
-    Params: league={league_id}, season={season}, status=FT
-    Headers: x-rapidapi-key: {api_key}
+    Lee partidos FINISHED de upcoming_matches (Firestore) para la liga indicada.
+    Fallback a backtest_fixtures si upcoming_matches no tiene datos para ese league_id.
 
-    Parsea response["response"] y guarda en col("backtest_fixtures") si no existe.
-    Devuelve lista de fixtures normalizados.
+    El plan gratuito de api-football-v1.p.rapidapi.com no incluye fixtures históricos
+    (responde 403), así que usamos los datos ya recolectados por el pipeline de collect.
     """
-    # Intentar leer de Firestore primero si quota agotada
-    if not quota.can_call("api_sports"):
-        logger.warning(
-            "fetch_historical_fixtures: quota api_sports agotada, leyendo Firestore"
-        )
-        return _read_fixtures_from_firestore(league_id, season)
-
-    url = "https://api-football-v1.p.rapidapi.com/fixtures"
-    params = {"league": str(league_id), "season": str(season), "status": "FT"}
-    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "api-football-v1.p.rapidapi.com"}
-
-    fixtures: list[dict] = []
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, headers=headers, params=params)
-
-        quota.track_call("api_sports")
-
-        if resp.status_code == 429:
-            logger.warning(
-                "fetch_historical_fixtures: rate limit 429 — leyendo Firestore"
-            )
-            return _read_fixtures_from_firestore(league_id, season)
-
-        if resp.status_code != 200:
-            logger.warning(
-                "fetch_historical_fixtures(%d/%d): API respondio %d",
-                league_id, season, resp.status_code,
-            )
-            return _read_fixtures_from_firestore(league_id, season)
-
-        data = resp.json()
-        raw_list = data.get("response", [])
-
-        for raw in raw_list:
-            parsed = _parse_fixture(raw, league_id, season)
-            if parsed is None:
-                continue
-            fixtures.append(parsed)
-            # Guardar en Firestore si no existe
-            doc_id = str(parsed["fixture_id"])
-            try:
-                doc_ref = col("backtest_fixtures").document(doc_id)
-                if not doc_ref.get().exists:
-                    doc_ref.set(parsed)
-            except Exception as e:
-                logger.error(
-                    "fetch_historical_fixtures: error guardando fixture %s: %s",
-                    doc_id, e,
-                )
-
+    # 1. Leer de upcoming_matches (partidos ya jugados recolectados por collect)
+    cached = _read_fixtures_from_firestore(league_id, season)
+    if cached:
         logger.info(
-            "fetch_historical_fixtures: league=%d season=%d → %d fixtures",
+            "fetch_historical_fixtures: league=%d season=%d → %d fixtures (backtest_fixtures)",
+            league_id, season, len(cached),
+        )
+        return cached
+
+    # 2. Fallback: leer de upcoming_matches filtrado por league_id
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter as FF
+        docs = list(
+            col("upcoming_matches")
+            .where(filter=FF("league_id", "==", league_id))
+            .where(filter=FF("status", "==", "FINISHED"))
+            .stream()
+        )
+        fixtures: list[dict] = []
+        for d in docs:
+            raw = d.to_dict()
+            gh = raw.get("goals_home")
+            ga = raw.get("goals_away")
+            if gh is None or ga is None:
+                continue
+            gh, ga = int(gh), int(ga)
+            result = "H" if gh > ga else ("A" if ga > gh else "D")
+            fixture_id = hash(d.id) & 0x7FFFFFFF
+            fixtures.append({
+                "fixture_id":  fixture_id,
+                "league_id":   league_id,
+                "league":      raw.get("league", ""),
+                "season":      season,
+                "date":        str(raw.get("match_date", ""))[:10],
+                "home_team":   raw.get("home_team", ""),
+                "away_team":   raw.get("away_team", ""),
+                "goals_home":  gh,
+                "goals_away":  ga,
+                "result":      result,
+                "odds_home":   raw.get("odds_home") or raw.get("odds_1") or None,
+                "odds_draw":   raw.get("odds_draw") or raw.get("odds_x") or None,
+                "odds_away":   raw.get("odds_away") or raw.get("odds_2") or None,
+                "odds_over25": raw.get("odds_over25") or None,
+                "odds_under25":raw.get("odds_under25") or None,
+                "odds_btts_yes": raw.get("odds_btts_yes") or None,
+                "odds_btts_no":  raw.get("odds_btts_no") or None,
+            })
+        logger.info(
+            "fetch_historical_fixtures: league=%d season=%d → %d fixtures (upcoming_matches)",
             league_id, season, len(fixtures),
         )
-
+        return fixtures
     except Exception as e:
         logger.error(
-            "fetch_historical_fixtures(%d/%d): error de red: %s",
+            "fetch_historical_fixtures(%d/%d): error leyendo Firestore: %s",
             league_id, season, e,
         )
-        return _read_fixtures_from_firestore(league_id, season)
-
-    return fixtures
+        return []
 
 
 def _read_fixtures_from_firestore(league_id: int, season: int) -> list[dict]:
