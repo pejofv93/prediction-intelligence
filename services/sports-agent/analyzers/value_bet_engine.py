@@ -18,6 +18,7 @@ import numpy as np
 from shared.config import (
     CLOUD_RUN_TOKEN,
     DEFAULT_WEIGHTS,
+    LEAGUE_MIN_EDGE,
     ODDS_API_KEY,
     SPORTS_ALERT_EDGE,
     SPORTS_MIN_CONFIDENCE,
@@ -1388,6 +1389,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     league = enriched_match.get("league", "")
     match_date = enriched_match.get("match_date") or enriched_match.get("date")
     data_quality = enriched_match.get("data_quality", "partial")
+    _min_edge = LEAGUE_MIN_EDGE.get(league, SPORTS_MIN_EDGE)
 
     # Si faltan nombres o liga (docs enriquecidos antes del fix), leerlos de upcoming_matches
     if not home_team or not away_team or not league:
@@ -1697,16 +1699,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # --- 6. Umbrales de intensidad (FIX 2) ---
     # FUERTE: edge>15% + conf>80% + odds<5.00
     # MODERADA: edge>10% + conf>70% + odds<6.00
-    # DETECTADA: edge>8% + conf>65% + odds<4.00
+    # DETECTADA: edge>_min_edge + conf>65% + odds<4.00 (_min_edge calibrado por liga via backtest)
     _is_fuerte    = best_edge > 0.15 and best_confidence > 0.80 and best_odds < 5.00
     _is_moderada  = best_edge > 0.10 and best_confidence > 0.70 and best_odds < 6.00
-    _is_detectada = best_edge > 0.08 and best_confidence > 0.65 and best_odds < 4.00
+    _is_detectada = best_edge > _min_edge and best_confidence > 0.65 and best_odds < 4.00
 
     if not (_is_fuerte or _is_moderada or _is_detectada):
         logger.debug(
             "generate_signal(%s): descartado — no cumple umbral "
-            "(edge=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
-            match_id, best_edge * 100, best_confidence * 100, best_odds,
+            "(edge=%.1f%% min=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
+            match_id, best_edge * 100, _min_edge * 100, best_confidence * 100, best_odds,
             home_team, away_team, league,
         )
         return []
@@ -1833,9 +1835,9 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 over_edge = calculate_edge(over_p, totals_odds["over_odds"])
                 under_edge = calculate_edge(under_p, totals_odds["under_odds"])
 
-                if over_edge >= under_edge and over_edge > SPORTS_MIN_EDGE:
+                if over_edge >= under_edge and over_edge > _min_edge:
                     sel, sel_prob, sel_odds, sel_edge = "Over", over_p, totals_odds["over_odds"], over_edge
-                elif under_edge > over_edge and under_edge > SPORTS_MIN_EDGE:
+                elif under_edge > over_edge and under_edge > _min_edge:
                     sel, sel_prob, sel_odds, sel_edge = "Under", under_p, totals_odds["under_odds"], under_edge
                 else:
                     sel = None

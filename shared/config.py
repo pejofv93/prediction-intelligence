@@ -44,6 +44,20 @@ SPORTS_ALERT_EDGE = 0.08
 POLY_MIN_EDGE = 0.08
 POLY_MIN_CONFIDENCE = 0.65
 
+# Thresholds por liga — calibrados por backtest histórico (prodmatch_results)
+# Ligas con ROI positivo en backtest → umbral más bajo (más señales)
+# Ligas con ROI negativo → umbral más alto (sólo señales de alta convicción)
+LEAGUE_MIN_EDGE: dict[str, float] = {
+    "PL":  0.072,  # Premier League — ROI +13.5%: umbral bajado para capturar más edge
+    "PD":  0.080,  # La Liga — ROI +7.4%: igual al global
+    "BL1": 0.096,  # Bundesliga — ROI -31.9%: umbral subido, solo alta convicción
+    "SA":  0.096,  # Serie A — ROI -18.9%: umbral subido
+    "FL1": 0.096,  # Ligue 1 — ROI -24.6%: umbral subido
+    "CL":  0.080,  # Champions League — sin backtest suficiente: global
+    "EL":  0.080,  # Europa League
+    "ECL": 0.080,  # Conference League
+}
+
 # Ligas de futbol — football-data.org (modelo Poisson+ELO completo)
 SUPPORTED_FOOTBALL_LEAGUES = {
     "PL":  2021,   # Premier League
