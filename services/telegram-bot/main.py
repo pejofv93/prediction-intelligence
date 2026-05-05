@@ -107,6 +107,10 @@ async def send_alert(request: Request) -> JSONResponse:
             text = data.get("text", "")
             if text:
                 sent = await send_message(text, message_thread_id=TELEGRAM_POLY_THREAD_ID)
+        elif alert_type == "arbitrage":
+            text = data.get("message", "")
+            if text:
+                sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
     except Exception:
@@ -302,6 +306,22 @@ async def send_weekly_report() -> JSONResponse:
             else 0.0
         )
 
+        # Accuracy BUY_YES / BUY_NO (solo mercados con resultado conocido)
+        resolved_poly = [p for p in poly_preds if p.get("resolved") is True]
+        poly_buy_yes = [p for p in resolved_poly if p.get("recommendation") == "BUY_YES"]
+        poly_buy_no = [p for p in resolved_poly if p.get("recommendation") == "BUY_NO"]
+        poly_buy_yes_correct = sum(1 for p in poly_buy_yes if p.get("outcome") == "correct")
+        poly_buy_no_correct = sum(1 for p in poly_buy_no if p.get("outcome") == "correct")
+
+        # Mejor señal poly (mayor edge entre las alertadas)
+        alerted_poly = [p for p in poly_preds if p.get("alerted") is True]
+        poly_best_market = "—"
+        poly_best_edge = 0.0
+        if alerted_poly:
+            best_poly = max(alerted_poly, key=lambda p: abs(float(p.get("edge") or 0)))
+            poly_best_market = str(best_poly.get("question") or "")[:40]
+            poly_best_edge = abs(float(best_poly.get("edge") or 0))
+
         # Bankroll virtual (shadow trades)
         try:
             from shared.shadow_engine import calculate_metrics
@@ -327,6 +347,12 @@ async def send_weekly_report() -> JSONResponse:
             "poly_total": poly_total,
             "poly_alerts": poly_alerts,
             "poly_avg_edge": poly_avg_edge,
+            "poly_buy_yes_correct": poly_buy_yes_correct,
+            "poly_buy_yes_total": len(poly_buy_yes),
+            "poly_buy_no_correct": poly_buy_no_correct,
+            "poly_buy_no_total": len(poly_buy_no),
+            "poly_best_market": poly_best_market,
+            "poly_best_edge": poly_best_edge,
             "bankroll_current": shadow_metrics.get("current_bankroll", 50.0),
             "roi_total": shadow_metrics.get("roi_total", 0.0),
             "roi_sports": shadow_metrics.get("roi_sports", 0.0),

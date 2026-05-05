@@ -167,9 +167,7 @@ async def detect_and_store_arbitrage(odds_data: list[dict]) -> list[dict]:
 
 
 def format_arb_telegram(arb: dict) -> str:
-    """
-    Formatea una oportunidad de arbitraje para enviar por Telegram.
-    """
+    """Formatea una oportunidad de arbitraje para Telegram con emoji 💎."""
     league = arb.get("league", "")
     home = arb.get("home", "")
     away = arb.get("away", "")
@@ -182,27 +180,48 @@ def format_arb_telegram(arb: dict) -> str:
     best_away_book = arb.get("best_away_book", "?")
     best_away_odds = arb.get("best_away_odds", 0.0)
 
+    stake_home = stakes.get("home", 0.0)
+    stake_away = stakes.get("away", 0.0)
+
     lines: list[str] = [
-        f"ARB DETECTADO | {league}",
+        f"💎 ARBITRAJE DETECTADO | {league}",
         f"{home} vs {away}",
-        f"Back {home}: {best_home_book} @ {best_home_odds}",
-        f"Back {away}: {best_away_book} @ {best_away_odds}",
+        f"Back: {best_home_book} @ *{best_home_odds}* ({stake_home:.0f}€)",
+        f"Lay: {best_away_book} @ *{best_away_odds}* ({stake_away:.0f}€)",
     ]
 
     if arb_type == "3way":
         best_draw_book = arb.get("best_draw_book", "?")
         best_draw_odds = arb.get("best_draw_odds", 0.0)
-        lines.append(f"Back Draw: {best_draw_book} @ {best_draw_odds}")
-
-    stake_home = stakes.get("home", 0.0)
-    stake_away = stakes.get("away", 0.0)
-    stakes_str = f"{stake_home}€ / {stake_away}€"
-    if arb_type == "3way":
         stake_draw = stakes.get("draw", 0.0)
-        stakes_str += f" / {stake_draw}€"
+        lines.append(f"Empate: {best_draw_book} @ *{best_draw_odds}* ({stake_draw:.0f}€)")
 
-    lines.append(f"Beneficio garantizado: +{profit_pct:.1f}%")
-    lines.append(f"Stakes (100€): {stakes_str}")
-    lines.append("⚠️ Apuesta responsablemente.")
+    lines.append(f"Beneficio garantizado: *+{profit_pct:.1f}%*")
+    lines.append("⚠️ Apuesta responsablemente. No es asesoramiento financiero.")
 
     return "\n".join(lines)
+
+
+def build_arb_prediction(arb: dict, match_id: str) -> dict:
+    """Construye un dict de prediction con market_type=ARBITRAGE para guardar en Firestore."""
+    from datetime import datetime, timezone
+    return {
+        "match_id": f"{match_id}_arb",
+        "home_team": arb.get("home", ""),
+        "away_team": arb.get("away", ""),
+        "league": arb.get("league", ""),
+        "sport": "football",
+        "market_type": "ARBITRAGE",
+        "selection": f"{arb.get('best_home_book')} / {arb.get('best_away_book')}",
+        "odds": round(arb.get("best_home_odds", 0.0), 3),
+        "edge": round(arb.get("profit_pct", 0.0) / 100, 4),
+        "confidence": 1.0,
+        "profit_pct": arb.get("profit_pct", 0.0),
+        "arb_type": arb.get("arb_type", "2way"),
+        "overround": arb.get("overround", 0.0),
+        "stakes": arb.get("stakes", {}),
+        "data_source": "arbitrage_detector",
+        "created_at": datetime.now(timezone.utc),
+        "result": None,
+        "correct": None,
+    }
