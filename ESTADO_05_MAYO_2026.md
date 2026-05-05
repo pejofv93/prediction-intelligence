@@ -29,6 +29,36 @@ b07881a fix(groq): reasoning consistente con recommendation + limpieza frases co
 e9b32a4 docs: estado completo del sistema 4 mayo 2026
 ```
 
+## Mejoras implementadas esta sesión (5 mayo 2026) — ACTUALIZADO
+
+### BLOQUE D — Fixes CL/EL/ECL en sports-agent (segunda parte del día)
+
+| Commit | Fix |
+|---|---|
+| `0ee66db` | `NameError: league not defined` en `enrich_match()` — `league = match.get("league", "")` |
+| `2f22257` | `_check_enriched()`: re-enriquecer si `data_quality == "partial"` (CL/EL/ECL con team_stats fallback) |
+| `b33734c` | AWAY gate F3 para CL/EL/ECL: `odds < 6.00 and conf > 0.65` (antes `odds > 3.5 and conf > 0.85`) |
+| `3991af4` | Confidence cap `min(conf, 0.70)` exento para CL/EL/ECL (borde exacto 0.70 > 0.70 = False) |
+| `cf1b69d` | Step 6 intensity: umbrales relajados CL/EL/ECL inline antes del bloque `data_quality=partial` |
+
+**Resultado verificado:** PSG @ 4.00 edge=36.9% conf=72% kelly=5.0% → alerta Telegram ✅ 20:11 UTC  
+17 señales generadas vs 13 antes de los fixes.
+
+### Thresholds CL/EL/ECL (sports-agent)
+
+```
+AWAY gate:        odds < 6.00 AND conf > 0.65 (resto: odds<2.5 OR odds>3.5+conf>0.85)
+Conf cap:         SIN cap (resto: min(conf, 0.70) si odds > 4.00)
+Partial penalty:  SIN 0.90× penalty
+Intensidad:
+  FUERTE:   edge > 0.15 AND conf > 0.80 AND odds < 5.00
+  MODERADA: edge > 0.10 AND conf > 0.65 AND odds < 6.00
+  DETECTADA: edge > min_edge AND conf > 0.65 AND odds < 6.00
+POISSON_GUARD: exento (_POISSON_EXEMPT_LEAGUES)
+```
+
+---
+
 ## Mejoras implementadas esta sesión (5 mayo 2026)
 
 ### BLOQUE A — Mercados resolución próxima
@@ -135,6 +165,10 @@ gcloud run revisions list --region europe-west1 --project prediction-intelligenc
 ## Pendientes priorizados
 
 ### Alta prioridad
+- [ ] **`corners_bookings.py` crash:** `slugify(home_team)` con `home_team=None` → `AttributeError`. Fix: `if not home_team: return []` al inicio de `generate_corners_signals()`
+- [ ] **OddsAPI.io cuota agotada:** Corners/bookings sin datos este mes — esperar renovación o upgrade de plan
+- [ ] **CLI (Copa Libertadores) sin cuotas:** 48 eventos en odds-api.io pero 0 con cuotas — verificar sport key o endpoint
+- [ ] **ELO data para CL:** Todos los CL muestran `elo=0.640` (default). Poblar colección `team_elo` con datos UEFA
 - [ ] **Exponer `classify_volume_spike`** en el enricher para que el campo `volume_spike_type` llegue a la señal y a Telegram
 - [ ] **Conectar `check_pending_odds_changes`** — actualmente implementado pero no hay scheduler que lo llame con las cuotas actuales
 - [ ] **`SPORTS_AGENT_URL` como GitHub secret** — necesario para que `weekly-report.yml` llame al backtest
@@ -177,4 +211,4 @@ Remove-Item -Recurse -Force services\telegram-bot\shared
 
 Sistema de predicción deportiva + Polymarket desplegado en Google Cloud Run (proyecto `prediction-intelligence`, región `europe-west1`). Tres servicios: `sports-agent`, `polymarket-agent`, `telegram-bot`. Código en `C:\Users\Usuario\prediction-intelligence-ok\`. Deploy siempre con `xcopy /E /I /Y shared services\{servicio}\shared` → `gcloud run deploy {servicio} --source . --region europe-west1 --project prediction-intelligence` → limpiar shared.
 
-Estado al 5 mayo 2026: sistema operativo, señales enviando a Telegram, learning engine ajustando pesos. Pendiente: exponer `classify_volume_spike` en enricher, conectar scheduler para `check_pending_odds_changes`, deploy del backtest engine al sports-agent.
+Estado al 5 mayo 2026 (final del día): 17 señales activas, fixes CL/EL/ECL desplegados, PSG vs Bayern señal en Firestore (PSG @4.00 edge=36.9%). Pendientes urgentes: corners_bookings.py crash (slugify None), OddsAPI.io cuota agotada, CLI sin cuotas, ELO data CL. Pendientes Polymarket: exponer classify_volume_spike, conectar check_pending_odds_changes, deploy backtest engine.
