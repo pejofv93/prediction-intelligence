@@ -81,6 +81,8 @@ async def enrich_match(match: dict) -> dict:
     loop = asyncio.get_event_loop()
 
     def _get(collection: str, doc_id: str):
+        if not doc_id:
+            return None
         return col(collection).document(doc_id).get()
 
     try:
