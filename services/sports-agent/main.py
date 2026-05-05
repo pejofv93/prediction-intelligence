@@ -958,6 +958,11 @@ async def _bg_analyze() -> None:
             signals_generated, len(docs), elapsed,
         )
 
+        # Arbitrage detection — corre al final de cada analyze en background
+        # para no bloquear el streaming response ni penalizar el tiempo de analyze.
+        asyncio.create_task(_bg_arb())
+        logger.info("analyze: arbitrage detector lanzado en background")
+
     except Exception as e:
         logger.error("analyze: error no controlado — %s", e, exc_info=True)
 
