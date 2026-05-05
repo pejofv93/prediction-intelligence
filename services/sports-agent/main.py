@@ -179,6 +179,26 @@ async def backtest_status() -> JSONResponse:
     })
 
 
+@app.post("/run-production-backtest", dependencies=[Depends(verify_token)])
+async def run_production_backtest() -> JSONResponse:
+    """
+    202 → background: backtest sobre predictions resueltas de producción.
+    Calcula accuracy por liga/mercado/edge/confianza y actualiza model_weights/current.
+    Llamado automáticamente los lunes desde weekly-report.yml, después del reporte.
+    """
+    asyncio.create_task(_bg_production_backtest())
+    return JSONResponse(status_code=202, content={"status": "accepted", "job": "production-backtest"})
+
+
+async def _bg_production_backtest() -> None:
+    try:
+        from learner.backtest_engine import run_production_backtest as _run
+        result = await _run()
+        logger.info("production-backtest: completado — %s", result)
+    except Exception as e:
+        logger.error("production-backtest: error — %s", e, exc_info=True)
+
+
 @app.post("/run-arb", dependencies=[Depends(verify_token)])
 async def run_arb() -> JSONResponse:
     """202 → background: lee cuotas de Firestore, detecta arb, envía alertas Telegram."""
@@ -1098,21 +1118,34 @@ async def _bg_arb() -> None:
 
         arbs = await detect_and_store_arbitrage(markets)
 
+        from collectors.arbitrage_detector import build_arb_prediction
+        from shared.firestore_client import col as _col_arb
         telegram_url = os.environ.get("TELEGRAM_BOT_URL", "")
+        cloud_run_token = os.environ.get("CLOUD_RUN_TOKEN", "")
         sent = 0
-        for arb in arbs:
+        for idx, arb in enumerate(arbs):
             try:
+                # Guardar en predictions con market_type=ARBITRAGE
+                match_id_arb = f"arb_{int(datetime.now(timezone.utc).timestamp())}_{idx}"
+                pred = build_arb_prediction(arb, match_id_arb)
+                try:
+                    _col_arb("predictions").document(pred["match_id"]).set(pred)
+                except Exception as _fe:
+                    logger.warning("arb: error guardando prediction arb — %s", _fe)
+
+                # Enviar alerta Telegram con formato 💎
                 message = format_arb_telegram(arb)
                 if telegram_url:
                     import httpx as _httpx
                     async with _httpx.AsyncClient(timeout=10.0) as client:
                         await client.post(
                             f"{telegram_url}/send-alert",
-                            json={"type": "sports", "data": {"arb": True, "message": message}},
+                            headers={"x-cloud-token": cloud_run_token},
+                            json={"type": "arbitrage", "data": {"message": message, "arb": pred}},
                         )
                     sent += 1
             except Exception as e:
-                logger.warning("arb: error enviando alerta Telegram — %s", e)
+                logger.warning("arb: error procesando arb — %s", e)
 
         logger.info("arb: %d arbs encontrados, %d alertas Telegram enviadas", len(arbs), sent)
 
