@@ -1,13 +1,11 @@
 """
 Tracker de wallets inteligentes en Polymarket.
-Identifica traders con win_rate > 65% y > 10 trades via CLOB API.
+Identifica traders con win_rate > 65% y > 10 trades.
 
-El endpoint GET /trades?market={condition_id} es PÚBLICO — no requiere autenticación.
-La clave POLYMARKET_CLOB_KEY solo es necesaria para operaciones de escritura
-(colocar/cancelar órdenes), que este módulo nunca realiza.
+Usa data-api.polymarket.com/trades?market={conditionId} — endpoint público, sin auth.
+Campos de respuesta: proxyWallet, side (BUY/SELL), outcome (Yes/No), size (USD), timestamp (unix int).
 """
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -17,25 +15,15 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-_CLOB = "https://clob.polymarket.com"
+_DATA_API = "https://data-api.polymarket.com"
 _MIN_TRADES = 10
 _MIN_WIN_RATE = 0.65
 _MIN_USD = 5_000.0
 _WINDOW_H = 6
 
-# CLOB /trades es público — no requiere auth. Clave opcional solo para futuras operaciones.
-_CLOB_KEY = os.environ.get("POLYMARKET_CLOB_KEY", "")
-
-
-def _clob_headers() -> dict:
-    headers = {"Accept": "application/json"}
-    if _CLOB_KEY:
-        headers["Authorization"] = f"Bearer {_CLOB_KEY}"
-    return headers
-
 
 async def _get_condition_id(market_id: str) -> str:
-    """Lee condition_id (hex) desde poly_markets Firestore — necesario para CLOB /trades."""
+    """Lee condition_id (hex) desde poly_markets Firestore."""
     try:
         doc = col("poly_markets").document(str(market_id)).get()
         return doc.to_dict().get("condition_id", "") if doc.exists else ""
@@ -45,8 +33,9 @@ async def _get_condition_id(market_id: str) -> str:
 
 async def get_top_traders(market_id: str) -> list[dict]:
     """
-    Llama CLOB GET /trades?market={condition_id}&limit=100 (endpoint público).
-    Agrupa por maker_address, estima win_rate y guarda smart wallets en poly_smart_wallets.
+    Llama data-api GET /trades?market={condition_id}&limit=100 (público).
+    Agrupa por proxyWallet, estima win_rate desde outcome=Yes/BUY combos,
+    y guarda smart wallets en poly_smart_wallets.
     """
     try:
         condition_id = await _get_condition_id(market_id)
@@ -55,12 +44,12 @@ async def get_top_traders(market_id: str) -> list[dict]:
             return []
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
-                f"{_CLOB}/trades",
+                f"{_DATA_API}/trades",
                 params={"market": condition_id, "limit": "100"},
-                headers=_clob_headers(),
+                headers={"Accept": "application/json"},
             )
         if resp.status_code != 200:
-            logger.debug("get_top_traders(%s): CLOB %d", market_id, resp.status_code)
+            logger.debug("get_top_traders(%s): data-api %d", market_id, resp.status_code)
             return []
 
         raw = resp.json()
@@ -70,15 +59,17 @@ async def get_top_traders(market_id: str) -> list[dict]:
 
         by_wallet: dict[str, dict] = {}
         for t in trades:
-            addr = t.get("maker") or t.get("maker_address") or ""
+            addr = t.get("proxyWallet") or ""
             if not addr or len(addr) < 10:
                 continue
             rec = by_wallet.setdefault(addr, {"n": 0, "wins": 0, "usd": 0.0})
             rec["n"] += 1
-            rec["usd"] += float(t.get("usd_size") or t.get("size") or 0)
-            # Estimación de win: compró a precio < 0.45 → compró "barato", likely edge positivo
+            rec["usd"] += float(t.get("size") or 0)
+            # Estimación de win: compró YES (outcome=Yes, side=BUY) a precio < 0.45
             price = float(t.get("price") or 0)
-            if 0 < price < 0.45:
+            outcome = str(t.get("outcome") or "").lower()
+            side = str(t.get("side") or "").upper()
+            if side == "BUY" and outcome == "yes" and 0 < price < 0.45:
                 rec["wins"] += 1
 
         smart: list[dict] = []
@@ -116,10 +107,10 @@ async def get_top_traders(market_id: str) -> list[dict]:
 
 async def check_wallet_activity(market_id: str, recommendation: str) -> dict:
     """
-    Comprueba si alguna smart wallet conocida compró YES/NO en las últimas 6h.
+    Comprueba si alguna smart wallet conocida operó en las últimas 6h.
+    Usa data-api /trades — público, sin auth.
     Si coincide con recomendación: confidence_adj = +0.10
     Si va en contra: confidence_adj = -0.10
-    Requiere POLYMARKET_CLOB_KEY — si no está configurado, devuelve _default.
     """
     _default = {"whale_signal": False, "confidence_adj": 0.0, "message": ""}
     try:
@@ -137,11 +128,12 @@ async def check_wallet_activity(market_id: str, recommendation: str) -> dict:
         condition_id = await _get_condition_id(market_id)
         if not condition_id:
             return _default
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
-                f"{_CLOB}/trades",
+                f"{_DATA_API}/trades",
                 params={"market": condition_id, "limit": "50"},
-                headers=_clob_headers(),
+                headers={"Accept": "application/json"},
             )
         if resp.status_code != 200:
             return _default
@@ -151,12 +143,12 @@ async def check_wallet_activity(market_id: str, recommendation: str) -> dict:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=_WINDOW_H)
 
         for t in trades:
-            addr = t.get("maker") or t.get("maker_address") or ""
+            addr = t.get("proxyWallet") or ""
             if addr not in known:
                 continue
 
-            # Filtrar por ventana de tiempo
-            ts_raw = t.get("created_at") or t.get("timestamp") or ""
+            # timestamp es unix int en data-api
+            ts_raw = t.get("timestamp")
             try:
                 if isinstance(ts_raw, (int, float)):
                     ts = datetime.fromtimestamp(ts_raw, tz=timezone.utc)
@@ -167,13 +159,18 @@ async def check_wallet_activity(market_id: str, recommendation: str) -> dict:
             except Exception:
                 continue
 
-            usd = float(t.get("usd_size") or t.get("size") or 0)
+            usd = float(t.get("size") or 0)
             if usd < _MIN_USD:
                 continue
 
-            # Dirección: price < 0.5 → comprando YES; price > 0.5 → comprando NO
-            price = float(t.get("price") or 0)
-            direction = "YES" if price < 0.5 else "NO"
+            # outcome field: "Yes" → YES, "No" → NO; side: BUY/SELL
+            outcome = str(t.get("outcome") or "").upper()
+            side = str(t.get("side") or "").upper()
+            if side == "BUY":
+                direction = outcome if outcome in ("YES", "NO") else "YES"
+            else:
+                direction = "NO" if outcome == "YES" else "YES"
+
             win_rate = float(known[addr].get("win_rate", 0))
             short = addr[:6] + "..." + addr[-4:]
 
