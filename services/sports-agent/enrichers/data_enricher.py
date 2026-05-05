@@ -80,10 +80,41 @@ async def enrich_match(match: dict) -> dict:
 
     loop = asyncio.get_event_loop()
 
+    # Ligas europeas donde los team_ids de la competición pueden diferir de los domésticos
+    _INTL_LEAGUES = {"CL", "EL", "ECL", "EC", "WC", "NL", "WCQ"}
+
     def _get(collection: str, doc_id: str):
         if not doc_id:
             return None
         return col(collection).document(doc_id).get()
+
+    def _normalize_name(name: str) -> str:
+        """Slug para búsqueda por nombre: minúsculas, solo alfanumérico."""
+        import re as _re
+        return _re.sub(r"[^a-z0-9]", "", name.lower())
+
+    def _find_team_stats_by_name(team_name: str):
+        """
+        Fallback: busca team_stats por nombre normalizado cuando el team_id no matchea.
+        Recorre team_stats y compara el campo team_name normalizado.
+        Devuelve el DocumentSnapshot encontrado o None.
+        """
+        if not team_name:
+            return None
+        needle = _normalize_name(team_name)
+        if not needle:
+            return None
+        try:
+            docs = col("team_stats").stream()
+            for doc in docs:
+                d = doc.to_dict() or {}
+                stored = _normalize_name(d.get("team_name", ""))
+                # Coincidencia si needle está contenido en stored o viceversa (≥5 chars)
+                if len(needle) >= 5 and (needle in stored or stored in needle):
+                    return doc
+        except Exception:
+            pass
+        return None
 
     try:
         home_doc, away_doc, h2h_doc, odds_doc = await asyncio.gather(
@@ -96,7 +127,7 @@ async def enrich_match(match: dict) -> dict:
         logger.error("enrich_match(%s): error en reads paralelos", match_id, exc_info=True)
         home_doc = away_doc = h2h_doc = odds_doc = None
 
-    # --- 1. team_stats ---
+    # --- 1. team_stats — con fallback por nombre para ligas internacionales ---
     home_stats: dict = {}
     away_stats: dict = {}
 
@@ -105,14 +136,39 @@ async def enrich_match(match: dict) -> dict:
             home_stats = home_doc.to_dict() or {}
         elif home_id:
             logger.warning("enrich_match(%s): sin team_stats para home_id=%d", match_id, home_id)
-            data_quality = "partial"
+            # Fallback por nombre en ligas internacionales (CL/EL/ECL: team_id puede diferir)
+            if league in _INTL_LEAGUES:
+                home_name = match.get("home_team", match.get("home_team_name", ""))
+                fallback = await loop.run_in_executor(None, _find_team_stats_by_name, home_name)
+                if fallback and fallback.exists:
+                    home_stats = fallback.to_dict() or {}
+                    logger.info(
+                        "enrich_match(%s): home team_stats fallback por nombre '%s' → id=%s",
+                        match_id, home_name, fallback.id,
+                    )
+                else:
+                    data_quality = "partial"
+            else:
+                data_quality = "partial"
 
     if away_doc is not None:
         if away_doc.exists:
             away_stats = away_doc.to_dict() or {}
         elif away_id:
             logger.warning("enrich_match(%s): sin team_stats para away_id=%d", match_id, away_id)
-            data_quality = "partial"
+            if league in _INTL_LEAGUES:
+                away_name = match.get("away_team", match.get("away_team_name", ""))
+                fallback = await loop.run_in_executor(None, _find_team_stats_by_name, away_name)
+                if fallback and fallback.exists:
+                    away_stats = fallback.to_dict() or {}
+                    logger.info(
+                        "enrich_match(%s): away team_stats fallback por nombre '%s' → id=%s",
+                        match_id, away_name, fallback.id,
+                    )
+                else:
+                    data_quality = "partial"
+            else:
+                data_quality = "partial"
 
     # --- 2. Form score y racha ---
     home_form_score = float(home_stats.get("form_score", 50.0))
