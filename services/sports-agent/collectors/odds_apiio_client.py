@@ -910,7 +910,7 @@ async def _fetch_all_soccer_events() -> list[dict]:
         logger.info("odds-api.io: fetch soccer global (1 request para todas las ligas)")
 
         from_dt = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        to_dt   = (now + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_dt   = (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         for slug in _FOOTBALL_SLUG_CANDIDATES:
             status, body, data = await _get_raw(
