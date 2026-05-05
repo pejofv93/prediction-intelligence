@@ -491,6 +491,23 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         tot = _get_totals_odds(event)
         if tot:
             exp_total = rats["exp_home"] + rats["exp_away"]
+
+            # Playoffs NBA: ritmo más lento → totales ~8% inferiores a temporada regular
+            _series_title = str(game.get("series_title", "")).lower()
+            _is_playoff = (
+                game.get("playoff") is True
+                or "round" in _series_title
+                or "finals" in _series_title
+                or "playoffs" in _series_title
+            )
+            if _is_playoff:
+                _total_original = exp_total
+                exp_total = round(exp_total * 0.92, 1)
+                logger.info(
+                    "basketball_analyzer(%s): PLAYOFF_DISCOUNT aplicado: %.1f → %.1f",
+                    match_id, _total_original, exp_total,
+                )
+
             line = tot["line"]
             p_over = float(1.0 - norm.cdf(line, loc=exp_total,
                                            scale=BASKETBALL_SPREAD_SIGMA * 1.2))
