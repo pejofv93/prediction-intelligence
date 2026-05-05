@@ -1711,7 +1711,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 match_id, best_odds, home_team, away_team, league,
             )
             return []
-        if best_odds > 4.00:
+        if best_odds > 4.00 and league not in {"CL", "EL", "ECL"}:
             best_confidence = round(min(best_confidence, 0.70), 4)
     _sel_form = (
         enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
