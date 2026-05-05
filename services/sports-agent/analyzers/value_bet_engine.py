@@ -626,7 +626,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
     # --- 2. Cache en Firestore (sobrevive reinicios Cloud Run) ---
     try:
-        fs_doc = col("league_odds_cache").document(sport_key + "_v2").get()
+        fs_doc = col("league_odds_cache").document(sport_key + "_v3").get()
         if fs_doc.exists:
             fs_data = fs_doc.to_dict()
             fs_fetched = fs_data.get("fetched_at")
@@ -669,7 +669,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
         url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
         try:
-            markets_param = "h2h,spreads,totals"
+            markets_param = "h2h,spreads,totals,btts"
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
@@ -714,7 +714,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
             # Actualizar cache en memoria y en Firestore
             _LEAGUE_ODDS_CACHE[sport_key] = (now, events)
             try:
-                col("league_odds_cache").document(sport_key + "_v2").set({
+                col("league_odds_cache").document(sport_key + "_v3").set({
                     "sport_key": sport_key,
                     "fetched_at": now,
                     "events": events,

@@ -885,12 +885,6 @@ async def generate_football_extra_signals(
             event = ev
             break
 
-    if event:
-        market_keys = [m.get("key") for bk in event.get("bookmakers", []) for m in bk.get("markets", [])]
-        logger.info("football_markets(%s): event encontrado — market_keys=%s", match_id, list(set(market_keys)))
-    else:
-        logger.info("football_markets(%s): event NO encontrado en cached_events (%d)", match_id, len(cached_events))
-
     base = {
         "match_id": match_id,
         "home_team": home_team,
