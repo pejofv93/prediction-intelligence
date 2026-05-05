@@ -187,33 +187,49 @@ async def get_standings(league_id: int) -> list[dict]:
 
 async def get_finished_matches(days_back: int = 30) -> list[dict]:
     """
-    GET /matches?status=FINISHED&dateFrom=hace_{days_back}_días&dateTo=ayer
+    GET /matches?status=FINISHED en ventanas de 10 días (límite free plan).
+    Itera desde ayer hacia atrás en chunks ≤10 días hasta cubrir days_back.
     Devuelve partidos terminados de todas las ligas soportadas.
-    Usado por el collect pipeline para actualizar resultados en upcoming_matches.
     """
     today = datetime.now(timezone.utc).date()
-    date_from = today - timedelta(days=days_back)
-    date_to = today - timedelta(days=1)
     leagues = ",".join(SUPPORTED_FOOTBALL_LEAGUES.keys())
 
-    data = await _request(
-        f"/matches?dateFrom={date_from}&dateTo={date_to}"
-        f"&competitions={leagues}&status=FINISHED"
-    )
-    if not data:
-        return []
+    all_matches: list[dict] = []
+    seen_ids: set[str] = set()
 
-    matches = []
-    for m in data.get("matches", []):
-        parsed = _parse_match(m)
-        if parsed and parsed["goals_home"] is not None and parsed["goals_away"] is not None:
-            matches.append(parsed)
+    # Iterar en chunks de 10 días (límite API football-data.org free plan)
+    chunk_size = 10
+    cursor = today - timedelta(days=1)  # ayer
+    remaining = days_back
+
+    while remaining > 0:
+        window = min(chunk_size, remaining)
+        date_from = cursor - timedelta(days=window - 1)
+
+        data = await _request(
+            f"/matches?dateFrom={date_from}&dateTo={cursor}"
+            f"&competitions={leagues}&status=FINISHED"
+        )
+        if data:
+            for m in data.get("matches", []):
+                parsed = _parse_match(m)
+                if (
+                    parsed
+                    and parsed["goals_home"] is not None
+                    and parsed["goals_away"] is not None
+                    and parsed["match_id"] not in seen_ids
+                ):
+                    all_matches.append(parsed)
+                    seen_ids.add(parsed["match_id"])
+
+        cursor = date_from - timedelta(days=1)
+        remaining -= window
 
     logger.info(
         "get_finished_matches: %d partidos terminados (últimos %d días)",
-        len(matches), days_back,
+        len(all_matches), days_back,
     )
-    return matches
+    return all_matches
 
 
 async def get_match_result(match_id: str) -> dict | None:
