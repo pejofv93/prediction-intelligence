@@ -318,7 +318,7 @@ def calibrate_thresholds(results: list[dict]) -> dict[str, float]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-async def run_backtest(limit: int = 200) -> dict:
+async def run_backtest(limit: int = 200, days_back: int = 90) -> dict:
     """
     Orquesta el backtest completo:
     1. Fetch mercados cerrados de Gamma API

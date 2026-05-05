@@ -56,9 +56,9 @@ async def fetch_historical_fixtures(
         )
         return _read_fixtures_from_firestore(league_id, season)
 
-    url = "https://v3.football.api-sports.io/fixtures"
+    url = "https://api-football-v1.p.rapidapi.com/fixtures"
     params = {"league": str(league_id), "season": str(season), "status": "FT"}
-    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "v3.football.api-sports.io"}
+    headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "api-football-v1.p.rapidapi.com"}
 
     fixtures: list[dict] = []
 
