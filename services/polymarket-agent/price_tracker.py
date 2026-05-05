@@ -1,8 +1,9 @@
 """
-Price tracker — snapshots historicos, momentum y volume spike.
+Price tracker — snapshots historicos, momentum, volume spike y monitor de movimientos bruscos.
 Persiste en Firestore poly_price_history para analisis posterior.
 """
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -10,6 +11,9 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
+
+_PRICE_MOVE_THRESHOLD = 0.08   # 8% en < 1h → alerta
+_DEDUP_WINDOW_SECONDS = 7_200  # no re-alertar el mismo mercado en 2h
 
 
 async def save_price_snapshot(
@@ -318,6 +322,147 @@ async def detect_whale_activity(market_id: str) -> dict:
     except Exception:
         logger.error("detect_whale_activity(%s): error", market_id, exc_info=True)
         return _default
+
+
+async def monitor_price_changes() -> int:
+    """
+    Detecta movimientos bruscos de precio (>8% en <1h) en mercados activos.
+    Compara el snapshot más reciente contra el más antiguo de la última 1h en poly_price_history.
+    Envía alerta Telegram (topic Polymarket) si detecta movimiento significativo.
+    Dedup: no re-alerta el mismo mercado en 2h.
+    Devuelve número de alertas enviadas.
+    """
+    import httpx
+
+    now = datetime.now(timezone.utc)
+    cutoff_2h = now - timedelta(hours=2)
+    alerts_sent = 0
+
+    bot_url = os.environ.get("TELEGRAM_BOT_URL", "")
+    cloud_run_token = os.environ.get("CLOUD_RUN_TOKEN", "")
+
+    # Leer mercados activos de enriched_markets
+    try:
+        raw_docs = list(col("enriched_markets").stream())
+        markets = [d.to_dict() for d in raw_docs if d.to_dict().get("market_id")]
+    except Exception:
+        logger.error("monitor_price_changes: error leyendo enriched_markets", exc_info=True)
+        return 0
+
+    logger.info("monitor_price_changes: evaluando %d mercados", len(markets))
+
+    for market in markets:
+        market_id = market.get("market_id", "")
+        question = market.get("question", "")[:120]
+        if not market_id:
+            continue
+
+        try:
+            # Snapshots de las últimas 2h para este mercado
+            snaps = [
+                d.to_dict()
+                for d in col("poly_price_history")
+                .where(filter=FieldFilter("market_id", "==", market_id))
+                .where(filter=FieldFilter("timestamp", ">=", cutoff_2h))
+                .order_by("timestamp")
+                .stream()
+            ]
+
+            if len(snaps) < 2:
+                continue
+
+            oldest = snaps[0]
+            latest = snaps[-1]
+
+            t_old = oldest.get("timestamp")
+            t_new = latest.get("timestamp")
+            for t in (t_old, t_new):
+                if t is not None and hasattr(t, "tzinfo") and t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+
+            if t_old is None or t_new is None:
+                continue
+
+            if hasattr(t_old, "tzinfo") and t_old.tzinfo is None:
+                t_old = t_old.replace(tzinfo=timezone.utc)
+            if hasattr(t_new, "tzinfo") and t_new.tzinfo is None:
+                t_new = t_new.replace(tzinfo=timezone.utc)
+
+            minutes_elapsed = (t_new - t_old).total_seconds() / 60
+            if minutes_elapsed < 5:
+                continue
+
+            price_old = float(oldest.get("price_yes", 0))
+            price_new = float(latest.get("price_yes", 0))
+
+            if price_old <= 0:
+                continue
+
+            pct_change = (price_new - price_old) / price_old
+
+            if abs(pct_change) < _PRICE_MOVE_THRESHOLD:
+                continue
+
+            # Dedup — no re-alertar en 2h
+            dedup_key = f"price_alert_{market_id}"
+            dedup_ref = col("alerts_sent").document(dedup_key)
+            try:
+                dedup_doc = dedup_ref.get()
+                if dedup_doc.exists:
+                    last_sent = dedup_doc.to_dict().get("sent_at")
+                    if last_sent:
+                        if hasattr(last_sent, "tzinfo") and last_sent.tzinfo is None:
+                            last_sent = last_sent.replace(tzinfo=timezone.utc)
+                        if (now - last_sent).total_seconds() < _DEDUP_WINDOW_SECONDS:
+                            logger.debug("monitor_price_changes(%s): dedup — alerta reciente", market_id)
+                            continue
+            except Exception:
+                pass
+
+            vol_24h = float(latest.get("volume_24h", 0))
+            sign = "+" if pct_change > 0 else ""
+            text = (
+                f"🚨 MOVIMIENTO BRUSCO\n"
+                f"{question}\n"
+                f"Precio: {price_old*100:.1f}% → {price_new*100:.1f}%\n"
+                f"Cambio: {sign}{pct_change*100:.1f}% en {minutes_elapsed:.0f} min\n"
+                f"Vol 1h: ${vol_24h:,.0f}\n"
+                f"⚡ Posible información privilegiada"
+            )
+
+            if not bot_url:
+                logger.warning("monitor_price_changes: TELEGRAM_BOT_URL no configurada — alerta omitida")
+                break
+
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        f"{bot_url}/send-alert",
+                        json={"type": "polymarket_resolution", "data": {"text": text}},
+                        headers={"x-cloud-token": cloud_run_token},
+                    )
+                if resp.status_code in (200, 201, 202):
+                    try:
+                        dedup_ref.set({"market_id": market_id, "sent_at": now})
+                    except Exception:
+                        pass
+                    alerts_sent += 1
+                    logger.info(
+                        "monitor_price_changes(%s): alerta enviada — cambio=%s%.1f%% en %.0fmin",
+                        market_id, sign, abs(pct_change) * 100, minutes_elapsed,
+                    )
+                else:
+                    logger.warning(
+                        "monitor_price_changes(%s): telegram-bot respondio %d", market_id, resp.status_code
+                    )
+            except Exception:
+                logger.error("monitor_price_changes(%s): error enviando alerta", market_id, exc_info=True)
+
+        except Exception:
+            logger.error("monitor_price_changes(%s): error procesando", market_id, exc_info=True)
+
+    logger.info("monitor_price_changes: %d alertas enviadas de %d mercados", alerts_sent, len(markets))
+    return alerts_sent
 
 
 def apply_whale_to_signal(signal: dict, whale_data: dict, signal_direction: str = "YES") -> dict:

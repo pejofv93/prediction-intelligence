@@ -1,0 +1,19 @@
+name: poly-price-monitor
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger price monitor (Cloud Run)
+        run: |
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-price-monitor" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 540 \
+            --no-buffer \
+            --fail --silent --show-error

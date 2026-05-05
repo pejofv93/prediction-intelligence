@@ -1,6 +1,6 @@
 """
 polymarket-agent — FastAPI service
-Endpoints: /run-scan /run-enrich /run-analyze /run-poly-backtest /run-websocket /run-learn /health
+Endpoints: /run-scan /run-enrich /run-analyze /run-price-monitor /run-poly-backtest /run-websocket /run-learn /health
 Todos los endpoints /run-* devuelven 202 Accepted inmediatamente.
 """
 import asyncio
@@ -99,6 +99,14 @@ async def run_analyze() -> JSONResponse:
     Cloud Run mantiene la instancia viva durante todo el proceso (timeout=1200s)."""
     result = await _bg_analyze()
     return JSONResponse(status_code=200, content=result)
+
+
+@app.post("/run-price-monitor", dependencies=[Depends(verify_token)])
+async def run_price_monitor() -> JSONResponse:
+    """Detecta movimientos bruscos de precio (>8% en <1h) en mercados activos y alerta Telegram."""
+    from price_tracker import monitor_price_changes
+    alerts = await monitor_price_changes()
+    return JSONResponse(status_code=200, content={"status": "ok", "alerts_sent": alerts})
 
 
 @app.get("/recent-predictions", dependencies=[Depends(verify_token)])
