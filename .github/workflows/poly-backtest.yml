@@ -1,0 +1,25 @@
+name: poly-backtest
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 1 * *'  # Mensual, dia 1 a las 03:00 UTC (tras sports-backtest 02:00)
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger poly-backtest (fire-and-forget)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.POLYMARKET_AGENT_URL }}/run-poly-backtest" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 15)
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" = "202" ]; then
+            echo "Poly-backtest iniciado en background (202 Accepted)"
+          elif [ "$STATUS" = "409" ]; then
+            echo "Poly-backtest ya en ejecucion (409 Conflict) — omitiendo"
+          else
+            echo "Error inesperado HTTP $STATUS"
+            exit 1
+          fi
