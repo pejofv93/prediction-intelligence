@@ -431,7 +431,7 @@ async def _bg_analyze() -> dict:
         # Balanceo por categoría: top 5 frescos por enriched_at de cada categoría activa
         from collections import Counter
         from datetime import timedelta
-        from groq_analyzer import categorize_market
+        from groq_analyzer import categorize_market, market_analysis_priority
 
         # Excluir mercados analizados en <12h salvo que precio haya cambiado >3%
         _cutoff_12h = datetime.now(timezone.utc) - timedelta(hours=12)
@@ -523,7 +523,7 @@ async def _bg_analyze() -> dict:
             )[:5]
             docs_balanced.extend(_top)
         docs_balanced.sort(
-            key=lambda x: x.get("enriched_at") or _dt_min,
+            key=lambda x: (market_analysis_priority(x), x.get("enriched_at") or _dt_min),
             reverse=True,
         )
 

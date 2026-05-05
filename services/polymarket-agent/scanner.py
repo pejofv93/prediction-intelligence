@@ -17,7 +17,7 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 _HTTP_TIMEOUT = 20.0
 
-# Categorías para rotación diversa — max 5 por categoría, 30 total en el bloque rotado
+# Categorías para rotación diversa — max 7 por categoría, 40 total en bloque medio
 _SCAN_CATEGORIES: dict[str, list[str]] = {
     "crypto":      ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "altcoin", "halving"],
     "sports":      ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "nfl", "mlb", "wimbledon", "olympic", "copa"],
@@ -26,8 +26,20 @@ _SCAN_CATEGORIES: dict[str, list[str]] = {
     "pop_culture": ["oscar", "grammy", "emmy", "movie", "album", "singer", "actor", "celebrity", "taylor", "award", "box office"],
     "business":    ["apple", "tesla", "microsoft", "amazon", "google", "meta", "earnings", "merger", "acquisition", "ipo", "layoffs"],
 }
-_MAX_PER_CATEGORY = 5
-_DIVERSITY_TOTAL = 30
+_MAX_PER_CATEGORY = 7
+_MEDIUM_VOL_TOTAL = 40
+
+# Keywords específicos de deportes para el bucket deportivo dedicado
+_SPORTS_KEYWORDS = [
+    "football", "soccer", "nba", "nfl", "mlb", "nhl", "tennis", "golf",
+    "formula 1", " f1 ", "boxing", "mma", "ufc", "olympics", "world cup",
+    "champions league", "premier league", "la liga", "bundesliga", "serie a",
+    "ligue 1", "super bowl", "playoffs", "copa", "euro ", "wimbledon",
+    "roland garros", "us open", "masters", "nascar", "basketball", "baseball",
+    "hockey", "cricket", "rugby", "wrestling", "atp", "wta", "fifa", "uefa",
+    "match", " win ", " wins ", "championship", "tournament", "semifinal",
+    "quarterfinal", "knockout", "grand prix", "driver", "team score",
+]
 
 
 def _categorize_for_scan(question: str) -> str:
@@ -36,6 +48,49 @@ def _categorize_for_scan(question: str) -> str:
         if any(kw in q for kw in kws):
             return cat
     return "other"
+
+
+def _is_sports_market(question: str) -> bool:
+    """True si el mercado es deportivo según keywords específicos."""
+    q = question.lower()
+    return any(kw in q for kw in _SPORTS_KEYWORDS)
+
+
+def _quality_ok(market: dict, now: datetime) -> bool:
+    """
+    Filtro de calidad mínima común a todos los buckets:
+    - volume_24h >= 5000
+    - days_to_close entre 2 y 30
+    - price_yes no extremo (no prácticamente resuelto)
+    """
+    if market.get("volume_24h", 0) < 5000:
+        return False
+    end_date = market.get("end_date")
+    if not end_date or not isinstance(end_date, datetime):
+        return False
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=timezone.utc)
+    days = (end_date - now).total_seconds() / 86400
+    if days < 2 or days > 30:
+        return False
+    price_yes = market.get("price_yes", 0.5)
+    if price_yes < 0.05 or price_yes > 0.95:
+        return False
+    return True
+
+
+def _rotate_by_category(markets: list[dict], max_per_cat: int, total: int) -> list[dict]:
+    """Distribuye mercados por categoría respetando max_per_cat y el total máximo."""
+    by_cat: dict[str, list[dict]] = {}
+    for m in markets:
+        cat = _categorize_for_scan(m.get("question", ""))
+        by_cat.setdefault(cat, []).append(m)
+    result: list[dict] = []
+    for cat_markets in by_cat.values():
+        result.extend(cat_markets[:max_per_cat])
+        if len(result) >= total:
+            break
+    return result[:total]
 
 
 async def _get_alerted_market_ids_48h() -> set[str]:
@@ -209,12 +264,27 @@ def _parse_market(raw: dict) -> dict | None:
 
         slug = str(raw.get("slug", raw.get("market_slug", "")))
 
+        created_at: datetime | None = None
+        _cat_raw = (
+            raw.get("createdAt") or raw.get("created_at")
+            or raw.get("startDate") or raw.get("start_date")
+        )
+        if _cat_raw:
+            try:
+                created_at = (
+                    _cat_raw if isinstance(_cat_raw, datetime)
+                    else datetime.fromisoformat(str(_cat_raw).replace("Z", "+00:00"))
+                )
+            except Exception:
+                pass
+
         return {
             "market_id": market_id,
             "condition_id": condition_id,
             "question": question,
             "slug": slug,
             "end_date": end_date,
+            "created_at": created_at,
             "volume_24h": volume_24h,
             "price_yes": price_yes,
             "price_no": price_no,
@@ -226,77 +296,87 @@ def _parse_market(raw: dict) -> dict | None:
         return None
 
 
-async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
-    """
-    Combina top-20 por volumen 24h + hasta 30 mercados rotando por 6 categorías.
-    Categorías: crypto, sports, politics, science, pop_culture, business (máx 5 c/u).
-    El bloque rotado excluye mercados ya alertados en las últimas 48h.
-    Guarda en Firestore poly_markets. Devuelve lista combinada.
-    """
-    now = datetime.now(timezone.utc)
-    min_end_date = now + timedelta(hours=24)
-    alerted_ids = await _get_alerted_market_ids_48h()
-
+async def _fetch_raw_pool(order: str = "volume24hr", limit: int = 500) -> list[dict]:
+    """Fetch genérico de mercados activos de la Gamma API. Devuelve parsed list."""
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(
                 f"{GAMMA_API}/markets",
-                params={
-                    "active": "true",
-                    "closed": "false",
-                    "order": "volume24hr",
-                    "ascending": "false",
-                    "limit": "200",
-                },
+                params={"active": "true", "closed": "false",
+                        "order": order, "ascending": "false", "limit": str(limit)},
             )
         if resp.status_code != 200:
-            logger.error("fetch_diverse_markets: API respondio %d", resp.status_code)
+            logger.error("_fetch_raw_pool(%s): API respondio %d", order, resp.status_code)
             return []
         raw_data = resp.json()
-        raw_markets = raw_data if isinstance(raw_data, list) else raw_data.get("markets", raw_data.get("data", []))
+        raw_list = raw_data if isinstance(raw_data, list) else raw_data.get("markets", raw_data.get("data", []))
     except Exception:
-        logger.error("fetch_diverse_markets: error de red", exc_info=True)
+        logger.error("_fetch_raw_pool(%s): error de red", order, exc_info=True)
         return []
-
-    parsed: list[dict] = []
-    for raw in raw_markets:
+    result = []
+    for raw in raw_list:
         try:
-            market = _parse_market(raw)
-            if market is None:
-                continue
-            if market["volume_24h"] < min_volume:
-                continue
-            end_date = market.get("end_date")
-            if not end_date or not isinstance(end_date, datetime):
-                continue
-            if end_date.tzinfo is None:
-                end_date = end_date.replace(tzinfo=timezone.utc)
-            if end_date < min_end_date:
-                continue
-            parsed.append(market)
+            m = _parse_market(raw)
+            if m:
+                result.append(m)
         except Exception:
-            logger.error("fetch_diverse_markets: error parseando mercado", exc_info=True)
+            pass
+    return result
 
-    # Top-20 por volumen (siempre incluidos)
-    parsed_sorted = sorted(parsed, key=lambda m: m.get("volume_24h", 0), reverse=True)
-    top_20 = parsed_sorted[:20]
-    top_20_ids = {m["market_id"] for m in top_20}
 
-    # Bloque rotado: de los restantes, excluir alertados 48h y rotar por categoría
-    remaining = [m for m in parsed_sorted[20:] if m["market_id"] not in alerted_ids]
-    by_category: dict[str, list[dict]] = {}
-    for m in remaining:
-        cat = _categorize_for_scan(m.get("question", ""))
-        by_category.setdefault(cat, []).append(m)
+async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
+    """
+    100 mercados por ciclo en 4 buckets con filtro de calidad (vol>$5k, días 2-30):
+      - Top 10: mayor volumen 24h (ballenas, referencia)
+      - Medio 40: $10k-$100k rotando por categoría (mayor ineficiencia de precio)
+      - Deportes 30: vol>$5k, keywords deportivos (fútbol, NBA, etc.)
+      - Nuevos 20: creados en últimas 48h, vol>$5k (precio aún no calibrado)
+    Guarda en Firestore poly_markets. Devuelve lista combinada.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff_48h = now - timedelta(hours=48)
+    alerted_ids = await _get_alerted_market_ids_48h()
 
-    rotated: list[dict] = []
-    for cat_markets in by_category.values():
-        rotated.extend(cat_markets[:_MAX_PER_CATEGORY])
-        if len(rotated) >= _DIVERSITY_TOTAL:
-            break
-    rotated = rotated[:_DIVERSITY_TOTAL]
+    # Pool principal por volumen (top-10 + medio + deportes)
+    vol_pool = await _fetch_raw_pool(order="volume24hr", limit=500)
+    qualified = [m for m in vol_pool if _quality_ok(m, now)]
+    by_vol = sorted(qualified, key=lambda m: m["volume_24h"], reverse=True)
 
-    combined = top_20 + [m for m in rotated if m["market_id"] not in top_20_ids]
+    # Bucket 1 — Top 10 por volumen (siempre incluidos)
+    top10 = by_vol[:10]
+    used_ids = {m["market_id"] for m in top10}
+
+    # Bucket 2 — Volumen medio $10k-$100k, rotando por categoría, 40 max
+    medium_pool = [
+        m for m in by_vol
+        if 10_000 <= m["volume_24h"] <= 100_000 and m["market_id"] not in used_ids
+    ]
+    medium = _rotate_by_category(medium_pool, max_per_cat=_MAX_PER_CATEGORY, total=_MEDIUM_VOL_TOTAL)
+    used_ids |= {m["market_id"] for m in medium}
+
+    # Bucket 3 — Deportes con vol>$5k, 30 max
+    sports_pool = [
+        m for m in by_vol
+        if _is_sports_market(m.get("question", "")) and m["market_id"] not in used_ids
+    ]
+    sports = sports_pool[:30]
+    used_ids |= {m["market_id"] for m in sports}
+
+    # Bucket 4 — Nuevos (últimas 48h), vol>$5k, 20 max
+    new_pool = await _fetch_raw_pool(order="startDate", limit=150)
+    new_qualified = [
+        m for m in new_pool
+        if _quality_ok(m, now)
+        and m["market_id"] not in used_ids
+        and m.get("created_at") is not None
+        and (
+            m["created_at"] if m["created_at"].tzinfo
+            else m["created_at"].replace(tzinfo=timezone.utc)
+        ) >= cutoff_48h
+    ]
+    new_markets = new_qualified[:20]
+
+    combined = top10 + medium + sports + new_markets
 
     saved = 0
     for market in combined:
@@ -307,8 +387,9 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
             logger.error("fetch_diverse_markets: error guardando %s", market["market_id"], exc_info=True)
 
     logger.info(
-        "fetch_diverse_markets: top20=%d rotated=%d total=%d saved=%d excl_alertados=%d",
-        len(top_20), len(rotated), len(combined), saved, len(alerted_ids),
+        "fetch_diverse_markets: top10=%d medio=%d deportes=%d nuevos=%d total=%d saved=%d excl_alert=%d",
+        len(top10), len(medium), len(sports), len(new_markets),
+        len(combined), saved, len(alerted_ids),
     )
     return combined
 

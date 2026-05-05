@@ -110,6 +110,16 @@ def categorize_market(question: str) -> str:
     return "other"
 
 
+def market_analysis_priority(enriched_market: dict) -> int:
+    """Prioridad de análisis: medio volumen ($10k-$100k) primero — menos eficiente de precio."""
+    vol = float(enriched_market.get("volume_24h", 0))
+    if 10_000 <= vol <= 100_000:
+        return 2
+    if 5_000 <= vol < 10_000:
+        return 1
+    return 0
+
+
 def _get_current_crypto_price(question: str, enriched_market: dict | None = None) -> float | None:
     """
     Precio spot del activo crypto.
