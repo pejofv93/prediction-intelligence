@@ -888,6 +888,10 @@ async def _generate_oddsapiio_extra_signals(
 
     # ── BTTS ──────────────────────────────────────────────────────────────────
     btts_mkt = all_markets.get("btts")
+    if not btts_mkt:
+        logger.info("EXTRA_MARKETS_BTTS(%s): no disponible en all_markets", match_id)
+    else:
+        logger.info("EXTRA_MARKETS_BTTS(%s): mkt=%s", match_id, btts_mkt)
     if btts_mkt:
         btts_probs = _calculate_btts_prob(enriched_match)
         if btts_probs:
@@ -895,6 +899,13 @@ async def _generate_oddsapiio_extra_signals(
             if yes_odds > 1.05:
                 edge = calculate_edge(btts_probs["btts_prob"], yes_odds)
                 conf = round(min(1.0, max(0.0, btts_probs["btts_prob"] + 0.1)), 4)
+                logger.info(
+                    "EXTRA_MARKETS_BTTS(%s): btts_prob=%.3f yes_odds=%.2f "
+                    "edge=%.4f(min=%.3f) conf=%.3f(min=%.3f) → %s",
+                    match_id, btts_probs["btts_prob"], yes_odds,
+                    edge, SPORTS_MIN_EDGE, conf, SPORTS_MIN_CONFIDENCE,
+                    "OK" if edge > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE else "SKIP",
+                )
                 if edge > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE:
                     doc_id = f"{match_id}_btts"
                     pred = {
@@ -926,7 +937,12 @@ async def _generate_oddsapiio_extra_signals(
 
     # ── Over/Under 2.5 ────────────────────────────────────────────────────────
     totals_list = all_markets.get("totals", [])
+    available_lines = [t.get("line") for t in totals_list]
     t25 = next((t for t in totals_list if abs(t.get("line", 0) - 2.5) < 0.01), None)
+    logger.info(
+        "EXTRA_MARKETS_OU(%s): totals_lines=%s t25=%s",
+        match_id, available_lines, bool(t25),
+    )
     if t25:
         totals_probs = _calculate_totals_prob(enriched_match, line=2.5)
         if totals_probs:
@@ -935,15 +951,29 @@ async def _generate_oddsapiio_extra_signals(
             over_edge = calculate_edge(totals_probs["over_prob"], over_odds) if over_odds > 1.05 else -1
             under_edge = calculate_edge(totals_probs["under_prob"], under_odds) if under_odds > 1.05 else -1
 
+            logger.info(
+                "EXTRA_MARKETS_OU(%s): over_prob=%.3f over_odds=%.2f over_edge=%.4f "
+                "| under_prob=%.3f under_odds=%.2f under_edge=%.4f | min_edge=%.3f",
+                match_id,
+                totals_probs["over_prob"], over_odds, over_edge,
+                totals_probs["under_prob"], under_odds, under_edge,
+                SPORTS_MIN_EDGE,
+            )
             if over_edge >= under_edge and over_edge > SPORTS_MIN_EDGE:
                 sel, sel_p, sel_odds, sel_edge = "Over", totals_probs["over_prob"], over_odds, over_edge
             elif under_edge > over_edge and under_edge > SPORTS_MIN_EDGE:
                 sel, sel_p, sel_odds, sel_edge = "Under", totals_probs["under_prob"], under_odds, under_edge
             else:
                 sel = None
+                logger.info("EXTRA_MARKETS_OU(%s): SKIP — ningún lado supera min_edge=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
                 sel_conf = round(max(0.0, 1.0 - abs(sel_p - 0.5) * 2), 4)
+                logger.info(
+                    "EXTRA_MARKETS_OU(%s): sel=%s sel_p=%.3f conf=%.3f(min=%.3f) → %s",
+                    match_id, sel, sel_p, sel_conf, SPORTS_MIN_CONFIDENCE,
+                    "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP (conf formula invertida: prob alta = conf baja)",
+                )
                 if sel_conf > SPORTS_MIN_CONFIDENCE:
                     doc_id = f"{match_id}_ou25_oaio"
                     pred = {
@@ -973,9 +1003,14 @@ async def _generate_oddsapiio_extra_signals(
 
     # ── Asian Handicap -0.5 ───────────────────────────────────────────────────
     spreads_list = all_markets.get("spreads", [])
+    available_points = [s.get("point") for s in spreads_list]
     ah_m05 = next(
         (s for s in spreads_list if s.get("point") is not None and abs(s.get("point", 0) + 0.5) < 0.01),
         None,
+    )
+    logger.info(
+        "EXTRA_MARKETS_AH(%s): spreads_points=%s ah_m05=%s",
+        match_id, available_points, bool(ah_m05),
     )
     if ah_m05:
         ah_probs = _calculate_ah_prob(enriched_match, line=-0.5)
@@ -985,15 +1020,30 @@ async def _generate_oddsapiio_extra_signals(
             home_edge = calculate_edge(ah_probs["home_covers"], home_ah_odds) if home_ah_odds > 1.05 else -1
             away_edge = calculate_edge(ah_probs["away_covers"], away_ah_odds) if away_ah_odds > 1.05 else -1
 
+            logger.info(
+                "EXTRA_MARKETS_AH(%s): home_covers=%.3f home_odds=%.2f home_edge=%.4f "
+                "| away_covers=%.3f away_odds=%.2f away_edge=%.4f | min_edge=%.3f",
+                match_id,
+                ah_probs["home_covers"], home_ah_odds, home_edge,
+                ah_probs["away_covers"], away_ah_odds, away_edge,
+                SPORTS_MIN_EDGE,
+            )
             if home_edge >= away_edge and home_edge > SPORTS_MIN_EDGE:
                 sel, sel_p, sel_odds, sel_edge = home_team, ah_probs["home_covers"], home_ah_odds, home_edge
             elif away_edge > home_edge and away_edge > SPORTS_MIN_EDGE:
                 sel, sel_p, sel_odds, sel_edge = away_team, ah_probs["away_covers"], away_ah_odds, away_edge
             else:
                 sel = None
+                logger.info("EXTRA_MARKETS_AH(%s): SKIP — ningún lado supera min_edge=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
                 sel_conf = round(min(1.0, abs(sel_p - 0.5) * 3), 4)
+                logger.info(
+                    "EXTRA_MARKETS_AH(%s): sel=%s sel_p=%.3f conf=%.3f(min=%.3f) → %s "
+                    "[NOTA: conf requiere sel_p>0.717 para pasar — posible bug fórmula]",
+                    match_id, sel, sel_p, sel_conf, SPORTS_MIN_CONFIDENCE,
+                    "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP",
+                )
                 if sel_conf > SPORTS_MIN_CONFIDENCE:
                     doc_id = f"{match_id}_ah05"
                     pred = {
@@ -1805,18 +1855,36 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                         results.append(totals_pred)
 
     # --- Señales BTTS, OU 2.5, AH -0.5 desde odds-api.io all_markets ---
-    if sport_key in _FOOTBALL_SPORT_KEYS and odds_data and odds_data.get("source") == "oddsapiio":
-        _all_mkt = odds_data.get("all_markets", {})
-        if _all_mkt:
-            try:
-                extra_oaio = await _generate_oddsapiio_extra_signals(
-                    enriched_match, _all_mkt, match_id,
-                    str(home_team), str(away_team),
-                    league, sport, match_date, weights_version,
+    if sport_key in _FOOTBALL_SPORT_KEYS:
+        _odds_src = odds_data.get("source") if odds_data else None
+        if _odds_src != "oddsapiio":
+            logger.info(
+                "EXTRA_MARKETS_SKIP(%s): source=%s (solo oddsapiio tiene all_markets) "
+                "— BTTS/OU/AH no disponibles para este partido",
+                match_id, _odds_src,
+            )
+        elif odds_data:
+            _all_mkt = odds_data.get("all_markets", {})
+            logger.info(
+                "EXTRA_MARKETS_CHECK(%s): source=oddsapiio all_markets_keys=%s",
+                match_id, list(_all_mkt.keys()),
+            )
+            if not _all_mkt:
+                logger.info(
+                    "EXTRA_MARKETS_SKIP(%s): all_markets vacío — "
+                    "odds-api.io no devolvió BTTS/OU/AH para este partido",
+                    match_id,
                 )
-                results.extend(extra_oaio)
-            except Exception:
-                logger.error("generate_signal(%s): error en oddsapiio extra signals", match_id, exc_info=True)
+            else:
+                try:
+                    extra_oaio = await _generate_oddsapiio_extra_signals(
+                        enriched_match, _all_mkt, match_id,
+                        str(home_team), str(away_team),
+                        league, sport, match_date, weights_version,
+                    )
+                    results.extend(extra_oaio)
+                except Exception:
+                    logger.error("generate_signal(%s): error en oddsapiio extra signals", match_id, exc_info=True)
 
     # --- Señales extra de fútbol (BTTS, Double Chance, AH, Totals 3.5) ---
     if sport_key in _FOOTBALL_SPORT_KEYS:
