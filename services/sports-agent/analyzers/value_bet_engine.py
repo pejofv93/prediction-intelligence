@@ -1404,28 +1404,57 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         except Exception:
             logger.warning("generate_signal(%s): no se pudo resolver nombre de equipo desde upcoming_matches", match_id)
 
-    # Ligas donde Poisson no es viable: Copa Lib/BSA tienen <3 partidos de fase de grupos
-    # en la primera mitad de la temporada. Se permite continuar con ELO solo si está disponible.
-    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM"}
+    # Ligas donde Poisson puede faltar: se permite continuar con ELO o form como proxy.
+    # Copa/BSA: datos históricos insuficientes en fase de grupos.
+    # CL/EL/ECL: ELO DB puede no cubrir equipos — pero cuotas siempre disponibles.
+    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM", "CL", "EL", "ECL"}
 
-    # Fix 1: futbol sin Poisson valido → descartar, EXCEPTO ligas exentas con ELO disponible
+    # POISSON_GUARD: bloquear SOLO si no hay ningún modelo disponible.
+    # Regla: si poisson_home_win existe → pasar siempre (elo=-1 no bloquea).
+    #        si poisson=None → intentar ELO o form como proxy en ligas exentas.
     if sport == "football" and enriched_match.get("poisson_home_win") is None:
-        elo_available = enriched_match.get("elo_home_win_prob") is not None
-        if league in _POISSON_EXEMPT_LEAGUES and elo_available:
-            logger.info(
-                "generate_signal(%s): %s vs %s [%s] — Poisson exento (liga Copa/BSA), "
-                "continuando con ELO elo=%.3f",
-                match_id, home_team, away_team, league,
-                enriched_match.get("elo_home_win_prob", 0.0),
-            )
-            # Inyectar Poisson sintético desde ELO para que el ensemble funcione
-            elo_p = enriched_match.get("elo_home_win_prob", 0.45)
-            enriched_match = {
-                **enriched_match,
-                "poisson_home_win": elo_p,
-                "poisson_draw":     max(0.0, 1.0 - elo_p - (1.0 - elo_p) * 0.6),
-                "poisson_away_win": (1.0 - elo_p) * 0.6,
-            }
+        elo_prob = enriched_match.get("elo_home_win_prob")
+        # elo=-1 significa equipo no en DB — tratarlo como no disponible
+        elo_available = elo_prob is not None and float(elo_prob) > 0
+
+        if league in _POISSON_EXEMPT_LEAGUES:
+            if elo_available:
+                # ELO disponible → Poisson sintético desde ELO
+                elo_p = float(elo_prob)
+                logger.info(
+                    "generate_signal(%s): %s vs %s [%s] — Poisson sintético desde ELO elo=%.3f",
+                    match_id, home_team, away_team, league, elo_p,
+                )
+                enriched_match = {
+                    **enriched_match,
+                    "poisson_home_win": elo_p,
+                    "poisson_draw":     max(0.0, 1.0 - elo_p - (1.0 - elo_p) * 0.6),
+                    "poisson_away_win": (1.0 - elo_p) * 0.6,
+                }
+            else:
+                # ELO también ausente — usar form como proxy si no es el default 50/50
+                home_form = float(enriched_match.get("home_form_score", 50.0))
+                away_form = float(enriched_match.get("away_form_score", 50.0))
+                if home_form == 50.0 and away_form == 50.0:
+                    logger.warning(
+                        "DIAG_POISSON_GUARD: %s vs %s [%s] — poisson=None elo=None form=default "
+                        "— sin datos reales, bloqueado",
+                        home_team, away_team, league,
+                    )
+                    return []
+                total_form = home_form + away_form
+                form_p = home_form / total_form if total_form > 0 else 0.45
+                logger.info(
+                    "generate_signal(%s): %s vs %s [%s] — Poisson sintético desde FORM "
+                    "home=%.1f away=%.1f → p_home=%.3f",
+                    match_id, home_team, away_team, league, home_form, away_form, form_p,
+                )
+                enriched_match = {
+                    **enriched_match,
+                    "poisson_home_win": form_p,
+                    "poisson_draw":     max(0.0, 1.0 - form_p - (1.0 - form_p) * 0.6),
+                    "poisson_away_win": (1.0 - form_p) * 0.6,
+                }
         else:
             logger.warning(
                 "DIAG_POISSON_GUARD: %s vs %s [%s] — poisson=None quality=%s "
