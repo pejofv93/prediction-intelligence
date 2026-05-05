@@ -1402,6 +1402,43 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         )
         return []
 
+    # --- Filtro de relevancia por standings ---
+    # No generar señales cuando un equipo ya no tiene nada que ganar o perder.
+    _standings_confidence_adj = 1.0
+    try:
+        _standings_doc = col("standings").document(league).get()
+        if _standings_doc.exists:
+            _standings = _standings_doc.to_dict().get("teams", {})
+            _home_standing = _standings.get(str(enriched_match.get("home_team_id", home_team)), {})
+            _away_standing = _standings.get(str(enriched_match.get("away_team_id", away_team)), {})
+
+            for _team_name, _standing in [(home_team, _home_standing), (away_team, _away_standing)]:
+                if not _standing:
+                    continue
+                _relegated = _standing.get("mathematically_relegated", False)
+                _champion = _standing.get("mathematically_champion", False)
+                _nothing_at_stake = _standing.get("nothing_at_stake", False)
+
+                if _relegated:
+                    logger.info(
+                        "generate_signal(%s): %s matemáticamente descendido — señal omitida",
+                        match_id, _team_name,
+                    )
+                    return []
+                if _champion:
+                    logger.info(
+                        "generate_signal(%s): %s matemáticamente campeón — señal omitida",
+                        match_id, _team_name,
+                    )
+                    return []
+                if _nothing_at_stake:
+                    _standings_confidence_adj = min(_standings_confidence_adj, 0.80)
+                    logger.info(
+                        "generate_signal(%s): %s sin nada en juego — confianza reducida 20%%",
+                        match_id, _team_name,
+                    )
+    except Exception as _se:
+        logger.debug("generate_signal(%s): error leyendo standings — %s", match_id, _se)
 
     # Determinar data_source segun si hay modelo estadistico
     has_statistical_model = (
@@ -1578,6 +1615,10 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 match_id, best_odds, best_confidence, home_team, away_team, league,
             )
             return []
+
+    # Aplicar descuento de standings si algún equipo no tiene nada en juego
+    if _standings_confidence_adj < 1.0:
+        best_confidence = round(best_confidence * _standings_confidence_adj, 4)
 
     # --- 6. Verificar thresholds ---
     if best_edge <= SPORTS_MIN_EDGE or best_confidence <= SPORTS_MIN_CONFIDENCE:
