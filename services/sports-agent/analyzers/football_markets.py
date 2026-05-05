@@ -811,6 +811,11 @@ def _make_prediction(base: dict, market_type: str, selection: str,
     # Confidence = prob directamente (señales Poisson tienen una sola fuente).
     # std(factors) no aplica: xg/ah_line tienen escalas dispares → resultado sin sentido.
     confidence = round(min(0.92, max(0.0, float(prob))), 4)
+    # FIX 3: cap de confianza por cuota alta (mercados con poco respaldo de bookmaker)
+    if odds > 8.00:
+        confidence = round(min(confidence, 0.50), 4)
+    elif odds > 6.00:
+        confidence = round(min(confidence, 0.60), 4)
     if confidence <= SPORTS_MIN_CONFIDENCE:
         return None
 
@@ -871,6 +876,19 @@ async def generate_football_extra_signals(
 
     home_xg = float(home_xg)
     away_xg = float(away_xg)
+
+    # FIX 3: form < 0.30 Y poisson < 0.20 → datos insuficientes para señales extras
+    _hf = float(enriched_match.get("home_form_score", 50.0)) / 100.0
+    _af = float(enriched_match.get("away_form_score", 50.0)) / 100.0
+    _ph = float(enriched_match.get("poisson_home_win") or 0.5)
+    _pa = float(enriched_match.get("poisson_away_win") or 0.5)
+    if (_hf < 0.30 and _ph < 0.20) or (_af < 0.30 and _pa < 0.20):
+        logger.info(
+            "football_markets(%s): skip extras — form/poisson bajos "
+            "(h_form=%.2f h_poi=%.2f a_form=%.2f a_poi=%.2f)",
+            match_id, _hf, _ph, _af, _pa,
+        )
+        return []
 
     # WriteBatch: agrupa todos los writes del partido en 1 sola RPC
     _fs = _get_fs_client()

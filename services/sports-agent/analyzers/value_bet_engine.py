@@ -1665,23 +1665,63 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             )
             return []
 
+    # --- 5f. Filtros adicionales underdogs (FIX 1) ---
+    if _lado == "AWAY":
+        if best_odds > 6.00:
+            logger.info(
+                "generate_signal(%s): AWAY extremo descartado (odds=%.2f > 6.00) [%s vs %s | %s]",
+                match_id, best_odds, home_team, away_team, league,
+            )
+            return []
+        if best_odds > 4.00:
+            best_confidence = round(min(best_confidence, 0.70), 4)
+    _sel_form = (
+        enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
+        else enriched_match.get("away_form_score", 50.0)
+    ) / 100.0
+    _sel_poisson = float(
+        (enriched_match.get("poisson_home_win") if team_to_back == str(home_team)
+         else enriched_match.get("poisson_away_win")) or 0.5
+    )
+    if _sel_form < 0.25 and _sel_poisson < 0.20:
+        logger.info(
+            "generate_signal(%s): descartado — form=%.2f y poisson=%.2f del equipo seleccionado [%s | %s]",
+            match_id, _sel_form, _sel_poisson, team_to_back, league,
+        )
+        return []
+
     # Aplicar descuento de standings si algún equipo no tiene nada en juego
     if _standings_confidence_adj < 1.0:
         best_confidence = round(best_confidence * _standings_confidence_adj, 4)
 
-    # --- 6. Verificar thresholds ---
-    if best_edge <= SPORTS_MIN_EDGE or best_confidence <= SPORTS_MIN_CONFIDENCE:
+    # --- 6. Umbrales de intensidad (FIX 2) ---
+    # FUERTE: edge>15% + conf>80% + odds<5.00
+    # MODERADA: edge>10% + conf>70% + odds<6.00
+    # DETECTADA: edge>8% + conf>65% + odds<4.00
+    _is_fuerte    = best_edge > 0.15 and best_confidence > 0.80 and best_odds < 5.00
+    _is_moderada  = best_edge > 0.10 and best_confidence > 0.70 and best_odds < 6.00
+    _is_detectada = best_edge > 0.08 and best_confidence > 0.65 and best_odds < 4.00
+
+    if not (_is_fuerte or _is_moderada or _is_detectada):
         logger.debug(
-            "generate_signal(%s): edge=%.3f conf=%.3f — debajo del umbral",
-            match_id, best_edge, best_confidence,
+            "generate_signal(%s): descartado — no cumple umbral "
+            "(edge=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
+            match_id, best_edge * 100, best_confidence * 100, best_odds,
+            home_team, away_team, league,
         )
         return []
 
-    # Calidad de datos: si es partial, reducir confianza un 10%
+    _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
+
+    # Calidad de datos: si es partial, reducir confianza un 10% y re-evaluar tiers
     if data_quality == "partial":
         best_confidence = round(max(0.0, best_confidence * 0.9), 4)
-        if best_confidence <= SPORTS_MIN_CONFIDENCE:
+        _is_fuerte    = best_edge > 0.15 and best_confidence > 0.80 and best_odds < 5.00
+        _is_moderada  = best_edge > 0.10 and best_confidence > 0.70 and best_odds < 6.00
+        _is_detectada = best_edge > 0.08 and best_confidence > 0.65 and best_odds < 4.00
+        if not (_is_fuerte or _is_moderada or _is_detectada):
             return []
+        _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
 
     # --- 7. Contexto externo (lesiones / rotaciones) ---
     external_ctx = await _fetch_external_context(
@@ -1743,6 +1783,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         "error_type": None,
         "external_context": external_ctx["notes"],
         "odds_movement": odds_movement,
+        "intensity": _signal_intensity,
     }
 
     # --- Guardar en Firestore predictions ---
