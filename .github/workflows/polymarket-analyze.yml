@@ -7,9 +7,17 @@ on:
 jobs:
   trigger:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: Trigger Cloud Run
+      - name: Enrich markets (prereq de analyze)
+        continue-on-error: true
+        run: |
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-enrich" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 600 \
+            --fail --silent --show-error
+      - name: Analyze markets
         run: |
           curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-analyze" \
             -H "Content-Type: application/json" \
