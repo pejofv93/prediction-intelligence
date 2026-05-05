@@ -377,13 +377,18 @@ async def run_enrichment() -> int:
     loop = asyncio.get_event_loop()
 
     def _check_enriched(match_id: str) -> bool:
-        """True si debe enriquecerse (no existe o está obsoleto)."""
+        """True si debe enriquecerse (no existe, obsoleto o calidad parcial)."""
         try:
             doc = col("enriched_matches").document(match_id).get()
             if not doc.exists:
                 return True
-            enriched_at = doc.to_dict().get("enriched_at")
+            d = doc.to_dict() or {}
+            enriched_at = d.get("enriched_at")
             if enriched_at is None:
+                return True
+            # Re-enriquecer si datos parciales (team_stats no encontrado la vez anterior)
+            if d.get("data_quality") == "partial":
+                logger.info("_check_enriched(%s): data_quality=partial → forzar re-enrich", match_id)
                 return True
             if hasattr(enriched_at, "tzinfo") and enriched_at.tzinfo is None:
                 from datetime import timezone as tz
