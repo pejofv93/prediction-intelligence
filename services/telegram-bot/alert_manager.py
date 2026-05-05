@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 _BOT_BASE = "https://api.telegram.org/bot"
 _HTTP_TIMEOUT = 10.0
 
+# Umbral de cambio de cuota para disparar alerta (10%)
+_ODDS_CHANGE_THRESHOLD = 0.10
+
 
 def _bot_url(method: str) -> str:
     return f"{_BOT_BASE}{TELEGRAM_TOKEN}/{method}"
@@ -362,6 +365,92 @@ def _alert_key(data: dict, edge: float) -> str:
     """Genera clave de deduplicacion."""
     id_field = data.get("match_id") or data.get("market_id") or "unknown"
     return f"{id_field}_{round(edge, 2)}"
+
+
+async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) -> int:
+    """
+    Compara cuotas actuales vs cuotas en señales PENDIENTES de Firestore.
+    Para cada señal activa (result=None):
+      - Si cambio > 10% → envía alerta al topic Sports.
+      - Si nueva cuota hace edge < 0 → añade advertencia de edge negativo.
+
+    Args:
+        current_odds_by_match: {match_id: cuota_actual} — proporcionado por el analyze.
+
+    Returns:
+        Número de alertas de cambio enviadas.
+    """
+    from shared.firestore_client import col
+
+    if not current_odds_by_match:
+        return 0
+
+    sent_count = 0
+    try:
+        pending_docs = list(
+            col("predictions")
+            .where(filter=FieldFilter("result", "==", None))
+            .limit(200)
+            .stream()
+        )
+    except Exception:
+        logger.error("check_pending_odds_changes: error leyendo predictions pendientes", exc_info=True)
+        return 0
+
+    for doc in pending_docs:
+        try:
+            pred = doc.to_dict()
+            match_id = str(pred.get("match_id") or doc.id)
+            # Extraer el match_id base (sin sufijos _ml_home, _spread, etc.)
+            base_id = match_id.split("_ml_")[0].split("_spread")[0].split("_tot_")[0].split("_h1_")[0].split("_q1_")[0]
+
+            current_odds = current_odds_by_match.get(base_id) or current_odds_by_match.get(match_id)
+            if current_odds is None:
+                continue
+
+            original_odds = float(pred.get("odds") or 0)
+            if original_odds <= 1.0:
+                continue
+
+            pct_change = (current_odds - original_odds) / original_odds
+            if abs(pct_change) <= _ODDS_CHANGE_THRESHOLD:
+                continue
+
+            # Calcular edge actualizado
+            calculated_prob = float(pred.get("calculated_prob") or 0)
+            new_edge = round(calculated_prob - (1.0 / current_odds), 4) if current_odds > 1 else 0.0
+            pct_str = f"{pct_change:+.1%}"
+
+            home = _escape_md(pred.get("home_team", "?"))
+            away = _escape_md(pred.get("away_team", "?"))
+            selection = _escape_md(str(pred.get("selection") or pred.get("team_to_back") or "?"))
+
+            msg_lines = [
+                "📊 CAMBIO DE CUOTA",
+                f"{home} vs {away} | {selection}",
+                f"Cuota original: *{original_odds:.2f}*",
+                f"Cuota actual: *{current_odds:.2f}* ({pct_str})",
+                f"Edge actualizado: *{new_edge:+.1%}*",
+            ]
+            if new_edge < 0:
+                msg_lines.append("⚠️ Edge negativo — revisar")
+
+            msg = "\n".join(msg_lines)
+            sent = await send_message(msg, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
+            if sent:
+                sent_count += 1
+                logger.info(
+                    "check_pending_odds_changes: alerta cuota enviada — %s "
+                    "odds %.2f→%.2f (%s) edge_new=%.3f",
+                    match_id, original_odds, current_odds, pct_str, new_edge,
+                )
+            await asyncio.sleep(0.5)
+        except Exception:
+            logger.error(
+                "check_pending_odds_changes: error procesando %s", doc.id, exc_info=True
+            )
+
+    return sent_count
 
 
 async def send_sports_alert(prediction: dict) -> bool:
