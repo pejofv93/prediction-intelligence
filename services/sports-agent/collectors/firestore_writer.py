@@ -196,17 +196,28 @@ async def save_team_stats(team_id: int, raw_api_matches: list[dict]) -> None:
         )
 
 
+def _derive_season(date_str: str) -> int:
+    """
+    Deriva la temporada de fútbol desde una fecha ISO.
+    Agosto-Diciembre → año del partido. Enero-Julio → año - 1.
+    Ej: 2024-10-15 → 2024, 2025-03-20 → 2024.
+    """
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.year if dt.month >= 8 else dt.year - 1
+    except Exception:
+        return datetime.now(timezone.utc).year
+
+
 async def update_finished_matches(matches: list[dict]) -> int:
     """
-    Upsert partidos FINISHED en upcoming_matches.
-    Para cada partido: actualiza status, goals_home, goals_away, winner.
-    Si el doc no existe lo crea. Usa set(merge=True) para preservar campos existentes.
-    Devuelve el numero de docs actualizados/creados.
+    Escribe partidos FINISHED en la colección permanente 'prodmatch_results'.
+    Sin TTL ni cleanup — persisten indefinidamente para backtest y learning engine.
+    Doc ID = match_id.
     """
     if not matches:
         return 0
 
-    now = datetime.now(timezone.utc)
     updated = 0
 
     for m in matches:
@@ -227,30 +238,26 @@ async def update_finished_matches(matches: list[dict]) -> int:
         else:
             winner = "D"
 
-        update_data = {
-            "match_id": match_id,
-            "status": "FINISHED",
-            "goals_home": goals_home,
-            "goals_away": goals_away,
-            "winner": winner,
-            "result_updated_at": now,
-            # campos base para crear doc si no existe
+        match_date = m.get("date", m.get("match_date", ""))
+        doc = {
+            "match_id":  match_id,
             "home_team": m.get("home_team_name", m.get("home_team", "")),
             "away_team": m.get("away_team_name", m.get("away_team", "")),
-            "home_team_id": m.get("home_team_id"),
-            "away_team_id": m.get("away_team_id"),
-            "league": m.get("league", ""),
-            "match_date": m.get("date", m.get("match_date", "")),
-            "sport": m.get("sport", "football"),
+            "league":    m.get("league", ""),
+            "goals_home": goals_home,
+            "goals_away": goals_away,
+            "winner":    winner,
+            "match_date": match_date,
+            "season":    _derive_season(match_date),
         }
 
         try:
-            col("upcoming_matches").document(match_id).set(update_data, merge=True)
+            col("prodmatch_results").document(match_id).set(doc)
             updated += 1
         except Exception as e:
             logger.error("update_finished_matches: error en doc %s: %s", match_id, e)
 
-    logger.info("RESULTS_UPDATE: %d partidos actualizados a FINISHED", updated)
+    logger.info("RESULTS_UPDATE: %d partidos escritos en prodmatch_results", updated)
     return updated
 
 

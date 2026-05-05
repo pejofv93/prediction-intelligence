@@ -111,15 +111,27 @@ async def fetch_pending_results() -> list[dict]:
 
 async def check_result(match_id: str) -> str | None:
     """
-    Llama a football_api.get_match_result(match_id).
+    Busca resultado en prodmatch_results (Firestore) primero.
+    Fallback a football_api.get_match_result() si no está en la colección.
     Devuelve "HOME_WIN" | "AWAY_WIN" | "DRAW" | None.
     """
+    _WINNER_MAP = {"H": "HOME_WIN", "A": "AWAY_WIN", "D": "DRAW"}
+    try:
+        doc = col("prodmatch_results").document(str(match_id)).get()
+        if doc.exists:
+            winner = doc.to_dict().get("winner")
+            mapped = _WINNER_MAP.get(winner)
+            if mapped:
+                logger.debug("check_result(%s): encontrado en prodmatch_results → %s", match_id, mapped)
+                return mapped
+    except Exception:
+        logger.warning("check_result(%s): error leyendo prodmatch_results, usando API", match_id, exc_info=True)
+
     try:
         from collectors.football_api import get_match_result
         result = await get_match_result(match_id)
         if result is None:
             return None
-        # get_match_result devuelve un dict {"result": "HOME_WIN", ...}
         return result.get("result")
     except Exception:
         logger.error("check_result(%s): error consultando API", match_id, exc_info=True)
