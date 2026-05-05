@@ -808,7 +808,9 @@ def _make_prediction(base: dict, market_type: str, selection: str,
     if edge <= SPORTS_MIN_EDGE:
         return None
 
-    confidence = max(0.0, round(1.0 - float(np.std(list(factors.values()))), 4))
+    # Confidence = prob directamente (señales Poisson tienen una sola fuente).
+    # std(factors) no aplica: xg/ah_line tienen escalas dispares → resultado sin sentido.
+    confidence = round(min(0.92, max(0.0, float(prob))), 4)
     if confidence <= SPORTS_MIN_CONFIDENCE:
         return None
 
