@@ -1688,11 +1688,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             )
             return []
         # F3: gate final — solo favorito visitante (<2.5) o underdog extremo (>3.5 + conf>0.85)
-        if not (best_odds < 2.5 or (best_odds > 3.5 and best_confidence > 0.85)):
+        # CL/EL/ECL: límite de odds ampliado a 6.00 (torneos eliminatorios con sorpresas históricas)
+        _intl_away_leagues = {"CL", "EL", "ECL"}
+        _away_odds_limit = 6.00 if league in _intl_away_leagues else 3.5
+        _away_conf_min   = 0.70 if league in _intl_away_leagues else 0.85
+        if not (best_odds < 2.5 or (best_odds > _away_odds_limit and best_confidence > _away_conf_min)):
             logger.info(
                 "generate_signal(%s): AWAY gate descartada "
-                "(odds=%.2f conf=%.2f — requiere odds<2.5 o odds>3.5+conf>0.85) [%s vs %s | %s]",
-                match_id, best_odds, best_confidence, home_team, away_team, league,
+                "(odds=%.2f conf=%.2f — requiere odds<2.5 o odds>%.1f+conf>%.2f) [%s vs %s | %s]",
+                match_id, best_odds, best_confidence, _away_odds_limit, _away_conf_min,
+                home_team, away_team, league,
             )
             return []
 
@@ -1745,10 +1750,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
 
     # Calidad de datos: si es partial, reducir confianza un 10% y re-evaluar tiers
+    # Excepción: CL/EL/ECL usan umbral mínimo 0.65 (team_stats via fallback nombre son fiables)
+    _intl_partial_exempt = {"CL", "EL", "ECL"}
     if data_quality == "partial":
-        best_confidence = round(max(0.0, best_confidence * 0.9), 4)
+        if league not in _intl_partial_exempt:
+            best_confidence = round(max(0.0, best_confidence * 0.9), 4)
         _is_fuerte    = best_edge > 0.15 and best_confidence > 0.80 and best_odds < 5.00
-        _is_moderada  = best_edge > 0.10 and best_confidence > 0.70 and best_odds < 6.00
+        _is_moderada  = best_edge > 0.10 and best_confidence > 0.65 and best_odds < 6.00
         _is_detectada = best_edge > 0.08 and best_confidence > 0.65 and best_odds < 4.00
         if not (_is_fuerte or _is_moderada or _is_detectada):
             return []
