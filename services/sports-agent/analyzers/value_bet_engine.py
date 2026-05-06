@@ -899,15 +899,16 @@ async def _generate_oddsapiio_extra_signals(
             yes_odds = btts_mkt.get("yes_odds") or 0.0
             if yes_odds > 1.05:
                 edge = calculate_edge(btts_probs["btts_prob"], yes_odds)
+                ev_btts = calculate_ev(btts_probs["btts_prob"], yes_odds)
                 conf = round(min(1.0, max(0.0, btts_probs["btts_prob"] + 0.1)), 4)
                 logger.info(
                     "EXTRA_MARKETS_BTTS(%s): btts_prob=%.3f yes_odds=%.2f "
-                    "edge=%.4f(min=%.3f) conf=%.3f(min=%.3f) → %s",
+                    "edge=%.4f ev=%.4f(min_ev=%.3f) conf=%.3f(min=%.3f) → %s",
                     match_id, btts_probs["btts_prob"], yes_odds,
-                    edge, SPORTS_MIN_EDGE, conf, SPORTS_MIN_CONFIDENCE,
-                    "OK" if edge > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE else "SKIP",
+                    edge, ev_btts, SPORTS_MIN_EDGE, conf, SPORTS_MIN_CONFIDENCE,
+                    "OK" if ev_btts > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE else "SKIP",
                 )
-                if edge > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE:
+                if ev_btts > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE:
                     doc_id = f"{match_id}_btts"
                     pred = {
                         "match_id": doc_id, "home_team": home_team, "away_team": away_team,
@@ -915,8 +916,8 @@ async def _generate_oddsapiio_extra_signals(
                         "selection": "Yes", "bookmaker": btts_mkt.get("bookmaker", ""),
                         "odds": round(yes_odds, 3),
                         "calculated_prob": btts_probs["btts_prob"],
-                        "edge": round(edge, 4), "confidence": conf,
-                        "kelly_fraction": kelly_criterion(edge, yes_odds),
+                        "edge": round(edge, 4), "ev": round(ev_btts, 4), "confidence": conf,
+                        "kelly_fraction": kelly_criterion(ev_btts, yes_odds),
                         "factors": {
                             "btts_prob": btts_probs["btts_prob"],
                             "home_xg": enriched_match.get("home_xg"),
@@ -928,11 +929,11 @@ async def _generate_oddsapiio_extra_signals(
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
-                        logger.info("generate_signal(%s): BTTS Yes @ %.2f edge=%.1f%%",
-                                    match_id, yes_odds, edge * 100)
+                        logger.info("generate_signal(%s): BTTS Yes @ %.2f edge=%.1f%% ev=%.1f%%",
+                                    match_id, yes_odds, edge * 100, ev_btts * 100)
                     except Exception:
                         logger.error("generate_signal(%s): error guardando btts", match_id, exc_info=True)
-                    if edge > SPORTS_ALERT_EDGE:
+                    if ev_btts > SPORTS_ALERT_EDGE:
                         await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                     results.append(pred)
 
@@ -951,28 +952,30 @@ async def _generate_oddsapiio_extra_signals(
             under_odds = t25.get("under_odds") or 0.0
             over_edge = calculate_edge(totals_probs["over_prob"], over_odds) if over_odds > 1.05 else -1
             under_edge = calculate_edge(totals_probs["under_prob"], under_odds) if under_odds > 1.05 else -1
+            over_ev = calculate_ev(totals_probs["over_prob"], over_odds) if over_odds > 1.05 else -1.0
+            under_ev = calculate_ev(totals_probs["under_prob"], under_odds) if under_odds > 1.05 else -1.0
 
             logger.info(
-                "EXTRA_MARKETS_OU(%s): over_prob=%.3f over_odds=%.2f over_edge=%.4f "
-                "| under_prob=%.3f under_odds=%.2f under_edge=%.4f | min_edge=%.3f",
+                "EXTRA_MARKETS_OU(%s): over_prob=%.3f over_odds=%.2f over_edge=%.4f over_ev=%.4f "
+                "| under_prob=%.3f under_odds=%.2f under_edge=%.4f under_ev=%.4f | min_ev=%.3f",
                 match_id,
-                totals_probs["over_prob"], over_odds, over_edge,
-                totals_probs["under_prob"], under_odds, under_edge,
+                totals_probs["over_prob"], over_odds, over_edge, over_ev,
+                totals_probs["under_prob"], under_odds, under_edge, under_ev,
                 SPORTS_MIN_EDGE,
             )
-            if over_edge >= under_edge and over_edge > SPORTS_MIN_EDGE:
-                sel, sel_p, sel_odds, sel_edge = "Over", totals_probs["over_prob"], over_odds, over_edge
-            elif under_edge > over_edge and under_edge > SPORTS_MIN_EDGE:
-                sel, sel_p, sel_odds, sel_edge = "Under", totals_probs["under_prob"], under_odds, under_edge
+            if over_ev >= under_ev and over_ev > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge, sel_ev = "Over", totals_probs["over_prob"], over_odds, over_edge, over_ev
+            elif under_ev > over_ev and under_ev > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge, sel_ev = "Under", totals_probs["under_prob"], under_odds, under_edge, under_ev
             else:
                 sel = None
-                logger.info("EXTRA_MARKETS_OU(%s): SKIP — ningún lado supera min_edge=%.3f", match_id, SPORTS_MIN_EDGE)
+                logger.info("EXTRA_MARKETS_OU(%s): SKIP — ningún lado supera min_ev=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
                 sel_conf = round(abs(sel_p - 0.5) * 2, 4)
                 logger.info(
-                    "EXTRA_MARKETS_OU(%s): sel=%s sel_p=%.3f conf=%.3f(min=%.3f) → %s",
-                    match_id, sel, sel_p, sel_conf, SPORTS_MIN_CONFIDENCE,
+                    "EXTRA_MARKETS_OU(%s): sel=%s sel_p=%.3f ev=%.4f conf=%.3f(min=%.3f) → %s",
+                    match_id, sel, sel_p, sel_ev, sel_conf, SPORTS_MIN_CONFIDENCE,
                     "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP",
                 )
                 if sel_conf > SPORTS_MIN_CONFIDENCE:
@@ -983,8 +986,8 @@ async def _generate_oddsapiio_extra_signals(
                         "selection": f"{sel} 2.5", "line": 2.5,
                         "bookmaker": t25.get("bookmaker", ""),
                         "odds": round(sel_odds, 3), "calculated_prob": sel_p,
-                        "edge": round(sel_edge, 4), "confidence": sel_conf,
-                        "kelly_fraction": kelly_criterion(sel_edge, sel_odds),
+                        "edge": round(sel_edge, 4), "ev": round(sel_ev, 4), "confidence": sel_conf,
+                        "kelly_fraction": kelly_criterion(sel_ev, sel_odds),
                         "factors": {
                             "expected_total": totals_probs["expected_total"],
                             "home_xg": enriched_match.get("home_xg"),
@@ -996,8 +999,8 @@ async def _generate_oddsapiio_extra_signals(
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
-                        logger.info("generate_signal(%s): %s 2.5 @ %.2f edge=%.1f%%",
-                                    match_id, sel, sel_odds, sel_edge * 100)
+                        logger.info("generate_signal(%s): %s 2.5 @ %.2f edge=%.1f%% ev=%.1f%%",
+                                    match_id, sel, sel_odds, sel_edge * 100, sel_ev * 100)
                     except Exception:
                         logger.error("generate_signal(%s): error guardando ou25_oaio", match_id, exc_info=True)
                     results.append(pred)
@@ -1020,28 +1023,30 @@ async def _generate_oddsapiio_extra_signals(
             away_ah_odds = ah_m05.get("away_odds") or 0.0
             home_edge = calculate_edge(ah_probs["home_covers"], home_ah_odds) if home_ah_odds > 1.05 else -1
             away_edge = calculate_edge(ah_probs["away_covers"], away_ah_odds) if away_ah_odds > 1.05 else -1
+            home_ev_ah = calculate_ev(ah_probs["home_covers"], home_ah_odds) if home_ah_odds > 1.05 else -1.0
+            away_ev_ah = calculate_ev(ah_probs["away_covers"], away_ah_odds) if away_ah_odds > 1.05 else -1.0
 
             logger.info(
-                "EXTRA_MARKETS_AH(%s): home_covers=%.3f home_odds=%.2f home_edge=%.4f "
-                "| away_covers=%.3f away_odds=%.2f away_edge=%.4f | min_edge=%.3f",
+                "EXTRA_MARKETS_AH(%s): home_covers=%.3f home_odds=%.2f home_edge=%.4f home_ev=%.4f "
+                "| away_covers=%.3f away_odds=%.2f away_edge=%.4f away_ev=%.4f | min_ev=%.3f",
                 match_id,
-                ah_probs["home_covers"], home_ah_odds, home_edge,
-                ah_probs["away_covers"], away_ah_odds, away_edge,
+                ah_probs["home_covers"], home_ah_odds, home_edge, home_ev_ah,
+                ah_probs["away_covers"], away_ah_odds, away_edge, away_ev_ah,
                 SPORTS_MIN_EDGE,
             )
-            if home_edge >= away_edge and home_edge > SPORTS_MIN_EDGE:
-                sel, sel_p, sel_odds, sel_edge = home_team, ah_probs["home_covers"], home_ah_odds, home_edge
-            elif away_edge > home_edge and away_edge > SPORTS_MIN_EDGE:
-                sel, sel_p, sel_odds, sel_edge = away_team, ah_probs["away_covers"], away_ah_odds, away_edge
+            if home_ev_ah >= away_ev_ah and home_ev_ah > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge, sel_ev_ah = home_team, ah_probs["home_covers"], home_ah_odds, home_edge, home_ev_ah
+            elif away_ev_ah > home_ev_ah and away_ev_ah > SPORTS_MIN_EDGE:
+                sel, sel_p, sel_odds, sel_edge, sel_ev_ah = away_team, ah_probs["away_covers"], away_ah_odds, away_edge, away_ev_ah
             else:
                 sel = None
-                logger.info("EXTRA_MARKETS_AH(%s): SKIP — ningún lado supera min_edge=%.3f", match_id, SPORTS_MIN_EDGE)
+                logger.info("EXTRA_MARKETS_AH(%s): SKIP — ningún lado supera min_ev=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
                 sel_conf = round(min(1.0, sel_p), 4)
                 logger.info(
-                    "EXTRA_MARKETS_AH(%s): sel=%s sel_p=%.3f conf=%.3f(min=%.3f) → %s",
-                    match_id, sel, sel_p, sel_conf, SPORTS_MIN_CONFIDENCE,
+                    "EXTRA_MARKETS_AH(%s): sel=%s sel_p=%.3f ev=%.4f conf=%.3f(min=%.3f) → %s",
+                    match_id, sel, sel_p, sel_ev_ah, sel_conf, SPORTS_MIN_CONFIDENCE,
                     "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP",
                 )
                 if sel_conf > SPORTS_MIN_CONFIDENCE:
@@ -1052,8 +1057,8 @@ async def _generate_oddsapiio_extra_signals(
                         "selection": sel, "line": -0.5,
                         "bookmaker": ah_m05.get("bookmaker", ""),
                         "odds": round(sel_odds, 3), "calculated_prob": sel_p,
-                        "edge": round(sel_edge, 4), "confidence": sel_conf,
-                        "kelly_fraction": kelly_criterion(sel_edge, sel_odds),
+                        "edge": round(sel_edge, 4), "ev": round(sel_ev_ah, 4), "confidence": sel_conf,
+                        "kelly_fraction": kelly_criterion(sel_ev_ah, sel_odds),
                         "factors": {
                             "home_covers": ah_probs["home_covers"],
                             "home_xg": enriched_match.get("home_xg"),
@@ -1065,11 +1070,11 @@ async def _generate_oddsapiio_extra_signals(
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
-                        logger.info("generate_signal(%s): AH -0.5 %s @ %.2f edge=%.1f%%",
-                                    match_id, sel, sel_odds, sel_edge * 100)
+                        logger.info("generate_signal(%s): AH -0.5 %s @ %.2f edge=%.1f%% ev=%.1f%%",
+                                    match_id, sel, sel_odds, sel_edge * 100, sel_ev_ah * 100)
                     except Exception:
                         logger.error("generate_signal(%s): error guardando ah05", match_id, exc_info=True)
-                    if sel_edge > SPORTS_ALERT_EDGE:
+                    if sel_ev_ah > SPORTS_ALERT_EDGE:
                         await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                     results.append(pred)
 
@@ -1154,15 +1159,27 @@ def calculate_edge(prob_calculated: float, decimal_odds: float) -> float:
     return round(prob_calculated - (1.0 / decimal_odds), 4)
 
 
-def kelly_criterion(edge: float, decimal_odds: float) -> float:
+def calculate_ev(prob: float, decimal_odds: float) -> float:
     """
-    Kelly fraction = edge / (decimal_odds - 1).
-    Si edge <= 0 devuelve 0.0 (nunca apostar con edge negativo).
+    EV = prob × (odds - 1) - (1 - prob).
+    Positivo = valor esperado positivo por unidad apostada.
+    EV=0.08 equivale a +8% de retorno esperado por apuesta.
+    """
+    if decimal_odds <= 1.0:
+        return -1.0
+    return round(prob * (decimal_odds - 1.0) - (1.0 - prob), 4)
+
+
+def kelly_criterion(ev: float, decimal_odds: float) -> float:
+    """
+    Kelly fraction = ev / (decimal_odds - 1).
+    ev debe ser el Expected Value (calculate_ev), no el edge porcentual.
+    Si ev <= 0 devuelve 0.0 (nunca apostar con EV negativo).
     Clampea resultado entre 0.0 y 0.05 (max 5% del bankroll — cap global de riesgo).
     """
-    if edge <= 0.0 or decimal_odds <= 1.0:
+    if ev <= 0.0 or decimal_odds <= 1.0:
         return 0.0
-    fraction = edge / (decimal_odds - 1.0)
+    fraction = ev / (decimal_odds - 1.0)
     return round(max(0.0, min(0.05, fraction)), 4)
 
 
@@ -1600,20 +1617,23 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         odds_movement = {"flag": "NONE", "direction": None, "pct_change_6h": 0.0,
                         "pct_change_24h": 0.0, "timeframe": None, "message": ""}
 
-    # --- 4. Edge para home y away ---
+    # --- 4. Edge y EV para home y away ---
     edge_home = calculate_edge(result_home["prob"], home_odds)
     edge_away = calculate_edge(result_away["prob"], away_odds)
+    ev_home = calculate_ev(result_home["prob"], home_odds)
+    ev_away = calculate_ev(result_away["prob"], away_odds)
 
     logger.info(
-        "generate_signal(%s): edges — HOME %s p=%.2f @%.2f edge=%.3f | AWAY %s p=%.2f @%.2f edge=%.3f",
+        "generate_signal(%s): HOME %s p=%.2f @%.2f edge=%.3f ev=%.3f | AWAY %s p=%.2f @%.2f edge=%.3f ev=%.3f",
         match_id,
-        home_team, result_home["prob"], home_odds, edge_home,
-        away_team, result_away["prob"], away_odds, edge_away,
+        home_team, result_home["prob"], home_odds, edge_home, ev_home,
+        away_team, result_away["prob"], away_odds, edge_away, ev_away,
     )
 
-    # --- 5. Seleccionar el lado con mayor edge ---
-    if edge_home >= edge_away:
+    # --- 5. Seleccionar el lado con mayor EV ---
+    if ev_home >= ev_away:
         best_edge = edge_home
+        best_ev = ev_home
         best_prob = result_home["prob"]
         best_confidence = result_home["confidence"]
         best_signals = result_home["signals"]
@@ -1621,6 +1641,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         team_to_back = str(home_team)
     else:
         best_edge = edge_away
+        best_ev = ev_away
         best_prob = result_away["prob"]
         best_confidence = result_away["confidence"]
         best_signals = result_away["signals"]
@@ -1732,18 +1753,18 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     if _standings_confidence_adj < 1.0:
         best_confidence = round(best_confidence * _standings_confidence_adj, 4)
 
-    # --- 6. Umbrales de intensidad (FIX 2) ---
+    # --- 6. Umbrales de intensidad basados en EV (FIX 2 + EV) ---
     # CL/EL/ECL: umbrales relajados (eliminatorias con mayor varianza, team_stats por nombre)
     _is_intl_cup = league in {"CL", "EL", "ECL"}
-    _is_fuerte    = best_edge > 0.15 and best_confidence > 0.80 and best_odds < 5.00
-    _is_moderada  = best_edge > 0.10 and best_confidence > (0.65 if _is_intl_cup else 0.70) and best_odds < 6.00
-    _is_detectada = best_edge > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
+    _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
+    _is_moderada  = best_ev > 0.12 and best_confidence > (0.65 if _is_intl_cup else 0.70) and best_odds < 6.00
+    _is_detectada = best_ev > SPORTS_MIN_EDGE and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
 
     if not (_is_fuerte or _is_moderada or _is_detectada):
         logger.debug(
             "generate_signal(%s): descartado — no cumple umbral "
-            "(edge=%.1f%% min=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
-            match_id, best_edge * 100, _min_edge * 100, best_confidence * 100, best_odds,
+            "(ev=%.1f%% min_ev=8%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
+            match_id, best_ev * 100, best_confidence * 100, best_odds,
             home_team, away_team, league,
         )
         return []
@@ -1756,9 +1777,9 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     if data_quality == "partial":
         if league not in _intl_partial_exempt:
             best_confidence = round(max(0.0, best_confidence * 0.9), 4)
-        _is_fuerte    = best_edge > 0.15 and best_confidence > 0.80 and best_odds < 5.00
-        _is_moderada  = best_edge > 0.10 and best_confidence > 0.65 and best_odds < 6.00
-        _is_detectada = best_edge > 0.08 and best_confidence > 0.65 and best_odds < 4.00
+        _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
+        _is_moderada  = best_ev > 0.12 and best_confidence > 0.65 and best_odds < 6.00
+        _is_detectada = best_ev > SPORTS_MIN_EDGE and best_confidence > 0.65 and best_odds < 4.00
         if not (_is_fuerte or _is_moderada or _is_detectada):
             return []
         _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
@@ -1777,7 +1798,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             )
             return []
 
-    kelly = kelly_criterion(best_edge, best_odds)
+    kelly = kelly_criterion(best_ev, best_odds)
     results: list[dict] = []
 
     # Construir factors segun data_source
@@ -1809,6 +1830,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         "odds": best_odds,
         "calculated_prob": best_prob,
         "edge": best_edge,
+        "ev": round(best_ev, 4),
         "confidence": best_confidence,
         "kelly_fraction": kelly,
         "factors": factors,
@@ -1830,16 +1852,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     try:
         col("predictions").document(match_id).set(prediction)
         logger.info(
-            "generate_signal(%s): %s @ %.2f | edge=%.1f%% conf=%.0f%% kelly=%.1f%% | odds_movement=%s",
+            "generate_signal(%s): %s @ %.2f | edge=%.1f%% ev=%.1f%% conf=%.0f%% kelly=%.1f%% | odds_movement=%s",
             match_id, team_to_back, best_odds,
-            best_edge * 100, best_confidence * 100, kelly * 100,
+            best_edge * 100, best_ev * 100, best_confidence * 100, kelly * 100,
             odds_movement.get("flag", "NONE"),
         )
     except Exception:
         logger.error("generate_signal(%s): error guardando prediction", match_id, exc_info=True)
 
-    # --- Alerta Telegram si edge alto ---
-    if best_edge > SPORTS_ALERT_EDGE:
+    # --- Alerta Telegram si EV alto ---
+    if best_ev > SPORTS_ALERT_EDGE:
         actually_sent = await _send_telegram_alert(_build_alert_payload(prediction, enriched_match))
         if actually_sent:
             try:
@@ -1872,11 +1894,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 under_p = totals_probs["under_prob"]
                 over_edge = calculate_edge(over_p, totals_odds["over_odds"])
                 under_edge = calculate_edge(under_p, totals_odds["under_odds"])
+                over_ev_t = calculate_ev(over_p, totals_odds["over_odds"])
+                under_ev_t = calculate_ev(under_p, totals_odds["under_odds"])
 
-                if over_edge >= under_edge and over_edge > _min_edge:
-                    sel, sel_prob, sel_odds, sel_edge = "Over", over_p, totals_odds["over_odds"], over_edge
-                elif under_edge > over_edge and under_edge > _min_edge:
-                    sel, sel_prob, sel_odds, sel_edge = "Under", under_p, totals_odds["under_odds"], under_edge
+                if over_ev_t >= under_ev_t and over_ev_t > _min_edge:
+                    sel, sel_prob, sel_odds, sel_edge, sel_ev_t = "Over", over_p, totals_odds["over_odds"], over_edge, over_ev_t
+                elif under_ev_t > over_ev_t and under_ev_t > _min_edge:
+                    sel, sel_prob, sel_odds, sel_edge, sel_ev_t = "Under", under_p, totals_odds["under_odds"], under_edge, under_ev_t
                 else:
                     sel = None
 
@@ -1884,7 +1908,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     sel_confidence = max(0.0, 1.0 - abs(over_p - 0.5) * 2) if sel == "Over" else max(0.0, 1.0 - abs(under_p - 0.5) * 2)
                     sel_confidence = round(max(0.0, min(1.0, sel_confidence)), 4)
                     if sel_confidence > SPORTS_MIN_CONFIDENCE:
-                        sel_kelly = kelly_criterion(sel_edge, sel_odds)
+                        sel_kelly = kelly_criterion(sel_ev_t, sel_odds)
                         totals_pred = {
                             "match_id": f"{match_id}_totals",
                             "home_team": str(home_team),
@@ -1898,6 +1922,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                             "odds": sel_odds,
                             "calculated_prob": sel_prob,
                             "edge": sel_edge,
+                            "ev": round(sel_ev_t, 4),
                             "confidence": sel_confidence,
                             "kelly_fraction": sel_kelly,
                             "factors": {
@@ -1917,13 +1942,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                         try:
                             col("predictions").document(f"{match_id}_totals").set(totals_pred)
                             logger.info(
-                                "generate_signal(%s): %s %.1f @ %.2f | edge=%.1f%% conf=%.0f%%",
-                                match_id, sel, line, sel_odds, sel_edge * 100, sel_confidence * 100,
+                                "generate_signal(%s): %s %.1f @ %.2f | edge=%.1f%% ev=%.1f%% conf=%.0f%%",
+                                match_id, sel, line, sel_odds, sel_edge * 100, sel_ev_t * 100, sel_confidence * 100,
                             )
                         except Exception:
                             logger.error("generate_signal(%s): error guardando totals prediction", match_id, exc_info=True)
 
-                        if sel_edge > SPORTS_ALERT_EDGE:
+                        if sel_ev_t > SPORTS_ALERT_EDGE:
                             totals_payload = {**totals_pred, "match_date": str(totals_pred.get("match_date", "")[:16] if totals_pred.get("match_date") else "?")}
                             actually_sent = await _send_telegram_alert(totals_payload)
                             if actually_sent:
