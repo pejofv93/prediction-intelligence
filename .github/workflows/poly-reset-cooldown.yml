@@ -1,0 +1,51 @@
+name: poly-reset-cooldown
+on:
+  workflow_dispatch:
+
+env:
+  PROJECT: prediction-intelligence
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install google-cloud-firestore
+
+      - name: Authenticate GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Delete recent poly_predictions (reset cooldown)
+        run: |
+          python - <<'EOF'
+          from google.cloud import firestore
+          from datetime import datetime, timezone, timedelta
+
+          PREFIX = "prod"
+          db = firestore.Client(project="prediction-intelligence")
+
+          cutoff = datetime.now(timezone.utc) - timedelta(hours=13)
+          col = db.collection(f"{PREFIX}poly_predictions")
+
+          docs = list(col.where("analyzed_at", ">=", cutoff).stream())
+
+          by_cat = {}
+          for doc in docs:
+              d = doc.to_dict()
+              cat = d.get("category", "?")
+              by_cat[cat] = by_cat.get(cat, 0) + 1
+              doc.reference.delete()
+
+          print(f"\n=== COOLDOWN RESET: {len(docs)} docs borrados de {PREFIX}poly_predictions ===")
+          for cat, n in sorted(by_cat.items(), key=lambda x: -x[1]):
+              print(f"  {cat:15s}: {n}")
+          print()
+          EOF
