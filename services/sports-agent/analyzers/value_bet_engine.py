@@ -1805,10 +1805,19 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
 
     # Calidad de datos: si es partial, reducir confianza un 10% y re-evaluar tiers
-    # Excepción: CL/EL/ECL usan umbral mínimo 0.65 (team_stats via fallback nombre son fiables)
+    # CL/EL/ECL partial: umbrales MÁS ESTRICTOS (datos históricos limitados entre equipos
+    # de distintas asociaciones → EV mín 15% + conf mín 75% para evitar falsos positivos tipo PSG).
     _intl_partial_exempt = {"CL", "EL", "ECL"}
     if data_quality == "partial":
-        if league not in _intl_partial_exempt:
+        if league in _intl_partial_exempt:
+            if best_ev <= 0.15 or best_confidence <= 0.75:
+                logger.info(
+                    "generate_signal(%s): descartado — %s partial EV=%.3f conf=%.3f "
+                    "(requiere EV>0.15 y conf>0.75)",
+                    match_id, league, best_ev, best_confidence,
+                )
+                return []
+        else:
             best_confidence = round(max(0.0, best_confidence * 0.9), 4)
         _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
         _is_moderada  = best_ev > 0.12 and best_confidence > 0.65 and best_odds < 6.00

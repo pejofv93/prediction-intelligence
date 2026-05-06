@@ -668,11 +668,11 @@ def _dedup_signals_for_match(base_match_id: str, signals: list[dict]) -> None:
     to_delete: list[str] = []
 
     if len(h2h_signals) > 1:
-        h2h_signals.sort(key=lambda s: float(s.get("edge", 0)), reverse=True)
+        h2h_signals.sort(key=lambda s: float(s.get("ev", s.get("edge", 0))), reverse=True)
         to_delete += [s.get("match_id", "") for s in h2h_signals[1:]]
 
     if len(alt_signals) > 1:
-        alt_signals.sort(key=lambda s: float(s.get("edge", 0)), reverse=True)
+        alt_signals.sort(key=lambda s: float(s.get("ev", s.get("edge", 0))), reverse=True)
         to_delete += [s.get("match_id", "") for s in alt_signals[1:]]
 
     for doc_id in to_delete:
@@ -851,6 +851,16 @@ async def _bg_analyze() -> None:
 
         for doc in docs:
             enriched = doc.to_dict()
+            # FIX1: generate_signal y mercados auxiliares son exclusivos de fútbol.
+            # NBA/basketball pasan por generate_basketball_signals() — procesarlos aquí
+            # también causaba doble-análisis con ensemble inflado (Timberwolves EV+106%).
+            _doc_sport = enriched.get("sport", "football")
+            if _doc_sport not in ("football", "soccer", ""):
+                logger.info(
+                    "analyze: sport=%s — skipping generate_signal loop (no es fútbol) [%s]",
+                    _doc_sport, enriched.get("match_id"),
+                )
+                continue
             try:
                 signals = await generate_signal(enriched)
                 signals_generated += len(signals)
