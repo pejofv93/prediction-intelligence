@@ -109,9 +109,9 @@ async def check_and_alert(analysis: dict) -> bool:
             if _end_dt.tzinfo is None:
                 _end_dt = _end_dt.replace(tzinfo=timezone.utc)
             _days_left = (_end_dt - datetime.now(timezone.utc)).days
-            if _days_left > 30:
-                logger.debug(
-                    "check_and_alert(%s): cierra en %dd > 30d — omitida",
+            if _days_left > 60:
+                logger.info(
+                    "check_and_alert(%s): cierra en %dd > 60d — omitida",
                     analysis.get("market_id"), _days_left,
                 )
                 return False
