@@ -356,7 +356,9 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
     if coingecko_id:
         try:
             from realtime.correlation_tracker import get_crypto_price
-            price = await get_crypto_price(coingecko_id)
+            price = await asyncio.wait_for(get_crypto_price(coingecko_id), timeout=4.0)
+        except asyncio.TimeoutError:
+            logger.debug("_fetch_current_price(%s): CoinGecko timeout >4s", asset_key)
         except Exception as _cge:
             logger.debug("_fetch_current_price(%s): CoinGecko error — %s", asset_key, _cge)
 
@@ -531,7 +533,7 @@ async def _fetch_nba_win_prob(team_name: str) -> float | None:
     def _fetch() -> dict | None:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 return json.loads(resp.read())
         except Exception as _e:
             logger.debug("_fetch_nba_win_prob: ESPN error — %s", _e)
@@ -617,7 +619,7 @@ async def _check_team_eliminated(team: str, tournament: str) -> bool:
             req = urllib.request.Request(
                 url, headers={"User-Agent": "Mozilla/5.0 (compatible; prediction-bot/1.0)"}
             )
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 return resp.read().decode("utf-8", errors="ignore")
         except Exception as _e:
             logger.debug("_check_team_eliminated(%s): DDG fetch error — %s", team, _e)
@@ -734,12 +736,17 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         if _tt:
             _tm, _trn = _tt
             try:
-                if await _check_team_eliminated(_tm, _trn):
+                if await asyncio.wait_for(_check_team_eliminated(_tm, _trn), timeout=5.0):
                     logger.info(
                         "analyze_market(%s): TEAM_ELIMINATED — %s descartado (%s)",
                         market_id, _tm, _trn,
                     )
                     return None
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "analyze_market(%s): _check_team_eliminated timeout >5s — skip (%s)",
+                    market_id, _tm,
+                )
             except Exception as _te:
                 logger.debug(
                     "analyze_market(%s): error verificando eliminación de %s — %s",
@@ -753,7 +760,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             if _nba_m:
                 _nba_team = _nba_m.group(1).strip()
                 try:
-                    _nba_win_prob = await _fetch_nba_win_prob(_nba_team)
+                    _nba_win_prob = await asyncio.wait_for(
+                        _fetch_nba_win_prob(_nba_team), timeout=5.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "analyze_market(%s): _fetch_nba_win_prob timeout >5s — skip (%s)",
+                        market_id, _nba_team,
+                    )
                 except Exception as _nwe:
                     logger.debug(
                         "analyze_market(%s): error fetch NBA win prob — %s", market_id, _nwe
