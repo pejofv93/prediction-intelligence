@@ -93,11 +93,14 @@ def _get_poly_weights() -> dict:
 logger = logging.getLogger(__name__)
 
 CATEGORY_KEYWORDS = {
-    "crypto": ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "halving", "altcoin"],
-    "politics": ["election", "president", "vote", "congress", "senate", "minister", "parliament", "poll", "referendum", "prime minister", "chancellor"],
-    "economy": ["fed", "interest rate", "inflation", "cpi", "gdp", "recession", "unemployment", "federal reserve", "rate hike", "rate cut", "jerome powell"],
-    "sports": ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "league", "nfl", "mlb", "wimbledon", "olympic"],
-    "geopolitics": ["war", "ceasefire", "conflict", "nato", "military", "invasion", "sanctions", "treaty", "diplomacy", "nuclear"],
+    "crypto": ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "halving", "altcoin", "xrp", "bnb", "doge", "dogecoin", "stablecoin", "nft", "web3", "layer 2", "base chain"],
+    "politics": ["election", "president", "vote", "congress", "senate", "minister", "parliament", "poll", "referendum", "prime minister", "chancellor", "governor", "ballot", "trump", "biden", "harris", "democrat", "republican"],
+    "economy": ["fed", "interest rate", "inflation", "cpi", "gdp", "recession", "unemployment", "federal reserve", "rate hike", "rate cut", "jerome powell", "tariff", "trade war", "crude oil", "wti", "brent", "oil price", "gold price", "s&p", "nasdaq", "dow jones"],
+    "sports": ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "league", "nfl", "mlb", "wimbledon", "olympic", "football", "soccer", "formula 1", " f1 ", "tennis", "golf", "boxing", "ufc", "mma", "playoffs", "copa", "euro ", "roland garros", "us open", "masters", "nascar", "basketball", "baseball", "hockey", "cricket", "rugby", "atp", "wta", "fifa", "uefa", "premier league", "la liga", "bundesliga", "serie a", "grand prix"],
+    "geopolitics": ["war", "ceasefire", "conflict", "nato", "military", "invasion", "sanctions", "treaty", "diplomacy", "nuclear", "iran", "hormuz", "strait", "ukraine", "russia", "china", "taiwan", "israel", "gaza", "hamas", "hezbollah", "korea", "missile", "drone", "coup", "regime", "peace deal", "cease fire", "truce", "embargo"],
+    "business": ["apple", "tesla", "microsoft", "amazon", "google", "alphabet", "meta", "nvidia", "openai", "anthropic", "earnings", "merger", "acquisition", "ipo", "layoffs", "market cap", "revenue", "profit", "ceo", "stock", "shares", "valuation", "startup", "funding", "unicorn"],
+    "science": ["climate", "nasa", "space", "vaccine", "fda", "cancer", "quantum", "discovery", "mission", "ai model", "chatgpt", "llm", "gpt", "gemini", "claude", "spacex", "rocket", "satellite", "drug approval", "clinical trial"],
+    "culture": ["oscar", "grammy", "emmy", "movie", "album", "singer", "actor", "celebrity", "taylor swift", "award", "box office", "netflix", "spotify", "billboard", "world record", "streaming"],
 }
 
 
