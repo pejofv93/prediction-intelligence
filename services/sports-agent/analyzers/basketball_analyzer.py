@@ -212,9 +212,10 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
                prob: float, signals: dict, conf: float, match_date,
                weights_version: int, bookmaker: str,
                edge_discount: float = 1.0) -> dict | None:
-    from analyzers.value_bet_engine import kelly_criterion
+    from analyzers.value_bet_engine import kelly_criterion, calculate_ev
     edge = round((prob - 1.0 / odds) * edge_discount, 4) if odds > 1 else 0.0
-    if edge <= SPORTS_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
+    ev = calculate_ev(prob, odds)
+    if ev <= SPORTS_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
         return None
     return {
         **base,
@@ -224,8 +225,9 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
         "odds": round(odds, 3),
         "calculated_prob": round(prob, 4),
         "edge": edge,
+        "ev": round(ev, 4),
         "confidence": round(conf, 4),
-        "kelly_fraction": kelly_criterion(edge, odds),
+        "kelly_fraction": kelly_criterion(ev, odds),
         "signals": signals,
         "factors": signals,
         "data_source": "basketball_model",
@@ -246,7 +248,7 @@ def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -> None
             col("predictions").document(doc_id).set(pred)
     except Exception:
         logger.error("basketball_analyzer: error guardando %s", doc_id, exc_info=True)
-    if pred["edge"] > SPORTS_ALERT_EDGE:
+    if pred.get("ev", pred["edge"]) > SPORTS_ALERT_EDGE:
         try:
             loop = asyncio.get_event_loop()
             loop.create_task(_send_telegram_alert(_build_alert_payload(pred, enriched)))
@@ -444,6 +446,21 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     # ── Moneyline ─────────────────────────────────────────────────────────────
     if event:
         ml = _get_moneyline_odds(event)
+        if ml:
+            # Guardia de divergencia extrema: descarta si modelo difiere >2.5× del mercado
+            _impl_home = 1.0 / ml["home_odds"] if ml["home_odds"] > 1.0 else 1.0
+            _impl_away = 1.0 / ml["away_odds"] if ml["away_odds"] > 1.0 else 1.0
+            _p_home_chk = rats["p_home_win"]
+            _p_away_chk = 1.0 - _p_home_chk
+            if _p_home_chk > _impl_home * 2.5 or _p_away_chk > _impl_away * 2.5:
+                logger.warning(
+                    "basketball_analyzer(%s): divergencia extrema modelo/mercado — "
+                    "p_home=%.3f impl_home=%.3f p_away=%.3f impl_away=%.3f — "
+                    "señal moneyline descartada [%s vs %s]",
+                    match_id, _p_home_chk, _impl_home, _p_away_chk, _impl_away,
+                    home_name, away_name,
+                )
+                ml = None
         if ml:
             for team, prob, odds, tag, team_seed, opp_seed in [
                 (home_name, rats["p_home_win"], ml["home_odds"], "home", home_seed, away_seed),
