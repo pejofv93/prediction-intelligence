@@ -17,17 +17,24 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 _HTTP_TIMEOUT = 20.0
 
-# Categorías para rotación diversa — max 7 por categoría, 40 total en bloque medio
+# Categorías para buckets específicos — variedad forzada por categoría
 _SCAN_CATEGORIES: dict[str, list[str]] = {
     "crypto":      ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "altcoin", "halving"],
     "sports":      ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "nfl", "mlb", "wimbledon", "olympic", "copa"],
     "politics":    ["election", "president", "vote", "congress", "senate", "minister", "parliament", "referendum", "prime minister", "chancellor"],
+    "culture":     ["oscar", "grammy", "emmy", "movie", "album", "singer", "actor", "celebrity", "taylor", "award", "box office", "netflix", "spotify", "billboard"],
+    "geopolitics": ["war", "ceasefire", "iran", "strait", "hormuz", "conflict", "nato", "military", "invasion", "sanctions", "nuclear", "missile"],
     "science":     ["climate", "nasa", "space", "vaccine", "fda", "cancer", "quantum", "discovery", "mission", "ai model"],
-    "pop_culture": ["oscar", "grammy", "emmy", "movie", "album", "singer", "actor", "celebrity", "taylor", "award", "box office"],
-    "business":    ["apple", "tesla", "microsoft", "amazon", "google", "meta", "earnings", "merger", "acquisition", "ipo", "layoffs"],
+    "business":    ["apple", "tesla", "microsoft", "amazon", "google", "meta", "nvidia", "earnings", "merger", "acquisition", "ipo", "layoffs"],
 }
-_MAX_PER_CATEGORY = 7
-_MEDIUM_VOL_TOTAL = 40
+
+# Límites por bucket de categoría
+_BUCKET_CRYPTO   = 10
+_BUCKET_SPORTS   = 10
+_BUCKET_POLITICS = 10
+_BUCKET_CULTURE  = 5
+_BUCKET_OTHER    = 10   # geopolítica + ciencia + negocio + otros combinados
+_BUCKET_NEW      = 20   # mercados creados últimas 48h
 
 # Keywords específicos de deportes para el bucket deportivo dedicado
 _SPORTS_KEYWORDS = [
@@ -91,6 +98,17 @@ def _rotate_by_category(markets: list[dict], max_per_cat: int, total: int) -> li
         if len(result) >= total:
             break
     return result[:total]
+
+
+def _build_category_buckets(by_vol: list[dict]) -> dict[str, list[dict]]:
+    """Clasifica mercados ya ordenados por volumen en buckets por categoría."""
+    buckets: dict[str, list[dict]] = {
+        cat: [] for cat in list(_SCAN_CATEGORIES.keys()) + ["other"]
+    }
+    for m in by_vol:
+        cat = _categorize_for_scan(m.get("question", ""))
+        buckets.setdefault(cat, []).append(m)
+    return buckets
 
 
 async def _get_alerted_market_ids_48h() -> set[str]:
@@ -326,43 +344,51 @@ async def _fetch_raw_pool(order: str = "volume24hr", limit: int = 500) -> list[d
 
 async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
     """
-    100 mercados por ciclo en 4 buckets con filtro de calidad (vol>$5k, días 2-30):
-      - Top 10: mayor volumen 24h (ballenas, referencia)
-      - Medio 40: $10k-$100k rotando por categoría (mayor ineficiencia de precio)
-      - Deportes 30: vol>$5k, keywords deportivos (fútbol, NBA, etc.)
-      - Nuevos 20: creados en últimas 48h, vol>$5k (precio aún no calibrado)
+    ~65 mercados por ciclo en 6 buckets con variedad forzada por categoría:
+      - Crypto   10: top 10 crypto por volumen (BTC, ETH, SOL…)
+      - Sports   10: top 10 deportes por volumen (NBA, UCL, F1…)
+      - Politics 10: top 10 políticos por volumen (elecciones, congreso…)
+      - Culture   5: top 5 cultura/entretenimiento (Oscar, Grammy…)
+      - Other    10: geopolítica + ciencia + negocio + resto (máx 10 en total)
+      - New      20: creados últimas 48h (precio aún no calibrado)
     Guarda en Firestore poly_markets. Devuelve lista combinada.
     """
     now = datetime.now(timezone.utc)
     cutoff_48h = now - timedelta(hours=48)
-    alerted_ids = await _get_alerted_market_ids_48h()
 
-    # Pool principal por volumen (top-10 + medio + deportes)
+    # Pool principal por volumen descendente
     vol_pool = await _fetch_raw_pool(order="volume24hr", limit=500)
     qualified = [m for m in vol_pool if _quality_ok(m, now)]
     by_vol = sorted(qualified, key=lambda m: m["volume_24h"], reverse=True)
 
-    # Bucket 1 — Top 10 por volumen (siempre incluidos)
-    top10 = by_vol[:10]
-    used_ids = {m["market_id"] for m in top10}
+    # Clasificar por categoría
+    buckets = _build_category_buckets(by_vol)
 
-    # Bucket 2 — Volumen medio $10k-$100k, rotando por categoría, 40 max
-    medium_pool = [
-        m for m in by_vol
-        if 10_000 <= m["volume_24h"] <= 100_000 and m["market_id"] not in used_ids
-    ]
-    medium = _rotate_by_category(medium_pool, max_per_cat=_MAX_PER_CATEGORY, total=_MEDIUM_VOL_TOTAL)
-    used_ids |= {m["market_id"] for m in medium}
+    used_ids: set[str] = set()
 
-    # Bucket 3 — Deportes con vol>$5k, 30 max
-    sports_pool = [
-        m for m in by_vol
-        if _is_sports_market(m.get("question", "")) and m["market_id"] not in used_ids
-    ]
-    sports = sports_pool[:30]
-    used_ids |= {m["market_id"] for m in sports}
+    def _take(source: list[dict], n: int) -> list[dict]:
+        result = [m for m in source if m["market_id"] not in used_ids][:n]
+        used_ids.update(m["market_id"] for m in result)
+        return result
 
-    # Bucket 4 — Nuevos (últimas 48h), vol>$5k, 20 max
+    # Buckets específicos — variedad garantizada por categoría
+    bucket_crypto   = _take(buckets["crypto"], _BUCKET_CRYPTO)
+    # Sports usa los keywords extendidos (_is_sports_market) + categoría
+    sports_all = [m for m in by_vol if _is_sports_market(m.get("question", ""))]
+    bucket_sports   = _take(sports_all, _BUCKET_SPORTS)
+    bucket_politics = _take(buckets["politics"], _BUCKET_POLITICS)
+    bucket_culture  = _take(buckets["culture"], _BUCKET_CULTURE)
+
+    # Other: geopolítica + ciencia + negocio + sin categoría — máximo 10 total
+    other_pool = (
+        buckets.get("geopolitics", [])
+        + buckets.get("science", [])
+        + buckets.get("business", [])
+        + buckets.get("other", [])
+    )
+    bucket_other = _take(other_pool, _BUCKET_OTHER)
+
+    # Nuevos (últimas 48h)
     new_pool = await _fetch_raw_pool(order="startDate", limit=150)
     new_qualified = [
         m for m in new_pool
@@ -374,9 +400,12 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
             else m["created_at"].replace(tzinfo=timezone.utc)
         ) >= cutoff_48h
     ]
-    new_markets = new_qualified[:20]
+    bucket_new = new_qualified[:_BUCKET_NEW]
 
-    combined = top10 + medium + sports + new_markets
+    combined = (
+        bucket_crypto + bucket_sports + bucket_politics
+        + bucket_culture + bucket_other + bucket_new
+    )
 
     saved = 0
     for market in combined:
@@ -387,9 +416,10 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
             logger.error("fetch_diverse_markets: error guardando %s", market["market_id"], exc_info=True)
 
     logger.info(
-        "fetch_diverse_markets: top10=%d medio=%d deportes=%d nuevos=%d total=%d saved=%d excl_alert=%d",
-        len(top10), len(medium), len(sports), len(new_markets),
-        len(combined), saved, len(alerted_ids),
+        "fetch_diverse_markets: crypto=%d sports=%d politics=%d culture=%d other=%d nuevos=%d total=%d saved=%d",
+        len(bucket_crypto), len(bucket_sports), len(bucket_politics),
+        len(bucket_culture), len(bucket_other), len(bucket_new),
+        len(combined), saved,
     )
     return combined
 
