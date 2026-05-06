@@ -33,6 +33,23 @@ _TEAM_ELIM_TTL: float = 14400.0
 _NBA_SERIES_CACHE: dict[str, tuple[float, float]] = {}
 _NBA_SERIES_TTL: float = 1800.0
 
+# League title race standings cache (4h TTL)
+_TITLE_RACE_CACHE: dict[str, tuple[int | None, float]] = {}
+_TITLE_RACE_TTL: float = 14400.0
+
+_LEAGUE_TITLE_RACE_RE = re.compile(
+    r'will\s+(.+?)\s+win\s+(?:the\s+)?(premier league|la liga|bundesliga|serie a|ligue 1|eredivisie|mls)',
+    re.I,
+)
+_PTS_BEHIND_PATTERNS = [
+    re.compile(r'(\d{1,2})\s*points?\s+(?:behind|adrift|off\s+the\s+pace|from\s+(?:the\s+)?(?:top|leaders?))', re.I),
+    re.compile(r'trail(?:ing)?\s+(?:\w+\s+){0,3}by\s+(\d{1,2})\s*points?', re.I),
+    re.compile(r'(\d{1,2})-point\s+(?:gap|deficit)', re.I),
+    re.compile(r'gap\s+(?:of|is)\s+(\d{1,2})', re.I),
+]
+
+_MLB_RE = re.compile(r'\b(mlb|baseball|major league baseball)\b', re.I)
+
 _WIN_TOURNAMENT_RE = re.compile(
     r'will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)[\?\.\s]*$', re.I
 )
@@ -508,6 +525,65 @@ SYSTEM_PROMPT = (
     "Una variacion de mas de 15 puntos porcentuales respecto al analisis anterior indica un error "
     "de razonamiento — revisa la evidencia antes de cambiar drasticamente tu estimacion."
 )
+
+
+async def _get_title_race_points_behind(team: str, league: str) -> int | None:
+    """
+    Searches DDG for '{team} {league} standings 2026' and parses the points gap
+    between the team and the league leader. Returns int (pts behind) or None.
+    Cache 4h.
+    """
+    import asyncio
+    import urllib.parse
+    import urllib.request
+
+    cache_key = f"{team.lower()}|{league.lower()}"
+    now_ts = _time.monotonic()
+    if cache_key in _TITLE_RACE_CACHE:
+        pts, ts = _TITLE_RACE_CACHE[cache_key]
+        if now_ts - ts < _TITLE_RACE_TTL:
+            return pts
+
+    query = f"{team} {league} standings 2026 points behind leader"
+    url = f"https://html.duckduckgo.com/html/?{urllib.parse.urlencode({'q': query})}"
+
+    def _fetch() -> str:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except Exception as _e:
+            logger.debug("_get_title_race_points_behind(%s): DDG error — %s", team, _e)
+            return ""
+
+    html = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+    if not html:
+        _TITLE_RACE_CACHE[cache_key] = (None, now_ts)
+        return None
+
+    html_lower = html.lower()
+    team_lower = team.lower()
+    result_pts: int | None = None
+
+    idx = html_lower.find(team_lower)
+    while idx != -1 and result_pts is None:
+        window = html_lower[max(0, idx - 350): idx + 350]
+        for pattern in _PTS_BEHIND_PATTERNS:
+            m = pattern.search(window)
+            if m:
+                pts = int(m.group(1))
+                if 1 <= pts <= 30:
+                    result_pts = pts
+                    break
+        idx = html_lower.find(team_lower, idx + 1)
+
+    _TITLE_RACE_CACHE[cache_key] = (result_pts, now_ts)
+    if result_pts is not None:
+        logger.info(
+            "_get_title_race_points_behind: %s %dpts behind leader in %s",
+            team, result_pts, league,
+        )
+    return result_pts
 
 
 async def _fetch_nba_win_prob(team_name: str) -> float | None:
@@ -1240,6 +1316,55 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     except Exception:
         pass
 
+    # MLB extreme probs — no señal cuando el modelo no tiene datos reales de béisbol
+    if category == "sports" and recommendation in ("BUY_YES", "BUY_NO"):
+        if _MLB_RE.search(question):
+            if real_prob < 0.10 or real_prob > 0.90:
+                logger.info(
+                    "analyze_market(%s): MLB_NO_DATA_EXTREME real_prob=%.2f fuera [10%%,90%%] → PASS",
+                    market_id, real_prob,
+                )
+                recommendation = "PASS"
+
+    # Title race cap — equipo a >10 pts del líder cerca del final de temporada → prob_max 15%
+    if category == "sports" and recommendation in ("BUY_YES", "WATCH") and real_prob > 0.15 and days_to_close < 90:
+        _title_m = _LEAGUE_TITLE_RACE_RE.search(question)
+        if _title_m:
+            _lr_team = _title_m.group(1).strip()
+            _lr_league = _title_m.group(2).strip()
+            try:
+                _pts_behind = await asyncio.wait_for(
+                    _get_title_race_points_behind(_lr_team, _lr_league), timeout=5.0
+                )
+                if _pts_behind is not None and _pts_behind > 10:
+                    _lr_cap = 0.15
+                    if real_prob > _lr_cap:
+                        _old_lr = real_prob
+                        real_prob = _lr_cap
+                        edge = round(real_prob - price_yes, 4)
+                        if edge >= POLY_MIN_EDGE:
+                            recommendation = "BUY_YES"
+                        elif edge <= -POLY_MIN_EDGE:
+                            recommendation = "BUY_NO"
+                        else:
+                            recommendation = "PASS"
+                        _lr_note = (
+                            f"⚠️ TITLE_RACE_CHECK: {_lr_team} {_pts_behind}pts "
+                            f"behind {_lr_league} leader → prob_max=15%"
+                        )
+                        reasoning = f"{_lr_note}\n{reasoning}" if reasoning else _lr_note
+                        logger.info(
+                            "analyze_market(%s): TITLE_RACE_CHECK %.3f→%.3f %s +%dpts behind",
+                            market_id, _old_lr, real_prob, _lr_team, _pts_behind,
+                        )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "analyze_market(%s): _get_title_race_points_behind timeout >5s — skip (%s)",
+                    market_id, _lr_team,
+                )
+            except Exception as _tre:
+                logger.debug("analyze_market(%s): TITLE_RACE_CHECK error — %s", market_id, _tre)
+
     # FIX 3: NBA playoff series — floor si ESPN muestra equipo muy favorito (> 85%)
     if _nba_win_prob is not None and _nba_win_prob > 0.85:
         _nba_floor = 0.75
@@ -1300,7 +1425,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "fear_greed_label": fear_greed.get("label") if fear_greed else None,
         "end_date_iso": end_date.isoformat() if end_date else None,
         "days_to_close": days_to_close,
-        "slug": market_data.get("slug", ""),
+        "slug": market_data.get("slug") or enriched_market.get("slug", ""),
         "volume_24h": volume_24h,
         "analyzed_at": datetime.now(timezone.utc),
         "alerted": False,
