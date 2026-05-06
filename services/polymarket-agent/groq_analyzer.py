@@ -278,68 +278,41 @@ def _clean_contradictory_reasoning(
     real_prob: float = 0.0,
 ) -> str:
     """
-    Capa 2: Post-procesado del reasoning del LLM.
-    Si el texto contradice la recommendation → reemplaza reasoning COMPLETO
-    con mensaje canónico coherente que incluye los valores numéricos reales.
+    Reemplaza el reasoning con texto canónico cuando la dirección numérica
+    es consistente con la recomendación. No usa detección de palabras clave
+    — el texto del LLM siempre se descarta para señales BUY_NO/BUY_YES.
     """
     if not reasoning:
         return reasoning
 
-    r_lower = reasoning.lower()
+    mp_pct = f"{market_price:.0%}"
+    rp_pct = f"{real_prob:.0%}"
 
-    # Palabras clave que indican conclusión BUY_YES dentro del texto
-    _BUY_YES_SIGNALS = [
-        "buy_yes", "buy yes",
-        "subvaluado", "infravalorado",
-        "oportunidad de compra",
-        "edge positivo",
-        "comprar yes",
-        "probabilidad real es mayor",
-        "recomendar yes",
-        "recomiendo yes",
-    ]
-    # Palabras clave que indican conclusión BUY_NO dentro del texto
-    _BUY_NO_SIGNALS = [
-        "buy_no", "buy no",
-        "sobrevaluado",
-        "vender",
-        "oportunidad de venta",
-        "edge negativo",
-        "comprar no",
-        "recomendar no",
-        "recomiendo no",
-    ]
+    if recommendation == "BUY_NO" and market_price > real_prob:
+        logger.warning(
+            "_clean_contradictory_reasoning: BUY_NO market=%.3f > real=%.3f "
+            "— reemplazando reasoning con texto canónico",
+            market_price, real_prob,
+        )
+        return (
+            f"El mercado sobrevalora esta probabilidad. "
+            f"Precio actual ({mp_pct}) está por encima "
+            f"de la probabilidad real estimada ({rp_pct}). "
+            f"BUY_NO es la posición correcta."
+        )
 
-    mp_pct = f"{market_price * 100:.1f}%"
-    rp_pct = f"{real_prob * 100:.1f}%"
-
-    if recommendation == "BUY_NO":
-        has_contradiction = any(p in r_lower for p in _BUY_YES_SIGNALS)
-        if has_contradiction:
-            logger.warning(
-                "_clean_contradictory_reasoning: reasoning contradice BUY_NO "
-                "(señales positivas detectadas) — reemplazando completo"
-            )
-            return (
-                f"El mercado sobrevalora esta probabilidad. "
-                f"Precio actual ({mp_pct}) está por encima "
-                f"de la probabilidad real estimada ({rp_pct}). "
-                f"BUY_NO es la posición correcta."
-            )
-
-    if recommendation == "BUY_YES":
-        has_contradiction = any(p in r_lower for p in _BUY_NO_SIGNALS)
-        if has_contradiction:
-            logger.warning(
-                "_clean_contradictory_reasoning: reasoning contradice BUY_YES "
-                "(señales negativas detectadas) — reemplazando completo"
-            )
-            return (
-                f"El mercado infravalora esta probabilidad. "
-                f"Precio actual ({mp_pct}) está por debajo "
-                f"de la probabilidad real estimada ({rp_pct}). "
-                f"BUY_YES es la posición correcta."
-            )
+    if recommendation == "BUY_YES" and real_prob > market_price:
+        logger.warning(
+            "_clean_contradictory_reasoning: BUY_YES real=%.3f > market=%.3f "
+            "— reemplazando reasoning con texto canónico",
+            real_prob, market_price,
+        )
+        return (
+            f"El mercado infravalora esta probabilidad. "
+            f"Precio actual ({mp_pct}) está por debajo "
+            f"de la probabilidad real estimada ({rp_pct}). "
+            f"BUY_YES es la posición correcta."
+        )
 
     return reasoning
 
