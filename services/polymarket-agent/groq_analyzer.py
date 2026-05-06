@@ -601,8 +601,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 break
             except Exception as e:
                 err_str = str(e).lower()
-                if "model_not_found" in err_str or "404" in err_str:
-                    logger.warning("analyze_market(%s): modelo %s no encontrado — probando siguiente", market_id, model)
+                if "model_not_found" in err_str or "404" in err_str or "model_decommissioned" in err_str or "decommissioned" in err_str:
+                    logger.warning("analyze_market(%s): modelo %s no disponible — probando siguiente", market_id, model)
                     continue
                 if "429" in err_str or "rate_limit" in err_str or "quota" in err_str or "daily" in err_str:
                     logger.warning("analyze_market(%s): TPD agotado en %s — probando siguiente", market_id, model)

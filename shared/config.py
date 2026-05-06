@@ -30,7 +30,7 @@ COLLECTION_PREFIX = os.environ.get("FIRESTORE_COLLECTION_PREFIX", "")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_MODEL_ROTATION = [
     "llama-3.3-70b-versatile",   # principal
-    "mixtral-8x7b-32768",        # fallback 1
+    "llama3-70b-8192",           # fallback 1
     "gemma2-9b-it",              # fallback 2
     "llama-3.1-8b-instant",      # fallback 3
 ]
