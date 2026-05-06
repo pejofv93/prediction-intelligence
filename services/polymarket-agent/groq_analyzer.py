@@ -271,58 +271,75 @@ def _build_category_context(question: str, category: str) -> str:
     return ""
 
 
-def _clean_contradictory_reasoning(recommendation: str, reasoning: str) -> str:
+def _clean_contradictory_reasoning(
+    recommendation: str,
+    reasoning: str,
+    market_price: float = 0.0,
+    real_prob: float = 0.0,
+) -> str:
     """
-    Elimina frases del reasoning que contradigan la recommendation final.
-    Si recommendation=BUY_NO pero el texto dice "recomendar BUY_YES" o variantes
-    positivas → reemplaza con nota aclaratoria.
+    Capa 2: Post-procesado del reasoning del LLM.
+    Si el texto contradice la recommendation → reemplaza reasoning COMPLETO
+    con mensaje canónico coherente que incluye los valores numéricos reales.
     """
     if not reasoning:
         return reasoning
 
     r_lower = reasoning.lower()
 
-    _BUY_YES_PHRASES = [
-        "recomendar buy_yes", "recomiendo buy_yes", "recomienda buy_yes",
-        "oportunidad de compra yes", "comprar yes", "apostar por yes",
-        "buy yes", "buy_yes recomendado",
+    # Palabras clave que indican conclusión BUY_YES dentro del texto
+    _BUY_YES_SIGNALS = [
+        "buy_yes", "buy yes",
+        "subvaluado", "infravalorado",
+        "oportunidad de compra",
+        "edge positivo",
+        "comprar yes",
+        "probabilidad real es mayor",
+        "recomendar yes",
+        "recomiendo yes",
     ]
-    _BUY_NO_PHRASES = [
-        "recomendar buy_no", "recomiendo buy_no", "recomienda buy_no",
-        "oportunidad de compra no", "comprar no", "apostar por no",
-        "buy no", "buy_no recomendado",
+    # Palabras clave que indican conclusión BUY_NO dentro del texto
+    _BUY_NO_SIGNALS = [
+        "buy_no", "buy no",
+        "sobrevaluado",
+        "vender",
+        "oportunidad de venta",
+        "edge negativo",
+        "comprar no",
+        "recomendar no",
+        "recomiendo no",
     ]
+
+    mp_pct = f"{market_price * 100:.1f}%"
+    rp_pct = f"{real_prob * 100:.1f}%"
 
     if recommendation == "BUY_NO":
-        has_contradiction = any(p in r_lower for p in _BUY_YES_PHRASES)
+        has_contradiction = any(p in r_lower for p in _BUY_YES_SIGNALS)
         if has_contradiction:
             logger.warning(
-                "_clean_contradictory_reasoning: reasoning contradice BUY_NO — limpiando"
+                "_clean_contradictory_reasoning: reasoning contradice BUY_NO "
+                "(señales positivas detectadas) — reemplazando completo"
             )
-            cleaned = re.sub(
-                r'(?i)(recomendar|recomiendo|recomienda)\s+buy[_\s]?yes\b[^.]*\.',
-                "[contradicción eliminada: el edge negativo indica BUY_NO].",
-                reasoning,
+            return (
+                f"El mercado sobrevalora esta probabilidad. "
+                f"Precio actual ({mp_pct}) está por encima "
+                f"de la probabilidad real estimada ({rp_pct}). "
+                f"BUY_NO es la posición correcta."
             )
-            cleaned = re.sub(
-                r'(?i)oportunidad\s+de\s+compra\s+yes\b[^.]*\.',
-                "[contradicción eliminada: mercado sobrevaluado según análisis cuantitativo].",
-                cleaned,
-            )
-            return cleaned
 
     if recommendation == "BUY_YES":
-        has_contradiction = any(p in r_lower for p in _BUY_NO_PHRASES)
+        has_contradiction = any(p in r_lower for p in _BUY_NO_SIGNALS)
         if has_contradiction:
             logger.warning(
-                "_clean_contradictory_reasoning: reasoning contradice BUY_YES — limpiando"
+                "_clean_contradictory_reasoning: reasoning contradice BUY_YES "
+                "(señales negativas detectadas) — reemplazando completo"
             )
-            cleaned = re.sub(
-                r'(?i)(recomendar|recomiendo|recomienda)\s+buy[_\s]?no\b[^.]*\.',
-                "[contradicción eliminada: el edge positivo indica BUY_YES].",
-                reasoning,
+            return (
+                f"El mercado infravalora esta probabilidad. "
+                f"Precio actual ({mp_pct}) está por debajo "
+                f"de la probabilidad real estimada ({rp_pct}). "
+                f"BUY_YES es la posición correcta."
             )
-            return cleaned
 
     return reasoning
 
@@ -363,6 +380,16 @@ def _validate_prob_in_reasoning(real_prob: float, reasoning: str) -> str:
 
 
 SYSTEM_PROMPT = (
+    "REGLA ABSOLUTA — CONSISTENCIA REASONING (CRITICA): "
+    "Tu campo 'reasoning' DEBE ser consistente con tu 'recommendation'. "
+    "Si recommendation=BUY_NO: el reasoning DEBE explicar POR QUE el mercado esta SOBREVALUADO. "
+    "NUNCA uses palabras como 'subvaluado', 'infravalorado', 'oportunidad de compra', "
+    "'BUY_YES', 'edge positivo', 'comprar YES' o 'probabilidad real es mayor' "
+    "en el reasoning si recommendation=BUY_NO. "
+    "Si recommendation=BUY_YES: el reasoning DEBE explicar POR QUE el mercado esta INFRAVALORADO. "
+    "NUNCA uses palabras como 'sobrevaluado', 'BUY_NO', 'vender' o 'edge negativo' "
+    "en el reasoning si recommendation=BUY_YES. "
+    "INCUMPLIR ESTA REGLA ES UN ERROR CRITICO — el sistema rechazara y sobreescribira tu reasoning. "
     "Eres un analista cuantitativo especializado en encontrar ineficiencias en mercados de prediccion. "
     "Tu objetivo es detectar DIVERGENCIAS entre el precio de mercado y la probabilidad real. "
     "Los mercados de Polymarket son frecuentemente INEFICIENTES: "
@@ -705,8 +732,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # a real_prob en >0.10, prepender nota aclaratoria para el mensaje Telegram.
     # real_prob del JSON estructurado es siempre el valor canónico.
     reasoning = _validate_prob_in_reasoning(real_prob, reasoning)
-    # Eliminar frases del reasoning que contradigan la recommendation (BUY_NO/BUY_YES cruzados).
-    reasoning = _clean_contradictory_reasoning(recommendation, reasoning)
+    # Capa 2: reemplazar reasoning completo si contradice recommendation.
+    reasoning = _clean_contradictory_reasoning(recommendation, reasoning, price_yes, real_prob)
 
     # Fix 6: precio crypto desde enriched_market['ctc_price'] — evita fetch HTTP separado
     # Fix 4 + validador de precio crypto — caps para predicciones históricamente improbables
