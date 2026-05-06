@@ -352,17 +352,25 @@ async def _bg_enrich() -> dict:
         except Exception:
             pass
         try:
-            docs_raw = list(col("poly_markets").limit(200).stream(timeout=120.0))
+            # updated_at DESC: los del último scan primero, evita leer 1300+ docs acumulados
+            docs_raw = list(
+                col("poly_markets")
+                .order_by("updated_at", direction="DESCENDING")
+                .limit(200)
+                .stream(timeout=120.0)
+            )
         except Exception as e:
             logger.error("enrich: error leyendo poly_markets — %s: %s", type(e).__name__, e)
             return {"status": "error", "error": f"{type(e).__name__}: {e}", "enriched": 0}
         markets = [d.to_dict() for d in docs_raw]
 
-        # Filtrar mercados expirados antes de enriquecer — evita gastar enrichments
-        # en mercados "Will X in April?" que ya vencieron. end_date=null → mantener.
+        # Filtrar mercados fuera de ventana útil: expirados (< now+2d) o demasiado lejanos
+        # (> 30d). Alinea con _quality_ok del scanner. end_date=null → mantener.
         from datetime import timedelta
-        _min_end = datetime.now(timezone.utc) + timedelta(days=2)
-        _valid, _expired = [], 0
+        _now_enrich = datetime.now(timezone.utc)
+        _min_end = _now_enrich + timedelta(days=2)
+        _max_end = _now_enrich + timedelta(days=30)
+        _valid, _skipped = [], 0
         for _m in markets:
             _end = _m.get("end_date")
             if _end is None:
@@ -370,12 +378,14 @@ async def _bg_enrich() -> dict:
                 continue
             if hasattr(_end, "tzinfo") and _end.tzinfo is None:
                 _end = _end.replace(tzinfo=timezone.utc)
-            if _end >= _min_end:
+            if _min_end <= _end <= _max_end:
                 _valid.append(_m)
             else:
-                _expired += 1
-        if _expired:
-            logger.info("enrich: %d mercados expirados descartados (end_date < now+2d)", _expired)
+                _skipped += 1
+        logger.info(
+            "enrich: %d/%d mercados válidos tras filtro ventana 2-30d (%d descartados)",
+            len(_valid), len(markets), _skipped,
+        )
         markets = _valid
 
         count = await run_enrichment(markets)
