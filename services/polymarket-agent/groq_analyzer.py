@@ -21,6 +21,31 @@ _WEIGHTS_CACHE: dict = {}
 _WEIGHTS_CACHE_TS: float = 0.0
 _WEIGHTS_CACHE_TTL: float = 600.0  # 10 min
 
+# Price context cache for "Will X reach $Y" markets (5-min TTL)
+_PRICE_CACHE: dict[str, tuple[float, float]] = {}
+_PRICE_CACHE_TTL: float = 300.0
+
+_YAHOO_SYMBOLS: dict[str, str] = {
+    "WTI":    "CL%3DF",
+    "GOLD":   "GC%3DF",
+    "SILVER": "SI%3DF",
+}
+
+_ASSET_DETECT: list = [
+    (re.compile(r'\b(bitcoin|btc)\b', re.I),            "BTC",    "bitcoin"),
+    (re.compile(r'\b(ethereum|eth)\b', re.I),            "ETH",    "ethereum"),
+    (re.compile(r'\b(solana|sol)\b', re.I),              "SOL",    "solana"),
+    (re.compile(r'\b(xrp|ripple)\b', re.I),              "XRP",    "ripple"),
+    (re.compile(r'\bbnb\b', re.I),                       "BNB",    "binancecoin"),
+    (re.compile(r'\b(dogecoin|doge)\b', re.I),           "DOGE",   "dogecoin"),
+    (re.compile(r'\b(cardano|ada)\b', re.I),             "ADA",    "cardano"),
+    (re.compile(r'\b(avalanche|avax)\b', re.I),          "AVAX",   "avalanche-2"),
+    (re.compile(r'\bchainlink\b', re.I),                 "LINK",   "chainlink"),
+    (re.compile(r'\b(crude oil|wti|oil price)\b', re.I), "WTI",    None),
+    (re.compile(r'\b(gold|xau)\b', re.I),                "GOLD",   None),
+    (re.compile(r'\b(silver|xag)\b', re.I),              "SILVER", None),
+]
+
 
 def _is_groq_quota_exhausted() -> bool:
     """Lee agent_state/groq_quota. True si TPD agotado y aún no ha pasado la medianoche UTC."""
@@ -274,6 +299,61 @@ def _build_category_context(question: str, category: str) -> str:
     return ""
 
 
+def _detect_price_market(question: str) -> tuple[str, str | None, float] | None:
+    """Detect 'Will X reach $Y' markets. Returns (asset_key, coingecko_id, target_price) or None."""
+    target = _extract_target_price(question)
+    if target is None:
+        return None
+    for pattern, asset_key, cg_id in _ASSET_DETECT:
+        if pattern.search(question):
+            return asset_key, cg_id, target
+    return None
+
+
+async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> float | None:
+    """Fetch spot price with 5-min in-memory cache. Returns None on failure."""
+    import asyncio
+    import json
+    import urllib.request
+
+    now_ts = _time.monotonic()
+    if asset_key in _PRICE_CACHE:
+        cached_price, cached_ts = _PRICE_CACHE[asset_key]
+        if now_ts - cached_ts < _PRICE_CACHE_TTL:
+            return cached_price
+
+    def _http_get(url: str, parse_fn) -> float | None:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "prediction-intelligence/1.0"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                return float(parse_fn(json.loads(resp.read())))
+        except Exception as _e:
+            logger.debug("_fetch_current_price(%s): %s — %s", asset_key, url[:60], _e)
+            return None
+
+    loop = asyncio.get_running_loop()
+    price: float | None = None
+
+    if coingecko_id:
+        _url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
+        _cg_id = coingecko_id
+        price = await loop.run_in_executor(
+            None, lambda: _http_get(_url, lambda d: d[_cg_id]["usd"])
+        )
+
+    if price is None and asset_key in _YAHOO_SYMBOLS:
+        _sym = _YAHOO_SYMBOLS[asset_key]
+        _yurl = f"https://query2.finance.yahoo.com/v8/finance/chart/{_sym}?interval=1d&range=1d"
+        price = await loop.run_in_executor(
+            None, lambda: _http_get(_yurl, lambda d: d["chart"]["result"][0]["meta"]["regularMarketPrice"])
+        )
+
+    if price and price > 0:
+        _PRICE_CACHE[asset_key] = (price, now_ts)
+        logger.info("_fetch_current_price: %s=$%.4g", asset_key, price)
+    return price if (price and price > 0) else None
+
+
 def _clean_contradictory_reasoning(
     recommendation: str,
     reasoning: str,
@@ -483,6 +563,23 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     category = categorize_market(question)
     category_context = _build_category_context(question, category)
 
+    # Detect "Will X reach $Y" markets and fetch live price
+    _price_ctx = _detect_price_market(question)
+    _current_price: float | None = None
+    _pct_needed: float | None = None
+    if _price_ctx:
+        _p_asset, _p_cg_id, _p_target = _price_ctx
+        _current_price = await _fetch_current_price(_p_asset, _p_cg_id)
+        if _current_price and _current_price > 0:
+            _pct_needed = (_p_target / _current_price - 1) * 100
+            if abs(_pct_needed) > 100:
+                logger.info(
+                    "analyze_market(%s): PRICE_UNREACHABLE — %s target=$%.0f current=$%.2f "
+                    "requiere %.0f%% en %dd — descartando",
+                    market_id, _p_asset, _p_target, _current_price, _pct_needed, days_to_close,
+                )
+                return None
+
     # Fear & Greed para mercados crypto
     fear_greed: dict = {}
     if category == "crypto":
@@ -571,6 +668,15 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         )
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
+    if _current_price is not None and _pct_needed is not None and _price_ctx:
+        _direction = "subida" if _pct_needed > 0 else "bajada"
+        user_prompt += (
+            f"\n\nCONTEXTO DE PRECIO ({_price_ctx[0]}): "
+            f"Precio actual: ${_current_price:,.2f}. "
+            f"Precio objetivo: ${_price_ctx[2]:,.0f}. "
+            f"Requiere {_direction} de {abs(_pct_needed):.1f}% en {days_to_close} días. "
+            f"Calibra tu real_prob considerando la magnitud de este movimiento."
+        )
 
     # Llamada a Groq con rotación de modelos
     raw_response = ""
@@ -759,16 +865,34 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # Capa 2: reemplazar reasoning completo si contradice recommendation.
     reasoning = _clean_contradictory_reasoning(recommendation, reasoning, price_yes, real_prob)
 
-    # Fix 6: precio crypto desde enriched_market['ctc_price'] — evita fetch HTTP separado
-    # Fix 4 + validador de precio crypto — caps para predicciones históricamente improbables
+    # Cap por magnitud de movimiento requerido — todas las categorías
+    if _price_ctx and _pct_needed is not None and abs(_pct_needed) > 50 and real_prob > 0.15:
+        _old_prob = real_prob
+        real_prob = 0.15
+        edge = round(real_prob - price_yes, 4)
+        _dir = "subida" if _pct_needed > 0 else "bajada"
+        _note = (
+            f"⚠️ Cap precio: {_price_ctx[0]} requiere {_dir} de "
+            f"{abs(_pct_needed):.1f}% → prob_max=15%"
+        )
+        reasoning = f"{_note}\n{reasoning}" if reasoning else _note
+        logger.info(
+            "analyze_market(%s): PRICE_MOVE_CAP %.3f→0.150 pct_needed=%.1f%% asset=%s",
+            market_id, _old_prob, _pct_needed, _price_ctx[0],
+        )
+        if edge >= POLY_MIN_EDGE:
+            recommendation = "BUY_YES"
+        elif edge <= -POLY_MIN_EDGE:
+            recommendation = "BUY_NO"
+        else:
+            recommendation = "PASS"
+
+    # Validador de precio crypto — caps adicionales para predicciones históricamente improbables
     if category == "crypto" and _extract_target_price(question) is not None:
-        _ctc = enriched_market.get("ctc_price")
-        _ctc_price = float(_ctc) if _ctc else None
         real_prob, edge, reasoning = _validate_crypto_price_prediction(
             question, real_prob, price_yes, days_to_close, reasoning,
-            current_price=_ctc_price,
+            current_price=_current_price,
         )
-        # Recalcular recommendation tras ajuste
         if edge >= POLY_MIN_EDGE:
             recommendation = "BUY_YES"
         elif edge <= -POLY_MIN_EDGE:
