@@ -133,6 +133,11 @@ def _build_ratings(home_stats: dict, away_stats: dict, league: str) -> dict:
     signals = {"off_edge": off_sig, "def_edge": def_sig, "form": form_sig}
     conf = max(0.0, 1.0 - float(np.std(list(signals.values()))))
 
+    # Si todas las señales están en el valor neutro (0.50 = sin datos reales) → cap conf 60%
+    if all(abs(v - 0.5) < 0.001 for v in signals.values()):
+        conf = min(conf, 0.60)
+        logger.debug("_build_ratings: señales todas default (0.50) → conf capped 0.60")
+
     return {
         "off_home": off_home, "def_home": def_home,
         "off_away": off_away, "def_away": def_away,
