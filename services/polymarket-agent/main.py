@@ -551,6 +551,12 @@ async def _bg_analyze() -> dict:
             )
 
         _dt_min = datetime.min.replace(tzinfo=timezone.utc)
+        # Límite total: 20 mercados por ciclo.
+        # - 1 categoría (ej. todo "other"): hasta 20 de esa categoría.
+        # - Varias categorías: hasta 5 por categoría (mismo comportamiento previo).
+        _CYCLE_LIMIT = 20
+        _n_cats = len(_markets_by_cat)
+        _per_cat_limit = _CYCLE_LIMIT if _n_cats == 1 else 5
         docs_balanced: list[dict] = []
         for _cat_markets in _markets_by_cat.values():
             # Ordenar por enriched_at DESC — priorizar datos frescos
@@ -558,12 +564,13 @@ async def _bg_analyze() -> dict:
                 _cat_markets,
                 key=lambda x: x.get("enriched_at") or _dt_min,
                 reverse=True,
-            )[:5]
+            )[:_per_cat_limit]
             docs_balanced.extend(_top)
         docs_balanced.sort(
             key=lambda x: (market_analysis_priority(x), x.get("enriched_at") or _dt_min),
             reverse=True,
         )
+        docs_balanced = docs_balanced[:_CYCLE_LIMIT]
 
         cat_counter = Counter(categorize_market(m.get("question", "")) for m in docs_balanced)
         logger.info("analyze: categorías a analizar: %s", dict(cat_counter))
