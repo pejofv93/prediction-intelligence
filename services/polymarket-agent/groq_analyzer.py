@@ -689,8 +689,55 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 continue
 
         if result is None:
-            logger.error("analyze_market(%s): no se pudo parsear JSON de Groq: %s", market_id, raw_response[:200])
-            return None
+            # Retry con temperatura=0 y prompt JSON estricto (máx 2 intentos)
+            _json_strict = (
+                "RESPONDE ÚNICAMENTE CON JSON VÁLIDO. "
+                "NO escribas texto, explicaciones ni prosa. "
+                "SOLO el objeto JSON solicitado."
+            )
+            for _retry in range(2):
+                try:
+                    _r = groq_client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + _json_strict},
+                            {"role": "user", "content": user_prompt + "\n\n" + _json_strict},
+                        ],
+                        max_tokens=500,
+                        temperature=0.0,
+                    )
+                    _raw = _r.choices[0].message.content
+                    for _ext in [
+                        lambda r: json.loads(r),
+                        lambda r: json.loads(re.search(r"\{.*\}", r, re.DOTALL).group()),
+                    ]:
+                        try:
+                            result = _ext(_raw)
+                            break
+                        except Exception:
+                            continue
+                    if result is not None:
+                        logger.info(
+                            "analyze_market(%s): JSON retry %d/2 OK (temp=0)",
+                            market_id, _retry + 1,
+                        )
+                        break
+                    logger.warning(
+                        "analyze_market(%s): JSON retry %d/2 — sigue sin JSON válido",
+                        market_id, _retry + 1,
+                    )
+                except Exception as _re:
+                    logger.warning(
+                        "analyze_market(%s): JSON retry %d/2 error — %s",
+                        market_id, _retry + 1, _re,
+                    )
+
+            if result is None:
+                logger.error(
+                    "analyze_market(%s): no se pudo parsear JSON tras 2 reintentos: %s",
+                    market_id, raw_response[:200],
+                )
+                return None
 
     # Construir documento poly_prediction
     real_prob = float(result.get("real_prob", price_yes))
