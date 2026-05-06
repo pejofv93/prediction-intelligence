@@ -50,6 +50,22 @@ _PTS_BEHIND_PATTERNS = [
 
 _MLB_RE = re.compile(r'\b(mlb|baseball|major league baseball)\b', re.I)
 
+# Individual sports match detection (tenis, UFC, MLB por slug o pregunta)
+_SPORTS_DATA_CACHE: dict[str, tuple[str | None, float]] = {}
+_SPORTS_DATA_TTL: float = 7200.0  # 2h
+
+_TENNIS_RE = re.compile(
+    r'\b(atp|wta|internazionali|roland garros|wimbledon|us open|australian open|'
+    r'masters 1000|davis cup|indian wells|miami open|monte.?carlo|madrid open|'
+    r'rome|toronto|cincinnati|qualification|qualifier|tennis)\b',
+    re.I,
+)
+_UFC_RE = re.compile(
+    r'\b(ufc|bellator|pfl|one championship|mma|middleweight|heavyweight|'
+    r'lightweight|welterweight|featherweight|bantamweight|flyweight)\b',
+    re.I,
+)
+
 _WIN_TOURNAMENT_RE = re.compile(
     r'will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)[\?\.\s]*$', re.I
 )
@@ -731,6 +747,66 @@ async def _check_team_eliminated(team: str, tournament: str) -> bool:
     return eliminated
 
 
+async def _fetch_sports_odds_context(query: str) -> str | None:
+    """DDG search for individual match odds/rankings. Returns context snippet or None if no data."""
+    import urllib.request, urllib.parse
+
+    cache_key = re.sub(r'\s+', ' ', query.lower().strip())[:80]
+    now_ts = _time.monotonic()
+    cached = _SPORTS_DATA_CACHE.get(cache_key)
+    if cached and now_ts - cached[1] < _SPORTS_DATA_TTL:
+        return cached[0]
+
+    try:
+        data = urllib.parse.urlencode({"q": query}).encode()
+        req = urllib.request.Request(
+            "https://html.duckduckgo.com/html/",
+            data=data,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; prediction/1.0)",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+
+        snippets = re.findall(
+            r'class="result__snippet[^"]*"[^>]*>(.*?)</(?:a|span)>',
+            html, re.I | re.DOTALL,
+        )
+        text = " ".join(re.sub(r'<[^>]+>', '', s).strip() for s in snippets[:6])
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        has_data = bool(re.search(
+            r'([+-]\d{2,4}|\d\.\d{2,3}\s*(odds|to\s+win)|\d+\s*%\s*(chance|win|probability)|'
+            r'\brank(ing)?\s*#?\d+|\bfavorit|\bunderdog|\bprediction|\bpick\b)',
+            text, re.I,
+        ))
+        result = text[:700] if (text and has_data) else None
+        _SPORTS_DATA_CACHE[cache_key] = (result, now_ts)
+        return result
+    except Exception as _sde:
+        logger.debug("_fetch_sports_odds_context(%s...): %s", query[:40], _sde)
+        _SPORTS_DATA_CACHE[cache_key] = (None, now_ts)
+        return None
+
+
+def _parse_implied_prob(text: str) -> float | None:
+    """Parse American (+150/-200) or decimal (2.50) odds → implied win probability."""
+    probs: list[float] = []
+    for sign, val in re.findall(r'([+-])(\d{2,4})', text):
+        v = int(val)
+        if v < 100:
+            continue
+        probs.append(100.0 / (v + 100.0) if sign == '+' else v / (v + 100.0))
+    if probs:
+        return sum(probs) / len(probs)
+    dec_odds = [float(d) for d in re.findall(r'\b([12]\.\d{2})\b', text) if float(d) > 1.05]
+    if dec_odds:
+        return sum(1.0 / d for d in dec_odds) / len(dec_odds)
+    return None
+
+
 async def analyze_market(enriched_market: dict) -> dict | None:
     """
     Solo analiza si: volume_24h > 5000 AND days_to_close > 2.
@@ -849,6 +925,50 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                         "analyze_market(%s): error fetch NBA win prob — %s", market_id, _nwe
                     )
 
+    # Individual sports match context: tenis, UFC, MLB
+    _sports_context: str | None = None
+    _is_tennis = False
+    _is_ufc = False
+    _is_mlb_game = False
+    _is_individual_match = False
+    if category == "sports":
+        _slug = market_data.get("slug", "")
+        _is_tennis = _slug.startswith(("atp-", "wta-")) or bool(_TENNIS_RE.search(question))
+        _is_ufc = _slug.startswith("ufc-") or bool(_UFC_RE.search(question))
+        _is_mlb_game = _slug.startswith("mlb-") or bool(_MLB_RE.search(question))
+        _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game
+
+        if _is_individual_match:
+            _sport_label = "TENNIS" if _is_tennis else ("UFC" if _is_ufc else "MLB")
+            if _is_tennis:
+                _sports_query = f"{question} odds ATP WTA ranking 2026"
+            elif _is_ufc:
+                _sports_query = f"{question} UFC odds betting prediction 2026"
+            else:
+                _sports_query = f"{question} MLB game prediction odds 2026"
+
+            try:
+                _sports_context = await asyncio.wait_for(
+                    _fetch_sports_odds_context(_sports_query), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "analyze_market(%s): _fetch_sports_odds_context timeout >5s (%s)",
+                    market_id, _sport_label,
+                )
+
+            if _sports_context is None:
+                if _is_tennis or _is_ufc:
+                    logger.info(
+                        "analyze_market(%s): %s_NO_DATA — sin odds/datos externos → PASS",
+                        market_id, _sport_label,
+                    )
+                    return None
+                logger.warning(
+                    "analyze_market(%s): MLB_NO_DATA — sin odds disponibles, confianza reducida",
+                    market_id,
+                )
+
     # Detect "Will X reach $Y" markets and fetch live price
     _price_ctx = _detect_price_market(question)
     _current_price: float | None = None
@@ -954,6 +1074,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         )
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
+    if _sports_context:
+        _slabel = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
+        user_prompt += (
+            f"\n\nDATOS EXTERNOS {_slabel} (fuente: DDG):\n{_sports_context}\n"
+            f"IMPORTANTE: Calibra real_prob usando las odds/rankings reales de arriba como ancla primaria. "
+            f"Si las odds implican una probabilidad, úsala como base antes de ajustar por orderbook/sentiment."
+        )
     if _current_price is not None and _pct_needed is not None and _price_ctx:
         _direction = "subida" if _pct_needed > 0 else "bajada"
         user_prompt += (
@@ -1333,9 +1460,26 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     except Exception:
         pass
 
+    # Partidos individuales: edge > 40% → verificar contra odds reales o descartar
+    if _is_individual_match and recommendation in ("BUY_YES", "BUY_NO") and abs(edge) > 0.40:
+        if _sports_context:
+            _implied = _parse_implied_prob(_sports_context)
+            if _implied is not None and abs(real_prob - _implied) > 0.40:
+                logger.info(
+                    "analyze_market(%s): SPORTS_ODDS_DIVERGE real_prob=%.2f implied=%.2f diff=%.2f → PASS",
+                    market_id, real_prob, _implied, abs(real_prob - _implied),
+                )
+                recommendation = "PASS"
+        else:
+            logger.info(
+                "analyze_market(%s): SPORTS_EDGE_SUSPICIOUS edge=%.2f sin datos externos → PASS",
+                market_id, edge,
+            )
+            recommendation = "PASS"
+
     # MLB extreme probs — no señal cuando el modelo no tiene datos reales de béisbol
     if category == "sports" and recommendation in ("BUY_YES", "BUY_NO"):
-        if _MLB_RE.search(question):
+        if _is_mlb_game or _MLB_RE.search(question):
             if real_prob < 0.10 or real_prob > 0.90:
                 logger.info(
                     "analyze_market(%s): MLB_NO_DATA_EXTREME real_prob=%.2f fuera [10%%,90%%] → PASS",
