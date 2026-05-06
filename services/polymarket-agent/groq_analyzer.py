@@ -444,16 +444,17 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     if end_date:
         if hasattr(end_date, "tzinfo") and end_date.tzinfo is None:
             end_date = end_date.replace(tzinfo=timezone.utc)
-        # Descartar si el mercado cierra en menos de 24h (incluyendo ya expirados)
-        if end_date < now_utc + timedelta(hours=24):
+        # Descartar solo si el mercado cierra en menos de 2h (ya expirado o inminente)
+        if end_date < now_utc + timedelta(hours=2):
             logger.info(
-                "analyze_market(%s): CLOSING_SOON_SKIP — mercado cierra en <24h (end_date=%s)",
+                "analyze_market(%s): CLOSING_SOON_SKIP — mercado cierra en <2h (end_date=%s)",
                 market_id, end_date.isoformat(),
             )
             return None
         days_to_close = (end_date - now_utc).days
-        # Mercados entre 24h y 48h: el precio de mercado es más fiable que la estimación LLM
-        _closing_soon = days_to_close < 2
+        # Mercados entre 2h y 48h: blend LLM 50% + precio mercado 50%
+        hours_to_close = (end_date - now_utc).total_seconds() / 3600
+        _closing_soon = hours_to_close < 48
     else:
         logger.warning(
             "analyze_market(%s): end_date no disponible en Firestore — omitiendo por seguridad",

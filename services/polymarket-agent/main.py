@@ -425,7 +425,7 @@ async def _bg_analyze() -> dict:
             raw_docs = list(
                 col("enriched_markets")
                 .order_by("enriched_at", direction="DESCENDING")
-                .limit(100)
+                .limit(200)
                 .stream(timeout=120.0)
             )
         except Exception as e:
@@ -463,7 +463,7 @@ async def _bg_analyze() -> dict:
             logger.warning("analyze: error leyendo poly_predictions recientes — %s", _rpe)
 
         _now_utc = datetime.now(timezone.utc)
-        _cutoff_end_date = _now_utc + timedelta(hours=24)
+        _cutoff_end_date = _now_utc + timedelta(hours=2)
 
         # Cargar poly_markets una vez como fallback para docs enriched que aún no
         # tienen end_date/price_yes (enriquecidos antes del fix de market_enricher)
@@ -551,10 +551,10 @@ async def _bg_analyze() -> dict:
             )
 
         _dt_min = datetime.min.replace(tzinfo=timezone.utc)
-        # Límite total: 20 mercados por ciclo.
-        # - 1 categoría (ej. todo "other"): hasta 20 de esa categoría.
-        # - Varias categorías: hasta 5 por categoría (mismo comportamiento previo).
-        _CYCLE_LIMIT = 20
+        # Límite total: 40 mercados por ciclo.
+        # - 1 categoría (ej. todo "other"): hasta 40 de esa categoría.
+        # - Varias categorías: hasta 5 por categoría.
+        _CYCLE_LIMIT = 40
         _n_cats = len(_markets_by_cat)
         _per_cat_limit = _CYCLE_LIMIT if _n_cats == 1 else 5
         docs_balanced: list[dict] = []

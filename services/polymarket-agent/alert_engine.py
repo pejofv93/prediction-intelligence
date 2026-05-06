@@ -18,10 +18,10 @@ _LEARNED_THRESHOLDS: dict | None = None
 
 # Umbrales base usados cuando hay < 20 outcomes resueltos
 _BASE_THRESHOLDS = {
-    "buy_yes_min_edge": 0.08,
-    "buy_yes_min_confidence": POLY_MIN_CONFIDENCE,
-    "buy_no_min_edge": 0.07,
-    "buy_no_min_confidence": POLY_MIN_CONFIDENCE,
+    "buy_yes_min_edge": 0.10,
+    "buy_yes_min_confidence": 0.65,
+    "buy_no_min_edge": 0.08,
+    "buy_no_min_confidence": 0.60,
 }
 _MIN_OUTCOMES_FOR_LEARNED = 20
 
