@@ -25,6 +25,25 @@ _WEIGHTS_CACHE_TTL: float = 600.0  # 10 min
 _PRICE_CACHE: dict[str, tuple[float, float]] = {}
 _PRICE_CACHE_TTL: float = 300.0
 
+# Team elimination cache for "Will X win [tournament]" markets (4h TTL)
+_TEAM_ELIM_CACHE: dict[str, tuple[bool, float]] = {}
+_TEAM_ELIM_TTL: float = 14400.0
+
+# NBA playoff series win-prob cache (30-min TTL)
+_NBA_SERIES_CACHE: dict[str, tuple[float, float]] = {}
+_NBA_SERIES_TTL: float = 1800.0
+
+_WIN_TOURNAMENT_RE = re.compile(
+    r'will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)[\?\.\s]*$', re.I
+)
+_TOURNAMENT_KW_RE = re.compile(
+    r'\b(champions league|world cup|copa del rey|copa libertadores|europa league|'
+    r'premier league|la liga|bundesliga|serie a|ligue 1|nba finals|nfl|mlb|nhl|'
+    r'wimbledon|us open|roland garros|australian open|masters|grand slam|'
+    r'super bowl|playoff|finals?|semi.?final|quarter.?final|copa america|euro \d{4})\b',
+    re.I,
+)
+
 _YAHOO_SYMBOLS: dict[str, str] = {
     "WTI":    "CL%3DF",
     "GOLD":   "GC%3DF",
@@ -335,11 +354,11 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
     price: float | None = None
 
     if coingecko_id:
-        _url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
-        _cg_id = coingecko_id
-        price = await loop.run_in_executor(
-            None, lambda: _http_get(_url, lambda d: d[_cg_id]["usd"])
-        )
+        try:
+            from realtime.correlation_tracker import get_crypto_price
+            price = await get_crypto_price(coingecko_id)
+        except Exception as _cge:
+            logger.debug("_fetch_current_price(%s): CoinGecko error — %s", asset_key, _cge)
 
     if price is None and asset_key in _YAHOO_SYMBOLS:
         _sym = _YAHOO_SYMBOLS[asset_key]
@@ -489,6 +508,151 @@ SYSTEM_PROMPT = (
 )
 
 
+async def _fetch_nba_win_prob(team_name: str) -> float | None:
+    """
+    Fetch game-level win probability for a team from ESPN scoreboard predictor.
+    Used as proxy for series win probability in NBA playoff markets.
+    Returns probability in [0, 1] or None if not found / no predictor data.
+    Cache 30 min.
+    """
+    import asyncio
+    import json
+    import urllib.request
+
+    cache_key = team_name.lower()
+    now_ts = _time.monotonic()
+    if cache_key in _NBA_SERIES_CACHE:
+        prob, ts = _NBA_SERIES_CACHE[cache_key]
+        if now_ts - ts < _NBA_SERIES_TTL:
+            return prob
+
+    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+
+    def _fetch() -> dict | None:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return json.loads(resp.read())
+        except Exception as _e:
+            logger.debug("_fetch_nba_win_prob: ESPN error — %s", _e)
+            return None
+
+    data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+    if not data:
+        return None
+
+    team_lower = team_name.lower()
+
+    def _team_matches(competitor: dict) -> bool:
+        t = competitor.get("team", {})
+        candidates = [
+            (t.get("displayName") or "").lower(),
+            (t.get("shortDisplayName") or "").lower(),
+            (t.get("abbreviation") or "").lower(),
+        ]
+        return any(c and (team_lower in c or c in team_lower) for c in candidates)
+
+    for event in data.get("events", []):
+        for comp in event.get("competitions", []):
+            predictor = comp.get("predictor", {})
+            if not predictor:
+                continue
+            competitors = comp.get("competitors", [])
+            home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+            away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+
+            if _team_matches(home):
+                raw = predictor.get("homeTeam", {}).get("teamChance")
+            elif _team_matches(away):
+                raw = predictor.get("awayTeam", {}).get("teamChance")
+            else:
+                continue
+
+            if raw is not None:
+                prob = float(raw)
+                if prob > 1.0:
+                    prob /= 100.0
+                _NBA_SERIES_CACHE[cache_key] = (prob, now_ts)
+                logger.info("_fetch_nba_win_prob: %s=%.1f%%", team_name, prob * 100)
+                return prob
+
+    return None
+
+
+def _extract_team_tournament(question: str) -> tuple[str, str] | None:
+    """Extract (team, tournament) from 'Will X win [the] Y?' questions."""
+    m = _WIN_TOURNAMENT_RE.search(question)
+    if not m:
+        return None
+    team = m.group(1).strip()
+    tournament = m.group(2).strip()
+    if not _TOURNAMENT_KW_RE.search(question):
+        return None
+    if len(team) < 3 or len(team) > 60:
+        return None
+    return team, tournament
+
+
+async def _check_team_eliminated(team: str, tournament: str) -> bool:
+    """
+    Returns True if DDG results strongly suggest team is eliminated from tournament.
+    On any fetch error returns False (don't block the signal).
+    """
+    import asyncio
+    import urllib.parse
+    import urllib.request
+
+    cache_key = f"{team.lower()}|{tournament.lower()}"
+    now_ts = _time.monotonic()
+    if cache_key in _TEAM_ELIM_CACHE:
+        eliminated, cached_ts = _TEAM_ELIM_CACHE[cache_key]
+        if now_ts - cached_ts < _TEAM_ELIM_TTL:
+            return eliminated
+
+    query = f"{team} {tournament} 2026 eliminated OR knocked out OR eliminado"
+    url = f"https://html.duckduckgo.com/html/?{urllib.parse.urlencode({'q': query})}"
+
+    def _fetch() -> str:
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (compatible; prediction-bot/1.0)"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except Exception as _e:
+            logger.debug("_check_team_eliminated(%s): DDG fetch error — %s", team, _e)
+            return ""
+
+    loop = asyncio.get_running_loop()
+    html = await loop.run_in_executor(None, _fetch)
+
+    if not html:
+        _TEAM_ELIM_CACHE[cache_key] = (False, now_ts)
+        return False
+
+    html_lower = html.lower()
+    team_lower = team.lower()
+    elimination_signals = [
+        "eliminat", "knocked out", "out of the", "already eliminated",
+        "has been eliminated", "were eliminated", "fuera de",
+    ]
+
+    eliminated = False
+    for signal in elimination_signals:
+        idx = html_lower.find(signal)
+        while idx != -1:
+            window = html_lower[max(0, idx - 200): idx + 200]
+            if team_lower in window:
+                eliminated = True
+                break
+            idx = html_lower.find(signal, idx + 1)
+        if eliminated:
+            break
+
+    _TEAM_ELIM_CACHE[cache_key] = (eliminated, now_ts)
+    return eliminated
+
+
 async def analyze_market(enriched_market: dict) -> dict | None:
     """
     Solo analiza si: volume_24h > 5000 AND days_to_close > 2.
@@ -562,6 +726,38 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     category = categorize_market(question)
     category_context = _build_category_context(question, category)
+
+    # Discard "Will X win [tournament]" markets where team is already eliminated
+    _nba_win_prob: float | None = None
+    if category == "sports":
+        _tt = _extract_team_tournament(question)
+        if _tt:
+            _tm, _trn = _tt
+            try:
+                if await _check_team_eliminated(_tm, _trn):
+                    logger.info(
+                        "analyze_market(%s): TEAM_ELIMINATED — %s descartado (%s)",
+                        market_id, _tm, _trn,
+                    )
+                    return None
+            except Exception as _te:
+                logger.debug(
+                    "analyze_market(%s): error verificando eliminación de %s — %s",
+                    market_id, _tm, _te,
+                )
+
+        # NBA playoff series: pre-fetch ESPN win probability for post-LLM floor
+        q_lower = question.lower()
+        if "nba" in q_lower and ("series" in q_lower or "playoffs" in q_lower or "finals" in q_lower):
+            _nba_m = _WIN_TOURNAMENT_RE.search(question)
+            if _nba_m:
+                _nba_team = _nba_m.group(1).strip()
+                try:
+                    _nba_win_prob = await _fetch_nba_win_prob(_nba_team)
+                except Exception as _nwe:
+                    logger.debug(
+                        "analyze_market(%s): error fetch NBA win prob — %s", market_id, _nwe
+                    )
 
     # Detect "Will X reach $Y" markets and fetch live price
     _price_ctx = _detect_price_market(question)
@@ -865,6 +1061,37 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # Capa 2: reemplazar reasoning completo si contradice recommendation.
     reasoning = _clean_contradictory_reasoning(recommendation, reasoning, price_yes, real_prob)
 
+    # FIX 2: near-target floor — target < 10% de distancia → mínimo 60% + no señal contraria
+    if _price_ctx and _pct_needed is not None and abs(_pct_needed) < 10.0:
+        _near_floor = 0.60
+        if real_prob < _near_floor:
+            _old_near = real_prob
+            real_prob = _near_floor
+            edge = round(real_prob - price_yes, 4)
+            _near_dir = "subida" if _pct_needed > 0 else "bajada"
+            _near_note = (
+                f"⚠️ Floor target cercano: {_price_ctx[0]} a solo "
+                f"{abs(_pct_needed):.1f}% del objetivo ({_near_dir}) → prob_min={_near_floor:.0%}"
+            )
+            reasoning = f"{_near_note}\n{reasoning}" if reasoning else _near_note
+            logger.info(
+                "analyze_market(%s): NEAR_TARGET_FLOOR %.3f→%.3f pct_needed=%.1f%% asset=%s",
+                market_id, _old_near, real_prob, _pct_needed, _price_ctx[0],
+            )
+        # No generar señal contraria: BUY_NO en target alcista o BUY_YES en target bajista
+        if _pct_needed > 0 and recommendation == "BUY_NO":
+            recommendation = "PASS"
+            logger.info(
+                "analyze_market(%s): NEAR_TARGET_NO_CONTRA BUY_NO→PASS (target +%.1f%%)",
+                market_id, _pct_needed,
+            )
+        elif _pct_needed < 0 and recommendation == "BUY_YES":
+            recommendation = "PASS"
+            logger.info(
+                "analyze_market(%s): NEAR_TARGET_NO_CONTRA BUY_YES→PASS (target %.1f%%)",
+                market_id, _pct_needed,
+            )
+
     # Cap por magnitud de movimiento requerido — todas las categorías
     if _price_ctx and _pct_needed is not None and abs(_pct_needed) > 50 and real_prob > 0.15:
         _old_prob = real_prob
@@ -998,6 +1225,34 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 )
     except Exception:
         pass
+
+    # FIX 3: NBA playoff series — floor si ESPN muestra equipo muy favorito (> 85%)
+    if _nba_win_prob is not None and _nba_win_prob > 0.85:
+        _nba_floor = 0.75
+        if real_prob < _nba_floor:
+            _old_nba = real_prob
+            real_prob = _nba_floor
+            edge = round(real_prob - price_yes, 4)
+            _nba_note = (
+                f"⚠️ NBA playoff floor: ESPN win_prob={_nba_win_prob:.0%} > 85% "
+                f"→ prob_min={_nba_floor:.0%}"
+            )
+            reasoning = f"{_nba_note}\n{reasoning}" if reasoning else _nba_note
+            logger.info(
+                "analyze_market(%s): NBA_PLAYOFF_FLOOR %.3f→%.3f espn_win_prob=%.1f%%",
+                market_id, _old_nba, real_prob, _nba_win_prob * 100,
+            )
+        # Nunca BUY_NO contra equipo con >85% de ganar según ESPN
+        if recommendation == "BUY_NO":
+            recommendation = "PASS"
+            logger.info(
+                "analyze_market(%s): NBA_NO_CONTRA BUY_NO→PASS (espn=%.1f%%)",
+                market_id, _nba_win_prob * 100,
+            )
+        if edge >= POLY_MIN_EDGE:
+            recommendation = "BUY_YES"
+        elif edge > -POLY_MIN_EDGE:
+            recommendation = "PASS"
 
     # Aplicar ajuste Fear & Greed si es crypto
     if fear_greed and category == "crypto":
