@@ -1447,6 +1447,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     "poisson_home_win": elo_p,
                     "poisson_draw":     max(0.0, 1.0 - elo_p - (1.0 - elo_p) * 0.6),
                     "poisson_away_win": (1.0 - elo_p) * 0.6,
+                    "_synthetic_poisson": True,
                 }
             else:
                 # ELO también ausente — usar form como proxy si no es el default 50/50
@@ -1471,6 +1472,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     "poisson_home_win": form_p,
                     "poisson_draw":     max(0.0, 1.0 - form_p - (1.0 - form_p) * 0.6),
                     "poisson_away_win": (1.0 - form_p) * 0.6,
+                    "_synthetic_poisson": True,
                 }
         else:
             logger.warning(
@@ -1617,24 +1619,55 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         odds_movement = {"flag": "NONE", "direction": None, "pct_change_6h": 0.0,
                         "pct_change_24h": 0.0, "timeframe": None, "message": ""}
 
-    # --- 4. Edge y EV para home y away ---
-    edge_home = calculate_edge(result_home["prob"], home_odds)
-    edge_away = calculate_edge(result_away["prob"], away_odds)
-    ev_home = calculate_ev(result_home["prob"], home_odds)
-    ev_away = calculate_ev(result_away["prob"], away_odds)
+    # --- 4. Probabilidad canónica, Edge y EV ---
+    # BUG2-FIX: para fútbol con Poisson real (no sintético), usar Poisson directamente.
+    # El ensemble infla sistemáticamente la prob a través de form_score/100 que puede
+    # ser 0.85-0.90 para equipos en buena forma, aunque su win-rate real sea 50-60%.
+    _is_real_poisson = (
+        sport == "football"
+        and enriched_match.get("poisson_home_win") is not None
+        and not enriched_match.get("_synthetic_poisson", False)
+    )
+    if _is_real_poisson:
+        _prob_home = float(enriched_match["poisson_home_win"])
+        _prob_away = float(enriched_match.get("poisson_away_win") or 0.0)
+    else:
+        _prob_home = result_home["prob"]
+        _prob_away = result_away["prob"]
+
+    # BUG1-FIX: guardia de divergencia extrema — si prob > 2.5× la probabilidad
+    # implícita del bookmaker, el modelo diverge de forma imposible (e.g. PSG +176% EV).
+    _impl_home = 1.0 / home_odds if home_odds > 1.0 else 1.0
+    _impl_away = 1.0 / away_odds if away_odds > 1.0 else 1.0
+    if _prob_home > _impl_home * 2.5 or _prob_away > _impl_away * 2.5:
+        logger.warning(
+            "generate_signal(%s): divergencia extrema modelo/mercado — descartado "
+            "(p_home=%.2f impl=%.2f ratio=%.1fx | p_away=%.2f impl=%.2f ratio=%.1fx) [%s vs %s | %s]",
+            match_id,
+            _prob_home, _impl_home, _prob_home / max(_impl_home, 0.01),
+            _prob_away, _impl_away, _prob_away / max(_impl_away, 0.01),
+            home_team, away_team, league,
+        )
+        return []
+
+    edge_home = calculate_edge(_prob_home, home_odds)
+    edge_away = calculate_edge(_prob_away, away_odds)
+    ev_home = calculate_ev(_prob_home, home_odds)
+    ev_away = calculate_ev(_prob_away, away_odds)
 
     logger.info(
-        "generate_signal(%s): HOME %s p=%.2f @%.2f edge=%.3f ev=%.3f | AWAY %s p=%.2f @%.2f edge=%.3f ev=%.3f",
+        "generate_signal(%s): HOME %s p=%.2f @%.2f edge=%.3f ev=%.3f | AWAY %s p=%.2f @%.2f edge=%.3f ev=%.3f %s",
         match_id,
-        home_team, result_home["prob"], home_odds, edge_home, ev_home,
-        away_team, result_away["prob"], away_odds, edge_away, ev_away,
+        home_team, _prob_home, home_odds, edge_home, ev_home,
+        away_team, _prob_away, away_odds, edge_away, ev_away,
+        "(Poisson)" if _is_real_poisson else "(ensemble)",
     )
 
     # --- 5. Seleccionar el lado con mayor EV ---
     if ev_home >= ev_away:
         best_edge = edge_home
         best_ev = ev_home
-        best_prob = result_home["prob"]
+        best_prob = _prob_home
         best_confidence = result_home["confidence"]
         best_signals = result_home["signals"]
         best_odds = home_odds
@@ -1642,7 +1675,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     else:
         best_edge = edge_away
         best_ev = ev_away
-        best_prob = result_away["prob"]
+        best_prob = _prob_away
         best_confidence = result_away["confidence"]
         best_signals = result_away["signals"]
         best_odds = away_odds
