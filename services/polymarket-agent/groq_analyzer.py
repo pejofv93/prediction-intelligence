@@ -882,6 +882,10 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         except Exception as _fga:
             logger.debug("groq_analyzer: error aplicando F&G — %s", _fga)
 
+    # Capa final: re-aplicar limpieza de reasoning con los valores definitivos
+    # (recommendation puede haber cambiado por auto-corrección, correlación, etc.)
+    reasoning = _clean_contradictory_reasoning(recommendation, reasoning, price_yes, real_prob)
+
     prediction = {
         "market_id": market_id,
         "question": question,
