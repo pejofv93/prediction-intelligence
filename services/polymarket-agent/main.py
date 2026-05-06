@@ -441,7 +441,9 @@ async def _bg_analyze() -> dict:
         from datetime import timedelta
         from groq_analyzer import categorize_market, market_analysis_priority
 
-        # Excluir mercados analizados en <12h salvo que precio haya cambiado >3%
+        # Excluir mercados analizados recientemente salvo que precio haya cambiado >3%
+        # Cooldown dinámico: alto volumen (>$100k)→4h, medio (>$10k)→6h, bajo→12h
+        # Mercados nuevos (<48h) y precio con Δ>3% siempre se re-analizan
         _cutoff_12h = datetime.now(timezone.utc) - timedelta(hours=12)
         _recent_preds: dict[str, dict] = {}
         try:
@@ -452,7 +454,10 @@ async def _bg_analyze() -> dict:
             )
             for _pd in _pred_docs:
                 _pdata = _pd.to_dict()
-                _recent_preds[_pd.id] = {"price": float(_pdata.get("market_price_yes", 0.5))}
+                _recent_preds[_pd.id] = {
+                    "price": float(_pdata.get("market_price_yes", 0.5)),
+                    "analyzed_at": _pdata.get("analyzed_at"),
+                }
             logger.info("analyze: %d mercados analizados en las últimas 12h", len(_recent_preds))
         except Exception as _rpe:
             logger.warning("analyze: error leyendo poly_predictions recientes — %s", _rpe)
@@ -495,17 +500,42 @@ async def _bg_analyze() -> dict:
                 logger.debug("analyze: %s pre-filtrado — price_yes=%.3f extremo", _mid, _py)
                 continue
 
-            # Filtro rotación: analizado <12h sin Δprecio >3%
+            # Filtro rotación: cooldown dinámico por volumen + mercados nuevos siempre activos
             if _mid in _recent_preds:
                 _last_price = _recent_preds[_mid]["price"]
                 _price_chg = abs(_py - _last_price) / max(_last_price, 0.001)
-                if _price_chg <= 0.03:
-                    _skipped_rotation += 1
-                    logger.debug(
-                        "analyze: %s omitido — analizado <12h, precio sin cambio (%.1f%%)",
-                        _mid, _price_chg * 100,
-                    )
-                    continue
+                if _price_chg > 0.03:
+                    pass  # precio cambió >3% → re-analizar siempre
+                else:
+                    _poly_data = _poly_cache.get(_mid, {})
+                    _mkt_vol = float(_poly_data.get("volume_24h") or 0.0)
+                    _created = _poly_data.get("created_at") or _poly_data.get("start_date")
+                    _mkt_age_h = 999.0
+                    if _created:
+                        if hasattr(_created, "tzinfo") and _created.tzinfo is None:
+                            _created = _created.replace(tzinfo=timezone.utc)
+                        _mkt_age_h = (_now_utc - _created).total_seconds() / 3600
+
+                    if _mkt_age_h < 48:
+                        pass  # mercado nuevo (<48h) → sin cooldown
+                    else:
+                        _cooldown_h = 12 if _mkt_vol <= 10_000 else (6 if _mkt_vol <= 100_000 else 4)
+                        _cutoff_dyn = _now_utc - timedelta(hours=_cooldown_h)
+                        _last_analyzed = _recent_preds[_mid].get("analyzed_at")
+                        _skip = False
+                        if _last_analyzed:
+                            if hasattr(_last_analyzed, "tzinfo") and _last_analyzed.tzinfo is None:
+                                _last_analyzed = _last_analyzed.replace(tzinfo=timezone.utc)
+                            _skip = _last_analyzed >= _cutoff_dyn
+                        else:
+                            _skip = True  # sin timestamp → asumir analizado <12h
+                        if _skip:
+                            _skipped_rotation += 1
+                            logger.debug(
+                                "analyze: %s omitido — cooldown %dh (vol=$%.0f), precio sin cambio (%.1f%%)",
+                                _mid, _cooldown_h, _mkt_vol, _price_chg * 100,
+                            )
+                            continue
 
             _cat = categorize_market(_m.get("question", ""))
             _markets_by_cat.setdefault(_cat, []).append(_m)
@@ -516,7 +546,7 @@ async def _bg_analyze() -> dict:
         )
         if _skipped_rotation:
             logger.info(
-                "analyze: %d mercados excluidos por rotación (analiz. <12h sin Δprecio >3%%)",
+                "analyze: %d mercados excluidos por rotación (cooldown dinámico sin Δprecio >3%%)",
                 _skipped_rotation,
             )
 
