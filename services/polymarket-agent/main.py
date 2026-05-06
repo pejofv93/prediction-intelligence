@@ -358,6 +358,26 @@ async def _bg_enrich() -> dict:
             return {"status": "error", "error": f"{type(e).__name__}: {e}", "enriched": 0}
         markets = [d.to_dict() for d in docs_raw]
 
+        # Filtrar mercados expirados antes de enriquecer — evita gastar enrichments
+        # en mercados "Will X in April?" que ya vencieron. end_date=null → mantener.
+        from datetime import timedelta
+        _min_end = datetime.now(timezone.utc) + timedelta(days=2)
+        _valid, _expired = [], 0
+        for _m in markets:
+            _end = _m.get("end_date")
+            if _end is None:
+                _valid.append(_m)
+                continue
+            if hasattr(_end, "tzinfo") and _end.tzinfo is None:
+                _end = _end.replace(tzinfo=timezone.utc)
+            if _end >= _min_end:
+                _valid.append(_m)
+            else:
+                _expired += 1
+        if _expired:
+            logger.info("enrich: %d mercados expirados descartados (end_date < now+2d)", _expired)
+        markets = _valid
+
         count = await run_enrichment(markets)
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
