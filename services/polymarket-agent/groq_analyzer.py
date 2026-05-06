@@ -1110,7 +1110,24 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     # Construir documento poly_prediction
     real_prob = float(result.get("real_prob", price_yes))
-    edge = float(result.get("edge", real_prob - price_yes))
+
+    # Validación: LLM puede devolver real_prob como porcentaje (75 en lugar de 0.75)
+    if real_prob > 1.0:
+        _rp_raw = real_prob
+        real_prob = real_prob / 100.0
+        logger.warning(
+            "analyze_market(%s): real_prob=%.4f fuera de [0,1] — dividido /100 → %.4f",
+            market_id, _rp_raw, real_prob,
+        )
+        if real_prob > 1.0:
+            logger.error(
+                "analyze_market(%s): real_prob=%.4f inválido incluso tras /100 — descartado",
+                market_id, real_prob,
+            )
+            return None
+
+    # Recalcular edge siempre desde real_prob normalizado (no confiar en el edge del LLM)
+    edge = round(real_prob - price_yes, 4)
     confidence = float(result.get("confidence", 0.5))
     trend = result.get("trend", enriched_market.get("price_momentum", "STABLE"))
     recommendation = result.get("recommendation", "PASS")
