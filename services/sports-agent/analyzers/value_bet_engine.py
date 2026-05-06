@@ -868,6 +868,51 @@ def _calculate_ah_prob(enriched_match: dict, line: float = -0.5) -> dict | None:
     return None
 
 
+def _calculate_correct_score_probs(home_xg: float, away_xg: float, max_goals: int = 4) -> dict[str, float]:
+    """
+    Distribución bivariada Poisson: P(home=i, away=j) para resultados 0-0 … max_goals-max_goals.
+    Retorna {"0-0": prob, "1-0": prob, ...} ordenado por probabilidad descendente.
+    """
+    from scipy.stats import poisson as _poisson
+    lh = max(0.01, float(home_xg))
+    la = max(0.01, float(away_xg))
+    probs: dict[str, float] = {}
+    for h in range(max_goals + 1):
+        for a in range(max_goals + 1):
+            p = float(_poisson.pmf(h, lh)) * float(_poisson.pmf(a, la))
+            probs[f"{h}-{a}"] = round(p, 6)
+    return probs
+
+
+def _calculate_ht_goals_probs(enriched_match: dict, line: float = 0.5) -> dict | None:
+    """
+    P(over/under line goles en primera mitad).
+    xG_1H = xG_total × 0.45 (distribución histórica por mitad).
+    """
+    from scipy.stats import poisson as _poisson
+    home_xg = enriched_match.get("home_xg")
+    away_xg = enriched_match.get("away_xg")
+    if home_xg is None or away_xg is None:
+        return None
+    try:
+        ht_expected = (float(home_xg) + float(away_xg)) * 0.45
+        if ht_expected <= 0:
+            return None
+        floor_line = int(line)
+        prob_under_or_eq = sum(float(_poisson.pmf(k, ht_expected)) for k in range(floor_line + 1))
+        over_prob = max(0.0, min(1.0, 1.0 - prob_under_or_eq))
+        under_prob = max(0.0, min(1.0, prob_under_or_eq))
+        return {
+            "over_prob": round(over_prob, 4),
+            "under_prob": round(under_prob, 4),
+            "expected_total": round(ht_expected, 2),
+            "line": line,
+        }
+    except Exception:
+        logger.error("_calculate_ht_goals_probs: error", exc_info=True)
+        return None
+
+
 async def _generate_oddsapiio_extra_signals(
     enriched_match: dict,
     all_markets: dict,
@@ -1075,6 +1120,143 @@ async def _generate_oddsapiio_extra_signals(
                     except Exception:
                         logger.error("generate_signal(%s): error guardando ah05", match_id, exc_info=True)
                     if sel_ev_ah > SPORTS_ALERT_EDGE:
+                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+                    results.append(pred)
+
+    # ── Correct Score ─────────────────────────────────────────────────────────
+    _CS_MIN_EV = 0.20
+    cs_mkt = all_markets.get("correct_score", {})
+    logger.info("EXTRA_MARKETS_CS(%s): %d scorelines disponibles", match_id, len(cs_mkt))
+    if cs_mkt and enriched_match.get("home_xg") is not None:
+        cs_probs = _calculate_correct_score_probs(
+            enriched_match["home_xg"], enriched_match["away_xg"]
+        )
+        best_cs_score: str | None = None
+        best_cs_ev = -999.0
+        best_cs_odds = 0.0
+        best_cs_prob = 0.0
+        best_cs_bk = ""
+        for score, mkt_info in cs_mkt.items():
+            prob = cs_probs.get(score, 0.0)
+            if prob <= 0.0:
+                continue
+            s_odds = mkt_info.get("odds", 0.0)
+            if s_odds <= 1.05:
+                continue
+            ev = calculate_ev(prob, s_odds)
+            if ev > best_cs_ev:
+                best_cs_ev = ev
+                best_cs_score = score
+                best_cs_odds = s_odds
+                best_cs_prob = prob
+                best_cs_bk = mkt_info.get("bookmaker", "")
+        logger.info(
+            "EXTRA_MARKETS_CS(%s): best=%s odds=%.2f prob=%.4f ev=%.4f (min=%.2f) → %s",
+            match_id, best_cs_score, best_cs_odds, best_cs_prob, best_cs_ev, _CS_MIN_EV,
+            "OK" if best_cs_ev > _CS_MIN_EV else "SKIP",
+        )
+        if best_cs_score and best_cs_ev > _CS_MIN_EV:
+            # Divergence guard: discard if model prob > 2.5× implied
+            _cs_implied = 1.0 / best_cs_odds
+            if best_cs_prob > _cs_implied * 2.5:
+                logger.warning(
+                    "EXTRA_MARKETS_CS(%s): divergencia extrema %s prob=%.4f impl=%.4f — descartado",
+                    match_id, best_cs_score, best_cs_prob, _cs_implied,
+                )
+            else:
+                doc_id = f"{match_id}_cs_{best_cs_score.replace('-', '')}"
+                pred = {
+                    "match_id": doc_id, "home_team": home_team, "away_team": away_team,
+                    "sport": sport, "league": league, "market_type": "CORRECT_SCORE",
+                    "selection": best_cs_score, "bookmaker": best_cs_bk,
+                    "odds": round(best_cs_odds, 3), "calculated_prob": best_cs_prob,
+                    "edge": round(calculate_edge(best_cs_prob, best_cs_odds), 4),
+                    "ev": round(best_cs_ev, 4),
+                    "confidence": round(min(1.0, best_cs_prob * best_cs_odds), 4),
+                    "kelly_fraction": kelly_criterion(best_cs_ev, best_cs_odds),
+                    "factors": {
+                        "home_xg": enriched_match.get("home_xg"),
+                        "away_xg": enriched_match.get("away_xg"),
+                        "model_prob": best_cs_prob,
+                    },
+                    "signals": {}, "data_source": "poisson_cs", "odds_source": "oddsapiio",
+                    "match_date": match_date, "weights_version": weights_version,
+                    "created_at": now, "result": None, "correct": None, "error_type": None,
+                }
+                try:
+                    col("predictions").document(doc_id).set(pred)
+                    logger.info(
+                        "generate_signal(%s): CorrectScore %s @ %.2f ev=%.1f%%",
+                        match_id, best_cs_score, best_cs_odds, best_cs_ev * 100,
+                    )
+                except Exception:
+                    logger.error("generate_signal(%s): error guardando cs", match_id, exc_info=True)
+                if best_cs_ev > SPORTS_ALERT_EDGE:
+                    await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+                results.append(pred)
+
+    # ── HT Goals (primera mitad) ───────────────────────────────────────────────
+    _HT_MIN_EV = 0.10
+    ht_totals_list = all_markets.get("ht_totals", [])
+    available_ht_lines = [t.get("line") for t in ht_totals_list]
+    logger.info("EXTRA_MARKETS_HT(%s): ht_lines=%s", match_id, available_ht_lines)
+    ht05 = next((t for t in ht_totals_list if abs(t.get("line", 0) - 0.5) < 0.01), None)
+    if not ht05 and ht_totals_list:
+        ht05 = ht_totals_list[0]  # usar la línea más cercana disponible
+    if ht05:
+        ht_line = ht05.get("line", 0.5)
+        ht_probs = _calculate_ht_goals_probs(enriched_match, line=ht_line)
+        if ht_probs:
+            ht_over_odds = ht05.get("over_odds") or 0.0
+            ht_under_odds = ht05.get("under_odds") or 0.0
+            ht_over_ev = calculate_ev(ht_probs["over_prob"], ht_over_odds) if ht_over_odds > 1.05 else -1.0
+            ht_under_ev = calculate_ev(ht_probs["under_prob"], ht_under_odds) if ht_under_odds > 1.05 else -1.0
+            logger.info(
+                "EXTRA_MARKETS_HT(%s): line=%.1f over_prob=%.3f odds=%.2f ev=%.4f "
+                "| under_prob=%.3f odds=%.2f ev=%.4f | min=%.2f",
+                match_id, ht_line,
+                ht_probs["over_prob"], ht_over_odds, ht_over_ev,
+                ht_probs["under_prob"], ht_under_odds, ht_under_ev,
+                _HT_MIN_EV,
+            )
+            if ht_over_ev >= ht_under_ev and ht_over_ev > _HT_MIN_EV:
+                ht_sel, ht_sp, ht_so, ht_sev = "Over", ht_probs["over_prob"], ht_over_odds, ht_over_ev
+            elif ht_under_ev > ht_over_ev and ht_under_ev > _HT_MIN_EV:
+                ht_sel, ht_sp, ht_so, ht_sev = "Under", ht_probs["under_prob"], ht_under_odds, ht_under_ev
+            else:
+                ht_sel = None
+                logger.info("EXTRA_MARKETS_HT(%s): SKIP — ningún lado supera min_ev=%.2f", match_id, _HT_MIN_EV)
+            if ht_sel:
+                ht_conf = round(abs(ht_sp - 0.5) * 2, 4)
+                if ht_conf > SPORTS_MIN_CONFIDENCE:
+                    doc_id = f"{match_id}_ht{str(ht_line).replace('.', '')}"
+                    pred = {
+                        "match_id": doc_id, "home_team": home_team, "away_team": away_team,
+                        "sport": sport, "league": league, "market_type": "HT_GOALS",
+                        "selection": f"{ht_sel} {ht_line} (1H)", "line": ht_line,
+                        "bookmaker": ht05.get("bookmaker", ""),
+                        "odds": round(ht_so, 3), "calculated_prob": ht_sp,
+                        "edge": round(calculate_edge(ht_sp, ht_so), 4),
+                        "ev": round(ht_sev, 4), "confidence": ht_conf,
+                        "kelly_fraction": kelly_criterion(ht_sev, ht_so),
+                        "factors": {
+                            "ht_expected_total": ht_probs["expected_total"],
+                            "home_xg": enriched_match.get("home_xg"),
+                            "away_xg": enriched_match.get("away_xg"),
+                        },
+                        "signals": {}, "data_source": "poisson_ht", "odds_source": "oddsapiio",
+                        "match_date": match_date, "weights_version": weights_version,
+                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                    }
+                    try:
+                        col("predictions").document(doc_id).set(pred)
+                        logger.info(
+                            "generate_signal(%s): HT %s %.1f (1H) @ %.2f ev=%.1f%%",
+                            match_id, ht_sel, ht_line, ht_so, ht_sev * 100,
+                        )
+                    except Exception:
+                        logger.error("generate_signal(%s): error guardando ht", match_id, exc_info=True)
+                    if ht_sev > SPORTS_ALERT_EDGE:
                         await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                     results.append(pred)
 

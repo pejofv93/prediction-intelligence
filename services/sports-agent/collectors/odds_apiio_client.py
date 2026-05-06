@@ -411,7 +411,7 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
         params = {
             "eventIds": ",".join(batch),
             "bookmakers": _DEFAULT_BOOKMAKERS,
-            "markets": "h2h,btts,total_goals,asian_handicap,corners",
+            "markets": "h2h,btts,total_goals,asian_handicap,corners,correct_score,1st_half_goals",
         }
         if _first_call:
             status, body, data = await _get_raw("/odds/multi", params)
@@ -574,6 +574,11 @@ def _normalise_market_key(raw: str) -> str:
         "over_under": "totals", "totals": "totals", "goals": "totals",
         "over/under": "totals", "total_goals": "totals",
         "btts": "btts", "both_teams_to_score": "btts", "gg": "btts",
+        "correct_score": "correct_score", "score": "correct_score",
+        "1st_half_goals": "ht_totals", "halftime_goals": "ht_totals",
+        "1st_half_total": "ht_totals", "ht_over_under": "ht_totals",
+        "1st_half_total_goals": "ht_totals", "h1_totals": "ht_totals",
+        "first_half_goals": "ht_totals", "first_half_total": "ht_totals",
     }
     return mapping.get(raw, raw)
 
@@ -635,6 +640,33 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
                 outcomes.append({"name": "Yes", "price": yes})
             if no and no > 1:
                 outcomes.append({"name": "No", "price": no})
+
+    elif norm == "correct_score":
+        if isinstance(mkt_data, list):
+            for o in mkt_data:
+                name = o.get("name") or o.get("score") or o.get("label") or ""
+                price = _to_float(o.get("price") or o.get("odds") or o.get("odd"))
+                if name and price:
+                    name = name.replace(":", "-").replace(" ", "").strip()
+                    outcomes.append({"name": name, "price": price})
+
+    elif norm == "ht_totals":
+        # Same structure as totals but for first half
+        if isinstance(mkt_data, list):
+            for o in mkt_data:
+                line = _to_float(o.get("line") or o.get("total") or o.get("handicap"))
+                over = _to_float(o.get("over") or o.get("overOdds"))
+                under = _to_float(o.get("under") or o.get("underOdds"))
+                if line and over and under:
+                    outcomes.append({"name": "Over", "price": over, "point": line})
+                    outcomes.append({"name": "Under", "price": under, "point": line})
+        elif isinstance(mkt_data, dict):
+            line = _to_float(mkt_data.get("line") or mkt_data.get("total"))
+            over = _to_float(mkt_data.get("over"))
+            under = _to_float(mkt_data.get("under"))
+            if over and under:
+                outcomes.append({"name": "Over", "price": over, "point": line or 0.5})
+                outcomes.append({"name": "Under", "price": under, "point": line or 0.5})
 
     return outcomes
 
@@ -770,6 +802,39 @@ def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
                 {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
                 for entry in by_pt.values()
                 if entry["home_odds"] and entry["away_odds"]
+            ]
+
+        elif mkt_key == "correct_score":
+            by_score: dict[str, dict] = {}
+            for e in entries:
+                bk = e["bookmaker"]
+                for o in e["outcomes"]:
+                    score = o.get("name", "").replace(":", "-").strip()
+                    p = float(o.get("price") or 0)
+                    if score and p > 1:
+                        if score not in by_score or p > by_score[score]["odds"]:
+                            by_score[score] = {"odds": round(p, 3), "bookmaker": bk}
+            if by_score:
+                out["correct_score"] = by_score
+
+        elif mkt_key == "ht_totals":
+            by_ht_line: dict[float, dict] = {}
+            for e in entries:
+                bk = e["bookmaker"]
+                for o in e["outcomes"]:
+                    ln = round(float(o.get("point") or 0.5), 1)
+                    if ln not in by_ht_line:
+                        by_ht_line[ln] = {"line": ln, "over_odds": 0.0, "under_odds": 0.0, "bookmaker": ""}
+                    p = float(o.get("price") or 0)
+                    if o.get("name") == "Over" and p > by_ht_line[ln]["over_odds"]:
+                        by_ht_line[ln]["over_odds"] = p
+                        by_ht_line[ln]["bookmaker"] = bk
+                    elif o.get("name") == "Under" and p > by_ht_line[ln]["under_odds"]:
+                        by_ht_line[ln]["under_odds"] = p
+            out["ht_totals"] = [
+                {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
+                for entry in by_ht_line.values()
+                if entry["over_odds"] and entry["under_odds"]
             ]
 
     return out
