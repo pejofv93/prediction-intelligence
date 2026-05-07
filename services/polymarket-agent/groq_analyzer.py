@@ -32,6 +32,8 @@ _TEAM_ELIM_TTL: float = 14400.0
 # NBA playoff series win-prob cache (30-min TTL)
 _NBA_SERIES_CACHE: dict[str, tuple[float, float]] = {}
 _NBA_SERIES_TTL: float = 1800.0
+# NBA playoff series state cache: (team_wins, opp_wins)
+_NBA_SERIES_STATE_CACHE: dict[str, tuple[tuple[int, int], float]] = {}
 
 # League title race standings cache (4h TTL)
 _TITLE_RACE_CACHE: dict[str, tuple[int | None, float]] = {}
@@ -184,6 +186,10 @@ CATEGORY_KEYWORDS = {
 def categorize_market(question: str) -> str:
     """Categoriza un mercado Polymarket según su pregunta. Devuelve categoria o 'other'."""
     q_lower = question.lower()
+    # Sports override: detecta torneos de tenis antes del scan general.
+    # Evita que apellidos como "Solana" (jugadora) activen la categoría crypto.
+    if _TENNIS_RE.search(q_lower):
+        return "sports"
     for category, keywords in CATEGORY_KEYWORDS.items():
         if any(kw in q_lower for kw in keywords):
             return category
@@ -673,6 +679,77 @@ async def _fetch_nba_win_prob(team_name: str) -> float | None:
     return None
 
 
+async def _fetch_nba_series_state(team_name: str) -> tuple[int, int] | None:
+    """
+    Returns (team_wins, opp_wins) from ESPN NBA playoff scoreboard.
+    Works between games — the scoreboard always shows the most recent/upcoming series.
+    Cache 30 min.
+    """
+    import asyncio
+    import json
+    import urllib.request
+
+    cache_key = team_name.lower()
+    now_ts = _time.monotonic()
+    if cache_key in _NBA_SERIES_STATE_CACHE:
+        state, ts = _NBA_SERIES_STATE_CACHE[cache_key]
+        if now_ts - ts < _NBA_SERIES_TTL:
+            return state
+
+    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+
+    def _fetch() -> dict | None:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                return json.loads(resp.read())
+        except Exception as _e:
+            logger.debug("_fetch_nba_series_state: ESPN error — %s", _e)
+            return None
+
+    data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+    if not data:
+        return None
+
+    team_lower = team_name.lower()
+
+    def _team_matches(competitor: dict) -> bool:
+        t = competitor.get("team", {})
+        candidates = [
+            (t.get("displayName") or "").lower(),
+            (t.get("shortDisplayName") or "").lower(),
+            (t.get("abbreviation") or "").lower(),
+        ]
+        return any(c and (team_lower in c or c in team_lower) for c in candidates)
+
+    for event in data.get("events", []):
+        for comp in event.get("competitions", []):
+            series = comp.get("series")
+            if not series:
+                continue
+            competitors = comp.get("competitors", [])
+            target = next((c for c in competitors if _team_matches(c)), None)
+            opponent = next((c for c in competitors if not _team_matches(c)), None)
+            if target is None or opponent is None:
+                continue
+            target_id = target.get("id", "")
+            opp_id = opponent.get("id", "")
+            team_wins = 0
+            opp_wins = 0
+            for sc in series.get("competitors", []):
+                wins = int(sc.get("wins", 0))
+                if sc.get("id", "") == target_id:
+                    team_wins = wins
+                elif sc.get("id", "") == opp_id:
+                    opp_wins = wins
+            result = (team_wins, opp_wins)
+            _NBA_SERIES_STATE_CACHE[cache_key] = (result, now_ts)
+            logger.info("_fetch_nba_series_state: %s → %d-%d", team_name, team_wins, opp_wins)
+            return result
+
+    return None
+
+
 def _extract_team_tournament(question: str) -> tuple[str, str] | None:
     """Extract (team, tournament) from 'Will X win [the] Y?' questions."""
     m = _WIN_TOURNAMENT_RE.search(question)
@@ -883,6 +960,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     # Discard "Will X win [tournament]" markets where team is already eliminated
     _nba_win_prob: float | None = None
+    _nba_series_wins: tuple[int, int] | None = None
     if category == "sports":
         _tt = _extract_team_tournament(question)
         if _tt:
@@ -905,7 +983,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id, _tm, _te,
                 )
 
-        # NBA playoff series: pre-fetch ESPN win probability for post-LLM floor
+        # NBA playoff series: pre-fetch ESPN win probability + series state for post-LLM floor
         q_lower = question.lower()
         if "nba" in q_lower and ("series" in q_lower or "playoffs" in q_lower or "finals" in q_lower):
             _nba_m = _WIN_TOURNAMENT_RE.search(question)
@@ -923,6 +1001,19 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 except Exception as _nwe:
                     logger.debug(
                         "analyze_market(%s): error fetch NBA win prob — %s", market_id, _nwe
+                    )
+                try:
+                    _nba_series_wins = await asyncio.wait_for(
+                        _fetch_nba_series_state(_nba_team), timeout=5.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "analyze_market(%s): _fetch_nba_series_state timeout >5s — skip (%s)",
+                        market_id, _nba_team,
+                    )
+                except Exception as _nse:
+                    logger.debug(
+                        "analyze_market(%s): error fetch NBA series state — %s", market_id, _nse
                     )
 
     # Individual sports match context: tenis, UFC, MLB
@@ -1526,28 +1617,43 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             except Exception as _tre:
                 logger.debug("analyze_market(%s): TITLE_RACE_CHECK error — %s", market_id, _tre)
 
-    # FIX 3: NBA playoff series — floor si ESPN muestra equipo muy favorito (> 85%)
-    if _nba_win_prob is not None and _nba_win_prob > 0.85:
+    # FIX 3: NBA playoff series — floor basado en estado real de la serie (wins ESPN)
+    _nba_floor: float | None = None
+    _nba_floor_reason: str = ""
+    if _nba_series_wins is not None:
+        _tw, _ow = _nba_series_wins
+        if _tw == 3 and _ow == 0:
+            _nba_floor = 0.90
+            _nba_floor_reason = f"serie 3-0 → prob_min=90%"
+        elif _tw == 3 and _ow == 1:
+            _nba_floor = 0.85
+            _nba_floor_reason = f"serie 3-1 → prob_min=85%"
+        elif _tw == 2 and _ow == 0:
+            _nba_floor = 0.75
+            _nba_floor_reason = f"serie 2-0 → prob_min=75%"
+    elif _nba_win_prob is not None and _nba_win_prob > 0.85:
         _nba_floor = 0.75
+        _nba_floor_reason = f"ESPN win_prob={_nba_win_prob:.0%} > 85% → prob_min=75%"
+
+    if _nba_floor is not None:
         if real_prob < _nba_floor:
             _old_nba = real_prob
             real_prob = _nba_floor
             edge = round(real_prob - price_yes, 4)
-            _nba_note = (
-                f"⚠️ NBA playoff floor: ESPN win_prob={_nba_win_prob:.0%} > 85% "
-                f"→ prob_min={_nba_floor:.0%}"
-            )
+            _nba_note = f"⚠️ NBA playoff floor: {_nba_floor_reason}"
             reasoning = f"{_nba_note}\n{reasoning}" if reasoning else _nba_note
             logger.info(
-                "analyze_market(%s): NBA_PLAYOFF_FLOOR %.3f→%.3f espn_win_prob=%.1f%%",
-                market_id, _old_nba, real_prob, _nba_win_prob * 100,
+                "analyze_market(%s): NBA_PLAYOFF_FLOOR %.3f→%.3f (%s)",
+                market_id, _old_nba, real_prob, _nba_floor_reason,
             )
-        # Nunca BUY_NO contra equipo con >85% de ganar según ESPN
-        if recommendation == "BUY_NO":
+        # Nunca BUY_NO contra equipo líder 2-0 o más en la serie
+        _team_leading = _nba_series_wins is not None and _nba_series_wins[0] >= 2
+        _espn_dominant = _nba_win_prob is not None and _nba_win_prob > 0.85
+        if recommendation == "BUY_NO" and (_team_leading or _espn_dominant):
             recommendation = "PASS"
             logger.info(
-                "analyze_market(%s): NBA_NO_CONTRA BUY_NO→PASS (espn=%.1f%%)",
-                market_id, _nba_win_prob * 100,
+                "analyze_market(%s): NBA_NO_CONTRA BUY_NO→PASS (%s)",
+                market_id, _nba_floor_reason,
             )
         if edge >= POLY_MIN_EDGE:
             recommendation = "BUY_YES"
