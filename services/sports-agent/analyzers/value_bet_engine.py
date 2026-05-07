@@ -1986,19 +1986,27 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
 
     _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
 
-    # CL/EL/ECL: umbral estricto INDEPENDIENTE de data_quality.
-    # El enricher puede marcar "full" si encuentra stats de liga doméstica para ambos equipos,
-    # pero los enfrentamientos inter-confederación son menos predecibles → gate duro siempre.
-    _intl_strict_leagues = {"CL", "EL", "ECL"}
-    if league in _intl_strict_leagues:
+    # Umbral estricto por competición europea — independiente de data_quality.
+    # CL: mercado muy eficiente, equipos top → EV>15% y conf>75%
+    # EL/ECL: mercado menos eficiente, más edge disponible → EV>10% y conf>68%
+    if league == "CL":
         if best_ev <= 0.15 or best_confidence <= 0.75:
             logger.info(
+                "generate_signal(%s): descartado — CL EV=%.3f conf=%.3f "
+                "(requiere EV>0.15 y conf>0.75)",
+                match_id, best_ev, best_confidence,
+            )
+            return []
+    elif league in {"EL", "ECL"}:
+        if best_ev <= 0.10 or best_confidence <= 0.68:
+            logger.info(
                 "generate_signal(%s): descartado — %s EV=%.3f conf=%.3f "
-                "(requiere EV>0.15 y conf>0.75 en ligas europeas)",
+                "(requiere EV>0.10 y conf>0.68)",
                 match_id, league, best_ev, best_confidence,
             )
             return []
 
+    _intl_strict_leagues = {"CL", "EL", "ECL"}
     # Calidad de datos: si es partial (y no es CL/EL/ECL), reducir confianza 10% y re-evaluar tiers
     if data_quality == "partial" and league not in _intl_strict_leagues:
         best_confidence = round(max(0.0, best_confidence * 0.9), 4)
