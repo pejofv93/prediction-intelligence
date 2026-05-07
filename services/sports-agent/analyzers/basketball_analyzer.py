@@ -479,6 +479,22 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                         match_id, tag, team_seed, opp_seed, team,
                     )
                     continue
+                # NBA_UNDERDOG_EXTREME: visitante con odds > 6.00 no tiene valor apostable en NBA
+                if tag == "away" and odds > 6.00:
+                    logger.info(
+                        "basketball_analyzer(%s): NBA_UNDERDOG_EXTREME: %s descartado "
+                        "(odds=%.2f > 6.00) [%s vs %s]",
+                        match_id, team, odds, home_name, away_name,
+                    )
+                    continue
+                # NBA_UNDERDOG_EXTREME: visitante con odds > 4.00 y win_prob < 20% → sin valor
+                if tag == "away" and odds > 4.00 and prob < 0.20:
+                    logger.info(
+                        "basketball_analyzer(%s): NBA_UNDERDOG_EXTREME: %s descartado "
+                        "(odds=%.2f > 4.00, win_prob=%.1f%%) [%s vs %s]",
+                        match_id, team, odds, prob * 100, home_name, away_name,
+                    )
+                    continue
                 # Descuento elite: rival con seed ≤2 → bookmakers más eficientes, −20% edge
                 edge_discount = 0.80 if (opp_seed and opp_seed <= 2) else 1.0
                 pred = _make_pred(base, "h2h", team, odds, prob,
