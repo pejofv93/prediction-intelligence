@@ -1968,6 +1968,86 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     if _standings_confidence_adj < 1.0:
         best_confidence = round(best_confidence * _standings_confidence_adj, 4)
 
+    # --- 5g. Contexto situacional: posición en tabla, forma comparada, momentum ---
+    _ctx_penalties: list[str] = []
+    _ctx_factors: dict = {}
+    _conf_before_ctx = best_confidence
+
+    _selected_team_id = (
+        enriched_match.get("home_team_id") if team_to_back == str(home_team)
+        else enriched_match.get("away_team_id")
+    )
+    _rival_team_id = (
+        enriched_match.get("away_team_id") if team_to_back == str(home_team)
+        else enriched_match.get("home_team_id")
+    )
+
+    # i) Posición en tabla: si el rival está mejor clasificado que el equipo seleccionado
+    try:
+        _ctx_sel_pos   = _get_table_position(_selected_team_id, league)
+        _ctx_rival_pos = _get_table_position(_rival_team_id, league)
+        if _ctx_sel_pos is not None and _ctx_rival_pos is not None:
+            _pos_diff = _ctx_sel_pos - _ctx_rival_pos  # positivo = rival está más arriba (número menor)
+            if _pos_diff > 6:
+                best_confidence = round(best_confidence * 0.80, 4)
+                _ctx_penalties.append(
+                    f"rival_position_better(rival={_ctx_rival_pos} sel={_ctx_sel_pos} Δ={_pos_diff})(−20%)"
+                )
+            elif _pos_diff > 3:
+                best_confidence = round(best_confidence * 0.90, 4)
+                _ctx_penalties.append(
+                    f"rival_position_better(rival={_ctx_rival_pos} sel={_ctx_sel_pos} Δ={_pos_diff})(−10%)"
+                )
+    except Exception as _cpe:
+        logger.debug("generate_signal(%s): error posición en tabla — %s", match_id, _cpe)
+
+    # ii) Forma reciente comparada: si el rival tiene forma significativamente mejor
+    _ctx_sel_form_score = float(
+        enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
+        else enriched_match.get("away_form_score", 50.0)
+    )
+    _ctx_rival_form_score = float(
+        enriched_match.get("away_form_score", 50.0) if team_to_back == str(home_team)
+        else enriched_match.get("home_form_score", 50.0)
+    )
+    if _ctx_rival_form_score > _ctx_sel_form_score + 20:
+        best_confidence = round(best_confidence * 0.90, 4)
+        _ctx_penalties.append(
+            f"rival_form>{_ctx_rival_form_score:.0f}_vs_{_ctx_sel_form_score:.0f}(−10%)"
+        )
+    _ctx_factors["rival_form"] = round(_ctx_rival_form_score / 100.0, 4)
+
+    # iii) Momentum: racha del equipo seleccionado y del rival
+    _ctx_sel_streak = (
+        enriched_match.get("home_streak", {}) if team_to_back == str(home_team)
+        else enriched_match.get("away_streak", {})
+    )
+    _ctx_rival_streak = (
+        enriched_match.get("away_streak", {}) if team_to_back == str(home_team)
+        else enriched_match.get("home_streak", {})
+    )
+    _ctx_sel_streak_type  = _ctx_sel_streak.get("type", "")    if isinstance(_ctx_sel_streak, dict) else ""
+    _ctx_sel_streak_count = int(_ctx_sel_streak.get("count", 0)) if isinstance(_ctx_sel_streak, dict) else 0
+    _ctx_rival_streak_type  = _ctx_rival_streak.get("type", "")    if isinstance(_ctx_rival_streak, dict) else ""
+    _ctx_rival_streak_count = int(_ctx_rival_streak.get("count", 0)) if isinstance(_ctx_rival_streak, dict) else 0
+
+    if _ctx_rival_streak_type == "win" and _ctx_rival_streak_count >= 2:
+        _ctx_factors["rival_momentum"] = _ctx_rival_streak_count
+        _ctx_penalties.append(f"rival_momentum_{_ctx_rival_streak_count}W")
+
+    if _ctx_sel_streak_type == "loss" and _ctx_sel_streak_count >= 2:
+        best_confidence = round(best_confidence * 0.85, 4)
+        _ctx_factors["bad_streak"] = _ctx_sel_streak_count
+        _ctx_penalties.append(f"bad_streak_{_ctx_sel_streak_count}L(−15%)")
+
+    # Log explicativo si hubo penalizaciones de confianza
+    if _ctx_penalties:
+        logger.info(
+            "CONTEXT_PENALTY(%s): conf reducida de %.2f a %.2f (%s) [%s vs %s | %s]",
+            match_id, _conf_before_ctx, best_confidence,
+            ", ".join(_ctx_penalties), home_team, away_team, league,
+        )
+
     # --- 6. Umbrales de intensidad basados en EV (FIX 2 + EV) ---
     # CL/EL/ECL: umbrales relajados (eliminatorias con mayor varianza, team_stats por nombre)
     _is_intl_cup = league in {"CL", "EL", "ECL"}
@@ -2048,6 +2128,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             ),
             "groq_estimate": best_prob,
         }
+    # Añadir factores situacionales (rival_form, rival_momentum, bad_streak)
+    factors.update(_ctx_factors)
 
     prediction = {
         "match_id": match_id,
