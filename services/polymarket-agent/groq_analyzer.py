@@ -343,10 +343,17 @@ def _build_category_context(question: str, category: str) -> str:
         )
     elif category == "sports":
         return (
-            "CONTEXTO DEPORTIVO: Considera forma reciente de equipos/jugadores, "
-            "cuotas de casas de apuestas como referencia de probabilidad real. "
+            "CONTEXTO DEPORTIVO: Antes de estimar real_prob DEBES considerar:\n"
+            "  1. POSICIÓN EN TABLA: ¿En qué posición está el equipo/jugador en su competición? "
+            "Un equipo en top-4 con ventaja sólida tiene diferente motivación que uno en zona de descenso.\n"
+            "  2. ÚLTIMO RESULTADO: ¿Ganó, empató o perdió en su partido más reciente? "
+            "Un equipo que viene de 2-3 victorias consecutivas tiene momentum muy distinto "
+            "a uno que viene de derrotas.\n"
+            "  3. CUOTAS DE BOOKMAKERS: Úsalas como ancla de probabilidad real (implied prob = 1/cuota). "
             "Los mercados deportivos en Polymarket suelen ser menos eficientes "
-            "porque los participantes son menos especializados."
+            "porque los participantes son menos especializados — la divergencia con bookmakers es tu edge.\n"
+            "Si no tienes datos de tabla o último resultado, indícalo en key_factors "
+            "y reduce confidence en 0.05."
         )
     elif category == "geopolitics":
         return (
@@ -1115,6 +1122,18 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     smart_money = enriched_market.get("smart_money", {})
     arbitrage = enriched_market.get("arbitrage", {})
 
+    # Formatear correlaciones con pregunta y dirección de precio
+    _raw_corrs = enriched_market.get("correlations", [])
+    if _raw_corrs:
+        _corr_lines = "\n".join(
+            f"  · [{c.get('price_yes', 0.5):.0%} YES {'↑' if float(c.get('price_yes', 0.5)) > 0.5 else '↓'}] "
+            f"{str(c.get('question', ''))[:90]}"
+            for c in _raw_corrs[:5]
+        )
+        _corr_block = f"Mercados correlacionados ({len(_raw_corrs)}):\n{_corr_lines}"
+    else:
+        _corr_block = "Mercados correlacionados: ninguno"
+
     user_prompt = (
         f"Mercado: {question}\n"
         f"Categoría: {category}\n"
@@ -1127,12 +1146,12 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"Order book — buy_pressure: {orderbook.get('buy_pressure', 0.5):.3f}, "
         f"spread: {orderbook.get('spread', 0):.4f}, "
         f"imbalance: {orderbook.get('imbalance_signal', 'NEUTRAL')}\n"
-        f"Correlaciones: {len(enriched_market.get('correlations', []))} mercados relacionados\n"
+        f"{_corr_block}\n"
         f"Arbitrage: detected={arbitrage.get('detected', False)}, "
         f"inefficiency={arbitrage.get('inefficiency', 0):.3f}\n"
         f"Sentiment noticias: score={news.get('score', 0):.2f}, "
         f"trend={news.get('trend', 'NO_DATA')}, "
-        f"titulares={news.get('headlines', [])[:2]}\n"
+        f"titulares={news.get('headlines', [])[:5]}\n"
         f"\nEl precio de mercado YES = {price_yes:.3f}. "
         f"Estima la probabilidad REAL de YES basandote en todos los datos. "
         f"Si buy_pressure > 0.6 y momentum es RISING, el mercado puede estar subvaluado. "
