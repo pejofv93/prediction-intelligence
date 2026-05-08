@@ -177,6 +177,47 @@ async def enrich_match(match: dict) -> dict:
     home_streak = home_stats.get("streak", {"type": "draw", "count": 0})
     away_streak = away_stats.get("streak", {"type": "draw", "count": 0})
 
+    # --- 2b. Fatiga: días desde el último partido ---
+    _match_date_ref: datetime | None = None
+    try:
+        _md_raw = match.get("match_date") or match.get("date")
+        if _md_raw:
+            if isinstance(_md_raw, str):
+                _match_date_ref = datetime.fromisoformat(_md_raw[:10]).replace(tzinfo=timezone.utc)
+            elif hasattr(_md_raw, "tzinfo"):
+                _match_date_ref = _md_raw if _md_raw.tzinfo else _md_raw.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+
+    def _days_since_last(raw_matches: list, ref: datetime) -> int | None:
+        """Días entre ref y el partido más reciente anterior a ref."""
+        candidates = []
+        for _rm in raw_matches:
+            _d = _rm.get("match_date") or _rm.get("date")
+            if not _d:
+                continue
+            try:
+                if isinstance(_d, str):
+                    _dt = datetime.fromisoformat(_d[:10]).replace(tzinfo=timezone.utc)
+                elif hasattr(_d, "tzinfo"):
+                    _dt = _d if _d.tzinfo else _d.replace(tzinfo=timezone.utc)
+                else:
+                    continue
+                if _dt < ref:
+                    candidates.append(_dt)
+            except Exception:
+                continue
+        return (ref - max(candidates)).days if candidates else None
+
+    home_days_rest: int | None = None
+    away_days_rest: int | None = None
+    if _match_date_ref is not None:
+        try:
+            home_days_rest = _days_since_last(home_stats.get("raw_matches", []), _match_date_ref)
+            away_days_rest = _days_since_last(away_stats.get("raw_matches", []), _match_date_ref)
+        except Exception:
+            logger.debug("enrich_match(%s): error calculando days_rest", match_id)
+
     # --- 3. H2H advantage ---
     h2h_advantage = 0.0
     h2h_sufficient = False  # True solo si hay partidos H2H reales almacenados
@@ -318,6 +359,8 @@ async def enrich_match(match: dict) -> dict:
         "h2h_sufficient": h2h_sufficient,
         "home_streak": home_streak,
         "away_streak": away_streak,
+        "home_days_rest": home_days_rest,
+        "away_days_rest": away_days_rest,
         "odds_opening": odds_opening,
         "odds_current": odds_current,
         "odds_movement": odds_movement,

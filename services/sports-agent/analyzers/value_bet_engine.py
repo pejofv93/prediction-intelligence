@@ -1683,8 +1683,9 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         )
         return []
 
-    # --- Filtro de relevancia por standings ---
-    # No generar señales cuando un equipo ya no tiene nada que ganar o perder.
+    # --- Filtro de relevancia por standings + MOTIVATION_CHECK ---
+    # Ajuste de confianza según importancia del partido para cada equipo.
+    # No se descarta la señal: se penaliza/bonifica la confianza.
     _standings_confidence_adj = 1.0
     try:
         _standings_doc = col("standings").document(league).get()
@@ -1693,33 +1694,62 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             _home_standing = _standings.get(str(enriched_match.get("home_team_id", home_team)), {})
             _away_standing = _standings.get(str(enriched_match.get("away_team_id", away_team)), {})
 
+            # Calcular posición del 5º y umbral de últimos-3 con los datos de la liga
+            _all_st = [
+                (int(t.get("position", 99)), float(t.get("points", 0)))
+                for t in _standings.values()
+                if isinstance(t, dict) and t.get("position")
+            ]
+            _all_st.sort()
+            _total_teams_st = len(_all_st)
+            _fifth_points    = _all_st[4][1] if _total_teams_st >= 5 else None
+            _relegation_pos  = _total_teams_st - 2  # posición >= esta → últimos 3
+
+            _motivation_log: list[str] = []
             for _team_name, _standing in [(home_team, _home_standing), (away_team, _away_standing)]:
                 if not _standing:
                     continue
-                _relegated = _standing.get("mathematically_relegated", False)
-                _champion = _standing.get("mathematically_champion", False)
+                _relegated       = _standing.get("mathematically_relegated", False)
+                _champion        = _standing.get("mathematically_champion", False)
                 _nothing_at_stake = _standing.get("nothing_at_stake", False)
+                _pos  = _standing.get("position")
+                _pts  = float(_standing.get("points", 0))
 
                 if _relegated:
-                    logger.info(
-                        "generate_signal(%s): %s matemáticamente descendido — señal omitida",
-                        match_id, _team_name,
+                    _standings_confidence_adj *= 0.85
+                    _motivation_log.append(f"{_team_name}:descendido(−15%)")
+                elif _champion:
+                    _standings_confidence_adj *= 0.90
+                    _motivation_log.append(f"{_team_name}:campeon_rotacion(−10%)")
+                elif _nothing_at_stake:
+                    _standings_confidence_adj *= 0.80
+                    _motivation_log.append(f"{_team_name}:sin_juego(−20%)")
+                elif (
+                    _pos is not None and _pos <= 4
+                    and _fifth_points is not None
+                    and _pts - _fifth_points > 5
+                ):
+                    _standings_confidence_adj *= 0.95
+                    _motivation_log.append(
+                        f"{_team_name}:top4_seguro(pos={_pos} gap={_pts - _fifth_points:.0f}pts)(−5%)"
                     )
-                    return []
-                if _champion:
-                    logger.info(
-                        "generate_signal(%s): %s matemáticamente campeón — señal omitida",
-                        match_id, _team_name,
-                    )
-                    return []
-                if _nothing_at_stake:
-                    _standings_confidence_adj = min(_standings_confidence_adj, 0.80)
-                    logger.info(
-                        "generate_signal(%s): %s sin nada en juego — confianza reducida 20%%",
-                        match_id, _team_name,
-                    )
+                elif (
+                    _pos is not None and _total_teams_st > 0
+                    and _pos >= _relegation_pos
+                    and not _relegated
+                ):
+                    _standings_confidence_adj *= 1.05
+                    _motivation_log.append(f"{_team_name}:zona_descenso(pos={_pos})(+5%)")
+
+            # Cap a rango sensato
+            _standings_confidence_adj = round(max(0.70, min(1.05, _standings_confidence_adj)), 4)
+            if _motivation_log:
+                logger.info(
+                    "MOTIVATION_CHECK(%s): %s [%s vs %s | %s]",
+                    match_id, " | ".join(_motivation_log), home_team, away_team, league,
+                )
     except Exception as _se:
-        logger.debug("generate_signal(%s): error leyendo standings — %s", match_id, _se)
+        logger.debug("generate_signal(%s): error en MOTIVATION_CHECK — %s", match_id, _se)
 
     # Determinar data_source segun si hay modelo estadistico
     has_statistical_model = (
@@ -1964,8 +1994,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         )
         return []
 
-    # Aplicar descuento de standings si algún equipo no tiene nada en juego
-    if _standings_confidence_adj < 1.0:
+    # Aplicar ajuste de motivación (puede reducir o aumentar confianza)
+    if _standings_confidence_adj != 1.0:
         best_confidence = round(best_confidence * _standings_confidence_adj, 4)
 
     # --- 5g. Contexto situacional: posición en tabla, forma comparada, momentum ---
@@ -2040,10 +2070,35 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         _ctx_factors["bad_streak"] = _ctx_sel_streak_count
         _ctx_penalties.append(f"bad_streak_{_ctx_sel_streak_count}L(−15%)")
 
-    # Log explicativo si hubo penalizaciones de confianza
+    # --- 5h. Ventaja de descanso comparado ---
+    try:
+        _home_days_r = enriched_match.get("home_days_rest")
+        _away_days_r = enriched_match.get("away_days_rest")
+        if _home_days_r is not None and _away_days_r is not None:
+            _sel_days_r   = _home_days_r if team_to_back == str(home_team) else _away_days_r
+            _rival_days_r = _away_days_r if team_to_back == str(home_team) else _home_days_r
+            _rest_delta   = _rival_days_r - _sel_days_r  # positivo = rival descansó más
+
+            logger.info(
+                "REST_ADVANTAGE(%s): home=%dd away=%dd delta=%+dd [%s vs %s | %s]",
+                match_id, _home_days_r, _away_days_r, _away_days_r - _home_days_r,
+                home_team, away_team, league,
+            )
+            if _rest_delta >= 3:
+                best_confidence = round(best_confidence * 0.90, 4)
+                _ctx_penalties.append(f"rival_rest+{_rest_delta}d(−10%)")
+                _ctx_factors["rest_disadvantage"] = _rest_delta
+            elif _sel_days_r - _rival_days_r >= 3:
+                best_confidence = round(best_confidence * 1.05, 4)
+                _ctx_penalties.append(f"sel_rest+{_sel_days_r - _rival_days_r}d(+5%)")
+                _ctx_factors["rest_advantage"] = _sel_days_r - _rival_days_r
+    except Exception as _re:
+        logger.debug("generate_signal(%s): error REST_ADVANTAGE — %s", match_id, _re)
+
+    # Log explicativo si hubo penalizaciones/bonificaciones de contexto
     if _ctx_penalties:
         logger.info(
-            "CONTEXT_PENALTY(%s): conf reducida de %.2f a %.2f (%s) [%s vs %s | %s]",
+            "CONTEXT_PENALTY(%s): conf %.2f→%.2f (%s) [%s vs %s | %s]",
             match_id, _conf_before_ctx, best_confidence,
             ", ".join(_ctx_penalties), home_team, away_team, league,
         )
