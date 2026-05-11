@@ -8,14 +8,19 @@ modal_app/
 # Output generado
 output/
 
-# Base de datos local
+# Base de datos
 cryptoverdad.db
+cryptoverdad_backup.db
 
 # Credenciales y tokens — NUNCA commitear
 .env
 token.json
 client_secrets.json
 gcloud-service-key.json
+railway_env_backup.txt
+*_backup_b64.txt
+nuevo_token.txt
+db_check_output.txt
 
 # Claude Code — settings locales y worktrees (contienen tokens)
 .claude/settings.local.json
