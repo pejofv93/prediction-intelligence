@@ -420,12 +420,15 @@ async def monitor_price_changes() -> int:
                 pass
 
             vol_24h = float(latest.get("volume_24h", 0))
-            sign = "+" if pct_change > 0 else ""
+            # FIX-PRICE-PP: mostrar cambio absoluto en puntos porcentuales (pp), no relativo.
+            # "-19.5% en 103 min" era confuso (es variación relativa del precio).
+            # Nuevo formato: "-4pp (20.5% → 16.5%) en 103 min" (variación absoluta).
+            pp_change = (price_new - price_old) * 100
+            pp_sign = "+" if pp_change > 0 else ""
             text = (
                 f"🚨 MOVIMIENTO BRUSCO\n"
                 f"{question}\n"
-                f"Precio: {price_old*100:.1f}% → {price_new*100:.1f}%\n"
-                f"Cambio: {sign}{pct_change*100:.1f}% en {minutes_elapsed:.0f} min\n"
+                f"Cambio: {pp_sign}{pp_change:.1f}pp ({price_old*100:.1f}% → {price_new*100:.1f}%) en {minutes_elapsed:.0f} min\n"
                 f"Vol 1h: ${vol_24h:,.0f}\n"
                 f"⚡ Posible información privilegiada"
             )
