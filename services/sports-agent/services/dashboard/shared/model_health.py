@@ -198,15 +198,30 @@ def format_health_alert(health: dict) -> str:
     return "\n".join(lines)
 
 
+def _tier_roi(preds: list[dict]) -> float:
+    """ROI sobre predicciones resueltas: sum(pnl_unit) / count(resolved)."""
+    resolved = [p for p in preds if p.get("correct") is not None]
+    if not resolved:
+        return 0.0
+    pnl = sum(
+        (float(p.get("odds") or 2.0) - 1.0) if p.get("correct") is True else -1.0
+        for p in resolved
+    )
+    return round(pnl / len(resolved), 4)
+
+
 def format_daily_report(
     health: dict,
     shadow_metrics: dict,
     top_signal: Optional[dict] = None,
     pred_stats: Optional[dict] = None,
+    tier_stats: Optional[dict] = None,
 ) -> str:
     """
     Formato reporte diario matutino.
     pred_stats: {total, pending, resolved, correct, incorrect} desde col("predictions").
+    tier_stats: {fuerte: [...preds], detectada: [...preds], moderada: [...preds]}
+                con predicciones agrupadas por tier de edge para ROI por nivel.
     """
     now = datetime.now(timezone.utc)
     fecha = now.strftime("%d/%m/%Y")
@@ -226,36 +241,59 @@ def format_daily_report(
 
     lines = [f"📊 RESUMEN DEL DIA — {fecha}", ""]
 
-    # Bloque de predicciones: usar pred_stats si disponible (fuente fiable)
+    # --- Bloque por tiers (si hay datos) ---
+    if tier_stats:
+        for emoji, label, key in [
+            ("🔥", "SEÑALES FUERTES (EV>20%)",     "fuerte"),
+            ("✅", "SEÑALES DETECTADAS (EV 12-20%)", "detectada"),
+            ("📊", "SEÑALES MODERADAS (EV 8-12%)",  "moderada"),
+        ]:
+            preds = tier_stats.get(key, [])
+            if not preds:
+                continue
+            total_t = len(preds)
+            resolved_t = [p for p in preds if p.get("correct") is not None]
+            correct_t = [p for p in resolved_t if p.get("correct") is True]
+            roi_t = _tier_roi(preds)
+            wr_t = len(correct_t) / len(resolved_t) if resolved_t else 0.0
+            roi_str = f" | ROI (resueltas): {roi_t:+.1%}" if resolved_t else ""
+            lines += [
+                f"{emoji} {label}:",
+                f"   Total: {total_t} | Resueltas: {len(resolved_t)} | Correctas: {len(correct_t)}",
+                f"   Win rate: {wr_t:.0%}{roi_str}",
+                "",
+            ]
+
+    # --- Total general ---
+    lines.append("📈 TOTAL GENERAL:")
     if pred_stats and pred_stats.get("total", 0) > 0:
         total = pred_stats["total"]
         pending = pred_stats["pending"]
         resolved = pred_stats["resolved"]
         correct = pred_stats["correct"]
         incorrect = pred_stats["incorrect"]
-        lines.append(f"📋 Señales: {total} total")
+        lines.append(f"   📋 Señales: {total} total")
         if resolved > 0:
-            lines.append(f"✅ Resueltas: {resolved} ({correct} correctas · {incorrect} falladas)")
+            lines.append(f"   ✅ Resueltas: {resolved} ({correct} correctas · {incorrect} falladas)")
         if pending > 0:
-            lines.append(f"⏳ Pendientes: {pending}")
+            lines.append(f"   ⏳ Pendientes: {pending}")
         elif resolved == total:
-            lines.append("⏳ Pendientes: 0")
+            lines.append("   ⏳ Pendientes: 0")
     else:
-        # Fallback a shadow_metrics si pred_stats no disponible
         pending_fb = int(shadow_metrics.get("pending_trades") or 0)
         closed_fb = int(shadow_metrics.get("closed_trades") or 0)
         wins_fb = int(shadow_metrics.get("wins") or 0)
         losses_fb = int(shadow_metrics.get("losses") or 0)
-        lines.append(f"⏳ Pendientes: {pending_fb}")
+        lines.append(f"   ⏳ Pendientes: {pending_fb}")
         if closed_fb > 0:
-            lines.append(f"✅ Resueltas: {closed_fb} ({wins_fb} correctas · {losses_fb} falladas)")
+            lines.append(f"   ✅ Resueltas: {closed_fb} ({wins_fb} correctas · {losses_fb} falladas)")
 
-    lines.append(f"Bankroll virtual: {bankroll:.2f}€")
+    lines.append(f"   Bankroll virtual: {bankroll:.2f}€")
 
     if avg_clv != 0.0:
-        lines.append(f"CLV medio: {avg_clv:+.1%}")
+        lines.append(f"   CLV medio: {avg_clv:+.1%}")
 
-    lines.append(f"Modelo: {status_emoji} {status}")
+    lines.append(f"   Modelo: {status_emoji} {status}")
 
     if top_signal is not None:
         unified_score = top_signal.get("unified_score") or top_signal.get("edge")
@@ -266,8 +304,8 @@ def format_daily_report(
 
     lines += [
         "",
-        f"📈 ROI total: {roi_total:+.1%}",
-        f"🎯 Win rate: {win_rate:.0%}",
+        f"   📈 ROI total: {roi_total:+.1%}",
+        f"   🎯 Win rate: {win_rate:.0%}",
     ]
 
     return "\n".join(lines)

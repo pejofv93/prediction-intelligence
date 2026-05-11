@@ -153,12 +153,12 @@ async def _bg_daily_report() -> None:
             "total": 0, "pending": 0, "resolved": 0, "correct": 0, "incorrect": 0,
             "synthetic": 0, "real_odds": 0,
         }
+        tier_stats: dict = {"fuerte": [], "detectada": [], "moderada": []}
         try:
             all_preds = list(col("predictions").limit(500).stream())
             for doc in all_preds:
                 d = doc.to_dict()
                 pred_stats["total"] += 1
-                # Detectar señal sintética por campo source o is_synthetic
                 is_synthetic = d.get("is_synthetic", False) or d.get("source", "") == "POISSON_SYNTHETIC"
                 if is_synthetic:
                     pred_stats["synthetic"] += 1
@@ -172,6 +172,14 @@ async def _bg_daily_report() -> None:
                         pred_stats["correct"] += 1
                     elif d.get("correct") is False:
                         pred_stats["incorrect"] += 1
+                # Clasificar por tier de edge para el desglose del reporte
+                _edge = float(d.get("edge") or d.get("ev") or 0)
+                if _edge > 0.20:
+                    tier_stats["fuerte"].append(d)
+                elif _edge > 0.12:
+                    tier_stats["detectada"].append(d)
+                elif _edge > 0.08:
+                    tier_stats["moderada"].append(d)
         except Exception as _pe:
             logger.warning("daily-report: error leyendo predictions — %s", _pe)
 
@@ -200,7 +208,7 @@ async def _bg_daily_report() -> None:
         except Exception:
             pass
 
-        report = format_daily_report(health, shadow_metrics, top_signal, pred_stats)
+        report = format_daily_report(health, shadow_metrics, top_signal, pred_stats, tier_stats)
         await send_message(report, message_thread_id=TELEGRAM_DAILY_THREAD_ID)
 
         if health.get("degraded"):
