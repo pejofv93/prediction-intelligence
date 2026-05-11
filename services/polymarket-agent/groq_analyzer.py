@@ -52,6 +52,16 @@ _PTS_BEHIND_PATTERNS = [
 
 _MLB_RE = re.compile(r'\b(mlb|baseball|major league baseball)\b', re.I)
 
+# FIX-LOCAL-ELECTION: elecciones locales en países no anglófonos
+_LOCAL_ELECTION_RE = re.compile(
+    r'\b(mayoral|mayor|municipal|prefecture|local election|city council|alderman|alcalde|gubernatorial)\b',
+    re.I,
+)
+_ANGLOPHONE_COUNTRY_RE = re.compile(
+    r'\b(usa|united states|america|uk|united kingdom|england|britain|canada|australia|new zealand|ireland|scotland|wales)\b',
+    re.I,
+)
+
 # Individual sports match detection (tenis, UFC, MLB por slug o pregunta)
 _SPORTS_DATA_CACHE: dict[str, tuple[str | None, float]] = {}
 _SPORTS_DATA_TTL: float = 7200.0  # 2h
@@ -965,6 +975,18 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     category = categorize_market(question)
     category_context = _build_category_context(question, category)
 
+    # FIX-LOCAL-ELECTION: elecciones municipales/locales de países no anglófonos → skip.
+    # El modelo no tiene datos de encuestas locales para estos mercados; una divergencia
+    # de 30pp sin contexto real genera señales espurias (ej: Seoul Mayoral 2026).
+    if category == "politics":
+        if _LOCAL_ELECTION_RE.search(question) and not _ANGLOPHONE_COUNTRY_RE.search(question):
+            logger.info(
+                "analyze_market(%s): LOCAL_ELECTION_NO_DATA — elección local no anglófona "
+                "sin encuestas verificables → skip (%s)",
+                market_id, question[:80],
+            )
+            return None
+
     # Discard "Will X win [tournament]" markets where team is already eliminated
     _nba_win_prob: float | None = None
     _nba_series_wins: tuple[int, int] | None = None
@@ -1650,6 +1672,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         elif _tw == 2 and _ow == 0:
             _nba_floor = 0.75
             _nba_floor_reason = f"serie 2-0 → prob_min=75%"
+        elif _tw == 1 and _ow == 0:
+            # FIX-NBA-1-0: equipo líder 1-0 — floor más conservador pero suficiente
+            # para bloquear BUY_NO sin datos ESPN completos.
+            _nba_floor = 0.65
+            _nba_floor_reason = f"serie 1-0 → prob_min=65%"
     elif _nba_win_prob is not None and _nba_win_prob > 0.85:
         _nba_floor = 0.75
         _nba_floor_reason = f"ESPN win_prob={_nba_win_prob:.0%} > 85% → prob_min=75%"
@@ -1665,8 +1692,10 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "analyze_market(%s): NBA_PLAYOFF_FLOOR %.3f→%.3f (%s)",
                 market_id, _old_nba, real_prob, _nba_floor_reason,
             )
-        # Nunca BUY_NO contra equipo líder 2-0 o más en la serie
-        _team_leading = _nba_series_wins is not None and _nba_series_wins[0] >= 2
+        # FIX-NBA-1-0: bloquear BUY_NO contra cualquier equipo que VA GANANDO la serie
+        # (team_wins > opp_wins), no solo contra líderes 2-0+.
+        # Causa bug: "OKC 1-0" era _tw=1 >= 2 = False → BUY_NO contra Thunder no se bloqueaba.
+        _team_leading = _nba_series_wins is not None and _nba_series_wins[0] > _nba_series_wins[1]
         _espn_dominant = _nba_win_prob is not None and _nba_win_prob > 0.85
         if recommendation == "BUY_NO" and (_team_leading or _espn_dominant):
             recommendation = "PASS"
