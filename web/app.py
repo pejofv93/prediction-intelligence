@@ -20,7 +20,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 import yaml
 from fastapi import Cookie, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from rich.console import Console
 
@@ -1376,3 +1376,33 @@ async def volume_endpoint(
         console.print(f"[red]/volume cleanup error: {exc}[/]")
 
     return JSONResponse(response_data)
+
+
+# ── 24. Download DB — backup pre-cancelación ──────────────────────────────────
+@app.get("/download-db")
+async def download_db(
+    request: Request,
+    nexus_auth: Optional[str] = Cookie(default=None),
+):
+    cron_secret = os.getenv("CRON_SECRET", "")
+    provided_secret = (
+        request.headers.get("X-Cron-Secret", "")
+        or request.query_params.get("secret", "")
+    )
+    session_ok = _is_authenticated(nexus_auth)
+    secret_ok = cron_secret and provided_secret == cron_secret
+    if not session_ok and not secret_ok:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    cfg = _load_config()
+    db_path = cfg.get("database", {}).get("path", "cryptoverdad.db")
+    if not Path(db_path).exists():
+        db_path = "/app/output/cryptoverdad.db"
+    if not Path(db_path).exists():
+        raise HTTPException(status_code=404, detail=f"DB not found at {db_path}")
+
+    return FileResponse(
+        path=db_path,
+        media_type="application/octet-stream",
+        filename="cryptoverdad_backup.db",
+    )
