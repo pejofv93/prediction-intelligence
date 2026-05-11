@@ -2103,6 +2103,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             ", ".join(_ctx_penalties), home_team, away_team, league,
         )
 
+    # FIX-EDGE0: si best_edge ≤ 0 no hay valor real — descartar ANTES del threshold check.
+    # Causa: discount rival_top3 (×0.80) puede llevar un edge marginal a 0 mientras best_ev
+    # sigue positivo (best_ev no se descuenta en ese paso), dejando pasar la señal.
+    if best_edge <= 0.0:
+        logger.debug(
+            "generate_signal(%s): descartado — edge=%.4f ≤ 0 [%s vs %s | %s]",
+            match_id, best_edge, home_team, away_team, league,
+        )
+        return []
+
     # --- 6. Umbrales de intensidad basados en EV (FIX 2 + EV) ---
     # CL/EL/ECL: umbrales relajados (eliminatorias con mayor varianza, team_stats por nombre)
     _is_intl_cup = league in {"CL", "EL", "ECL"}
@@ -2165,6 +2175,10 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 match_id, best_confidence, external_ctx["notes"],
             )
             return []
+
+    # FIX-CONF100: cap estricto — multiplicadores acumulados (motivación + descanso)
+    # pueden superar 1.0 (ej: 1.05 × 1.05 = 1.1025). Confianza nunca puede superar 99%.
+    best_confidence = min(best_confidence, 0.99)
 
     kelly = kelly_criterion(best_ev, best_odds)
     results: list[dict] = []
