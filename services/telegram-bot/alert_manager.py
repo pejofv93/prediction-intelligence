@@ -289,6 +289,14 @@ def _format_poly_alert(analysis: dict) -> str:
     category = str(analysis.get("category") or "").lower()
     volume_24h = float(analysis.get("volume_24h") or 0)
 
+    # FIX-POLY-FORMAT: línea de acción explícita para claridad del outcome
+    _action_map = {
+        "BUY_YES": "🟢 COMPRAR YES — el mercado infravalora esta probabilidad",
+        "BUY_NO":  "🔴 COMPRAR NO — el mercado sobrevalora esta probabilidad",
+        "WATCH":   "👁 OBSERVAR — señal débil, monitorear evolución",
+    }
+    action_line = _action_map.get(recommendation, "") + "\n" if recommendation in _action_map else ""
+
     # Intensidad basada en edge absoluto
     if abs_edge > 0.15:
         intensity = "🔴 SEÑAL FUERTE"
@@ -341,9 +349,16 @@ def _format_poly_alert(analysis: dict) -> str:
     # Smart money
     smart_line = "\n🧠 *SMART MONEY detectado*\n" if (volume_spike or smart_money) else "\n"
 
-    # Link directo al mercado
+    # FIX-POLY-LINK: slug es el event slug de Gamma API → URL /event/{slug}.
+    # Si slug vacío, usar market_id (condition_id) como fallback con /market/.
     slug = str(analysis.get("slug") or "")
-    link_line = f"🔗 [Ver mercado](https://polymarket.com/event/{slug})\n" if slug else ""
+    market_id_fallback = str(analysis.get("market_id") or "")
+    if slug:
+        link_line = f"🔗 [Ver mercado](https://polymarket.com/event/{slug})\n"
+    elif market_id_fallback:
+        link_line = f"🔗 [Ver mercado](https://polymarket.com/market/{market_id_fallback})\n"
+    else:
+        link_line = ""
 
     whale_info = str(analysis.get("whale_info") or "")
     whale_line = f"{whale_info}\n" if whale_info else ""
@@ -352,8 +367,9 @@ def _format_poly_alert(analysis: dict) -> str:
         f"🔮 OPORTUNIDAD POLYMARKET — {intensity}\n"
         f"{cat_line}"
         f"\n❓ {question}\n\n"
+        f"{action_line}"
         f"💰 Precio YES: *{market_price_yes:.0%}* → IA: *{real_prob:.0%}* (*{edge:+.0%}* edge)\n"
-        f"🎯 Confianza: *{confidence:.0%}* | Recomendación: *{recommendation}*\n"
+        f"🎯 Confianza: *{confidence:.0%}*\n"
         f"{meta_line}"
         f"{link_line}"
         f"{smart_line}"
