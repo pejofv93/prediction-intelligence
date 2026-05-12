@@ -52,17 +52,40 @@ def _load_learned_thresholds() -> dict:
                 )
                 _LEARNED_THRESHOLDS = dict(_BASE_THRESHOLDS)
                 return _LEARNED_THRESHOLDS
-            loaded = {
-                "buy_yes_min_edge":        float(data.get("buy_yes_min_edge", POLY_MIN_EDGE)),
-                "buy_yes_min_confidence":  float(data.get("buy_yes_min_confidence", POLY_MIN_CONFIDENCE)),
-                "buy_no_min_edge":         float(data.get("buy_no_min_edge", POLY_MIN_EDGE)),
-                "buy_no_min_confidence":   float(data.get("buy_no_min_confidence", POLY_MIN_CONFIDENCE)),
+            accuracy = float(data.get("accuracy_overall", 0))
+            if accuracy < 0.50:
+                # Accuracy below chance — learned thresholds are unreliable, use base
+                logger.warning(
+                    "_load_learned_thresholds: accuracy=%.1f%% < 50%% (%d outcomes) — "
+                    "umbrales aprendidos ignorados, usando BASE para no bloquear todas las señales",
+                    accuracy * 100, sample_size,
+                )
+                _LEARNED_THRESHOLDS = dict(_BASE_THRESHOLDS)
+                return _LEARNED_THRESHOLDS
+
+            # Cap: learned thresholds cannot exceed these maximums (Groq never reaches >0.85)
+            _MAX_THRESHOLDS = {
+                "buy_yes_min_edge": 0.20,
+                "buy_yes_min_confidence": 0.75,
+                "buy_no_min_edge": 0.18,
+                "buy_no_min_confidence": 0.72,
             }
+            loaded = {}
+            for key in ("buy_yes_min_edge", "buy_yes_min_confidence",
+                        "buy_no_min_edge", "buy_no_min_confidence"):
+                raw = float(data.get(key) or _BASE_THRESHOLDS[key])
+                capped = min(raw, _MAX_THRESHOLDS[key])
+                if capped < raw:
+                    logger.warning(
+                        "_load_learned_thresholds: %s=%.3f capeado a %.3f",
+                        key, raw, capped,
+                    )
+                loaded[key] = capped
             _LEARNED_THRESHOLDS = loaded
             logger.info(
-                "_load_learned_thresholds: umbral_mode=learned (%d outcomes) v%s "
+                "_load_learned_thresholds: umbral_mode=learned (%d outcomes, acc=%.1f%%) v%s "
                 "BUY_YES(edge=%.3f conf=%.2f) BUY_NO(edge=%.3f conf=%.2f)",
-                sample_size, data.get("version", "?"),
+                sample_size, accuracy * 100, data.get("version", "?"),
                 loaded["buy_yes_min_edge"], loaded["buy_yes_min_confidence"],
                 loaded["buy_no_min_edge"],  loaded["buy_no_min_confidence"],
             )
