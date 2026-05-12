@@ -19,9 +19,9 @@ _LEARNED_THRESHOLDS: dict | None = None
 # Umbrales base usados cuando hay < 20 outcomes resueltos
 _BASE_THRESHOLDS = {
     "buy_yes_min_edge": 0.10,
-    "buy_yes_min_confidence": 0.65,
+    "buy_yes_min_confidence": 0.60,
     "buy_no_min_edge": 0.08,
-    "buy_no_min_confidence": 0.60,
+    "buy_no_min_confidence": 0.55,
 }
 _MIN_OUTCOMES_FOR_LEARNED = 20
 
@@ -186,6 +186,7 @@ async def check_and_alert(analysis: dict) -> bool:
     alert_key = f"{market_id}_{round(edge, 2)}"
     now = datetime.now(timezone.utc)
     cutoff_24h = now - timedelta(hours=24)
+    cutoff_7d = now - timedelta(days=7)
 
     # --- Guard: contradicción con alerta opuesta en las últimas 6h ---
     _opposite = "BUY_NO" if direction == "BUY_YES" else "BUY_YES"
@@ -245,6 +246,12 @@ async def check_and_alert(analysis: dict) -> bool:
                         market_id, _pchg * 100,
                     )
                     return False
+                if _last_sent > cutoff_7d and _pchg <= 0.05:
+                    logger.debug(
+                        "check_and_alert(%s): dedup market_id — <7d y precio sin cambio (%.1f%%) — omitida",
+                        market_id, _pchg * 100,
+                    )
+                    return False
     except Exception:
         logger.warning("check_and_alert(%s): error en dedup reforzado — continuando", market_id, exc_info=True)
 
@@ -268,14 +275,14 @@ async def check_and_alert(analysis: dict) -> bool:
             if sent_at and sent_at > cutoff_24h:
                 logger.debug("check_and_alert(%s): alerta reciente (<24h) omitida [tx]", market_id)
                 return False
-            if price_chg <= 0.05:
+            if price_chg <= 0.05 and sent_at and sent_at > cutoff_7d:
                 logger.debug(
-                    "check_and_alert(%s): precio sin cambio (%.1f%%) omitida [tx]",
+                    "check_and_alert(%s): precio sin cambio (%.1f%%) en <7d omitida [tx]",
                     market_id, price_chg * 100,
                 )
                 return False
             logger.info(
-                "check_and_alert(%s): re-alerta permitida — >24h y precio cambió %.1f%% [tx]",
+                "check_and_alert(%s): re-alerta permitida — precio cambió %.1f%% o >7d [tx]",
                 market_id, price_chg * 100,
             )
 
