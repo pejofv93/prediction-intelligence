@@ -140,6 +140,13 @@ jobs:
           print("DIAGNOSTICO COMPLETADO")
           EOF
 
+      - name: Recent predictions (últimas 20 por analyzed_at)
+        run: |
+          curl -s \
+            "${{ secrets.POLY_AGENT_URL }}/recent-predictions?limit=20" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 20 | python -m json.tool 2>/dev/null || echo "(sin respuesta)"
+
       - name: Force full pipeline (scan → wait → enrich → wait → analyze)
         run: |
           echo "=== [1/3] Triggering SCAN ==="
