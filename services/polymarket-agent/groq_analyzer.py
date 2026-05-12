@@ -58,7 +58,9 @@ _LOCAL_ELECTION_RE = re.compile(
     re.I,
 )
 _ANGLOPHONE_COUNTRY_RE = re.compile(
-    r'\b(usa|united states|america|uk|united kingdom|england|britain|canada|australia|new zealand|ireland|scotland|wales)\b',
+    r'\b(usa|united states|america|uk|united kingdom|england|britain|canada|australia|new zealand|ireland|scotland|wales|'
+    r'california|new york|los angeles|chicago|texas|florida|georgia|pennsylvania|ohio|michigan|illinois|'
+    r'arizona|north carolina|washington|colorado|nevada|virginia|maryland|massachusetts|minnesota)\b',
     re.I,
 )
 

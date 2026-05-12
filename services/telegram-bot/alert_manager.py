@@ -474,18 +474,27 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
 async def send_sports_alert(prediction: dict) -> bool:
     """
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
-    Verifica en alerts_sent que no se haya enviado ya (deduplicacion).
+    Verifica en alerts_sent con ventana de 48h (no dedup permanente — re-alerta
+    si el partido sigue programado y no se ha alertado en las últimas 48h).
     Devuelve True si envio.
     """
+    from datetime import timedelta
     from shared.firestore_client import col
 
     edge = float(prediction.get("edge") or 0)
     key = _alert_key(prediction, edge)
 
     try:
-        existing = list(col("alerts_sent").where(filter=FieldFilter("alert_key", "==", key)).limit(1).stream())
+        cutoff_48h = datetime.now(timezone.utc) - timedelta(hours=48)
+        existing = list(
+            col("alerts_sent")
+            .where(filter=FieldFilter("alert_key", "==", key))
+            .where(filter=FieldFilter("sent_at", ">=", cutoff_48h))
+            .limit(1)
+            .stream()
+        )
         if existing:
-            logger.debug("send_sports_alert: alerta duplicada omitida (%s)", key)
+            logger.debug("send_sports_alert: alerta duplicada en 48h omitida (%s)", key)
             return False
     except Exception:
         logger.error("send_sports_alert: error comprobando dedup", exc_info=True)
