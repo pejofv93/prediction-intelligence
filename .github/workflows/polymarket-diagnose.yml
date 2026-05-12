@@ -126,15 +126,43 @@ jobs:
                         f"  alerted={d.get('alerted')}  rec={d.get('recommendation')}")
                   print(f"    Q: {str(d.get('question',''))[:70]}")
 
-          # ── 5. alerts_sent (polymarket) ─────────────────────────────────────
+          # ── 5. poly_model_weights (umbrales aprendidos) ──────────────────────
           print("\n" + "="*60)
-          print("5. alerts_sent (tipo polymarket)")
+          print("5. poly_model_weights/current (umbrales aprendidos)")
+          wdoc = col("poly_model_weights").document("current").get()
+          if wdoc.exists:
+              w = wdoc.to_dict()
+              print(f"  sample_size: {w.get('sample_size')}")
+              print(f"  accuracy_overall: {w.get('accuracy_overall')}")
+              print(f"  buy_yes_min_edge: {w.get('buy_yes_min_edge')}")
+              print(f"  buy_yes_min_confidence: {w.get('buy_yes_min_confidence')}")
+              print(f"  buy_no_min_edge: {w.get('buy_no_min_edge')}")
+              print(f"  buy_no_min_confidence: {w.get('buy_no_min_confidence')}")
+              by_cat = w.get("by_category", {})
+              if by_cat:
+                  print(f"  by_category: {by_cat}")
+          else:
+              print("  (no existe — usando BASE thresholds)")
+
+          # ── 6. alerts_sent (polymarket) ─────────────────────────────────────
+          print("\n" + "="*60)
+          print("6. alerts_sent (tipo polymarket)")
           alerts = list(col("alerts_sent").where("type", "==", "polymarket").stream())
           print(f"Total alertas enviadas: {len(alerts)}")
           if alerts:
               for a in sorted(alerts, key=lambda d: make_aware(d.to_dict().get("sent_at")) or now, reverse=True)[:5]:
                   d = a.to_dict()
-                  print(f"  {d.get('sent_at')}  key={d.get('alert_key')}")
+                  print(f"  {d.get('sent_at')}  key={d.get('alert_key')}  status={d.get('status')}")
+
+          # ── 7. alerts_sent para mercados específicos ─────────────────────────
+          print("\n" + "="*60)
+          print("7. alerts_sent para Spencer Pratt (629035) y Peru (947289)")
+          for mid in ["629035", "947289"]:
+              docs = list(col("alerts_sent").where("market_id", "==", mid).stream())
+              print(f"  market_id={mid}: {len(docs)} docs")
+              for d in docs:
+                  dd = d.to_dict()
+                  print(f"    key={dd.get('alert_key')} status={dd.get('status')} sent_at={dd.get('sent_at')}")
 
           print("\n" + "="*60)
           print("DIAGNOSTICO COMPLETADO")
