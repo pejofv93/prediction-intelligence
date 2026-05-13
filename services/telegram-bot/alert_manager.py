@@ -486,30 +486,34 @@ async def send_sports_alert(prediction: dict) -> bool:
 
     try:
         cutoff_48h = datetime.now(timezone.utc) - timedelta(hours=48)
-        # Query de un solo campo (sin índice compuesto Firestore) + filtro sent_at en Python.
-        # La query compuesta alert_key+sent_at requería índice compuesto — al fallar caía al
-        # except y enviaba siempre (causa de los duplicados).
+        # Single-field query (no composite index needed) + Python filter for sent_at.
         docs = list(
             col("alerts_sent")
             .where(filter=FieldFilter("alert_key", "==", key))
             .limit(10)
             .stream()
         )
-        recent = [
-            d.to_dict() for d in docs
-            if d.to_dict().get("sent_at") is not None
-            and d.to_dict()["sent_at"] >= cutoff_48h
-        ]
+        recent = []
+        for _d in docs:
+            _data = _d.to_dict()
+            _sat = _data.get("sent_at")
+            if _sat is None:
+                continue
+            # Normalizar timezone — Firestore puede devolver datetimes naive o aware
+            if hasattr(_sat, "tzinfo") and _sat.tzinfo is None:
+                _sat = _sat.replace(tzinfo=timezone.utc)
+            if _sat >= cutoff_48h:
+                recent.append(_data)
         if recent:
             logger.info("send_sports_alert: duplicada 48h → omitida (%s)", key)
             return False
     except Exception as _de:
-        # Fail-closed: si el dedup falla NO enviamos para evitar duplicados.
+        # Fail-open: si el dedup falla enviamos igualmente (alerta llega aunque pueda
+        # repetirse) y logueamos el error para diagnóstico.
         logger.error(
-            "send_sports_alert: dedup falló [%s: %s] → omitida para evitar duplicado (%s)",
+            "send_sports_alert: dedup falló [%s: %s] → enviando igualmente (%s)",
             type(_de).__name__, _de, key,
         )
-        return False
 
     text = _format_alert_unified(prediction)
     sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
