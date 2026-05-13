@@ -118,9 +118,10 @@ async def check_and_alert(analysis: dict) -> bool:
 
     rec = str(analysis.get("recommendation", "")).upper()
     if rec not in ("BUY_YES", "BUY_NO"):
-        logger.debug(
-            "check_and_alert(%s): rec=%s — solo alertamos BUY_YES/BUY_NO",
+        logger.info(
+            "check_and_alert(%s): SKIP_REC rec=%s edge=%.3f conf=%.2f — solo alertamos BUY_YES/BUY_NO",
             analysis.get("market_id"), rec,
+            float(analysis.get("edge", 0)), float(analysis.get("confidence", 0)),
         )
         return False
 
@@ -180,14 +181,14 @@ async def check_and_alert(analysis: dict) -> bool:
             pass
 
     if abs(edge) < effective_min_edge:
-        logger.debug(
-            "check_and_alert(%s): abs(edge)=%.3f < %.3f (%s learned) — omitida",
+        logger.info(
+            "check_and_alert(%s): SKIP_EDGE abs(edge)=%.3f < %.3f (%s) — omitida",
             analysis.get("market_id"), abs(edge), effective_min_edge, direction,
         )
         return False
     if confidence < effective_min_conf:
-        logger.debug(
-            "check_and_alert(%s): conf=%.3f < %.3f (%s learned) — omitida",
+        logger.info(
+            "check_and_alert(%s): SKIP_CONF conf=%.3f < %.3f (%s) — omitida",
             analysis.get("market_id"), confidence, effective_min_conf, direction,
         )
         return False
@@ -264,14 +265,14 @@ async def check_and_alert(analysis: dict) -> bool:
                     _last_sent = _last_sent.replace(tzinfo=timezone.utc)
                 _pchg = abs(current_price - _last_price_mid) / max(_last_price_mid, 0.001)
                 if _last_sent > cutoff_24h and _pchg <= 0.05:
-                    logger.debug(
-                        "check_and_alert(%s): dedup market_id — <24h y precio sin cambio (%.1f%%) — omitida",
+                    logger.info(
+                        "check_and_alert(%s): SKIP_DEDUP_24H price_chg=%.1f%% <24h — omitida",
                         market_id, _pchg * 100,
                     )
                     return False
                 if _last_sent > cutoff_7d and _pchg <= 0.05:
-                    logger.debug(
-                        "check_and_alert(%s): dedup market_id — <7d y precio sin cambio (%.1f%%) — omitida",
+                    logger.info(
+                        "check_and_alert(%s): SKIP_DEDUP_7D price_chg=%.1f%% <7d — omitida",
                         market_id, _pchg * 100,
                     )
                     return False
@@ -296,11 +297,11 @@ async def check_and_alert(analysis: dict) -> bool:
             price_chg = abs(current_price - last_price) / max(last_price, 0.001)
 
             if sent_at and sent_at > cutoff_24h:
-                logger.debug("check_and_alert(%s): alerta reciente (<24h) omitida [tx]", market_id)
+                logger.info("check_and_alert(%s): SKIP_DEDUP_TX_24H (<24h) — omitida [tx]", market_id)
                 return False
             if price_chg <= 0.05 and sent_at and sent_at > cutoff_7d:
-                logger.debug(
-                    "check_and_alert(%s): precio sin cambio (%.1f%%) en <7d omitida [tx]",
+                logger.info(
+                    "check_and_alert(%s): SKIP_DEDUP_TX_7D price_chg=%.1f%% <7d — omitida [tx]",
                     market_id, price_chg * 100,
                 )
                 return False

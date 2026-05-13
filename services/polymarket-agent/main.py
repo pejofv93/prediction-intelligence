@@ -610,6 +610,9 @@ async def _bg_analyze() -> dict:
         alerts_sent = 0
         skipped_volume = 0
         skipped_groq = 0
+        skipped_pass = 0      # analyze_market devolvió PASS/WATCH → check_and_alert rechazó
+        skipped_threshold = 0  # check_and_alert rechazó por edge/conf insuficiente
+        skipped_dedup = 0      # check_and_alert rechazó por dedup 24h/7d
 
         for i, enriched in enumerate(docs_balanced):
             if i > 0:
@@ -684,6 +687,7 @@ async def _bg_analyze() -> dict:
                             _se,
                         )
 
+                    _rec = str(prediction.get("recommendation", "PASS")).upper()
                     alerted = await check_and_alert(prediction)
                     if alerted:
                         alerts_sent += 1
@@ -694,11 +698,17 @@ async def _bg_analyze() -> dict:
                         except Exception as _se:
                             logger.error("analyze: error en track_new_signal — %s", _se)
                     else:
-                        logger.debug(
-                            "analyze: %s — edge=%.3f conf=%.2f → no alerta",
-                            enriched.get("market_id"),
-                            float(prediction.get("edge", 0)),
-                            float(prediction.get("confidence", 0)),
+                        _edge_v = float(prediction.get("edge", 0))
+                        _conf_v = float(prediction.get("confidence", 0))
+                        if _rec not in ("BUY_YES", "BUY_NO"):
+                            skipped_pass += 1
+                        elif abs(_edge_v) < 0.08 or _conf_v < 0.55:
+                            skipped_threshold += 1
+                        else:
+                            skipped_dedup += 1
+                        logger.info(
+                            "analyze: FUNNEL %s rec=%s edge=%.3f conf=%.2f → no alerta",
+                            enriched.get("market_id"), _rec, _edge_v, _conf_v,
                         )
             except Exception:
                 skipped_groq += 1
@@ -709,9 +719,11 @@ async def _bg_analyze() -> dict:
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info(
-            "analyze: total=%d analizados=%d alertas=%d skip_vol=%d skip_err=%d en %.1fs",
+            "analyze: total=%d analizados=%d alertas=%d "
+            "skip_vol=%d skip_err=%d skip_pass=%d skip_threshold=%d skip_dedup=%d en %.1fs",
             len(docs_balanced), predictions_generated, alerts_sent,
-            skipped_volume, skipped_groq, elapsed,
+            skipped_volume, skipped_groq, skipped_pass, skipped_threshold, skipped_dedup,
+            elapsed,
         )
 
         # Asignar grupos tematicos a mercados (una sola vez al deploy)
@@ -737,6 +749,9 @@ async def _bg_analyze() -> dict:
             "alerts": alerts_sent,
             "skip_vol": skipped_volume,
             "skip_err": skipped_groq,
+            "skip_pass": skipped_pass,
+            "skip_threshold": skipped_threshold,
+            "skip_dedup": skipped_dedup,
             "elapsed_s": round(elapsed, 1),
         }
 
