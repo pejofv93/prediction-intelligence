@@ -52,6 +52,9 @@ async def _fetch_basketball_odds(sport_key: str) -> list:
         return cached[1]
     if not ODDS_API_KEY:
         return []
+    # basketball_nba devuelve 401 en el plan free — excluir para evitar spam de errores
+    if sport_key == "basketball_nba":
+        return []
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(

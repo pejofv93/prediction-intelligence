@@ -166,9 +166,11 @@ _TOP_LEAGUES_H2H_H1: frozenset[str] = frozenset({
 _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
 _LEAGUE_CACHE_TTL = timedelta(hours=24)
 
-# Cache de odds-api.io en memoria: {league_code: (fetched_at, [events_normalised])}
-_ODDSAPIIO_CACHE: dict[str, tuple[datetime, list]] = {}
-_ODDSAPIIO_CACHE_TTL = timedelta(hours=24)
+# Cache de odds-api.io en memoria: {league_code: (fetched_at, [events_normalised], is_error)}
+# is_error=True → respuesta vacía/429 → TTL corto para no bloquear reintentos indefinidamente
+_ODDSAPIIO_CACHE: dict[str, tuple[datetime, list, bool]] = {}
+_ODDSAPIIO_CACHE_TTL     = timedelta(hours=24)
+_ODDSAPIIO_CACHE_ERR_TTL = timedelta(minutes=30)
 
 # Cache de optic-odds en memoria: {league_code: (fetched_at, [events_normalised])}
 _OPTICODDS_CACHE: dict[str, tuple[datetime, list]] = {}
@@ -467,28 +469,26 @@ async def _fetch_oddsapiio(
     # Verificar caché en memoria (evita re-llamar al cliente entre partidos de la misma liga)
     cached = _ODDSAPIIO_CACHE.get(league)
     if cached is not None:
-        fetched_at, events = cached
-        if (now - fetched_at) < _ODDSAPIIO_CACHE_TTL:
+        fetched_at, events, is_err = cached
+        ttl = _ODDSAPIIO_CACHE_ERR_TTL if is_err else _ODDSAPIIO_CACHE_TTL
+        if (now - fetched_at) < ttl:
             age_min = int((now - fetched_at).total_seconds() / 60)
-            logger.warning(
-                "DIAG_VBE_CACHE_HIT: _ODDSAPIIO_CACHE[%s] → %d eventos (age=%dmin) — NO llama get_league_odds",
-                league, len(events), age_min,
+            logger.info(
+                "DIAG_VBE_CACHE_HIT: _ODDSAPIIO_CACHE[%s] → %d eventos age=%dmin err=%s",
+                league, len(events), age_min, is_err,
             )
             return _search_oddsapiio_event(events, home_team, away_team, match_id)
-        # Cache expirado → dejar que el cliente decida (también tiene su propio TTL)
 
     logger.warning("DIAG_VBE_CACHE_MISS: _ODDSAPIIO_CACHE[%s] miss → llamando get_league_odds", league)
 
     try:
         from collectors.odds_apiio_client import get_league_odds
         events = await get_league_odds(league)
-        # Solo cachear si hay eventos reales — si [] no almacenar aquí:
-        # odds_apiio_client._EVENT_CACHE ya tiene TTL 60s para errores y
-        # cachear (now, []) aquí con 4h bloquearía reintentos (age=0min).
-        if events:
-            _ODDSAPIIO_CACHE[league] = (now, events)
+        # Siempre cachear: eventos reales → TTL 24h; vacío/error (429) → TTL 30min
+        _ODDSAPIIO_CACHE[league] = (now, events, not bool(events))
     except Exception:
         logger.error("_fetch_oddsapiio(%s): error llamando cliente", match_id, exc_info=True)
+        _ODDSAPIIO_CACHE[league] = (now, [], True)
         return None
 
     return _search_oddsapiio_event(events, home_team, away_team, match_id)
