@@ -152,6 +152,14 @@ _YAHOO_SYMBOLS: dict[str, str] = {
     "WTI":    "CL%3DF",
     "GOLD":   "GC%3DF",
     "SILVER": "SI%3DF",
+    # Crypto fallback cuando CoinGecko falla (429 en Railway)
+    "BTC":    "BTC-USD",
+    "ETH":    "ETH-USD",
+    "SOL":    "SOL-USD",
+    "XRP":    "XRP-USD",
+    "BNB":    "BNB-USD",
+    "ADA":    "ADA-USD",
+    "DOGE":   "DOGE-USD",
 }
 
 _ASSET_DETECT: list = [
@@ -1203,6 +1211,18 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     if _price_ctx:
         _p_asset, _p_cg_id, _p_target = _price_ctx
         _current_price = await _fetch_current_price(_p_asset, _p_cg_id)
+        # Fallback: usar ctc_price del enricher si fetch HTTP falló (429 Railway)
+        if not _current_price and enriched_market:
+            _ctc = enriched_market.get("ctc_price")
+            if _ctc:
+                try:
+                    _current_price = float(_ctc)
+                    logger.info(
+                        "analyze_market(%s): PRICE_FROM_CTC — %s=$%.2f (CoinGecko falló, usando enricher)",
+                        market_id, _p_asset, _current_price,
+                    )
+                except (TypeError, ValueError):
+                    pass
         if _current_price and _current_price > 0:
             _pct_needed = (_p_target / _current_price - 1) * 100
             if abs(_pct_needed) > 100:
@@ -1552,7 +1572,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # FIX 2: near-target floor — target < 10% de distancia → mínimo 60% + no señal contraria
     if _price_ctx and _pct_needed is not None and abs(_pct_needed) < 10.0:
         _near_floor = 0.60
-        if real_prob < _near_floor:
+        if real_prob <= _near_floor:
             _old_near = real_prob
             real_prob = _near_floor
             edge = round(real_prob - price_yes, 4)
