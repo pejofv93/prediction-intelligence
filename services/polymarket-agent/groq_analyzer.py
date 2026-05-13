@@ -91,6 +91,63 @@ _TOURNAMENT_KW_RE = re.compile(
     re.I,
 )
 
+# Patrón para mercados de partido concreto ("Will X win on YYYY-MM-DD")
+_WIN_ON_DATE_RE = re.compile(r'\bwill\s+(.+?)\s+win\s+on\s+\d{4}-\d{2}-\d{2}', re.I)
+
+# Equipos de ligas soportadas — si el nombre del equipo está aquí NO se bloquea
+_KNOWN_FOOTBALL_TEAMS: frozenset[str] = frozenset({
+    # Premier League
+    "arsenal", "aston villa", "bournemouth", "brentford", "brighton", "chelsea",
+    "crystal palace", "everton", "fulham", "ipswich", "leicester", "liverpool",
+    "manchester city", "man city", "manchester united", "man united", "man utd",
+    "newcastle", "nottingham forest", "nottm forest", "tottenham", "spurs",
+    "west ham", "wolverhampton", "wolves",
+    # La Liga
+    "atletico madrid", "atletico de madrid", "barcelona", "fc barcelona", "betis",
+    "real betis", "celta", "celta vigo", "getafe", "girona", "granada",
+    "las palmas", "mallorca", "osasuna", "rayo vallecano", "real madrid",
+    "real sociedad", "sevilla", "valencia", "villarreal", "alaves", "leganes",
+    # Bundesliga
+    "augsburg", "bayer leverkusen", "bayer 04", "bayern münchen", "bayern munich",
+    "fc bayern", "fc bayern münchen", "borussia dortmund", "bvb",
+    "borussia mönchengladbach", "mönchengladbach", "darmstadt",
+    "eintracht frankfurt", "freiburg", "heidenheim", "hoffenheim",
+    "köln", "1. fc köln", "mainz", "rb leipzig", "union berlin", "1. fc union berlin",
+    "vfb stuttgart", "vfl bochum", "vfl wolfsburg", "werder bremen", "holstein kiel",
+    "st. pauli",
+    # Serie A
+    "ac milan", "atalanta", "bologna", "cagliari", "como", "empoli",
+    "fiorentina", "genoa", "inter milan", "internazionale", "inter", "juventus",
+    "lazio", "lecce", "milan", "monza", "napoli", "parma", "roma", "torino",
+    "udinese", "verona", "venezia",
+    # Ligue 1
+    "angers", "auxerre", "brest", "lens", "lille", "lyon", "marseille",
+    "monaco", "montpellier", "nantes", "nice", "paris saint-germain", "psg",
+    "paris fc", "reims", "rennes", "saint-etienne", "strasbourg", "toulouse",
+    # Champions League / Europa League regulars
+    "benfica", "porto", "sporting cp", "sporting lisbon", "ajax", "psv",
+    "feyenoord", "celtic", "rangers", "anderlecht", "club brugge", "gent",
+    "salzburg", "red bull salzburg", "shakhtar", "dynamo kyiv", "galatasaray",
+    "fenerbahce", "besiktas", "olympiakos", "panathinaikos", "apoel",
+    "crvena zvezda", "red star belgrade", "dinamo zagreb", "slavia prague",
+    "viktoria plzen", "sparta prague", "young boys", "basel", "zurich",
+    # Selecciones nacionales (EC/WC)
+    "england", "france", "germany", "spain", "italy", "portugal", "netherlands",
+    "holland", "belgium", "croatia", "denmark", "sweden", "norway", "switzerland",
+    "austria", "poland", "ukraine", "turkey", "czechia", "czech republic",
+    "scotland", "wales", "ireland", "hungary", "romania", "serbia", "slovakia",
+    "argentina", "brazil", "mexico", "colombia", "ecuador", "chile", "uruguay",
+    "usa", "united states", "canada", "japan", "south korea", "australia",
+    "morocco", "senegal", "nigeria", "egypt",
+})
+
+
+def _is_known_football_team(team: str) -> bool:
+    """True si el nombre del equipo coincide (total o parcialmente) con una liga soportada."""
+    t = team.lower().strip()
+    # Coincidencia directa o el nombre conocido está contenido en el equipo extraído
+    return any(kw in t or t in kw for kw in _KNOWN_FOOTBALL_TEAMS)
+
 _YAHOO_SYMBOLS: dict[str, str] = {
     "WTI":    "CL%3DF",
     "GOLD":   "GC%3DF",
@@ -1048,19 +1105,19 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id, _tm, _te,
                 )
 
-        # FIX 4: "Will X win on YYYY-MM-DD" — partido concreto sin datos de liga verificados → PASS
-        # Polymarket usa este formato para partidos de ligas menores no soportadas (ej: Chile, MLS, etc.)
-        # Si es liga soportada, sports-agent ya genera señal propia con Poisson+ELO.
-        _WIN_ON_DATE_RE = re.compile(
-            r'\bwill\s+.+?\s+win\s+on\s+\d{4}-\d{2}-\d{2}', re.I
-        )
-        if _WIN_ON_DATE_RE.search(question):
-            logger.info(
-                "analyze_market(%s): WIN_ON_DATE_SKIP — mercado partido especifico sin datos "
-                "de liga verificados → PASS (%s)",
-                market_id, question[:80],
-            )
-            return None
+        # FIX 4: "Will X win on YYYY-MM-DD" — partido concreto de liga desconocida → PASS
+        # Solo bloquear si el equipo NO aparece en ninguna liga soportada.
+        # Bayern Bundesliga, Arsenal PL, etc. NO se bloquean.
+        _wod_m = _WIN_ON_DATE_RE.search(question)
+        if _wod_m:
+            _wod_team = _wod_m.group(1).strip()
+            if not _is_known_football_team(_wod_team):
+                logger.info(
+                    "analyze_market(%s): WIN_ON_DATE_UNKNOWN_TEAM — equipo '%s' no reconocido "
+                    "en ligas soportadas → PASS (%s)",
+                    market_id, _wod_team, question[:80],
+                )
+                return None
 
         # NBA playoff series: pre-fetch ESPN win probability + series state for post-LLM floor
         q_lower = question.lower()
