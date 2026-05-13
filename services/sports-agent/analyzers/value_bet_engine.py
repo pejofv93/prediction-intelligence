@@ -1994,6 +1994,27 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         )
         return []
 
+    # EV alto en cuotas altas no compensa cuando la probabilidad propia del modelo es baja.
+    # Caso típico: Genoa @4.50 vs Milan — EV puede ser 20%+ pero Poisson 0.38 indica
+    # que el equipo tiene <40% de ganar según el modelo estadístico.
+    _is_real_poisson_sel = not enriched_match.get("_synthetic_poisson", False)
+    if _is_real_poisson_sel and _sel_poisson < 0.35:
+        logger.info(
+            "generate_signal(%s): descartado — poisson=%.2f < 0.35 (prob propia demasiado baja) "
+            "[%s | %s]",
+            match_id, _sel_poisson, team_to_back, league,
+        )
+        return []
+    if _sel_poisson < 0.40 and _sel_form < 0.45:
+        _conf_before_low = best_confidence
+        best_confidence = round(best_confidence * 0.85, 4)
+        logger.info(
+            "generate_signal(%s): confianza −15%% — poisson=%.2f form=%.2f bajos "
+            "(%.2f→%.2f) [%s | %s]",
+            match_id, _sel_poisson, _sel_form, _conf_before_low, best_confidence,
+            team_to_back, league,
+        )
+
     # Aplicar ajuste de motivación (puede reducir o aumentar confianza)
     if _standings_confidence_adj != 1.0:
         best_confidence = round(best_confidence * _standings_confidence_adj, 4)
