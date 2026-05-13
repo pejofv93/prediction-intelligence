@@ -486,18 +486,30 @@ async def send_sports_alert(prediction: dict) -> bool:
 
     try:
         cutoff_48h = datetime.now(timezone.utc) - timedelta(hours=48)
-        existing = list(
+        # Query de un solo campo (sin índice compuesto Firestore) + filtro sent_at en Python.
+        # La query compuesta alert_key+sent_at requería índice compuesto — al fallar caía al
+        # except y enviaba siempre (causa de los duplicados).
+        docs = list(
             col("alerts_sent")
             .where(filter=FieldFilter("alert_key", "==", key))
-            .where(filter=FieldFilter("sent_at", ">=", cutoff_48h))
-            .limit(1)
+            .limit(10)
             .stream()
         )
-        if existing:
-            logger.debug("send_sports_alert: alerta duplicada en 48h omitida (%s)", key)
+        recent = [
+            d.to_dict() for d in docs
+            if d.to_dict().get("sent_at") is not None
+            and d.to_dict()["sent_at"] >= cutoff_48h
+        ]
+        if recent:
+            logger.info("send_sports_alert: duplicada 48h → omitida (%s)", key)
             return False
-    except Exception:
-        logger.error("send_sports_alert: error comprobando dedup", exc_info=True)
+    except Exception as _de:
+        # Fail-closed: si el dedup falla NO enviamos para evitar duplicados.
+        logger.error(
+            "send_sports_alert: dedup falló [%s: %s] → omitida para evitar duplicado (%s)",
+            type(_de).__name__, _de, key,
+        )
+        return False
 
     text = _format_alert_unified(prediction)
     sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
