@@ -1608,17 +1608,18 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "analyze_market(%s): NEAR_TARGET_FLOOR %.3f→%.3f pct_needed=%.1f%% asset=%s",
                 market_id, _old_near, real_prob, _pct_needed, _price_ctx[0],
             )
-        # No generar señal contraria: BUY_NO en target alcista o BUY_YES en target bajista
+        # No generar señal contraria: BUY_NO en target alcista o bajista cercano
         if _pct_needed > 0 and recommendation == "BUY_NO":
             recommendation = "PASS"
             logger.info(
                 "analyze_market(%s): NEAR_TARGET_NO_CONTRA BUY_NO→PASS (target +%.1f%%)",
                 market_id, _pct_needed,
             )
-        elif _pct_needed < 0 and recommendation == "BUY_YES":
+        elif _pct_needed < 0 and recommendation == "BUY_NO":
+            # Dip cercano: solo -7% para que ETH/BTC llegue → apostar NO es contrario
             recommendation = "PASS"
             logger.info(
-                "analyze_market(%s): NEAR_TARGET_NO_CONTRA BUY_YES→PASS (target %.1f%%)",
+                "analyze_market(%s): NEAR_TARGET_NO_CONTRA BUY_NO→PASS (dip %.1f%% cercano)",
                 market_id, _pct_needed,
             )
 
