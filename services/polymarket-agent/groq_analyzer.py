@@ -288,7 +288,7 @@ def _validate_crypto_price_prediction(
     cap_note = ""
 
     if variation < 0:
-        # Caps para predicciones de bajada (independientes del plazo)
+        # Caps para predicciones de bajada
         if abs_var > 0.80:
             max_prob = 0.10
             cap_note = f"caída requerida {variation:+.0%} > 80%"
@@ -298,6 +298,12 @@ def _validate_crypto_price_prediction(
         elif abs_var > 0.50:
             max_prob = 0.30
             cap_note = f"caída requerida {variation:+.0%} > 50%"
+        elif abs_var > 0.30 and days_to_close < 90:
+            max_prob = 0.12
+            cap_note = f"caída requerida {variation:+.0%} > 30% en {days_to_close}d"
+        elif abs_var > 0.20 and days_to_close < 90:
+            max_prob = 0.18
+            cap_note = f"caída requerida {variation:+.0%} > 20% en {days_to_close}d"
     else:
         # Caps para predicciones de subida
         if abs_var > 2.0:
@@ -783,6 +789,18 @@ def _extract_team_tournament(question: str) -> tuple[str, str] | None:
     return team, tournament
 
 
+_KNOWN_ELIMINATED: dict[str, dict[str, bool]] = {
+    # UCL 2025-26: Bayern eliminado por PSG el 6-mayo-2026; final PSG vs Arsenal 30-mayo Budapest
+    "champions league": {
+        "bayern": True, "bayern munich": True, "fc bayern": True,
+        "real madrid": True, "barcelona": True, "atletico madrid": True,
+        "manchester city": True, "chelsea": True, "liverpool": True,
+        "borussia dortmund": True, "inter": True, "milan": True,
+        "psg": False, "paris saint-germain": False,  # PSG finalista
+        "arsenal": False,                              # Arsenal finalista
+    },
+}
+
 async def _check_team_eliminated(team: str, tournament: str) -> bool:
     """
     Returns True if DDG results strongly suggest team is eliminated from tournament.
@@ -792,14 +810,29 @@ async def _check_team_eliminated(team: str, tournament: str) -> bool:
     import urllib.parse
     import urllib.request
 
-    cache_key = f"{team.lower()}|{tournament.lower()}"
+    team_lower = team.lower().strip()
+    tournament_lower = tournament.lower().strip()
+
+    # 1. Conocimiento hardcodeado con resultados verificados
+    for trn_key, elim_map in _KNOWN_ELIMINATED.items():
+        if trn_key in tournament_lower or tournament_lower in trn_key:
+            for t_key, is_out in elim_map.items():
+                if t_key in team_lower or team_lower in t_key:
+                    logger.info(
+                        "_check_team_eliminated(%s, %s): HARDCODED → eliminated=%s",
+                        team, tournament, is_out,
+                    )
+                    return is_out
+
+    cache_key = f"{team_lower}|{tournament_lower}"
     now_ts = _time.monotonic()
     if cache_key in _TEAM_ELIM_CACHE:
         eliminated, cached_ts = _TEAM_ELIM_CACHE[cache_key]
         if now_ts - cached_ts < _TEAM_ELIM_TTL:
             return eliminated
 
-    query = f"{team} {tournament} 2026 eliminated OR knocked out OR eliminado"
+    # Quitar año concreto — usar temporada para no perder artículos de 2025-26
+    query = f"{team} {tournament} eliminated OR knocked out OR eliminado OR exit"
     url = f"https://html.duckduckgo.com/html/?{urllib.parse.urlencode({'q': query})}"
 
     def _fetch() -> str:
@@ -821,10 +854,11 @@ async def _check_team_eliminated(team: str, tournament: str) -> bool:
         return False
 
     html_lower = html.lower()
-    team_lower = team.lower()
     elimination_signals = [
         "eliminat", "knocked out", "out of the", "already eliminated",
         "has been eliminated", "were eliminated", "fuera de",
+        "exit from", "exit the", "knocked out of", "dumped out",
+        "crash out", "crashes out", "failed to qualify",
     ]
 
     eliminated = False
@@ -1014,6 +1048,20 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id, _tm, _te,
                 )
 
+        # FIX 4: "Will X win on YYYY-MM-DD" — partido concreto sin datos de liga verificados → PASS
+        # Polymarket usa este formato para partidos de ligas menores no soportadas (ej: Chile, MLS, etc.)
+        # Si es liga soportada, sports-agent ya genera señal propia con Poisson+ELO.
+        _WIN_ON_DATE_RE = re.compile(
+            r'\bwill\s+.+?\s+win\s+on\s+\d{4}-\d{2}-\d{2}', re.I
+        )
+        if _WIN_ON_DATE_RE.search(question):
+            logger.info(
+                "analyze_market(%s): WIN_ON_DATE_SKIP — mercado partido especifico sin datos "
+                "de liga verificados → PASS (%s)",
+                market_id, question[:80],
+            )
+            return None
+
         # NBA playoff series: pre-fetch ESPN win probability + series state for post-LLM floor
         q_lower = question.lower()
         if "nba" in q_lower and ("series" in q_lower or "playoffs" in q_lower or "finals" in q_lower):
@@ -1105,6 +1153,21 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     "analyze_market(%s): PRICE_UNREACHABLE — %s target=$%.0f current=$%.2f "
                     "requiere %.0f%% en %dd — descartando",
                     market_id, _p_asset, _p_target, _current_price, _pct_needed, days_to_close,
+                )
+                return None
+            # FIX 3: descartar mercados "dip to $X" con bajada demasiado extrema
+            if _pct_needed < -30:
+                logger.info(
+                    "analyze_market(%s): DIP_TOO_STEEP — %s target=$%.0f current=$%.2f "
+                    "requiere %.0f%% bajada (>30%%) — descartando",
+                    market_id, _p_asset, _p_target, _current_price, _pct_needed,
+                )
+                return None
+            if _pct_needed < -20 and days_to_close < 30:
+                logger.info(
+                    "analyze_market(%s): DIP_SHORTTERM — %s %.0f%% bajada en %dd (<30d) "
+                    "— descartando",
+                    market_id, _p_asset, _pct_needed, days_to_close,
                 )
                 return None
 

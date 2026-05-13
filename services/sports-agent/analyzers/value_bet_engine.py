@@ -2469,24 +2469,11 @@ async def _generate_poisson_signal(
         logger.error("_generate_poisson_signal(%s): error guardando en Firestore", match_id, exc_info=True)
 
     logger.info(
-        "generate_signal(%s): POISSON_SYNTHETIC — %s p=%.2f conf=%.0f%% (sin odds externas)",
+        "generate_signal(%s): POISSON_SYNTHETIC — %s p=%.2f conf=%.0f%% (sin odds externas, sin alerta)",
         match_id, team_to_back, best_prob, best_conf * 100,
     )
 
-    # Alerta Telegram con formato diferenciado
-    await _send_telegram_alert({
-        **prediction,
-        "market_emoji": "📊",
-        "intensity": "📊",
-        "match_date": str(match_date)[:16] if match_date else "?",
-        "_synthetic_warning": "⚠️ Sin validación de bookmaker — modelo Poisson propio",
-        "poisson": result_home["signals"].get("poisson"),
-        "elo": result_home["signals"].get("elo"),
-        "form": result_home["signals"].get("form"),
-        "h2h": result_home["signals"].get("h2h"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-
+    # Sin alerta Telegram: señal sintética sin validación de bookmaker → edge=None → descartada
     return [prediction]
 
 

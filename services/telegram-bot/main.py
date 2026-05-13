@@ -231,6 +231,7 @@ async def send_weekly_report() -> JSONResponse:
     3. predictions donde created_at >= semana_actual
     4. poly_predictions donde analyzed_at >= semana_actual
     """
+    import asyncio
     from shared.firestore_client import col
     from shared.report_generator import generate_weekly_report
     from alert_manager import send_message
@@ -330,10 +331,12 @@ async def send_weekly_report() -> JSONResponse:
             poly_best_market = str(best_poly.get("question") or "")[:40]
             poly_best_edge = abs(float(best_poly.get("edge") or 0))
 
-        # Bankroll virtual (shadow trades)
+        # Bankroll virtual (shadow trades) — ejecutar en executor para no bloquear event loop
         try:
             from shared.shadow_engine import calculate_metrics
-            shadow_metrics = calculate_metrics()
+            shadow_metrics = await asyncio.get_event_loop().run_in_executor(
+                None, calculate_metrics
+            )
         except Exception:
             logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
             shadow_metrics = {}
