@@ -152,7 +152,7 @@ _YAHOO_SYMBOLS: dict[str, str] = {
     "WTI":    "CL%3DF",
     "GOLD":   "GC%3DF",
     "SILVER": "SI%3DF",
-    # Crypto fallback cuando CoinGecko falla (429 en Railway)
+    # Crypto fallback 2 (Binance es fallback 1, Yahoo es fallback 2)
     "BTC":    "BTC-USD",
     "ETH":    "ETH-USD",
     "SOL":    "SOL-USD",
@@ -160,6 +160,16 @@ _YAHOO_SYMBOLS: dict[str, str] = {
     "BNB":    "BNB-USD",
     "ADA":    "ADA-USD",
     "DOGE":   "DOGE-USD",
+}
+
+_BINANCE_SYMBOLS: dict[str, str] = {
+    "BTC":  "BTCUSDT",
+    "ETH":  "ETHUSDT",
+    "SOL":  "SOLUSDT",
+    "BNB":  "BNBUSDT",
+    "XRP":  "XRPUSDT",
+    "ADA":  "ADAUSDT",
+    "DOGE": "DOGEUSDT",
 }
 
 _ASSET_DETECT: list = [
@@ -482,7 +492,18 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
     loop = asyncio.get_running_loop()
     price: float | None = None
 
-    if coingecko_id:
+    # 1. Binance — principal: sin API key, sin rate limit práctico
+    if asset_key in _BINANCE_SYMBOLS:
+        _bsym = _BINANCE_SYMBOLS[asset_key]
+        _burl = f"https://api.binance.com/api/v3/ticker/price?symbol={_bsym}"
+        price = await loop.run_in_executor(
+            None, lambda: _http_get(_burl, lambda d: d["price"])
+        )
+        if price:
+            logger.debug("_fetch_current_price(%s): Binance OK $%.4g", asset_key, price)
+
+    # 2. CoinGecko — fallback 1
+    if price is None and coingecko_id:
         try:
             from realtime.correlation_tracker import get_crypto_price
             price = await asyncio.wait_for(get_crypto_price(coingecko_id), timeout=4.0)
@@ -491,6 +512,7 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
         except Exception as _cge:
             logger.debug("_fetch_current_price(%s): CoinGecko error — %s", asset_key, _cge)
 
+    # 3. Yahoo Finance — fallback 2
     if price is None and asset_key in _YAHOO_SYMBOLS:
         _sym = _YAHOO_SYMBOLS[asset_key]
         _yurl = f"https://query2.finance.yahoo.com/v8/finance/chart/{_sym}?interval=1d&range=1d"
