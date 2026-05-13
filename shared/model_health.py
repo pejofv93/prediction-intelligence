@@ -203,10 +203,12 @@ def format_daily_report(
     shadow_metrics: dict,
     top_signal: Optional[dict] = None,
     pred_stats: Optional[dict] = None,
+    tier_stats: Optional[dict] = None,
 ) -> str:
     """
     Formato reporte diario matutino.
     pred_stats: {total, pending, resolved, correct, incorrect, synthetic, real_odds}.
+    tier_stats: {fuerte: [...], detectada: [...], moderada: [...]}.
     Estado del modelo basado en win_rate real (shadow_trades):
       > 50% → ✅ SALUDABLE  |  40-50% → ⚠️ ATENCIÓN  |  < 40% → 🔴 REVISAR
     """
@@ -287,5 +289,20 @@ def format_daily_report(
             market = top_signal.get("market_type") or top_signal.get("market") or top_signal.get("question", "")[:40]
             score_str = f"{unified_score:.0f}/100" if isinstance(unified_score, (int, float)) and unified_score > 1 else f"{float(unified_score):.0%}"
             lines.append(f"\n🏆 Top señal hoy: {market} — Score: {score_str}")
+
+    # Desglose por tiers de edge
+    if tier_stats:
+        fuerte   = tier_stats.get("fuerte", [])
+        detectada = tier_stats.get("detectada", [])
+        moderada  = tier_stats.get("moderada", [])
+        if fuerte or detectada or moderada:
+            lines.append("")
+            lines.append("📊 Distribución por tier:")
+            if fuerte:
+                lines.append(f"  🔥 Fuerte (edge>20%): {len(fuerte)}")
+            if detectada:
+                lines.append(f"  ✅ Detectada (12-20%): {len(detectada)}")
+            if moderada:
+                lines.append(f"  📊 Moderada (8-12%): {len(moderada)}")
 
     return "\n".join(lines)
