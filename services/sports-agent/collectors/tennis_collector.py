@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from shared.config import FOOTBALL_RAPID_API_KEY, ODDS_API_KEY
+from shared.config import FOOTBALL_RAPID_API_KEY, ODDS_API_KEY, ODDSAPIIO_KEY
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -240,8 +240,9 @@ async def _save_player_stats(player_id: str, player_name: str, ranking: int,
 
 
 _ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
+_ODDSAPIIO_BASE = "https://api.odds-api.io/v3"
 
-# Sport keys de The Odds API por torneo + superficie + nombre
+# Sport keys de The Odds API por torneo + superficie + nombre (fallback secundario)
 _FALLBACK_TENNIS_KEYS = [
     ("tennis_atp_french_open", "ATP_FRENCH_OPEN", "clay",  "Roland Garros"),
     ("tennis_wta_french_open", "WTA_FRENCH_OPEN", "clay",  "Roland Garros"),
@@ -253,19 +254,142 @@ _FALLBACK_TENNIS_KEYS = [
     ("tennis_wta",             "WTA",             "hard",  "WTA"),
 ]
 
+# Mapa competición → (league_code, surface, tournament_name) para odds-api.io
+_ODDSAPIIO_COMP_MAP = {
+    "roland": ("ATP_FRENCH_OPEN", "clay", "Roland Garros"),
+    "french":  ("ATP_FRENCH_OPEN", "clay", "Roland Garros"),
+    "wimbledon": ("ATP_WIMBLEDON", "grass", "Wimbledon"),
+    "us open":   ("ATP_US_OPEN",   "hard",  "US Open"),
+    "australian": ("ATP_AUS_OPEN", "hard",  "Australian Open"),
+    "madrid":    ("ATP_MADRID",    "clay",  "Madrid Open"),
+    "rome":      ("ATP_ROME",      "clay",  "Italian Open"),
+    "internazionali": ("ATP_ROME", "clay",  "Italian Open"),
+    "barcelona": ("ATP_BARCELONA", "clay",  "Barcelona Open"),
+    "wta":       ("WTA",           "hard",  "WTA"),
+    "atp":       ("ATP",           "hard",  "ATP"),
+}
 
-async def collect_tennis_from_odds_api(days: int = 10) -> list[dict]:
+
+def _oddsapiio_comp_to_league(comp: str) -> tuple[str, str, str]:
+    """Mapea nombre de competición de odds-api.io al código interno."""
+    comp_lower = comp.lower()
+    for kw, (code, surface, name) in _ODDSAPIIO_COMP_MAP.items():
+        if kw in comp_lower:
+            return code, surface, name
+    return "ATP", "hard", comp or "Tennis"
+
+
+async def _fetch_tennis_from_oddsapiio(days: int) -> list[dict]:
     """
-    Fallback: descubre partidos de tenis próximos desde The Odds API (events endpoint).
-    Se activa cuando tennis_collector (tennisapi1) no devuelve torneos.
-    Solo necesita ODDS_API_KEY — sin RapidAPI.
+    Primaria del fallback: descubre partidos de tenis via odds-api.io.
+    GET /events?sport=tennis — sin cuota mensual, 100 req/hora.
+    Devuelve lista vacía si la API no tiene eventos aún (mercados no abiertos).
     """
-    if not ODDS_API_KEY:
-        logger.warning("tennis_collector fallback: ODDS_API_KEY no configurada")
+    if not ODDSAPIIO_KEY:
+        logger.warning("tennis_collector oddsapiio: ODDSAPIIO_KEY no configurada")
         return []
 
     cutoff = datetime.now(timezone.utc) + timedelta(days=days)
     matches: list[dict] = []
+    seen_ids: set[str] = set()
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{_ODDSAPIIO_BASE}/events",
+                params={"sport": "tennis", "apiKey": ODDSAPIIO_KEY},
+            )
+        if resp.status_code == 429:
+            logger.warning("tennis_collector oddsapiio: rate limit 429 — reintentando en próximo ciclo")
+            return []
+        if resp.status_code != 200:
+            logger.warning("tennis_collector oddsapiio: HTTP %d", resp.status_code)
+            return []
+        data = resp.json()
+        if isinstance(data, dict) and "error" in data:
+            logger.warning("tennis_collector oddsapiio: error API — %s", data["error"])
+            return []
+        events = data if isinstance(data, list) else data.get("data", data.get("events", []))
+    except Exception:
+        logger.error("tennis_collector oddsapiio: excepción", exc_info=True)
+        return []
+
+    for ev in events:
+        ev_id = str(ev.get("id") or ev.get("eventId") or "")
+        if not ev_id or ev_id in seen_ids:
+            continue
+
+        date_raw = (ev.get("commenceTime") or ev.get("commence_time") or
+                    ev.get("startTime") or ev.get("date") or "")
+        try:
+            commence = datetime.fromisoformat(str(date_raw).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if commence > cutoff:
+            continue
+
+        home = (ev.get("homeTeam") or ev.get("home_team") or
+                ev.get("home") or "Player 1")
+        away = (ev.get("awayTeam") or ev.get("away_team") or
+                ev.get("away") or "Player 2")
+
+        lg = ev.get("league") or {}
+        if isinstance(lg, dict):
+            comp = lg.get("name") or lg.get("slug") or ""
+        else:
+            comp = str(ev.get("competition") or ev.get("tournament") or lg or "")
+
+        league_code, surface, tournament_name = _oddsapiio_comp_to_league(comp)
+
+        seen_ids.add(ev_id)
+        matches.append({
+            "match_id": f"tennis_oapiio_{ev_id}",
+            "date": commence.isoformat(),
+            "home_team_id": hash(home) % 1_000_000,
+            "away_team_id": hash(away) % 1_000_000,
+            "home_team": home,
+            "away_team": away,
+            "home_team_name": home,
+            "away_team_name": away,
+            "goals_home": None,
+            "goals_away": None,
+            "league": league_code,
+            "status": ev.get("status", "SCHEDULED"),
+            "sport": "tennis",
+            "h2h_advantage": 0.0,
+            "surface": surface,
+            "tournament": tournament_name,
+            "source": "oddsapiio_fallback",
+        })
+
+    logger.info("tennis_collector oddsapiio: %d partidos via odds-api.io", len(matches))
+    return matches
+
+
+async def collect_tennis_from_odds_api(days: int = 10) -> list[dict]:
+    """
+    Fallback cuando tennisapi1 (RapidAPI) no responde.
+    Orden de fuentes:
+      1. odds-api.io (ODDSAPIIO_KEY) — primaria (72k req/mes, sin cuota mensual agotable)
+      2. The Odds API (ODDS_API_KEY)  — secundaria (puede estar agotada)
+    Retorna en cuanto una fuente devuelva resultados.
+
+    Nota: Roland Garros y otros Grand Slams pueden aparecer 1-3 días antes de que
+    empiece el torneo, cuando los bookmakers abren los mercados. 0 eventos es normal
+    si el torneo empieza en >3 días.
+    """
+    # 1. Intentar odds-api.io primero
+    matches = await _fetch_tennis_from_oddsapiio(days)
+    if matches:
+        return matches
+
+    # 2. Fallback: The Odds API (cuota mensual 500 req — puede estar agotada)
+    if not ODDS_API_KEY:
+        logger.warning("tennis_collector fallback: ODDS_API_KEY no configurada — sin datos de tenis")
+        return []
+
+    logger.info("tennis_collector fallback: odds-api.io sin eventos → intentando The Odds API")
+    cutoff = datetime.now(timezone.utc) + timedelta(days=days)
     seen_ids: set[str] = set()
 
     for sport_key, league_code, surface, tournament_name in _FALLBACK_TENNIS_KEYS:
@@ -277,32 +401,30 @@ async def collect_tennis_from_odds_api(days: int = 10) -> list[dict]:
                     "dateFormat": "iso",
                 })
             if resp.status_code == 404:
-                continue  # torneo no activo aún en The Odds API
+                continue
             if resp.status_code != 200:
-                logger.warning("tennis_collector fallback: %s → HTTP %d", sport_key, resp.status_code)
+                logger.warning("tennis_collector the-odds-api: %s → HTTP %d", sport_key, resp.status_code)
                 continue
             events = resp.json()
         except Exception:
-            logger.error("tennis_collector fallback: error en %s", sport_key, exc_info=True)
+            logger.error("tennis_collector the-odds-api: error en %s", sport_key, exc_info=True)
             continue
 
         for ev in events:
             ev_id = ev.get("id", "")
             if not ev_id or ev_id in seen_ids:
                 continue
-
             try:
                 commence = datetime.fromisoformat(str(ev.get("commence_time", "")).replace("Z", "+00:00"))
             except Exception:
                 continue
             if commence > cutoff:
                 continue
-
             p1 = ev.get("home_team", "Player 1")
             p2 = ev.get("away_team", "Player 2")
             seen_ids.add(ev_id)
             matches.append({
-                "match_id": f"tennis_odds_{ev_id}",
+                "match_id": f"tennis_oddsapi_{ev_id}",
                 "date": commence.isoformat(),
                 "home_team_id": hash(p1) % 1_000_000,
                 "away_team_id": hash(p2) % 1_000_000,
@@ -318,11 +440,12 @@ async def collect_tennis_from_odds_api(days: int = 10) -> list[dict]:
                 "h2h_advantage": 0.0,
                 "surface": surface,
                 "tournament": tournament_name,
-                "source": "odds_api_fallback",
+                "source": "the_odds_api_fallback",
             })
         await asyncio.sleep(0.5)
 
-    logger.info("tennis_collector fallback: %d partidos via The Odds API", len(matches))
+    logger.info("tennis_collector fallback: %d partidos totales (oddsapiio=0, the-odds-api=%d)",
+                0, len(matches))
     return matches
 
 
