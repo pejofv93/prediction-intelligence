@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from shared.config import FOOTBALL_RAPID_API_KEY
+from shared.config import FOOTBALL_RAPID_API_KEY, ODDS_API_KEY
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -239,18 +239,105 @@ async def _save_player_stats(player_id: str, player_name: str, ranking: int,
         logger.error("tennis_collector: error guardando stats de %s", player_id, exc_info=True)
 
 
+_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
+
+# Sport keys de The Odds API por torneo + superficie + nombre
+_FALLBACK_TENNIS_KEYS = [
+    ("tennis_atp_french_open", "ATP_FRENCH_OPEN", "clay",  "Roland Garros"),
+    ("tennis_wta_french_open", "WTA_FRENCH_OPEN", "clay",  "Roland Garros"),
+    ("tennis_atp_rome",        "ATP_ROME",        "clay",  "Italian Open"),
+    ("tennis_wta_rome",        "WTA_ROME",        "clay",  "Italian Open"),
+    ("tennis_atp_madrid_open", "ATP_MADRID",      "clay",  "Madrid Open"),
+    ("tennis_wta_madrid_open", "WTA_MADRID",      "clay",  "Madrid Open"),
+    ("tennis_atp",             "ATP",             "hard",  "ATP"),
+    ("tennis_wta",             "WTA",             "hard",  "WTA"),
+]
+
+
+async def collect_tennis_from_odds_api(days: int = 10) -> list[dict]:
+    """
+    Fallback: descubre partidos de tenis próximos desde The Odds API (events endpoint).
+    Se activa cuando tennis_collector (tennisapi1) no devuelve torneos.
+    Solo necesita ODDS_API_KEY — sin RapidAPI.
+    """
+    if not ODDS_API_KEY:
+        logger.warning("tennis_collector fallback: ODDS_API_KEY no configurada")
+        return []
+
+    cutoff = datetime.now(timezone.utc) + timedelta(days=days)
+    matches: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for sport_key, league_code, surface, tournament_name in _FALLBACK_TENNIS_KEYS:
+        url = f"{_ODDS_API_BASE}/{sport_key}/events"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, params={
+                    "apiKey": ODDS_API_KEY,
+                    "dateFormat": "iso",
+                })
+            if resp.status_code == 404:
+                continue  # torneo no activo aún en The Odds API
+            if resp.status_code != 200:
+                logger.warning("tennis_collector fallback: %s → HTTP %d", sport_key, resp.status_code)
+                continue
+            events = resp.json()
+        except Exception:
+            logger.error("tennis_collector fallback: error en %s", sport_key, exc_info=True)
+            continue
+
+        for ev in events:
+            ev_id = ev.get("id", "")
+            if not ev_id or ev_id in seen_ids:
+                continue
+
+            try:
+                commence = datetime.fromisoformat(str(ev.get("commence_time", "")).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if commence > cutoff:
+                continue
+
+            p1 = ev.get("home_team", "Player 1")
+            p2 = ev.get("away_team", "Player 2")
+            seen_ids.add(ev_id)
+            matches.append({
+                "match_id": f"tennis_odds_{ev_id}",
+                "date": commence.isoformat(),
+                "home_team_id": hash(p1) % 1_000_000,
+                "away_team_id": hash(p2) % 1_000_000,
+                "home_team": p1,
+                "away_team": p2,
+                "home_team_name": p1,
+                "away_team_name": p2,
+                "goals_home": None,
+                "goals_away": None,
+                "league": league_code,
+                "status": "SCHEDULED",
+                "sport": "tennis",
+                "h2h_advantage": 0.0,
+                "surface": surface,
+                "tournament": tournament_name,
+                "source": "odds_api_fallback",
+            })
+        await asyncio.sleep(0.5)
+
+    logger.info("tennis_collector fallback: %d partidos via The Odds API", len(matches))
+    return matches
+
+
 async def collect_tennis_matches(days: int = 7) -> list[dict]:
     """
     Pipeline completo:
-    1. Obtiene torneos activos
-    2. Por torneo, obtiene partidos próximos
-    3. Por partido, guarda stats de ambos jugadores
+    1. Obtiene torneos activos via tennisapi1 (RapidAPI)
+    2. Fallback a The Odds API events si tennisapi1 devuelve 0 torneos
+    3. Por torneo, obtiene partidos próximos y stats de jugadores
     4. Devuelve lista de upcoming_matches normalizados
     """
     tournaments = await get_active_tournaments()
     if not tournaments:
-        logger.warning("tennis_collector: sin torneos activos")
-        return []
+        logger.warning("tennis_collector: sin torneos activos vía RapidAPI — activando fallback The Odds API")
+        return await collect_tennis_from_odds_api(days=days)
 
     # Rankings para asignar ranking a jugadores
     atp_rankings: dict[str, int] = {}
