@@ -1663,13 +1663,21 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     key_factors = result.get("key_factors", [])
     reasoning = result.get("reasoning", "")
 
-    # Mercados con resolución <48h: blend LLM 50% + precio mercado 50%
-    # El precio de mercado converge a la probabilidad real en los días finales.
+    # Mercados con resolución <48h: blend LLM + precio mercado.
+    # <24h: 20% LLM / 80% mercado — precio de mercado ya refleja info reciente
+    #       que el LLM puede no tener; reduce falsos edges por movimientos bruscos.
+    # 24-48h: 50% / 50% — blend estándar.
     if _closing_soon:
-        blended = round((real_prob * 0.5) + (price_yes * 0.5), 4)
+        if hours_to_close < 24:
+            _llm_w, _mkt_w = 0.20, 0.80
+        else:
+            _llm_w, _mkt_w = 0.50, 0.50
+        blended = round((real_prob * _llm_w) + (price_yes * _mkt_w), 4)
         logger.info(
-            "analyze_market(%s): CLOSING_SOON_BLEND days=%d real_prob %.3f→%.3f (blend con price_yes=%.3f)",
-            market_id, days_to_close, real_prob, blended, price_yes,
+            "analyze_market(%s): CLOSING_SOON_BLEND days=%d %.0f/%.0f "
+            "real_prob %.3f→%.3f (price_yes=%.3f)",
+            market_id, days_to_close, _llm_w * 100, _mkt_w * 100,
+            real_prob, blended, price_yes,
         )
         real_prob = blended
         edge = round(real_prob - price_yes, 4)

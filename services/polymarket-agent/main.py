@@ -53,6 +53,69 @@ def verify_token(x_cloud_token: str = Header(...)) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+_IMPLICIT_DATE_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+
+def _extract_implicit_date(question: str, now: "datetime") -> "datetime | None":
+    """
+    Intenta extraer una fecha de cierre implícita del título del mercado.
+    Patrones soportados:
+      "by May 31" / "by May 31, 2026" / "before June 15"
+      "in May 2026" / "in 2026" / "end of 2026" / "during Q2 2026"
+      "in May" (sin año → año actual si mes >= now.month, si no next year)
+    Devuelve datetime UTC o None si no se puede extraer.
+    """
+    import re as _re
+    import calendar as _cal
+    from datetime import datetime as _dt, timezone as _tz
+
+    q = question.lower()
+
+    # Patrón 1: "by/before/until Month Day[, Year]"  ej: "by May 31, 2026"
+    m = _re.search(
+        r'\b(?:by|before|until|on)\s+([a-z]+)\s+(\d{1,2})(?:,?\s+(20\d{2}))?\b', q
+    )
+    if m:
+        mon, day, yr = m.group(1), int(m.group(2)), m.group(3)
+        if mon in _IMPLICIT_DATE_MONTHS:
+            month = _IMPLICIT_DATE_MONTHS[mon]
+            year = int(yr) if yr else (now.year if month >= now.month else now.year + 1)
+            try:
+                return _dt(year, month, min(day, _cal.monthrange(year, month)[1]),
+                           tzinfo=_tz.utc)
+            except ValueError:
+                pass
+
+    # Patrón 2: "in Month Year"  ej: "in May 2026" → último día del mes
+    m = _re.search(r'\b(?:in|during)\s+([a-z]+)\s+(20\d{2})\b', q)
+    if m:
+        mon, yr = m.group(1), int(m.group(2))
+        if mon in _IMPLICIT_DATE_MONTHS:
+            month = _IMPLICIT_DATE_MONTHS[mon]
+            last = _cal.monthrange(yr, month)[1]
+            return _dt(yr, month, last, tzinfo=_tz.utc)
+
+    # Patrón 3: "in/by/end of Year"  ej: "in 2026" / "end of 2026"
+    m = _re.search(r'\b(?:by|in|end of|before|during)\s+(20\d{2})\b', q)
+    if m:
+        yr = int(m.group(1))
+        return _dt(yr, 12, 31, tzinfo=_tz.utc)
+
+    # Patrón 4: "in Month" sin año  ej: "in May?" → fin de ese mes
+    m = _re.search(r'\b(?:in|during)\s+([a-z]+)\b', q)
+    if m and m.group(1) in _IMPLICIT_DATE_MONTHS:
+        month = _IMPLICIT_DATE_MONTHS[m.group(1)]
+        year = now.year if month >= now.month else now.year + 1
+        last = _cal.monthrange(year, month)[1]
+        return _dt(year, month, last, tzinfo=_tz.utc)
+
+    return None
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     """Lanza retroactive_eval una sola vez al arrancar."""
@@ -365,16 +428,39 @@ async def _bg_enrich() -> dict:
         markets = [d.to_dict() for d in docs_raw]
 
         # Filtrar mercados fuera de ventana útil: expirados (< now+2d) o demasiado lejanos
-        # (> 30d). Alinea con _quality_ok del scanner. end_date=null → mantener.
+        # (> 30d). end_date=null → intentar extraer fecha implícita del título;
+        # si no hay → descartar si created_at > 60d (mercado viejo sin fecha = probablemente resuelto).
         from datetime import timedelta
         _now_enrich = datetime.now(timezone.utc)
         _min_end = _now_enrich + timedelta(days=2)
         _max_end = _now_enrich + timedelta(days=30)
-        _valid, _skipped = [], 0
+        _MAX_AGE_NO_DATE = timedelta(days=60)
+        _valid, _skipped, _null_implicit, _null_aged_out = [], 0, 0, 0
         for _m in markets:
             _end = _m.get("end_date")
             if _end is None:
-                _valid.append(_m)
+                # Intentar extraer fecha del título
+                _q = _m.get("question", "")
+                _implicit = _extract_implicit_date(_q, _now_enrich)
+                if _implicit is not None:
+                    # Aplicar mismo filtro 2-30d con la fecha extraída
+                    if _min_end <= _implicit <= _max_end:
+                        _m = dict(_m, end_date=_implicit)  # inyectar fecha para el enricher
+                        _valid.append(_m)
+                        _null_implicit += 1
+                    else:
+                        _skipped += 1
+                else:
+                    # Sin fecha implícita: descartar si el mercado lleva >60 días
+                    _created = _m.get("created_at") or _m.get("start_date")
+                    if _created is not None:
+                        if hasattr(_created, "tzinfo") and _created.tzinfo is None:
+                            _created = _created.replace(tzinfo=timezone.utc)
+                        if (_now_enrich - _created) > _MAX_AGE_NO_DATE:
+                            _skipped += 1
+                            _null_aged_out += 1
+                            continue
+                    _valid.append(_m)
                 continue
             if hasattr(_end, "tzinfo") and _end.tzinfo is None:
                 _end = _end.replace(tzinfo=timezone.utc)
@@ -383,8 +469,9 @@ async def _bg_enrich() -> dict:
             else:
                 _skipped += 1
         logger.info(
-            "enrich: %d/%d mercados válidos tras filtro ventana 2-30d (%d descartados)",
-            len(_valid), len(markets), _skipped,
+            "enrich: %d/%d mercados válidos tras filtro ventana 2-30d "
+            "(%d descartados | %d null→fecha implícita | %d null→aged-out >60d)",
+            len(_valid), len(markets), _skipped, _null_implicit, _null_aged_out,
         )
         markets = _valid
 
