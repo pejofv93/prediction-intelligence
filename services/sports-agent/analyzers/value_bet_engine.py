@@ -1988,6 +1988,22 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         best_odds = away_odds
         team_to_back = str(away_team)
 
+    # --- 5a. Cap de confianza para Poisson sintético con forma en default ---
+    # Si _synthetic_poisson=True (sin xG/posesión real) Y además form=50.0 (sin datos de forma),
+    # la confianza del ensemble es artificialmente alta (std≈0 → conf≈1.0).
+    # Cap a 0.60 para forzar bloqueo en el threshold 0.65 — idéntico a basketball_analyzer.
+    if enriched_match.get("_synthetic_poisson", False):
+        _fh = float(enriched_match.get("home_form_score", 50.0))
+        _fa = float(enriched_match.get("away_form_score", 50.0))
+        if abs(_fh - 50.0) < 0.5 and abs(_fa - 50.0) < 0.5:
+            if best_confidence > 0.60:
+                logger.info(
+                    "generate_signal(%s): SYNTHETIC_DEFAULT_CAP conf %.2f→0.60 "
+                    "(poisson sintético + form default) [%s vs %s | %s]",
+                    match_id, best_confidence, home_team, away_team, league,
+                )
+                best_confidence = 0.60
+
     # --- 5b. Filtro underdog extremo: umbral dinámico por liga vs rival top-6 ---
     rival_team = str(away_team) if team_to_back == str(home_team) else str(home_team)
     top6_keywords = _TOP6_KEYWORDS.get(league, [])
