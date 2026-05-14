@@ -178,8 +178,43 @@ _YAHOO_SYMBOLS: dict[str, str] = {
     "META":  "META",
     "AMD":   "AMD",
     "NFLX":  "NFLX",
+    "BRKB":  "BRK-B",
+    "JPM":   "JPM",
+    "V":     "V",
+    "WMT":   "WMT",
+    "JNJ":   "JNJ",
+    "UNH":   "UNH",
+    "XOM":   "XOM",
+    "CVX":   "CVX",
+    "BAC":   "BAC",
+    "COIN":  "COIN",
+    "HOOD":  "HOOD",
+    "PLTR":  "PLTR",
+    "ARM":   "ARM",
+    "SMCI":  "SMCI",
+    # ETFs / Índices
     "SPY":   "SPY",
     "QQQ":   "QQQ",
+    "DIA":   "DIA",
+    "IWM":   "IWM",
+    "GLD":   "GLD",
+    # Crypto adicional — fallback Yahoo (Binance es primario)
+    "AVAX":  "AVAX-USD",
+    "LINK":  "LINK-USD",
+    "DOT":   "DOT-USD",
+    "MATIC": "MATIC-USD",
+    "UNI":   "UNI-USD",
+    "AAVE":  "AAVE-USD",
+    "CRV":   "CRV-USD",
+    "LDO":   "LDO-USD",
+    "ARB":   "ARB-USD",
+    "OP":    "OP-USD",
+    "INJ":   "INJ-USD",
+    "TIA":   "TIA-USD",
+    "SEI":   "SEI-USD",
+    "SUI":   "SUI-USD",
+    "APT":   "APT-USD",
+    "NEAR":  "NEAR-USD",
 }
 
 _BINANCE_SYMBOLS: dict[str, str] = {
@@ -190,6 +225,22 @@ _BINANCE_SYMBOLS: dict[str, str] = {
     "XRP":  "XRPUSDT",
     "ADA":  "ADAUSDT",
     "DOGE": "DOGEUSDT",
+    "AVAX": "AVAXUSDT",
+    "LINK": "LINKUSDT",
+    "DOT":  "DOTUSDT",
+    "MATIC":"MATICUSDT",
+    "UNI":  "UNIUSDT",
+    "AAVE": "AAVEUSDT",
+    "CRV":  "CRVUSDT",
+    "LDO":  "LDOUSDT",
+    "ARB":  "ARBUSDT",
+    "OP":   "OPUSDT",
+    "INJ":  "INJUSDT",
+    "TIA":  "TIAUSDT",
+    "SEI":  "SEIUSDT",
+    "SUI":  "SUIUSDT",
+    "APT":  "APTUSDT",
+    "NEAR": "NEARUSDT",
 }
 
 _ASSET_DETECT: list = [
@@ -206,15 +257,50 @@ _ASSET_DETECT: list = [
     (re.compile(r'\b(gold|xau)\b', re.I),                "GOLD",   None),
     (re.compile(r'\b(silver|xag)\b', re.I),              "SILVER", None),
     # US Equities — precio real vía Yahoo Finance
-    (re.compile(r'\b(nvidia|nvda)\b', re.I),             "NVDA",  None),
-    (re.compile(r'\b(apple|aapl)\b', re.I),              "AAPL",  None),
-    (re.compile(r'\b(microsoft|msft)\b', re.I),          "MSFT",  None),
-    (re.compile(r'\b(google|alphabet|googl)\b', re.I),   "GOOGL", None),
-    (re.compile(r'\b(amazon|amzn)\b', re.I),             "AMZN",  None),
-    (re.compile(r'\b(tesla|tsla)\b', re.I),              "TSLA",  None),
-    (re.compile(r'\bmeta\b', re.I),                      "META",  None),
-    (re.compile(r'\b(amd|advanced micro devices)\b', re.I), "AMD", None),
-    (re.compile(r'\b(netflix|nflx)\b', re.I),            "NFLX",  None),
+    (re.compile(r'\b(nvidia|nvda)\b', re.I),                          "NVDA",  None),
+    (re.compile(r'\b(apple|aapl)\b', re.I),                           "AAPL",  None),
+    (re.compile(r'\b(microsoft|msft)\b', re.I),                       "MSFT",  None),
+    (re.compile(r'\b(google|alphabet|googl)\b', re.I),                "GOOGL", None),
+    (re.compile(r'\b(amazon|amzn)\b', re.I),                          "AMZN",  None),
+    (re.compile(r'\b(tesla|tsla)\b', re.I),                           "TSLA",  None),
+    (re.compile(r'\bmeta\b', re.I),                                   "META",  None),
+    (re.compile(r'\b(amd|advanced micro devices)\b', re.I),           "AMD",   None),
+    (re.compile(r'\b(netflix|nflx)\b', re.I),                         "NFLX",  None),
+    (re.compile(r'\b(berkshire|brkb|brk[-.]b)\b', re.I),              "BRKB",  None),
+    (re.compile(r'\b(jpmorgan|jp morgan|jpm)\b', re.I),               "JPM",   None),
+    (re.compile(r'\bvisa\b', re.I),                                   "V",     None),
+    (re.compile(r'\bwalmart\b', re.I),                                "WMT",   None),
+    (re.compile(r'\b(johnson.{0,3}johnson|j&j|jnj)\b', re.I),        "JNJ",   None),
+    (re.compile(r'\b(unitedhealth|unh)\b', re.I),                     "UNH",   None),
+    (re.compile(r'\b(exxon|exxonmobil|xom)\b', re.I),                "XOM",   None),
+    (re.compile(r'\b(chevron|cvx)\b', re.I),                          "CVX",   None),
+    (re.compile(r'\b(bank of america|bofa|bac)\b', re.I),             "BAC",   None),
+    (re.compile(r'\b(coinbase|coin)\b', re.I),                        "COIN",  None),
+    (re.compile(r'\b(robinhood|hood)\b', re.I),                       "HOOD",  None),
+    (re.compile(r'\b(palantir|pltr)\b', re.I),                        "PLTR",  None),
+    (re.compile(r'\b(arm holdings|arm semiconductor|arm stock)\b', re.I), "ARM", None),
+    (re.compile(r'\b(super micro|supermicro|smci)\b', re.I),          "SMCI",  None),
+    # ETFs / Índices
+    (re.compile(r'\b(spy|s&p.?500 etf)\b', re.I),                    "SPY",   None),
+    (re.compile(r'\b(qqq|nasdaq.?100 etf)\b', re.I),                  "QQQ",   None),
+    (re.compile(r'\b(dia|dow jones etf|djia etf)\b', re.I),           "DIA",   None),
+    (re.compile(r'\b(iwm|russell 2000)\b', re.I),                     "IWM",   None),
+    (re.compile(r'\b(gld|gold etf|spdr gold)\b', re.I),               "GLD",   None),
+    # Crypto adicional
+    (re.compile(r'\b(polkadot|dot)\b', re.I),                         "DOT",   "polkadot"),
+    (re.compile(r'\b(polygon|matic)\b', re.I),                        "MATIC", "matic-network"),
+    (re.compile(r'\b(uniswap|uni)\b', re.I),                          "UNI",   "uniswap"),
+    (re.compile(r'\baave\b', re.I),                                   "AAVE",  "aave"),
+    (re.compile(r'\b(curve|crv)\b', re.I),                            "CRV",   "curve-dao-token"),
+    (re.compile(r'\b(lido|ldo)\b', re.I),                             "LDO",   "lido-dao"),
+    (re.compile(r'\b(arbitrum|arb)\b', re.I),                         "ARB",   "arbitrum"),
+    (re.compile(r'\b(optimism|op)\b', re.I),                          "OP",    "optimism"),
+    (re.compile(r'\b(injective|inj)\b', re.I),                        "INJ",   "injective-protocol"),
+    (re.compile(r'\b(celestia|tia)\b', re.I),                         "TIA",   "celestia"),
+    (re.compile(r'\bsei\b', re.I),                                    "SEI",   "sei-network"),
+    (re.compile(r'\bsui\b', re.I),                                    "SUI",   "sui"),
+    (re.compile(r'\b(aptos|apt)\b', re.I),                            "APT",   "aptos"),
+    (re.compile(r'\b(near protocol|near)\b', re.I),                   "NEAR",  "near"),
 ]
 
 
@@ -1738,6 +1824,33 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     except Exception:
         pass
 
+    # E2. Corrección por correlación de mercados — pull real_prob si inconsistente.
+    # Se ejecuta AQUÍ, después de la calibración LLM y ANTES de los floors de precio,
+    # para que near-target/ALREADY_EXCEEDED tengan la última palabra.
+    try:
+        _correlations = enriched_market.get("correlations", [])
+        _high_corr = [c for c in _correlations if len(c.get("shared_keywords", [])) >= 3]
+        if _high_corr:
+            _corr_prices = [float(c.get("price_yes", 0.5)) for c in _high_corr]
+            _corr_avg = sum(_corr_prices) / len(_corr_prices)
+            _incon = abs(real_prob - _corr_avg)
+            if _incon > 0.15:
+                _old_prob = real_prob
+                real_prob = round(real_prob * 0.70 + _corr_avg * 0.30, 4)
+                edge = round(real_prob - price_yes, 4)
+                if edge >= POLY_MIN_EDGE:
+                    recommendation = "BUY_YES"
+                elif edge <= -POLY_MIN_EDGE:
+                    recommendation = "BUY_NO"
+                else:
+                    recommendation = "PASS"
+                logger.info(
+                    "analyze_market(%s): correlación inconsistente (%.0f%%) — prob %.2f→%.2f (corr_avg=%.2f)",
+                    market_id, _incon * 100, _old_prob, real_prob, _corr_avg,
+                )
+    except Exception:
+        pass
+
     # Garantizar coherencia: si el texto del reasoning menciona una prob distinta
     # a real_prob en >0.10, prepender nota aclaratoria para el mensaje Telegram.
     # real_prob del JSON estructurado es siempre el valor canónico.
@@ -1964,32 +2077,6 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "analyze_market(%s): spread=%.0f%% > 8%% — mercado ilíquido, conf→%.2f",
                 market_id, _spread * 100, confidence,
             )
-    except Exception:
-        pass
-
-    # E2. Corrección por correlación de mercados — pull real_prob si inconsistente
-    try:
-        _correlations = enriched_market.get("correlations", [])
-        _high_corr = [c for c in _correlations if len(c.get("shared_keywords", [])) >= 3]
-        if _high_corr:
-            _corr_prices = [float(c.get("price_yes", 0.5)) for c in _high_corr]
-            _corr_avg = sum(_corr_prices) / len(_corr_prices)
-            _incon = abs(real_prob - _corr_avg)
-            if _incon > 0.15:
-                _old_prob = real_prob
-                # Pull 30% hacia el promedio de mercados correlacionados
-                real_prob = round(real_prob * 0.70 + _corr_avg * 0.30, 4)
-                edge = round(real_prob - price_yes, 4)
-                if edge >= POLY_MIN_EDGE:
-                    recommendation = "BUY_YES"
-                elif edge <= -POLY_MIN_EDGE:
-                    recommendation = "BUY_NO"
-                else:
-                    recommendation = "PASS"
-                logger.info(
-                    "analyze_market(%s): correlación inconsistente (%.0f%%) — prob %.2f→%.2f (corr_avg=%.2f)",
-                    market_id, _incon * 100, _old_prob, real_prob, _corr_avg,
-                )
     except Exception:
         pass
 
