@@ -523,7 +523,7 @@ async def send_sports_alert(prediction: dict) -> bool:
 
     text = _format_alert_unified(prediction)
 
-    # Advertencia de calibración si win rate histórico < 40% para este bucket de confianza
+    # Calibración de confianza: muestra win rate histórico real cuando hay ≥10 señales en el bucket
     try:
         _conf_val = float(prediction.get("confidence") or 0.0)
         _cbkt = (
@@ -538,8 +538,13 @@ async def send_sports_alert(prediction: dict) -> bool:
                 _bkt_data = _mw.to_dict().get("accuracy_by_confidence", {}).get(_cbkt, {})
                 _rate = _bkt_data.get("rate")
                 _cnt = int(_bkt_data.get("count", 0))
-                if _rate is not None and _cnt >= 10 and _rate < 0.40:
-                    text += f"\n⚠️ Confianza histórica real: {_rate:.0%} ({_cnt} señales)"
+                if _rate is not None and _cnt >= 10:
+                    # ⚠️ si el modelo sobreestima más de 10pp, ✅ si está bien calibrado
+                    _calib_emoji = "⚠️" if _rate < _conf_val - 0.10 else "✅"
+                    text += (
+                        f"\n{_calib_emoji} Confianza histórica real: *{_rate:.0%}*"
+                        f" (modelo: {_conf_val:.0%}) — {_cnt} señales"
+                    )
     except Exception:
         pass
 
