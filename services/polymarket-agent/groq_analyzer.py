@@ -190,7 +190,7 @@ _ASSET_DETECT: list = [
     (re.compile(r'\b(cardano|ada)\b', re.I),             "ADA",    "cardano"),
     (re.compile(r'\b(avalanche|avax)\b', re.I),          "AVAX",   "avalanche-2"),
     (re.compile(r'\bchainlink\b', re.I),                 "LINK",   "chainlink"),
-    (re.compile(r'\b(crude oil|wti|oil price)\b', re.I), "WTI",    None),
+    (re.compile(r'\b(crude oil|crude|wti|brent|oil price|oil futures)\b', re.I), "WTI", None),
     (re.compile(r'\b(gold|xau)\b', re.I),                "GOLD",   None),
     (re.compile(r'\b(silver|xag)\b', re.I),              "SILVER", None),
 ]
@@ -534,7 +534,37 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
         except Exception as _cge:
             logger.debug("_fetch_current_price(%s): CoinGecko error — %s", asset_key, _cge)
 
-    # 3. Yahoo Finance — fallback 2 (query1 primero, query2 como alternativa)
+    # 3. Alpha Vantage — commodities: WTI via EIA, Gold/Silver via forex API
+    #    Más fiable que Yahoo Finance para futuros de materias primas
+    if price is None and asset_key in ("WTI", "GOLD", "SILVER"):
+        import os as _os
+        _av_key = _os.environ.get("ALPHA_VANTAGE_KEY", "demo")
+        if asset_key == "WTI":
+            _av_url = (
+                f"https://www.alphavantage.co/query?function=WTI"
+                f"&interval=daily&apikey={_av_key}"
+            )
+            price = await loop.run_in_executor(
+                None,
+                lambda: _http_get(_av_url, lambda d: float(d["data"][0]["value"])),
+            )
+        else:
+            _fx = "XAU" if asset_key == "GOLD" else "XAG"
+            _av_url = (
+                f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
+                f"&from_currency={_fx}&to_currency=USD&apikey={_av_key}"
+            )
+            price = await loop.run_in_executor(
+                None,
+                lambda: _http_get(
+                    _av_url,
+                    lambda d: float(d["Realtime Currency Exchange Rate"]["5. Exchange Rate"]),
+                ),
+            )
+        if price:
+            logger.info("_fetch_current_price(%s): AlphaVantage OK $%.4g", asset_key, price)
+
+    # 4. Yahoo Finance — fallback 3 (query1 primero, query2 como alternativa)
     if price is None and asset_key in _YAHOO_SYMBOLS:
         from urllib.parse import quote as _urlquote
         _sym = _urlquote(_YAHOO_SYMBOLS[asset_key], safe="")
@@ -1278,7 +1308,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         if not _current_price or _current_price <= 0:
             logger.info(
                 "analyze_market(%s): PRICE_UNAVAILABLE — precio de %s no obtenido "
-                "(Yahoo/CoinGecko fallaron) → skip para evitar señales sin contexto",
+                "(AlphaVantage/Yahoo/CoinGecko fallaron) → PASS para evitar señal sin precio verificado",
                 market_id, _p_asset,
             )
             return None
