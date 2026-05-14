@@ -208,7 +208,19 @@ async def _bg_daily_report() -> None:
         except Exception:
             pass
 
-        report = format_daily_report(health, shadow_metrics, top_signal, pred_stats, tier_stats)
+        # Leer calibración de confianza desde model_weights
+        _conf_calibration: dict = {}
+        try:
+            _mw = col("model_weights").document("current").get()
+            if _mw.exists:
+                _conf_calibration = _mw.to_dict().get("accuracy_by_confidence", {})
+        except Exception:
+            pass
+
+        report = format_daily_report(
+            health, shadow_metrics, top_signal, pred_stats, tier_stats,
+            conf_calibration=_conf_calibration,
+        )
         await send_message(report, message_thread_id=TELEGRAM_DAILY_THREAD_ID)
 
         if health.get("degraded"):

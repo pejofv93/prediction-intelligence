@@ -204,11 +204,13 @@ def format_daily_report(
     top_signal: Optional[dict] = None,
     pred_stats: Optional[dict] = None,
     tier_stats: Optional[dict] = None,
+    conf_calibration: Optional[dict] = None,
 ) -> str:
     """
     Formato reporte diario matutino.
     pred_stats: {total, pending, resolved, correct, incorrect, synthetic, real_odds}.
     tier_stats: {fuerte: [...], detectada: [...], moderada: [...]}.
+    conf_calibration: {bucket: {count, correct, rate}} de model_weights.accuracy_by_confidence.
     Estado del modelo basado en win_rate real (shadow_trades):
       > 50% → ✅ SALUDABLE  |  40-50% → ⚠️ ATENCIÓN  |  < 40% → 🔴 REVISAR
     """
@@ -304,5 +306,26 @@ def format_daily_report(
                 lines.append(f"  ✅ Detectada (12-20%): {len(detectada)}")
             if moderada:
                 lines.append(f"  📊 Moderada (8-12%): {len(moderada)}")
+
+    # Tabla de calibración de confianza
+    if conf_calibration:
+        _bkt_labels = {
+            "65_70": "65-70%",
+            "70_80": "70-80%",
+            "80_90": "80-90%",
+            "90_99": "90-99%",
+        }
+        _calib_rows = []
+        for _bkt, _label in _bkt_labels.items():
+            _d = conf_calibration.get(_bkt, {})
+            _rate = _d.get("rate")
+            _cnt = int(_d.get("count", 0))
+            if _cnt >= 5 and _rate is not None:
+                _flag = " ⚠️" if _rate < 0.40 else ""
+                _calib_rows.append(f"  {_label}: {_rate:.0%} win ({_cnt} señales){_flag}")
+        if _calib_rows:
+            lines.append("")
+            lines.append("🎯 Calibración histórica de confianza:")
+            lines.extend(_calib_rows)
 
     return "\n".join(lines)
