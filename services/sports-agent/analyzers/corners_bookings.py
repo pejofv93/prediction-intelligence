@@ -607,7 +607,7 @@ async def _generate_theodds_corners_signals(
             if edge < SPORTS_MIN_EDGE:
                 continue
             conf = round(
-                max(0.0, min(1.0, 1.0 - abs(model_p - mkt_p) * 2, n_bk / 10)), 4
+                max(0.0, min(0.99, 1.0 - abs(model_p - mkt_p) * 2, n_bk / 10)), 4
             )
             if conf < SPORTS_MIN_CONFIDENCE:
                 continue
@@ -643,7 +643,7 @@ async def _generate_theodds_corners_signals(
             if not best or best["price"] <= 1.05 or mkt_p <= 0:
                 continue
             edge = round(1.0 / mkt_p - best["price"], 4)
-            conf = round(min(1.0, n_bk / 10), 4)
+            conf = round(min(0.99, n_bk / 10), 4)
             if edge >= SPORTS_MIN_EDGE and conf >= SPORTS_MIN_CONFIDENCE:
                 signals.append({
                     "market":        "corners_ou",
@@ -765,11 +765,11 @@ async def generate_corners_signals(
                     poisson_p = poisson_est.get(sel, 0.0)
                     edge = round(poisson_p - implied, 4)
                     diff_pc = abs(poisson_p - consensus_p)
-                    confidence = round(max(0.0, 1.0 - diff_pc * 3), 4)
+                    confidence = round(max(0.0, min(0.99, 1.0 - diff_pc * 3)), 4)
                     poisson_prob = poisson_p
                 else:
                     edge = round((1.0 / consensus_p) - best_price, 4) if consensus_p > 0 else 0.0
-                    confidence = round(min(1.0, consensus.get("n_bookmakers", 0) / 20), 4)
+                    confidence = round(min(0.99, consensus.get("n_bookmakers", 0) / 20), 4)
                     poisson_prob = None
 
                 sig = _make_signal(
@@ -809,7 +809,7 @@ async def generate_corners_signals(
                     continue
                 fair_price = 1.0 / consensus_p
                 edge = round(fair_price - best_price, 4)
-                confidence = round(min(1.0, n_bk / 15), 4)
+                confidence = round(min(0.99, n_bk / 15), 4)
 
                 sig = _make_signal(
                     market_key, sel_label, best_price, best_entry["bookmaker"],
