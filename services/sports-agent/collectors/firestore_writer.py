@@ -252,7 +252,7 @@ async def update_finished_matches(matches: list[dict]) -> int:
         }
 
         try:
-            col("prodmatch_results").document(match_id).set(doc)
+            col("match_results").document(match_id).set(doc)
             updated += 1
         except Exception as e:
             logger.error("update_finished_matches: error en doc %s: %s", match_id, e)

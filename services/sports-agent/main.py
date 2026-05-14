@@ -441,6 +441,10 @@ async def _collect_football() -> None:
     h2h_pairs_seen: set[tuple[int, int]] = set()
     skipped_teams = 0
     skipped_h2h = 0
+    # Acumula partidos terminados de endpoints team-level (funciona para PD en tier gratuito).
+    # La competición PD no aparece en get_finished_matches (competition-level, requiere tier pago)
+    # pero /teams/{id}/matches?status=FINISHED sí devuelve resultados de PD.
+    team_raw_elo: dict[str, dict] = {}  # match_id → match normalizado
 
     for match in matches:
         home_id = match.get("home_team_id")
@@ -458,6 +462,10 @@ async def _collect_football() -> None:
                 else:
                     raw_home = await get_team_stats(home_id)
                     await save_team_stats(home_id, raw_home)
+                    for rm in raw_home:
+                        mid = rm.get("match_id")
+                        if mid and rm.get("goals_home") is not None and rm.get("goals_away") is not None:
+                            team_raw_elo[mid] = rm
                 team_ids_seen.add(home_id)
             except Exception:
                 logger.error("collect.football: error stats equipo %d", home_id, exc_info=True)
@@ -471,6 +479,10 @@ async def _collect_football() -> None:
                 else:
                     raw_away = await get_team_stats(away_id)
                     await save_team_stats(away_id, raw_away)
+                    for rm in raw_away:
+                        mid = rm.get("match_id")
+                        if mid and rm.get("goals_home") is not None and rm.get("goals_away") is not None:
+                            team_raw_elo[mid] = rm
                 team_ids_seen.add(away_id)
             except Exception:
                 logger.error("collect.football: error stats equipo %d", away_id, exc_info=True)
@@ -508,26 +520,39 @@ async def _collect_football() -> None:
     except Exception:
         logger.error("collect.football: error actualizando resultados FINISHED", exc_info=True)
 
-    # Actualizar ELO ratings desde partidos terminados con resultado conocido
+    # Actualizar ELO ratings desde partidos terminados con resultado conocido.
+    # Fuente 1: get_finished_matches (competition-level — cubre PL/BL1/SA/FL1 en tier gratuito).
+    # Fuente 2: team_raw_elo (team-level — cubre PD y cualquier liga que no esté en Fuente 1).
     try:
         from enrichers.elo_rating import update_all_elos
-        elo_matches = [
-            {
+
+        def _to_elo_entry(m: dict) -> dict:
+            gh = m.get("goals_home", 0) or 0
+            ga = m.get("goals_away", 0) or 0
+            return {
                 "home_team_id": m["home_team_id"],
                 "away_team_id": m["away_team_id"],
-                "result": (
-                    "HOME_WIN" if m.get("goals_home", 0) > m.get("goals_away", 0)
-                    else "AWAY_WIN" if m.get("goals_away", 0) > m.get("goals_home", 0)
-                    else "DRAW"
-                ),
+                "result": "HOME_WIN" if gh > ga else "AWAY_WIN" if ga > gh else "DRAW",
                 "date": m.get("date", ""),
             }
-            for m in finished
+
+        finished_ids = {m["match_id"] for m in finished if m.get("match_id")}
+        elo_matches = [
+            _to_elo_entry(m) for m in finished
             if m.get("goals_home") is not None and m.get("goals_away") is not None
         ]
+        # Añadir partidos de team-level que no están ya en competition-level
+        extra = 0
+        for mid, rm in team_raw_elo.items():
+            if mid not in finished_ids:
+                elo_matches.append(_to_elo_entry(rm))
+                extra += 1
+        if extra:
+            logger.info("ELO_UPDATE: +%d partidos de team-level (PD u otras ligas sin tier)", extra)
+
         if elo_matches:
             await update_all_elos(elo_matches)
-            logger.info("ELO_UPDATE: %d partidos procesados", len(elo_matches))
+            logger.info("ELO_UPDATE: %d partidos procesados en total", len(elo_matches))
         else:
             logger.info("ELO_UPDATE: sin partidos con resultado conocido")
     except Exception:
