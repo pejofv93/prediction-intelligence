@@ -379,10 +379,12 @@ def _format_poly_alert(analysis: dict) -> str:
     )
 
 
-def _alert_key(data: dict, edge: float) -> str:
-    """Genera clave de deduplicacion."""
+def _alert_key(data: dict, edge: float = 0.0) -> str:
+    """Genera clave de deduplicacion. Edge excluido — mismo partido/mercado/seleccion = misma clave."""
     id_field = data.get("match_id") or data.get("market_id") or "unknown"
-    return f"{id_field}_{round(edge, 2)}"
+    market = data.get("market_type", "h2h")
+    team = data.get("team_to_back") or data.get("selection") or ""
+    return f"{id_field}_{market}_{team}"
 
 
 async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) -> int:
@@ -516,6 +518,27 @@ async def send_sports_alert(prediction: dict) -> bool:
         )
 
     text = _format_alert_unified(prediction)
+
+    # Advertencia de calibración si win rate histórico < 40% para este bucket de confianza
+    try:
+        _conf_val = float(prediction.get("confidence") or 0.0)
+        _cbkt = (
+            "65_70" if 0.65 <= _conf_val < 0.70 else
+            "70_80" if 0.70 <= _conf_val < 0.80 else
+            "80_90" if 0.80 <= _conf_val < 0.90 else
+            "90_99" if _conf_val >= 0.90 else None
+        )
+        if _cbkt:
+            _mw = col("model_weights").document("current").get()
+            if _mw.exists:
+                _bkt_data = _mw.to_dict().get("accuracy_by_confidence", {}).get(_cbkt, {})
+                _rate = _bkt_data.get("rate")
+                _cnt = int(_bkt_data.get("count", 0))
+                if _rate is not None and _cnt >= 10 and _rate < 0.40:
+                    text += f"\n⚠️ Confianza histórica real: {_rate:.0%} ({_cnt} señales)"
+    except Exception:
+        pass
+
     sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
 
     if not sent:
