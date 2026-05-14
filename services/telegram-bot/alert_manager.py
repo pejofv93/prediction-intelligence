@@ -363,6 +363,9 @@ def _format_poly_alert(analysis: dict) -> str:
     whale_info = str(analysis.get("whale_info") or "")
     whale_line = f"{whale_info}\n" if whale_info else ""
 
+    data_quality = str(analysis.get("data_quality") or "")
+    data_quality_line = "⚠️ Sin datos externos verificables — ancla: precio mercado ±15%\n" if data_quality == "improvised" else ""
+
     return (
         f"🔮 OPORTUNIDAD POLYMARKET — {intensity}\n"
         f"{cat_line}"
@@ -372,6 +375,7 @@ def _format_poly_alert(analysis: dict) -> str:
         f"🎯 Confianza: *{confidence:.0%}*\n"
         f"{meta_line}"
         f"{link_line}"
+        f"{data_quality_line}"
         f"{smart_line}"
         f"{whale_line}"
         f"💭 {reasoning}\n\n"

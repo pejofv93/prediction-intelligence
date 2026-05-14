@@ -429,12 +429,6 @@ def _build_category_context(question: str, category: str) -> str:
             "Considera volatilidad histórica, halvings, ciclos de mercado. "
             "Si el precio spot contradice la probabilidad (>15% divergencia), señala como ineficiencia."
         )
-    elif category == "politics":
-        return (
-            "CONTEXTO POLÍTICO: Considera sesgo de mercado hacia candidatos mainstream. "
-            "Los mercados políticos suelen sobreestimar incumbentes y subestimar outsiders. "
-            "Busca divergencias entre encuestas recientes y precio de mercado."
-        )
     elif category == "economy":
         return (
             "CONTEXTO ECONÓMICO: El mercado Fed Funds Futures (CME FedWatch) "
@@ -460,7 +454,27 @@ def _build_category_context(question: str, category: str) -> str:
         return (
             "CONTEXTO GEOPOLÍTICO: Eventos de alta incertidumbre. "
             "Sé conservador: recomienda WATCH más que BUY salvo evidencia muy clara. "
-            "El mercado suele sobreestimar resolución rápida de conflictos."
+            "El mercado suele sobreestimar resolución rápida de conflictos. "
+            "Si no tienes datos externos verificables (encuestas, noticias concretas, "
+            "declaraciones oficiales), usa el precio del mercado como ancla base "
+            "y ajusta MÁXIMO ±15% por sentiment/orderbook. "
+            "NO inventes probabilidades sin datos externos verificables."
+        )
+    elif category == "politics":
+        return (
+            "CONTEXTO POLÍTICO: Considera sesgo de mercado hacia candidatos mainstream. "
+            "Los mercados políticos suelen sobreestimar incumbentes y subestimar outsiders. "
+            "Busca divergencias entre encuestas recientes y precio de mercado. "
+            "Si no tienes encuestas recientes ni datos verificables, usa el precio del "
+            "mercado como ancla base y ajusta MÁXIMO ±15% por sentiment/orderbook. "
+            "NO inventes probabilidades sin datos externos verificables."
+        )
+    elif category in ("business", "other"):
+        return (
+            f"CONTEXTO {category.upper()}: Si no tienes datos externos verificables "
+            "(precios reales, resultados financieros, declaraciones oficiales), "
+            "usa el precio del mercado como ancla base y ajusta MÁXIMO ±15% "
+            "por sentiment/orderbook. NO inventes probabilidades sin datos externos."
         )
     return ""
 
@@ -1331,6 +1345,20 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     smart_money = enriched_market.get("smart_money", {})
     arbitrage = enriched_market.get("arbitrage", {})
 
+    # Clasificar calidad de datos disponibles para el LLM
+    _has_external_data = bool(
+        _sports_context
+        or _current_price
+        or (news.get("headlines") and news.get("trend", "NO_DATA") != "NO_DATA")
+    )
+    _no_news = news.get("trend", "NO_DATA") == "NO_DATA" or not news.get("headlines")
+    if _has_external_data:
+        data_quality = "external_data"
+    elif _no_news:
+        data_quality = "improvised"
+    else:
+        data_quality = "market_only"
+
     # Formatear correlaciones con pregunta y dirección de precio
     _raw_corrs = enriched_market.get("correlations", [])
     if _raw_corrs:
@@ -1390,6 +1418,18 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             f"probabilidad real = {_last_prob:.1%}. "
             f"Si tu nueva estimación difiere en más de 15pp ({_last_prob - 0.15:.1%}–{_last_prob + 0.15:.1%}), "
             f"justifica explícitamente qué cambió."
+        )
+    if data_quality == "improvised":
+        _lo = max(0.0, price_yes - 0.15)
+        _hi = min(1.0, price_yes + 0.15)
+        user_prompt += (
+            f"\n\nANCLA DE MERCADO OBLIGATORIA: No tienes datos externos verificables "
+            f"para este mercado (sin noticias DDG, sin precios spot, sin encuestas recientes). "
+            f"Usa el precio del mercado ({price_yes:.1%}) como ancla base y ajusta "
+            f"MÁXIMO ±15% por sentiment/orderbook. "
+            f"Tu estimación de real_prob DEBE estar en [{_lo:.1%}, {_hi:.1%}]. "
+            f"Superar este rango sin datos externos verificables es una señal de alucinación. "
+            f"Si no puedes justificar la divergencia, recomienda WATCH o PASS."
         )
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
@@ -1574,6 +1614,19 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     # Recalcular edge siempre desde real_prob normalizado (no confiar en el edge del LLM)
     edge = round(real_prob - price_yes, 4)
+
+    # Hard cap ±15% cuando no hay datos externos verificables
+    if data_quality == "improvised":
+        _cap = 0.15
+        _capped = max(price_yes - _cap, min(price_yes + _cap, real_prob))
+        if abs(_capped - real_prob) > 0.001:
+            logger.info(
+                "analyze_market(%s): real_prob capped %.3f→%.3f (data_quality=improvised, price_yes=%.3f)",
+                market_id, real_prob, _capped, price_yes,
+            )
+            real_prob = _capped
+            edge = round(real_prob - price_yes, 4)
+
     confidence = float(result.get("confidence", 0.5))
     trend = result.get("trend", enriched_market.get("price_momentum", "STABLE"))
     recommendation = result.get("recommendation", "PASS")
@@ -1932,6 +1985,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "volume_24h": volume_24h,
         "analyzed_at": datetime.now(timezone.utc),
         "alerted": False,
+        "data_quality": data_quality,
     }
 
     try:
