@@ -187,6 +187,59 @@ _THE_ODDS_API_EXHAUSTED: bool = False
 # Timeout para llamadas HTTP a API externa
 _HTTP_TIMEOUT = 15.0
 
+# Cache de thresholds por liga desde Firestore model_weights/backtest_thresholds.
+# TTL 6h — se recarga automáticamente cuando el backtest actualiza Firestore.
+# Las claves del doc son league names ("Premier League"), se mapean a codes ("PL").
+_BACKTEST_THRESHOLDS_CACHE: dict[str, float] = {}
+_BACKTEST_THRESHOLDS_LOADED_AT: datetime | None = None
+_BACKTEST_THRESHOLDS_TTL = timedelta(hours=6)
+_LEAGUE_NAME_TO_CODE: dict[str, str] = {
+    "Premier League": "PL",
+    "La Liga":        "PD",
+    "Bundesliga":     "BL1",
+    "Serie A":        "SA",
+    "Ligue 1":        "FL1",
+}
+
+
+def _load_backtest_thresholds() -> dict[str, float]:
+    """
+    Lee model_weights/backtest_thresholds de Firestore (TTL 6h).
+    Mapea league names → league codes. Merge con LEAGUE_MIN_EDGE como base.
+    Si Firestore no tiene datos aún → devuelve LEAGUE_MIN_EDGE directamente.
+    """
+    global _BACKTEST_THRESHOLDS_CACHE, _BACKTEST_THRESHOLDS_LOADED_AT
+    now = datetime.now(timezone.utc)
+    if (
+        _BACKTEST_THRESHOLDS_LOADED_AT is not None
+        and (now - _BACKTEST_THRESHOLDS_LOADED_AT) < _BACKTEST_THRESHOLDS_TTL
+        and _BACKTEST_THRESHOLDS_CACHE
+    ):
+        return _BACKTEST_THRESHOLDS_CACHE
+    try:
+        doc = col("model_weights").document("backtest_thresholds").get()
+        merged = dict(LEAGUE_MIN_EDGE)
+        if doc.exists:
+            data = doc.to_dict()
+            for league_name, markets in data.items():
+                code = _LEAGUE_NAME_TO_CODE.get(league_name)
+                if not code or not isinstance(markets, dict):
+                    continue
+                h2h_thr = markets.get("h2h")
+                if h2h_thr is not None:
+                    merged[code] = float(h2h_thr)
+            logger.info(
+                "_load_backtest_thresholds: cargados desde Firestore — %s",
+                {k: v for k, v in merged.items() if k in _LEAGUE_NAME_TO_CODE.values()},
+            )
+        _BACKTEST_THRESHOLDS_CACHE = merged
+        _BACKTEST_THRESHOLDS_LOADED_AT = now
+    except Exception as _bt_err:
+        logger.warning("_load_backtest_thresholds: error Firestore — usando LEAGUE_MIN_EDGE: %s", _bt_err)
+        _BACKTEST_THRESHOLDS_CACHE = dict(LEAGUE_MIN_EDGE)
+        _BACKTEST_THRESHOLDS_LOADED_AT = now
+    return _BACKTEST_THRESHOLDS_CACHE
+
 
 def _has_upcoming_matches_for_league(league_code: str, within_hours: int) -> bool:
     """
@@ -1683,7 +1736,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     league = enriched_match.get("league", "")
     match_date = enriched_match.get("match_date") or enriched_match.get("date")
     data_quality = enriched_match.get("data_quality", "partial")
-    _min_edge = LEAGUE_MIN_EDGE.get(league, SPORTS_MIN_EDGE)
+    _min_edge = _load_backtest_thresholds().get(league, SPORTS_MIN_EDGE)
 
     # Si faltan nombres o liga (docs enriquecidos antes del fix), leerlos de upcoming_matches
     if not home_team or not away_team or not league:
@@ -2250,13 +2303,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     _is_intl_cup = league in {"CL", "EL", "ECL"}
     _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
     _is_moderada  = best_ev > 0.12 and best_confidence > (0.65 if _is_intl_cup else 0.70) and best_odds < 6.00
-    _is_detectada = best_ev > SPORTS_MIN_EDGE and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
+    _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
 
     if not (_is_fuerte or _is_moderada or _is_detectada):
         logger.debug(
             "generate_signal(%s): descartado — no cumple umbral "
-            "(ev=%.1f%% min_ev=8%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
-            match_id, best_ev * 100, best_confidence * 100, best_odds,
+            "(ev=%.1f%% min_ev=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
+            match_id, best_ev * 100, _min_edge * 100, best_confidence * 100, best_odds,
             home_team, away_team, league,
         )
         return []
@@ -2289,7 +2342,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         best_confidence = round(max(0.0, best_confidence * 0.9), 4)
         _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
         _is_moderada  = best_ev > 0.12 and best_confidence > 0.65 and best_odds < 6.00
-        _is_detectada = best_ev > SPORTS_MIN_EDGE and best_confidence > 0.65 and best_odds < 4.00
+        _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < 4.00
         if not (_is_fuerte or _is_moderada or _is_detectada):
             return []
         _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
