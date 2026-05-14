@@ -217,8 +217,11 @@ def _has_upcoming_matches_for_league(league_code: str, within_hours: int) -> boo
                 continue
         return False
     except Exception:
-        logger.warning("_has_upcoming_matches_for_league(%s): error Firestore — fail-open", league_code)
-        return True
+        logger.warning(
+            "_has_upcoming_matches_for_league(%s): error Firestore — fail-closed (protegiendo cuota)",
+            league_code,
+        )
+        return False
 
 
 def load_weights() -> dict:
@@ -2311,7 +2314,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
 
                 if sel:
                     sel_confidence = max(0.0, 1.0 - abs(over_p - 0.5) * 2) if sel == "Over" else max(0.0, 1.0 - abs(under_p - 0.5) * 2)
-                    sel_confidence = round(max(0.0, min(1.0, sel_confidence)), 4)
+                    sel_confidence = round(max(0.0, min(0.99, sel_confidence)), 4)
                     if sel_confidence > SPORTS_MIN_CONFIDENCE:
                         sel_kelly = kelly_criterion(sel_ev_t, sel_odds)
                         totals_pred = {
