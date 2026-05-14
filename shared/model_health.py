@@ -292,20 +292,41 @@ def format_daily_report(
             score_str = f"{unified_score:.0f}/100" if isinstance(unified_score, (int, float)) and unified_score > 1 else f"{float(unified_score):.0%}"
             lines.append(f"\n🏆 Top señal hoy: {market} — Score: {score_str}")
 
-    # Desglose por tiers de edge
+    # Desglose por tiers con señales reales
     if tier_stats:
-        fuerte   = tier_stats.get("fuerte", [])
+        fuerte    = tier_stats.get("fuerte", [])
         detectada = tier_stats.get("detectada", [])
         moderada  = tier_stats.get("moderada", [])
-        if fuerte or detectada or moderada:
+
+        def _fmt_signals(signals: list, max_show: int = 3) -> list[str]:
+            rows = []
+            for p in signals[:max_show]:
+                home = p.get("home_team", "?")
+                away = p.get("away_team", "?")
+                ttb  = p.get("team_to_back") or p.get("selection") or "?"
+                odds = float(p.get("odds") or 0)
+                edge = float(p.get("edge") or 0)
+                conf = float(p.get("confidence") or 0)
+                odds_str = f"@ {odds:.2f}" if odds else ""
+                conf_str = f" · conf {conf:.0%}" if conf else ""
+                rows.append(f"  · {home} vs {away} — {ttb} {odds_str} — edge {edge:+.0%}{conf_str}")
+            if len(signals) > max_show:
+                rows.append(f"  · ... +{len(signals) - max_show} más")
+            return rows
+
+        total_signals = len(fuerte) + len(detectada) + len(moderada)
+        if total_signals > 0:
             lines.append("")
-            lines.append("📊 Distribución por tier:")
             if fuerte:
-                lines.append(f"  🔥 Fuerte (edge>20%): {len(fuerte)}")
+                lines.append(f"🔥 SEÑALES FUERTES (edge >20%) — {len(fuerte)}")
+                lines.extend(_fmt_signals(fuerte))
             if detectada:
-                lines.append(f"  ✅ Detectada (12-20%): {len(detectada)}")
+                lines.append(f"✅ SEÑALES DETECTADAS (edge 12-20%) — {len(detectada)}")
+                lines.extend(_fmt_signals(detectada))
             if moderada:
-                lines.append(f"  📊 Moderada (8-12%): {len(moderada)}")
+                lines.append(f"📊 SEÑALES MODERADAS (edge 8-12%) — {len(moderada)}")
+                lines.extend(_fmt_signals(moderada))
+            lines.append(f"📈 TOTAL GENERAL: {total_signals} señales con edge positivo")
 
     # Tabla de calibración de confianza
     if conf_calibration:
