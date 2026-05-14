@@ -857,6 +857,35 @@ def _calculate_btts_prob(enriched_match: dict) -> dict | None:
         return None
 
 
+def _calculate_corners_prob(enriched_match: dict, line: float) -> dict | None:
+    """
+    Estimación P(corners) usando xG como proxy.
+    Modelo: exp_corners = 5.5 + (home_xg + away_xg) * 2.5
+    Sin stats dedicadas de corners — Poisson sobre xG escalado.
+    """
+    from scipy.stats import poisson as _poisson
+    home_xg = enriched_match.get("home_xg")
+    away_xg = enriched_match.get("away_xg")
+    if home_xg is None or away_xg is None:
+        return None
+    try:
+        expected_corners = 5.5 + (float(home_xg) + float(away_xg)) * 2.5
+        expected_corners = max(6.0, min(14.0, expected_corners))
+        floor_line = int(line)
+        prob_under_or_equal = sum(_poisson.pmf(k, expected_corners) for k in range(floor_line + 1))
+        over_prob = max(0.0, min(1.0, 1.0 - prob_under_or_equal))
+        under_prob = max(0.0, min(1.0, prob_under_or_equal))
+        return {
+            "over_prob": round(over_prob, 4),
+            "under_prob": round(under_prob, 4),
+            "expected_corners": round(expected_corners, 2),
+            "line": line,
+        }
+    except Exception:
+        logger.error("_calculate_corners_prob: error", exc_info=True)
+        return None
+
+
 def _calculate_ah_prob(enriched_match: dict, line: float = -0.5) -> dict | None:
     """
     P(home covers AH line).
@@ -1260,6 +1289,69 @@ async def _generate_oddsapiio_extra_signals(
                     except Exception:
                         logger.error("generate_signal(%s): error guardando ht", match_id, exc_info=True)
                     if ht_sev > SPORTS_ALERT_EDGE:
+                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
+                    results.append(pred)
+
+    # ── Corners Over/Under (odds-api.io) ──────────────────────────────────────
+    _CORNERS_MIN_EV = 0.08
+    corners_list = all_markets.get("corners_ou", [])
+    available_cn_lines = [c.get("line") for c in corners_list]
+    logger.info("EXTRA_MARKETS_CORNERS(%s): lines=%s", match_id, available_cn_lines)
+    if corners_list:
+        cn_entry = min(corners_list, key=lambda c: abs(c.get("line", 10.5) - 10.5))
+        cn_line = cn_entry.get("line", 10.5)
+        cn_probs = _calculate_corners_prob(enriched_match, line=cn_line)
+        if cn_probs:
+            cn_over_odds = cn_entry.get("over_odds") or 0.0
+            cn_under_odds = cn_entry.get("under_odds") or 0.0
+            cn_over_ev = calculate_ev(cn_probs["over_prob"], cn_over_odds) if cn_over_odds > 1.05 else -1.0
+            cn_under_ev = calculate_ev(cn_probs["under_prob"], cn_under_odds) if cn_under_odds > 1.05 else -1.0
+            logger.info(
+                "EXTRA_MARKETS_CORNERS(%s): line=%.1f exp_corners=%.1f over_prob=%.3f odds=%.2f ev=%.4f "
+                "| under_prob=%.3f odds=%.2f ev=%.4f | min=%.2f",
+                match_id, cn_line, cn_probs["expected_corners"],
+                cn_probs["over_prob"], cn_over_odds, cn_over_ev,
+                cn_probs["under_prob"], cn_under_odds, cn_under_ev,
+                _CORNERS_MIN_EV,
+            )
+            if cn_over_ev >= cn_under_ev and cn_over_ev > _CORNERS_MIN_EV:
+                cn_sel, cn_sp, cn_so, cn_sev = "Over", cn_probs["over_prob"], cn_over_odds, cn_over_ev
+            elif cn_under_ev > cn_over_ev and cn_under_ev > _CORNERS_MIN_EV:
+                cn_sel, cn_sp, cn_so, cn_sev = "Under", cn_probs["under_prob"], cn_under_odds, cn_under_ev
+            else:
+                cn_sel = None
+                logger.info("EXTRA_MARKETS_CORNERS(%s): SKIP — ningún lado supera min_ev=%.2f", match_id, _CORNERS_MIN_EV)
+            if cn_sel:
+                cn_conf = round(abs(cn_sp - 0.5) * 2, 4)
+                if cn_conf > SPORTS_MIN_CONFIDENCE:
+                    doc_id = f"{match_id}_cn{str(cn_line).replace('.', '')}"
+                    pred = {
+                        "match_id": doc_id, "home_team": home_team, "away_team": away_team,
+                        "sport": sport, "league": league, "market_type": "corners_ou",
+                        "selection": f"{cn_sel} {cn_line}", "line": cn_line,
+                        "bookmaker": cn_entry.get("bookmaker", ""),
+                        "odds": round(cn_so, 3), "calculated_prob": cn_sp,
+                        "edge": round(calculate_edge(cn_sp, cn_so), 4),
+                        "ev": round(cn_sev, 4), "confidence": cn_conf,
+                        "kelly_fraction": kelly_criterion(cn_sev, cn_so),
+                        "factors": {
+                            "expected_corners": cn_probs["expected_corners"],
+                            "home_xg": enriched_match.get("home_xg"),
+                            "away_xg": enriched_match.get("away_xg"),
+                        },
+                        "signals": {}, "data_source": "poisson_corners", "odds_source": "oddsapiio",
+                        "match_date": match_date, "weights_version": weights_version,
+                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                    }
+                    try:
+                        col("predictions").document(doc_id).set(pred)
+                        logger.info(
+                            "generate_signal(%s): Corners %s %.1f @ %.2f ev=%.1f%%",
+                            match_id, cn_sel, cn_line, cn_so, cn_sev * 100,
+                        )
+                    except Exception:
+                        logger.error("generate_signal(%s): error guardando corners", match_id, exc_info=True)
+                    if cn_sev > SPORTS_ALERT_EDGE:
                         await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                     results.append(pred)
 

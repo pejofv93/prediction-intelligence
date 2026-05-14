@@ -579,6 +579,9 @@ def _normalise_market_key(raw: str) -> str:
         "1st_half_total": "ht_totals", "ht_over_under": "ht_totals",
         "1st_half_total_goals": "ht_totals", "h1_totals": "ht_totals",
         "first_half_goals": "ht_totals", "first_half_total": "ht_totals",
+        "corners": "corners_ou", "corner": "corners_ou",
+        "total_corners": "corners_ou", "corners_over_under": "corners_ou",
+        "corners_totals": "corners_ou",
     }
     return mapping.get(raw, raw)
 
@@ -667,6 +670,24 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
             if over and under:
                 outcomes.append({"name": "Over", "price": over, "point": line or 0.5})
                 outcomes.append({"name": "Under", "price": under, "point": line or 0.5})
+
+    elif norm == "corners_ou":
+        # Corners Over/Under — misma estructura que totals (líneas típicas: 8.5, 9.5, 10.5, 11.5)
+        if isinstance(mkt_data, list):
+            for o in mkt_data:
+                line = _to_float(o.get("line") or o.get("total") or o.get("handicap"))
+                over = _to_float(o.get("over") or o.get("overOdds"))
+                under = _to_float(o.get("under") or o.get("underOdds"))
+                if line and over and under and 5.0 <= line <= 20.0:  # filtrar líneas absurdas
+                    outcomes.append({"name": "Over", "price": over, "point": line})
+                    outcomes.append({"name": "Under", "price": under, "point": line})
+        elif isinstance(mkt_data, dict):
+            line = _to_float(mkt_data.get("line") or mkt_data.get("total"))
+            over = _to_float(mkt_data.get("over"))
+            under = _to_float(mkt_data.get("under"))
+            if over and under and (line is None or 5.0 <= line <= 20.0):
+                outcomes.append({"name": "Over", "price": over, "point": line or 9.5})
+                outcomes.append({"name": "Under", "price": under, "point": line or 9.5})
 
     return outcomes
 
@@ -834,6 +855,26 @@ def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
             out["ht_totals"] = [
                 {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
                 for entry in by_ht_line.values()
+                if entry["over_odds"] and entry["under_odds"]
+            ]
+
+        elif mkt_key == "corners_ou":
+            by_cn_line: dict[float, dict] = {}
+            for e in entries:
+                bk = e["bookmaker"]
+                for o in e["outcomes"]:
+                    ln = round(float(o.get("point") or 9.5), 1)
+                    if ln not in by_cn_line:
+                        by_cn_line[ln] = {"line": ln, "over_odds": 0.0, "under_odds": 0.0, "bookmaker": ""}
+                    p = float(o.get("price") or 0)
+                    if o.get("name") == "Over" and p > by_cn_line[ln]["over_odds"]:
+                        by_cn_line[ln]["over_odds"] = p
+                        by_cn_line[ln]["bookmaker"] = bk
+                    elif o.get("name") == "Under" and p > by_cn_line[ln]["under_odds"]:
+                        by_cn_line[ln]["under_odds"] = p
+            out["corners_ou"] = [
+                {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
+                for entry in by_cn_line.values()
                 if entry["over_odds"] and entry["under_odds"]
             ]
 
