@@ -81,6 +81,9 @@ async def fetch_pending_results() -> list[dict]:
         pending = []
         for doc in docs:
             data = doc.to_dict()
+            # Preservar el doc ID de Firestore para garantizar que el update posterior
+            # use el ID correcto aunque el campo match_id almacenado difiera
+            data["_firestore_doc_id"] = doc.id
             match_date = data.get("match_date")
 
             if match_date is None:
@@ -109,27 +112,45 @@ async def fetch_pending_results() -> list[dict]:
         return []
 
 
+def _base_match_id(match_id: str) -> str:
+    """
+    Extrae el ID base del partido eliminando el sufijo de mercado.
+    Solo aplica cuando el primer segmento es numérico (predicciones de fútbol).
+    Ejemplos: "12345_btts" → "12345", "12345_ou25_oaio" → "12345"
+    Tennis/basketball quedan igual: "tennis_oapiio_xyz" → "tennis_oapiio_xyz"
+    """
+    parts = match_id.split("_", 1)
+    if len(parts) > 1 and parts[0].isdigit():
+        return parts[0]
+    return match_id
+
+
 async def check_result(match_id: str) -> str | None:
     """
-    Busca resultado en prodmatch_results (Firestore) primero.
+    Busca resultado en match_results (Firestore) primero.
     Fallback a football_api.get_match_result() si no está en la colección.
     Devuelve "HOME_WIN" | "AWAY_WIN" | "DRAW" | None.
+    Nota: col("match_results") aplica el prefijo FIRESTORE_COLLECTION_PREFIX
+    automáticamente → prodmatch_results en producción. No usar col("prodmatch_results")
+    porque añadiría el prefijo dos veces → prodprodmatch_results.
     """
     _WINNER_MAP = {"H": "HOME_WIN", "A": "AWAY_WIN", "D": "DRAW"}
+    # Para predicciones con sufijo de mercado (ej: "12345_btts"), usar el ID base
+    base_id = _base_match_id(match_id)
     try:
-        doc = col("prodmatch_results").document(str(match_id)).get()
+        doc = col("match_results").document(base_id).get()
         if doc.exists:
             winner = doc.to_dict().get("winner")
             mapped = _WINNER_MAP.get(winner)
             if mapped:
-                logger.debug("check_result(%s): encontrado en prodmatch_results → %s", match_id, mapped)
+                logger.debug("check_result(%s): encontrado en match_results → %s", match_id, mapped)
                 return mapped
     except Exception:
-        logger.warning("check_result(%s): error leyendo prodmatch_results, usando API", match_id, exc_info=True)
+        logger.warning("check_result(%s): error leyendo match_results, usando API", match_id, exc_info=True)
 
     try:
         from collectors.football_api import get_match_result
-        result = await get_match_result(match_id)
+        result = await get_match_result(base_id)
         if result is None:
             return None
         return result.get("result")
@@ -407,6 +428,8 @@ async def run_daily_learning() -> None:
             # Actualizar el documento prediction en Firestore
             processed_predictions.append({
                 "match_id": match_id,
+                # _firestore_doc_id garantiza el doc ID real aunque match_id difiera
+                "_firestore_doc_id": prediction.get("_firestore_doc_id") or match_id,
                 "result": actual_result,
                 "correct": correct,
                 "error_type": error_type,
@@ -580,23 +603,25 @@ async def run_daily_learning() -> None:
             "error_type": upd["error_type"],
         }
         mid = upd["match_id"]
-        # Actualizar el doc principal
+        # Usar el Firestore doc ID real (preservado en fetch_pending_results)
+        # para evitar 404 si el campo match_id almacenado difiere del doc ID
+        doc_id = upd.get("_firestore_doc_id") or mid
         try:
-            col("predictions").document(str(mid)).update(payload)
+            col("predictions").document(str(doc_id)).update(payload)
         except Exception:
             logger.error(
-                "run_daily_learning: error actualizando prediction %s", mid, exc_info=True
+                "run_daily_learning: error actualizando prediction %s (doc_id=%s)", mid, doc_id, exc_info=True
             )
-        # Actualizar también {match_id}_synthetic si existe
+        # Actualizar también {doc_id}_synthetic si existe
         try:
-            synthetic_ref = col("predictions").document(f"{mid}_synthetic")
+            synthetic_ref = col("predictions").document(f"{doc_id}_synthetic")
             snap = synthetic_ref.get()
             if snap.exists:
                 synthetic_ref.update(payload)
-                logger.debug("run_daily_learning: %s_synthetic actualizado", mid)
+                logger.debug("run_daily_learning: %s_synthetic actualizado", doc_id)
         except Exception:
             logger.warning(
-                "run_daily_learning: error actualizando %s_synthetic", mid, exc_info=True
+                "run_daily_learning: error actualizando %s_synthetic", doc_id, exc_info=True
             )
 
     # --- 8. Marcar predicciones obsoletas (>48h sin resultado) ---
