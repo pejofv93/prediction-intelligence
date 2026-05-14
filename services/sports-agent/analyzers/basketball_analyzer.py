@@ -36,12 +36,14 @@ _CACHE_TTL = timedelta(hours=24)
 _SPORT_KEY_MAP = {
     "NBA":        "basketball_nba",
     "EUROLEAGUE": "basketball_euroleague",
+    "ACB":        "basketball_spain_acb",
     "NBA_GL":     "basketball_nba",
 }
 
 _HOME_ADV = {
     "NBA":        BASKETBALL_HOME_ADV_NBA,
     "EUROLEAGUE": BASKETBALL_HOME_ADV_EURO,
+    "ACB":        BASKETBALL_HOME_ADV_EURO,
 }
 
 
@@ -360,8 +362,8 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
 
     if not home_stats.get("raw_matches") and not away_stats.get("raw_matches"):
         logger.debug(
-            "basketball_analyzer(%s): sin team_stats para %s vs %s — skip",
-            match_id, home_name, away_name,
+            "basketball_analyzer(%s): sin team_stats para %s vs %s — skip (%s)",
+            match_id, home_name, away_name, league,
         )
         return []
 

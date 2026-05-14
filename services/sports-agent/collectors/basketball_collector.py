@@ -33,7 +33,7 @@ _EUR_GAMES_URL = (
     "/competitions/E/seasons/E2025/games?limit=300"
 )
 _ACB_NEXT_URL = "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4408"
-_ACB_PREV_URL = "https://www.thesportsdb.com/api/v1/json/3/eventsprevleague.php?id=4408"
+_ACB_PREV_URL = "https://www.thesportsdb.com/api/v1/json/3/eventspastleague.php?id=4408"
 _HTTP_TIMEOUT = 15
 
 
@@ -178,6 +178,70 @@ async def collect_basketball_games(days: int = 1) -> list[dict]:
     return all_games
 
 
+async def _fetch_acb_team_last_games(team_id: int) -> list[dict]:
+    """Últimos partidos de un equipo ACB desde TheSportsDB eventslast. Sin key."""
+    url = f"https://www.thesportsdb.com/api/v1/json/3/eventslast.php?id={team_id}"
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, _http_get, url)
+    events = (data or {}).get("results") or []
+    result: list[dict] = []
+    for e in events:
+        home_score = e.get("intHomeScore")
+        away_score = e.get("intAwayScore")
+        if home_score is None or home_score == "" or away_score is None or away_score == "":
+            continue
+        try:
+            h_id_raw = e.get("idHomeTeam")
+            a_id_raw = e.get("idAwayTeam")
+            h_id = int(h_id_raw) if h_id_raw else _hash_team_id(e.get("strHomeTeam", "H"))
+            a_id = int(a_id_raw) if a_id_raw else _hash_team_id(e.get("strAwayTeam", "A"))
+            result.append({
+                "goals_home": float(home_score),
+                "goals_away": float(away_score),
+                "home_team_id": h_id,
+                "was_home": h_id == team_id,
+                "match_date": e.get("dateEvent", ""),
+            })
+        except (ValueError, TypeError, KeyError):
+            continue
+    return result
+
+
+async def _fetch_euroleague_history() -> list[dict]:
+    """Partidos Euroleague terminados de la temporada actual. Sin key."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, _http_get, _EUR_GAMES_URL)
+    games = data.get("data", []) if isinstance(data, dict) else []
+    result: list[dict] = []
+    for g in games:
+        if _eur_status(g.get("status", "")) != "FINISHED":
+            continue
+        home = g.get("home", {})
+        away = g.get("away", {})
+        home_code = home.get("code", "") or home.get("tla", "H")
+        away_code = away.get("code", "") or away.get("tla", "A")
+        home_score = home.get("score")
+        away_score = away.get("score")
+        if home_score is None or away_score is None:
+            continue
+        try:
+            result.append({
+                "match_id": f"EUR_{g['identifier']}",
+                "home_team_id": _hash_team_id(home_code),
+                "away_team_id": _hash_team_id(away_code),
+                "home_team_name": home.get("name", home_code),
+                "away_team_name": away.get("name", away_code),
+                "goals_home": float(home_score),
+                "goals_away": float(away_score),
+                "match_date": (g.get("date") or "")[:10],
+                "status": "FINISHED",
+            })
+        except (ValueError, TypeError, KeyError):
+            continue
+    logger.info("_fetch_euroleague_history: %d partidos Euroleague terminados", len(result))
+    return result
+
+
 async def collect_basketball_team_stats(games: list[dict]) -> None:
     """
     Para cada equipo en la lista de partidos, recopila sus últimos partidos
@@ -185,15 +249,21 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
 
     - Partidos ESPN (source='espn'): usa get_nba_team_stats_espn() — gratuito, sin clave.
     - Partidos api-basketball: usa get_team_stats_bdl() — requiere suscripción activa.
+    - Partidos ACB (source='thesportsdb'): usa _fetch_acb_team_last_games() por equipo.
+    - Partidos Euroleague (source='euroleague_incrowd'): usa _fetch_euroleague_history().
     """
     teams_seen: set[int] = set()
 
+    # Pre-fetch histórico Euroleague (1 sola petición para ~300 partidos)
+    eur_history: list[dict] = []
+    if any(g.get("source") == "euroleague_incrowd" for g in games):
+        try:
+            eur_history = await _fetch_euroleague_history()
+        except Exception:
+            logger.warning("basketball_collector: error cargando historial Euroleague", exc_info=True)
+
     for game in games:
         source = game.get("source", "")
-
-        # Fuentes sin histórico de stats — solo schedule, sin stats
-        if source in ("euroleague_incrowd", "thesportsdb"):
-            continue
 
         for team_id_key in ("home_team_id", "away_team_id"):
             team_id = game.get(team_id_key)
@@ -202,7 +272,53 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
 
             teams_seen.add(team_id)
             try:
-                if source == "espn":
+                if source in ("thesportsdb", "euroleague_incrowd"):
+                    if source == "thesportsdb":
+                        team_matches = await _fetch_acb_team_last_games(team_id)
+                    else:
+                        team_matches = [
+                            {
+                                "goals_home": m["goals_home"],
+                                "goals_away": m["goals_away"],
+                                "home_team_id": m["home_team_id"],
+                                "was_home": m["home_team_id"] == team_id,
+                                "match_date": m.get("match_date", ""),
+                            }
+                            for m in eur_history
+                            if m.get("home_team_id") == team_id or m.get("away_team_id") == team_id
+                        ]
+                    if not team_matches:
+                        logger.debug(
+                            "basketball_collector: sin historial para team %d (%s)", team_id, source
+                        )
+                        continue
+                    raw_matches_fmt = team_matches[:10]
+                    results = [
+                        "win" if (m["goals_home"] > m["goals_away"] and m["was_home"])
+                              or (m["goals_away"] > m["goals_home"] and not m["was_home"])
+                        else "loss"
+                        for m in raw_matches_fmt
+                    ]
+                    form_score = calculate_form_score(results[:10])
+                    streak = detect_streak(results[:10])
+                    team_name = game.get(
+                        "home_team_name" if team_id_key == "home_team_id" else "away_team_name",
+                        f"Team_{team_id}",
+                    )
+                    doc = {
+                        "team_id": team_id,
+                        "team_name": team_name,
+                        "league": game.get("league"),
+                        "sport": "basketball",
+                        "last_10": results[:10],
+                        "form_score": form_score,
+                        "streak": streak,
+                        "raw_matches": raw_matches_fmt,
+                        "xg_per_game": 0.0,
+                        "source": source,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                elif source == "espn":
                     # ESPN schedule → raw_matches ya en formato correcto
                     raw_matches_fmt = await get_nba_team_stats_espn(team_id)
                     if not raw_matches_fmt:
