@@ -140,6 +140,7 @@ async def _bg_daily_report() -> None:
     6. Si health.degraded: send_message(format_health_alert(health))
     """
     try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
         from shared.model_health import check_model_health, format_health_alert, format_daily_report
         from shared.shadow_engine import calculate_metrics
         from shared.firestore_client import col
@@ -244,6 +245,7 @@ async def send_weekly_report() -> JSONResponse:
     4. poly_predictions donde analyzed_at >= semana_actual
     """
     import asyncio
+    from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     from shared.report_generator import generate_weekly_report
     from alert_manager import send_message
