@@ -100,6 +100,8 @@ async def fetch_historical_fixtures(
                 "goals_home":    gh,
                 "goals_away":    ga,
                 "result":        result,
+                "home_team_id":  raw.get("home_team_id"),
+                "away_team_id":  raw.get("away_team_id"),
                 "odds_home":     raw.get("odds_home") or raw.get("odds_1") or None,
                 "odds_draw":     raw.get("odds_draw") or raw.get("odds_x") or None,
                 "odds_away":     raw.get("odds_away") or raw.get("odds_2") or None,
@@ -388,18 +390,14 @@ async def run_backtest(
     date_from = None
     date_to = None
 
+    # ── FASE 1: Recolectar todos los fixtures de todas las temporadas ──────────
     for season in seasons:
         try:
             fixtures = await fetch_historical_fixtures(league_id, season, api_key, league_name)
             if not fixtures:
-                logger.warning(
-                    "run_backtest: sin fixtures para %s/%d", league_name, season
-                )
+                logger.warning("run_backtest: sin fixtures para %s/%d", league_name, season)
                 continue
-
             all_fixtures.extend(fixtures)
-
-            # Actualizar rango de fechas
             for f in fixtures:
                 fdate = f.get("date", "")[:10]
                 if fdate:
@@ -407,87 +405,177 @@ async def run_backtest(
                         date_from = fdate
                     if date_to is None or fdate > date_to:
                         date_to = fdate
+        except Exception as e:
+            logger.error("run_backtest: error en temporada %d para %s: %s", season, league_name, e)
 
-            # Simular apuestas para cada fixture
-            for fixture in fixtures:
-                try:
-                    goals_home = int(fixture.get("goals_home") or 0)
-                    goals_away = int(fixture.get("goals_away") or 0)
+    if not all_fixtures:
+        logger.warning("run_backtest: 0 fixtures totales para %s", league_name)
+        return {
+            "backtest_id": str(uuid.uuid4()), "league": league_name, "market": market,
+            "season": ",".join(str(s) for s in seasons), "date_from": "", "date_to": "",
+            "n_bets": 0, "n_wins": 0, "win_rate": 0.0, "roi": 0.0, "avg_edge": 0.0,
+            "profit_factor": 0.0, "max_drawdown": 0.0, "sharpe": 0.0, "avg_clv": 0.0,
+            "threshold_recommended": _DEFAULT_SPORTS_MIN_EDGE,
+            "created_at": datetime.now(timezone.utc),
+        }
 
-                    # Senal simplificada: edge basado en confianza y cuota
-                    if market == "h2h":
-                        odds_home = float(fixture.get("odds_home") or 0)
-                        if odds_home <= 0:
-                            # Fallback: cuota calculada por goals ratio historico
-                            odds_home = 2.10  # cuota media de mercado
-                        confidence = min(0.95, max(0.5, 1 / odds_home + 0.05))
-                        edge = (confidence * odds_home) - 1.0
+    # ── FASE 2: Tasas históricas de la liga (modelo para totals/btts) ─────────
+    n_fix = len(all_fixtures)
+    over_rate = sum(
+        1 for f in all_fixtures
+        if int(f.get("goals_home") or 0) + int(f.get("goals_away") or 0) > 2.5
+    ) / n_fix
+    btts_rate = sum(
+        1 for f in all_fixtures
+        if int(f.get("goals_home") or 0) > 0 and int(f.get("goals_away") or 0) > 0
+    ) / n_fix
+    logger.info(
+        "run_backtest(%s/%s): %d fixtures — over_rate=%.2f btts_rate=%.2f",
+        league_name, market, n_fix, over_rate, btts_rate,
+    )
 
-                        if edge <= base_threshold:
-                            continue
+    # ── FASE 3: Cargar ELO en batch para h2h (una llamada por equipo) ─────────
+    _elo_map: dict[int, float] = {}
+    _elo_available = False
+    if market == "h2h":
+        try:
+            from enrichers.elo_rating import (
+                get_team_elo as _get_elo,
+                expected_score as _elo_exp,
+                HOME_ADVANTAGE as _ELO_HOME_ADV,
+            )
+            team_ids: set[int] = set()
+            for f in all_fixtures:
+                for key in ("home_team_id", "away_team_id"):
+                    tid = f.get(key)
+                    if tid is not None:
+                        try:
+                            team_ids.add(int(tid))
+                        except (ValueError, TypeError):
+                            pass
+            for tid in team_ids:
+                _elo_map[tid] = _get_elo(tid)
+            _elo_available = bool(team_ids)
+            logger.info("run_backtest(%s/h2h): %d ELOs cargados", league_name, len(_elo_map))
+        except Exception as _ee:
+            logger.warning("run_backtest: ELO no disponible — %s", _ee)
 
-                        signal = {
-                            "market_type": "h2h",
-                            "team_to_back": "home",
-                            "odds": odds_home,
-                            "edge": edge,
-                            "confidence": confidence,
-                            "kelly_fraction": min(0.25, max(0.01, edge / 2)),
-                        }
+    # ── FASE 4: Simular apuestas con lógica real (ELO + tasas históricas) ─────
+    for fixture in all_fixtures:
+        try:
+            signal: dict | None = None
 
-                    elif market == "totals":
-                        odds_over = float(fixture.get("odds_over25") or 1.85)
-                        confidence = 0.55
-                        edge = (confidence * odds_over) - 1.0
+            if market == "h2h":
+                odds_home = float(fixture.get("odds_home") or 0)
+                odds_away = float(fixture.get("odds_away") or 0)
+                odds_draw = float(fixture.get("odds_draw") or 0)
+                if odds_home <= 1.0: odds_home = 2.10
+                if odds_away <= 1.0: odds_away = 3.50
+                if odds_draw <= 1.0: odds_draw = 3.30
 
-                        if edge <= base_threshold:
-                            continue
-
-                        signal = {
-                            "market_type": "totals",
-                            "team_to_back": "over",
-                            "odds": odds_over,
-                            "edge": edge,
-                            "confidence": confidence,
-                            "kelly_fraction": min(0.25, max(0.01, edge / 2)),
-                        }
-
-                    elif market == "btts":
-                        odds_btts = float(fixture.get("odds_btts_yes") or 1.75)
-                        confidence = 0.52
-                        edge = (confidence * odds_btts) - 1.0
-
-                        if edge <= base_threshold:
-                            continue
-
-                        signal = {
-                            "market_type": "btts",
-                            "team_to_back": "yes",
-                            "odds": odds_btts,
-                            "edge": edge,
-                            "confidence": confidence,
-                            "kelly_fraction": min(0.25, max(0.01, edge / 2)),
-                        }
-
+                # Probabilidad del modelo: ELO si disponible, implied ajustada si no
+                h_id = fixture.get("home_team_id")
+                a_id = fixture.get("away_team_id")
+                if _elo_available and h_id and a_id:
+                    try:
+                        h_elo = _elo_map.get(int(h_id), 1500.0)
+                        a_elo = _elo_map.get(int(a_id), 1500.0)
+                        prob_home = _elo_exp(h_elo + _ELO_HOME_ADV, a_elo)
+                        prob_away = _elo_exp(a_elo, h_elo + _ELO_HOME_ADV)
+                        confidence = 0.60 + min(0.25, abs(prob_home - 0.50))
+                    except Exception:
+                        prob_home, prob_away, confidence = 0.45, 0.30, 0.60
+                else:
+                    # Implied probability: descontar ~8% de margen del bookmaker
+                    raw_h = 1.0 / odds_home
+                    raw_a = 1.0 / odds_away
+                    raw_d = 1.0 / odds_draw
+                    total_raw = raw_h + raw_a + raw_d
+                    if total_raw > 0:
+                        prob_home = raw_h / total_raw * 0.92
+                        prob_away = raw_a / total_raw * 0.92
                     else:
-                        continue
+                        prob_home, prob_away = 0.45, 0.30
+                    confidence = 0.58
 
-                    bet_result = simulate_bet(fixture, signal)
-                    bet_result["edge"] = edge
-                    bet_result["odds"] = signal["odds"]
-                    all_bets.append(bet_result)
+                ev_home = (prob_home * odds_home) - 1.0
+                ev_away = (prob_away * odds_away) - 1.0
 
-                except Exception as e:
-                    logger.error(
-                        "run_backtest: error simulando fixture %s: %s",
-                        fixture.get("fixture_id"), e,
-                    )
+                if ev_home >= ev_away:
+                    team_to_back = "home"
+                    sel_ev = ev_home
+                    sel_odds = odds_home
+                else:
+                    team_to_back = "away"
+                    sel_ev = ev_away
+                    sel_odds = odds_away
+
+                if sel_ev <= base_threshold:
+                    continue
+
+                signal = {
+                    "market_type": "h2h",
+                    "team_to_back": team_to_back,
+                    "odds": sel_odds,
+                    "edge": sel_ev,
+                    "confidence": min(0.90, max(0.55, confidence)),
+                    "kelly_fraction": min(0.25, max(0.01, sel_ev / 2)),
+                }
+
+            elif market == "totals":
+                odds_over  = float(fixture.get("odds_over25")  or 1.85)
+                odds_under = float(fixture.get("odds_under25") or 2.05)
+                if odds_over  <= 1.0: odds_over  = 1.85
+                if odds_under <= 1.0: odds_under = 2.05
+
+                ev_over  = (over_rate         * odds_over)  - 1.0
+                ev_under = ((1.0 - over_rate) * odds_under) - 1.0
+
+                if ev_over >= ev_under and ev_over > base_threshold:
+                    signal = {
+                        "market_type": "totals", "team_to_back": "over",
+                        "odds": odds_over, "edge": ev_over, "confidence": 0.62,
+                        "kelly_fraction": min(0.25, max(0.01, ev_over / 2)),
+                    }
+                elif ev_under > ev_over and ev_under > base_threshold:
+                    signal = {
+                        "market_type": "totals", "team_to_back": "under",
+                        "odds": odds_under, "edge": ev_under, "confidence": 0.60,
+                        "kelly_fraction": min(0.25, max(0.01, ev_under / 2)),
+                    }
+
+            elif market == "btts":
+                odds_btts    = float(fixture.get("odds_btts_yes") or 1.75)
+                odds_no_btts = float(fixture.get("odds_btts_no")  or 2.10)
+                if odds_btts    <= 1.0: odds_btts    = 1.75
+                if odds_no_btts <= 1.0: odds_no_btts = 2.10
+
+                ev_yes = (btts_rate         * odds_btts)    - 1.0
+                ev_no  = ((1.0 - btts_rate) * odds_no_btts) - 1.0
+
+                if ev_yes >= ev_no and ev_yes > base_threshold:
+                    signal = {
+                        "market_type": "btts", "team_to_back": "yes",
+                        "odds": odds_btts, "edge": ev_yes, "confidence": 0.60,
+                        "kelly_fraction": min(0.25, max(0.01, ev_yes / 2)),
+                    }
+                elif ev_no > ev_yes and ev_no > base_threshold:
+                    signal = {
+                        "market_type": "btts", "team_to_back": "no",
+                        "odds": odds_no_btts, "edge": ev_no, "confidence": 0.58,
+                        "kelly_fraction": min(0.25, max(0.01, ev_no / 2)),
+                    }
+
+            if signal is None:
+                continue
+
+            bet_result = simulate_bet(fixture, signal)
+            bet_result["edge"] = signal["edge"]
+            bet_result["odds"] = signal["odds"]
+            all_bets.append(bet_result)
 
         except Exception as e:
-            logger.error(
-                "run_backtest: error en temporada %d para %s: %s",
-                season, league_name, e,
-            )
+            logger.error("run_backtest: error simulando fixture %s: %s", fixture.get("fixture_id"), e)
 
     # Calcular metricas
     metrics = calculate_backtest_metrics(all_bets)
