@@ -246,9 +246,8 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
     }
 
 
-def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -> None:
+async def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -> None:
     from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
-    import asyncio
     try:
         if batch is not None:
             batch.set(col("predictions").document(doc_id), pred)
@@ -258,8 +257,7 @@ def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -> None
         logger.error("basketball_analyzer: error guardando %s", doc_id, exc_info=True)
     if pred.get("ev", pred["edge"]) > SPORTS_ALERT_EDGE:
         try:
-            loop = asyncio.get_event_loop()
-            loop.create_task(_send_telegram_alert(_build_alert_payload(pred, enriched)))
+            await _send_telegram_alert(_build_alert_payload(pred, enriched))
         except Exception:
             logger.error("basketball_analyzer: error enviando alerta %s", doc_id, exc_info=True)
 
@@ -506,7 +504,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 if pred:
                     doc_id = f"{match_id}_ml_{tag}"
                     pred["match_id"] = doc_id
-                    _save_and_alert(pred, doc_id, game, batch=_fs_batch)
+                    await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                     predictions.append(pred)
 
     # ── Spread ────────────────────────────────────────────────────────────────
@@ -524,7 +522,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
             if pred:
                 doc_id = f"{match_id}_spread"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, game, batch=_fs_batch)
+                await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                 predictions.append(pred)
 
     # ── Totals ────────────────────────────────────────────────────────────────
@@ -533,6 +531,18 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         if tot:
             exp_total = rats["exp_home"] + rats["exp_away"]
 
+            # Guardia de escala: si los raw_matches tienen goals en escala de fútbol
+            # (0-4 por partido) en vez de puntos NBA (85-130), exp_total sale < 50.
+            # En ese caso la señal O/U sería espuria (edge ~48% falso) → descartar.
+            if exp_total < 50:
+                logger.warning(
+                    "basketball_analyzer(%s): exp_total=%.1f < 50 — escala incorrecta, "
+                    "O/U omitido [%s vs %s]",
+                    match_id, exp_total, home_name, away_name,
+                )
+                tot = None
+
+        if tot:
             # Playoffs NBA: ritmo más lento → totales ~8% inferiores a temporada regular
             _series_title = str(game.get("series_title", "")).lower()
             _is_playoff = (
@@ -565,13 +575,14 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                     tag = "over" if "Over" in sel else "under"
                     doc_id = f"{match_id}_tot_{tag}"
                     pred["match_id"] = doc_id
-                    _save_and_alert(pred, doc_id, game, batch=_fs_batch)
+                    await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                     predictions.append(pred)
 
     # ── PRIMERA MITAD — SPREAD y TOTALS ──────────────────────────────────────
     # Modelo: H1 ≈ 48% del total esperado (NBA historical average)
     H1_FACTOR = 0.48
     exp_total = rats["exp_home"] + rats["exp_away"]
+    _h1_scale_ok = exp_total >= 50  # misma guardia que totals: escala NBA válida
     exp_h1_total  = exp_total  * H1_FACTOR
     exp_h1_margin = margin     * H1_FACTOR
 
@@ -602,11 +613,11 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         if pred:
             doc_id = f"{match_id}_h1_spread"
             pred["match_id"] = doc_id
-            _save_and_alert(pred, doc_id, game, batch=_fs_batch)
+            await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
             predictions.append(pred)
 
     # H1 totals
-    h1_tot = _get_market_odds_by_key(event, "h1_totals") if event else None
+    h1_tot = _get_market_odds_by_key(event, "h1_totals") if event and _h1_scale_ok else None
     if h1_tot:
         h1_line_t = h1_tot.get("line", round(exp_h1_total, 1))
         p_h1_over = float(1.0 - norm.cdf(h1_line_t, loc=exp_h1_total,
@@ -626,7 +637,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 tag = "over" if "Over" in sel else "under"
                 doc_id = f"{match_id}_h1_tot_{tag}"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, game, batch=_fs_batch)
+                await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                 predictions.append(pred)
 
     # ── PRIMER CUARTO TOTALS ──────────────────────────────────────────────────
@@ -653,7 +664,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 tag = "over" if "Over" in sel else "under"
                 doc_id = f"{match_id}_q1_tot_{tag}"
                 pred["match_id"] = doc_id
-                _save_and_alert(pred, doc_id, game, batch=_fs_batch)
+                await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
                 predictions.append(pred)
 
     try:
