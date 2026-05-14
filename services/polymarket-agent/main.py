@@ -475,6 +475,27 @@ async def _bg_enrich() -> dict:
         )
         markets = _valid
 
+        # Guardar snapshots de precio en poly_price_history para que el backtest
+        # tenga datos históricos. run-enrich es el único job que corre en schedule
+        # (cada ~6h); run-scan no está en ningún workflow programado.
+        try:
+            from price_tracker import save_price_snapshot
+            _snap_tasks = [
+                save_price_snapshot(
+                    market_id=_m.get("market_id") or "",
+                    price_yes=float(_m.get("price_yes", 0.5)),
+                    price_no=float(_m.get("price_no", 0.5)),
+                    volume_24h=float(_m.get("volume_24h", 0)),
+                )
+                for _m in markets
+                if _m.get("market_id")
+            ]
+            if _snap_tasks:
+                await asyncio.gather(*_snap_tasks, return_exceptions=True)
+                logger.info("enrich: %d snapshots guardados en poly_price_history", len(_snap_tasks))
+        except Exception as _snap_err:
+            logger.warning("enrich: error guardando snapshots de precio — %s", _snap_err)
+
         count = await run_enrichment(markets)
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
