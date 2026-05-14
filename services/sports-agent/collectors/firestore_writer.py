@@ -395,6 +395,89 @@ def _build_xg_matches(team_id: int, matches: list[dict]) -> list[dict]:
     return result
 
 
+async def save_standings(league_code: str, raw_standings: list[dict]) -> bool:
+    """
+    Procesa y guarda clasificación en standings/{league_code}.
+    Calcula flags motivacionales: mathematically_champion, mathematically_relegated,
+    nothing_at_stake (equipo sin opciones de Europa ni riesgo de descenso).
+    Ligas copa/torneos sin standings tradicionales (CL, EL, WC) → skip silencioso.
+    """
+    if not raw_standings:
+        return False
+
+    total_teams = len(raw_standings)
+    if total_teams < 8:
+        logger.debug("save_standings(%s): %d equipos — parece copa, skip", league_code, total_teams)
+        return False
+
+    num_relegated = 3 if total_teams >= 20 else 2
+    europe_cutoff = 5   # posiciones ≤ 5 = zona europea en la mayoría de ligas domésticas
+    total_rounds  = (total_teams - 1) * 2
+
+    sorted_teams      = sorted(raw_standings, key=lambda t: t["position"])
+    points_by_pos: dict[int, int] = {t["position"]: t["points"] for t in sorted_teams}
+
+    safety_pos        = total_teams - num_relegated     # última posición "segura"
+    safety_points     = points_by_pos.get(safety_pos, 0)
+    europe_edge_pts   = points_by_pos.get(europe_cutoff + 1, points_by_pos.get(europe_cutoff, 0))
+    second_place_pts  = points_by_pos.get(2, 0)
+
+    teams_dict: dict[str, dict] = {}
+    for team in sorted_teams:
+        pos          = team["position"]
+        pts          = team["points"]
+        played       = team["played"]
+        remaining    = max(0, total_rounds - played)
+
+        mathematically_champion  = pos == 1 and (pts - second_place_pts) > remaining * 3
+        mathematically_relegated = (
+            pos > safety_pos and (safety_points - pts) > remaining * 3
+        )
+        # Ni puede alcanzar Europa ni puede descender
+        can_reach_europe  = pos <= europe_cutoff or (europe_edge_pts - pts) <= remaining * 3
+        can_be_relegated  = pos >= safety_pos or (pts - safety_points) <= remaining * 3
+        nothing_at_stake  = (
+            not can_reach_europe
+            and not can_be_relegated
+            and not mathematically_champion
+            and not mathematically_relegated
+        )
+
+        teams_dict[str(team["team_id"])] = {
+            "team_id":                   team["team_id"],
+            "team_name":                 team["team_name"],
+            "position":                  pos,
+            "points":                    pts,
+            "played":                    played,
+            "won":                       team.get("won", 0),
+            "draw":                      team.get("draw", 0),
+            "lost":                      team.get("lost", 0),
+            "remaining_games":           remaining,
+            "mathematically_champion":   mathematically_champion,
+            "mathematically_relegated":  mathematically_relegated,
+            "nothing_at_stake":          nothing_at_stake,
+        }
+
+    doc = {
+        "league":      league_code,
+        "total_teams": total_teams,
+        "updated_at":  datetime.now(timezone.utc).isoformat(),
+        "teams":       teams_dict,
+    }
+
+    ok = await _firestore_set("standings", league_code, doc)
+    if ok:
+        flagged = sum(
+            1 for t in teams_dict.values()
+            if t["mathematically_champion"] or t["mathematically_relegated"] or t["nothing_at_stake"]
+        )
+        logger.info(
+            "save_standings(%s): %d equipos, %d con flag motivacional",
+            league_code, len(teams_dict), flagged,
+        )
+    return ok
+
+
 def _build_empty_team_stats(team_id: int) -> dict:
     """Stats neutrales para equipos sin datos historicos."""
     empty_side = {"played": 0, "won": 0, "drawn": 0, "lost": 0,

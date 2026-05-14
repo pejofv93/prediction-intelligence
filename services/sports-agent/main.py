@@ -321,6 +321,9 @@ async def _bg_collect() -> None:
         # --- 5. Fútbol europeo (football-data.org — lento, rate-limit 10 req/min) ---
         await _collect_football()
 
+        # --- 6. Clasificaciones domésticas (flags motivacionales para MOTIVATION_CHECK) ---
+        await _collect_standings()
+
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         _status["last_collect"] = datetime.now(timezone.utc).isoformat()
         logger.info("collect: completado en %.1fs", elapsed)
@@ -529,6 +532,35 @@ async def _collect_football() -> None:
             logger.info("ELO_UPDATE: sin partidos con resultado conocido")
     except Exception:
         logger.error("collect.football: error actualizando ELO ratings", exc_info=True)
+
+
+async def _collect_standings() -> None:
+    """
+    Recolecta clasificaciones de ligas domésticas (PL, PD, BL1, SA, FL1) via football-data.org.
+    Escribe standings/{league_code} en Firestore con flags motivacionales para MOTIVATION_CHECK.
+    Solo ligas domésticas con ≥8 equipos — skip silencioso para CL/EL/WC (torneos sin tabla).
+    TTL implícito: corre junto con el collect cada 6h.
+    """
+    from collectors.football_api import get_standings
+    from collectors.firestore_writer import save_standings
+    from shared.config import SUPPORTED_FOOTBALL_LEAGUES
+
+    # Solo ligas domésticas — CL/EL/ECL/WC no tienen standings de liga clásicos
+    domestic_leagues = {k: v for k, v in SUPPORTED_FOOTBALL_LEAGUES.items()
+                        if k not in ("CL", "EL", "ECL", "EC", "WC")}
+
+    logger.info("collect.standings: %d ligas domésticas", len(domestic_leagues))
+    for league_code, league_id in domestic_leagues.items():
+        try:
+            raw = await get_standings(league_id)
+            if raw:
+                await save_standings(league_code, raw)
+            else:
+                logger.warning("collect.standings: sin datos para %s (id=%d)", league_code, league_id)
+        except Exception:
+            logger.error("collect.standings: error en %s", league_code, exc_info=True)
+
+    logger.info("collect.standings: completado")
 
 
 async def _collect_allsports_football() -> None:

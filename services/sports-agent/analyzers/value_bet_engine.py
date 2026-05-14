@@ -2156,7 +2156,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         enriched_match.get("away_form_score", 50.0) if team_to_back == str(home_team)
         else enriched_match.get("home_form_score", 50.0)
     )
-    if _ctx_rival_form_score > _ctx_sel_form_score + 20:
+    if _ctx_rival_form_score > _ctx_sel_form_score + 15:
         best_confidence = round(best_confidence * 0.90, 4)
         _ctx_penalties.append(
             f"rival_form>{_ctx_rival_form_score:.0f}_vs_{_ctx_sel_form_score:.0f}(−10%)"
