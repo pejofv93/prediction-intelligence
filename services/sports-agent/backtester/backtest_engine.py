@@ -29,7 +29,7 @@ _BACKTEST_LEAGUES = {
 }
 
 _BACKTEST_SEASONS = [2022, 2023, 2024]
-_BACKTEST_MARKETS = ["h2h"]
+_BACKTEST_MARKETS = ["h2h", "totals", "btts"]
 _MAX_API_CALLS = 50
 
 
