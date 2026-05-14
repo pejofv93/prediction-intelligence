@@ -168,6 +168,18 @@ _YAHOO_SYMBOLS: dict[str, str] = {
     "BNB":    "BNB-USD",
     "ADA":    "ADA-USD",
     "DOGE":   "DOGE-USD",
+    # US Equities — símbolo directo Yahoo Finance (sin encoding)
+    "NVDA":  "NVDA",
+    "AAPL":  "AAPL",
+    "MSFT":  "MSFT",
+    "GOOGL": "GOOGL",
+    "AMZN":  "AMZN",
+    "TSLA":  "TSLA",
+    "META":  "META",
+    "AMD":   "AMD",
+    "NFLX":  "NFLX",
+    "SPY":   "SPY",
+    "QQQ":   "QQQ",
 }
 
 _BINANCE_SYMBOLS: dict[str, str] = {
@@ -193,7 +205,29 @@ _ASSET_DETECT: list = [
     (re.compile(r'\b(crude oil|crude|wti|brent|oil price|oil futures)\b', re.I), "WTI", None),
     (re.compile(r'\b(gold|xau)\b', re.I),                "GOLD",   None),
     (re.compile(r'\b(silver|xag)\b', re.I),              "SILVER", None),
+    # US Equities — precio real vía Yahoo Finance
+    (re.compile(r'\b(nvidia|nvda)\b', re.I),             "NVDA",  None),
+    (re.compile(r'\b(apple|aapl)\b', re.I),              "AAPL",  None),
+    (re.compile(r'\b(microsoft|msft)\b', re.I),          "MSFT",  None),
+    (re.compile(r'\b(google|alphabet|googl)\b', re.I),   "GOOGL", None),
+    (re.compile(r'\b(amazon|amzn)\b', re.I),             "AMZN",  None),
+    (re.compile(r'\b(tesla|tsla)\b', re.I),              "TSLA",  None),
+    (re.compile(r'\bmeta\b', re.I),                      "META",  None),
+    (re.compile(r'\b(amd|advanced micro devices)\b', re.I), "AMD", None),
+    (re.compile(r'\b(netflix|nflx)\b', re.I),            "NFLX",  None),
 ]
+
+
+# Detecta si la pregunta implica alcanzar un precio al ALZA (reach/hit/above/exceed…)
+# o a la BAJA (drop/fall/below…). Usado para el floor ALREADY_EXCEEDED.
+_UPWARD_PRICE_RE = re.compile(
+    r'\b(reach|hit|exceed|surpass|cross|above|break|top|close above|rise to|climb to|touch)\b',
+    re.I,
+)
+_DOWNWARD_PRICE_RE = re.compile(
+    r'\b(fall|drop|dip|below|decline|crash|sink|close below|go below|fall to|drop to|dip to)\b',
+    re.I,
+)
 
 
 def _is_groq_quota_exhausted() -> bool:
@@ -1742,6 +1776,44 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "analyze_market(%s): NEAR_TARGET_NO_CONTRA BUY_NO→PASS (dip %.1f%% cercano)",
                 market_id, _pct_needed,
             )
+
+    # ALREADY_EXCEEDED: precio actual ya superó el target → prob mínima 90%
+    # Aplica cuando current_price > target Y la pregunta implica alcanzar un precio al alza
+    # ("reach", "hit", "above", "exceed"...). NO aplica a mercados de bajada ("drop to $X").
+    if (
+        _price_ctx
+        and _pct_needed is not None
+        and _current_price is not None
+        and _current_price > _price_ctx[2]  # current > target
+        and _UPWARD_PRICE_RE.search(question)
+        and not _DOWNWARD_PRICE_RE.search(question)
+    ):
+        _exceeded_floor = 0.90
+        if real_prob < _exceeded_floor:
+            _old_rp_exc = real_prob
+            real_prob = _exceeded_floor
+            edge = round(real_prob - price_yes, 4)
+            _exc_note = (
+                f"⚠️ Target ya superado: {_price_ctx[0]} cotiza "
+                f"${_current_price:,.2f} > target ${_price_ctx[2]:,.0f} "
+                f"→ prob_min={_exceeded_floor:.0%}"
+            )
+            reasoning = f"{_exc_note}\n{reasoning}" if reasoning else _exc_note
+            logger.info(
+                "analyze_market(%s): ALREADY_EXCEEDED %.3f→%.3f "
+                "asset=%s current=$%.2f target=$%.0f",
+                market_id, _old_rp_exc, real_prob,
+                _price_ctx[0], _current_price, _price_ctx[2],
+            )
+        if recommendation == "BUY_NO":
+            recommendation = "PASS"
+            logger.info(
+                "analyze_market(%s): ALREADY_EXCEEDED BUY_NO→PASS "
+                "(current=$%.2f > target=$%.0f)",
+                market_id, _current_price, _price_ctx[2],
+            )
+        if edge >= POLY_MIN_EDGE:
+            recommendation = "BUY_YES"
 
     # Cap por magnitud de movimiento requerido — todas las categorías
     if _price_ctx and _pct_needed is not None and abs(_pct_needed) > 50 and real_prob > 0.15:
