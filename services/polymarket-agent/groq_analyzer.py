@@ -57,6 +57,14 @@ _LOCAL_ELECTION_RE = re.compile(
     r'\b(mayoral|mayor|municipal|prefecture|local election|city council|alderman|alcalde|gubernatorial)\b',
     re.I,
 )
+# FIX-NATIONAL-ELECTION: elecciones nacionales/presidenciales en países no anglófonos
+# (encuestas no verificables → señales espurias)
+_NATIONAL_ELECTION_RE = re.compile(
+    r'\b(presidential|presidency|prime minister|chancellor|premier|'
+    r'elección presidencial|presidencial|candidatura|candidato|candidata|'
+    r'president of|become president|win.*election|win.*presidency)\b',
+    re.I,
+)
 _ANGLOPHONE_COUNTRY_RE = re.compile(
     r'\b(usa|united states|america|uk|united kingdom|england|britain|canada|australia|new zealand|ireland|scotland|wales|'
     r'california|new york|los angeles|chicago|texas|florida|georgia|pennsylvania|ohio|michigan|illinois|'
@@ -149,9 +157,9 @@ def _is_known_football_team(team: str) -> bool:
     return any(kw in t or t in kw for kw in _KNOWN_FOOTBALL_TEAMS)
 
 _YAHOO_SYMBOLS: dict[str, str] = {
-    "WTI":    "CL%3DF",
-    "GOLD":   "GC%3DF",
-    "SILVER": "SI%3DF",
+    "WTI":    "CL=F",   # WTI crude oil futures — raw symbol, se encoda en URL
+    "GOLD":   "GC=F",   # Gold futures
+    "SILVER": "SI=F",   # Silver futures
     # Crypto fallback 2 (Binance es fallback 1, Yahoo es fallback 2)
     "BTC":    "BTC-USD",
     "ETH":    "ETH-USD",
@@ -512,13 +520,17 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
         except Exception as _cge:
             logger.debug("_fetch_current_price(%s): CoinGecko error — %s", asset_key, _cge)
 
-    # 3. Yahoo Finance — fallback 2
+    # 3. Yahoo Finance — fallback 2 (query1 primero, query2 como alternativa)
     if price is None and asset_key in _YAHOO_SYMBOLS:
-        _sym = _YAHOO_SYMBOLS[asset_key]
-        _yurl = f"https://query2.finance.yahoo.com/v8/finance/chart/{_sym}?interval=1d&range=1d"
-        price = await loop.run_in_executor(
-            None, lambda: _http_get(_yurl, lambda d: d["chart"]["result"][0]["meta"]["regularMarketPrice"])
-        )
+        from urllib.parse import quote as _urlquote
+        _sym = _urlquote(_YAHOO_SYMBOLS[asset_key], safe="")
+        for _yhost in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+            _yurl = f"https://{_yhost}/v8/finance/chart/{_sym}?interval=1d&range=1d"
+            price = await loop.run_in_executor(
+                None, lambda u=_yurl: _http_get(u, lambda d: d["chart"]["result"][0]["meta"]["regularMarketPrice"])
+            )
+            if price:
+                break
 
     if price and price > 0:
         _PRICE_CACHE[asset_key] = (price, now_ts)
@@ -1098,13 +1110,17 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     category = categorize_market(question)
     category_context = _build_category_context(question, category)
 
-    # FIX-LOCAL-ELECTION: elecciones municipales/locales de países no anglófonos → skip.
-    # El modelo no tiene datos de encuestas locales para estos mercados; una divergencia
-    # de 30pp sin contexto real genera señales espurias (ej: Seoul Mayoral 2026).
+    # FIX-LOCAL-ELECTION + FIX-NATIONAL-ELECTION: elecciones (locales o nacionales)
+    # en países no anglófonos → skip. Sin encuestas verificables las señales son espurias.
+    # Ej: Seoul Mayoral 2026, Keiko Fujimori (Peru 2026).
     if category == "politics":
-        if _LOCAL_ELECTION_RE.search(question) and not _ANGLOPHONE_COUNTRY_RE.search(question):
+        _is_election = (
+            _LOCAL_ELECTION_RE.search(question)
+            or _NATIONAL_ELECTION_RE.search(question)
+        )
+        if _is_election and not _ANGLOPHONE_COUNTRY_RE.search(question):
             logger.info(
-                "analyze_market(%s): LOCAL_ELECTION_NO_DATA — elección local no anglófona "
+                "analyze_market(%s): ELECTION_NO_DATA — elección no anglófona "
                 "sin encuestas verificables → skip (%s)",
                 market_id, question[:80],
             )
@@ -1245,6 +1261,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     )
                 except (TypeError, ValueError):
                     pass
+        if not _current_price or _current_price <= 0:
+            logger.info(
+                "analyze_market(%s): PRICE_UNAVAILABLE — precio de %s no obtenido "
+                "(Yahoo/CoinGecko fallaron) → skip para evitar señales sin contexto",
+                market_id, _p_asset,
+            )
+            return None
         if _current_price and _current_price > 0:
             _pct_needed = (_p_target / _current_price - 1) * 100
             if abs(_pct_needed) > 100:
