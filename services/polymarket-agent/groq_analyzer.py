@@ -1803,6 +1803,50 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             market_id, edge, real_prob, price_yes,
         )
 
+    # Smart money / volumen extremo — overrides finales antes de emitir señal
+    _is_smart_money = smart_money.get("is_smart_money", False)
+    _is_volume_spike = enriched_market.get("volume_spike", False)
+
+    # SM o volume_spike confirman precio alto (>80%): no apostar en contra
+    if (_is_smart_money or _is_volume_spike) and price_yes > 0.80 and recommendation == "BUY_NO":
+        logger.info(
+            "analyze_market(%s): SM_HIGH_PRICE BUY_NO→PASS "
+            "(smart_money=%s volume_spike=%s price_yes=%.3f)",
+            market_id, _is_smart_money, _is_volume_spike, price_yes,
+        )
+        recommendation = "PASS"
+
+    # SM confirma precio bajo (<20%): no apostar al alza
+    if _is_smart_money and price_yes < 0.20 and recommendation == "BUY_YES":
+        logger.info(
+            "analyze_market(%s): SM_LOW_PRICE BUY_YES→PASS "
+            "(smart_money=True price_yes=%.3f)",
+            market_id, price_yes,
+        )
+        recommendation = "PASS"
+
+    # Precio extremo alto con volumen alto: real_prob no puede caer >10pp bajo el mercado
+    if price_yes > 0.85 and volume_24h > 50_000:
+        _vol_floor = round(price_yes - 0.10, 4)
+        if real_prob < _vol_floor:
+            logger.info(
+                "analyze_market(%s): HIGH_PRICE_VOL_FLOOR real_prob=%.3f<floor=%.3f "
+                "(price_yes=%.3f vol=$%.0f) → PASS",
+                market_id, real_prob, _vol_floor, price_yes, volume_24h,
+            )
+            recommendation = "PASS"
+
+    # Precio extremo bajo con volumen alto: real_prob no puede subir >10pp sobre el mercado
+    if price_yes < 0.15 and volume_24h > 50_000:
+        _vol_ceil = round(price_yes + 0.10, 4)
+        if real_prob > _vol_ceil:
+            logger.info(
+                "analyze_market(%s): LOW_PRICE_VOL_CEIL real_prob=%.3f>ceil=%.3f "
+                "(price_yes=%.3f vol=$%.0f) → PASS",
+                market_id, real_prob, _vol_ceil, price_yes, volume_24h,
+            )
+            recommendation = "PASS"
+
     # Fix 4: calibrar confidence con accuracy histórica por bucket de edge
     try:
         _weights = _get_poly_weights()
