@@ -495,6 +495,7 @@ async def _collect_football() -> None:
     )
 
     # Actualizar resultados de partidos terminados (últimos 30 días)
+    finished: list[dict] = []
     try:
         from collectors.football_api import get_finished_matches
         from collectors.firestore_writer import update_finished_matches
@@ -503,6 +504,31 @@ async def _collect_football() -> None:
         logger.info("RESULTS_UPDATE: %d partidos actualizados a FINISHED", updated)
     except Exception:
         logger.error("collect.football: error actualizando resultados FINISHED", exc_info=True)
+
+    # Actualizar ELO ratings desde partidos terminados con resultado conocido
+    try:
+        from enrichers.elo_rating import update_all_elos
+        elo_matches = [
+            {
+                "home_team_id": m["home_team_id"],
+                "away_team_id": m["away_team_id"],
+                "result": (
+                    "HOME_WIN" if m.get("goals_home", 0) > m.get("goals_away", 0)
+                    else "AWAY_WIN" if m.get("goals_away", 0) > m.get("goals_home", 0)
+                    else "DRAW"
+                ),
+                "date": m.get("date", ""),
+            }
+            for m in finished
+            if m.get("goals_home") is not None and m.get("goals_away") is not None
+        ]
+        if elo_matches:
+            await update_all_elos(elo_matches)
+            logger.info("ELO_UPDATE: %d partidos procesados", len(elo_matches))
+        else:
+            logger.info("ELO_UPDATE: sin partidos con resultado conocido")
+    except Exception:
+        logger.error("collect.football: error actualizando ELO ratings", exc_info=True)
 
 
 async def _collect_allsports_football() -> None:
@@ -813,12 +839,14 @@ async def _bg_analyze() -> None:
                 from collectors.odds_apiio_client import get_league_odds as _get_oaio_odds
                 _oaio_coros = [_get_oaio_odds(lg) for lg in _active_leagues if lg]
 
+            from analyzers.value_bet_engine import _has_upcoming_matches_for_league as _has_upcoming
             _prefetch_coros = (
                 # odds-api.io: fuente primaria — pre-fetch todas las ligas activas
                 _oaio_coros
-                # The Odds API: secundaria (solo cuando odds-api.io falla)
+                # The Odds API: secundaria — solo ligas con partidos en próximas 48h
                 + [_get_league_events(sk, "prefetch", _now)
-                   for lg, sk in _ODDS_SPORT_MAP.items() if lg in _active_leagues]
+                   for lg, sk in _ODDS_SPORT_MAP.items()
+                   if lg in _active_leagues and _has_upcoming(lg, 48)]
                 # OddsPapi v4: fixtures de hoy (corners/bookings del día)
                 + [_fetch_fixtures_for_date(_today)]
                 + [_fetch_fixtures_for_date(_today, to_date=_week_end)]

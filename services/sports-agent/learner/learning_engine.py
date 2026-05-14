@@ -300,12 +300,14 @@ async def run_daily_learning() -> None:
     logger.info("run_daily_learning: procesando %d predicciones", len(pending))
 
     # --- 2. Cargar pesos actuales ---
+    _prev_conf_data: dict = {}
     try:
         weights_doc = col("model_weights").document("current").get()
         if weights_doc.exists:
             data = weights_doc.to_dict()
             current_weights = data.get("weights", dict(DEFAULT_WEIGHTS))
             current_version = int(data.get("version", 0))
+            _prev_conf_data = data.get("accuracy_by_confidence", {})
         else:
             current_weights = dict(DEFAULT_WEIGHTS)
             current_version = 0
@@ -322,6 +324,9 @@ async def run_daily_learning() -> None:
     accuracy_by_league: dict[str, list[bool]] = {k: [] for k in _FOOTBALL_LEAGUES}
     accuracy_by_market: dict[str, list[bool]] = {
         "1X2": [], "OVER_UNDER": [], "BTTS": [], "ASIAN_HANDICAP": [], "DOUBLE_CHANCE": []
+    }
+    accuracy_by_confidence: dict[str, list[bool]] = {
+        "65_70": [], "70_80": [], "80_90": [], "90_99": []
     }
 
     # 3a. Paralelizar todas las llamadas check_result (I/O bound → asyncio.gather)
@@ -387,6 +392,17 @@ async def run_daily_learning() -> None:
             bucket = _MARKET_BUCKETS.get(market_type, "1X2")
             if bucket in accuracy_by_market:
                 accuracy_by_market[bucket].append(correct)
+
+            # Acumular accuracy por bucket de confianza (calibración)
+            _conf = float(prediction.get("confidence") or 0.0)
+            if 0.65 <= _conf < 0.70:
+                accuracy_by_confidence["65_70"].append(correct)
+            elif 0.70 <= _conf < 0.80:
+                accuracy_by_confidence["70_80"].append(correct)
+            elif 0.80 <= _conf < 0.90:
+                accuracy_by_confidence["80_90"].append(correct)
+            elif _conf >= 0.90:
+                accuracy_by_confidence["90_99"].append(correct)
 
             # Actualizar el documento prediction en Firestore
             processed_predictions.append({
@@ -460,6 +476,23 @@ async def run_daily_learning() -> None:
         for bucket, results in accuracy_by_market.items()
     }
 
+    # Calcular calibración acumulativa por bucket de confianza (merge con histórico)
+    acc_by_confidence: dict[str, dict] = {}
+    for _bkt in ["65_70", "70_80", "80_90", "90_99"]:
+        _today_results = accuracy_by_confidence.get(_bkt, [])
+        _prev = _prev_conf_data.get(_bkt, {"count": 0, "correct": 0})
+        _total = int(_prev.get("count", 0)) + len(_today_results)
+        _correct = int(_prev.get("correct", 0)) + sum(1 for r in _today_results if r)
+        acc_by_confidence[_bkt] = {
+            "count": _total,
+            "correct": _correct,
+            "rate": round(_correct / _total, 4) if _total > 0 else None,
+        }
+    logger.info(
+        "run_daily_learning: calibración confianza — %s",
+        {k: v["rate"] for k, v in acc_by_confidence.items() if v["rate"] is not None},
+    )
+
     new_version = current_version + 1
     total_in_db, correct_in_db = _get_historical_counts()
 
@@ -470,6 +503,7 @@ async def run_daily_learning() -> None:
             "weights": current_weights,
             "accuracy_by_league": acc_by_league,
             "accuracy_by_market": acc_by_market,
+            "accuracy_by_confidence": acc_by_confidence,
             "blacklisted_leagues": [],
             "min_edge_threshold": 0.08,
             "min_confidence": 0.65,
