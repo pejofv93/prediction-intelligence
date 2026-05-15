@@ -1481,6 +1481,20 @@ async def _save_odds_cache(match_id: str, odds: dict, now: datetime) -> None:
     except Exception:
         logger.error("_save_odds_cache(%s): error guardando en Firestore", match_id, exc_info=True)
 
+    # Poblar odds_history para que _detect_odds_movement() tenga datos reales (SMART_MONEY/FADING)
+    try:
+        from analyzers.line_movement import save_odds_snapshot
+        await save_odds_snapshot(
+            fixture_id=match_id,
+            bookmaker=odds.get("bookmaker", "bet365"),
+            market_type="h2h",
+            home_odds=float(odds.get("home_odds", 0)),
+            draw_odds=odds.get("draw_odds"),
+            away_odds=float(odds.get("away_odds", 0)),
+        )
+    except Exception:
+        logger.debug("_save_odds_cache(%s): save_odds_snapshot falló — no crítico", match_id)
+
 
 def calculate_edge(prob_calculated: float, decimal_odds: float) -> float:
     """edge = prob_calculated - (1 / decimal_odds)"""

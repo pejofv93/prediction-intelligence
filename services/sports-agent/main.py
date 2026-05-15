@@ -1068,6 +1068,20 @@ async def _bg_analyze() -> None:
         asyncio.create_task(_bg_arb())
         logger.info("analyze: arbitrage detector lanzado en background")
 
+        # Odds change check: notificar cambios de cuota >10% en predicciones pendientes
+        _tg_url = os.environ.get("TELEGRAM_BOT_URL", "")
+        if _tg_url and CLOUD_RUN_TOKEN:
+            try:
+                import httpx as _httpx_oc
+                async with _httpx_oc.AsyncClient(timeout=15.0) as _hx:
+                    await _hx.post(
+                        f"{_tg_url}/run-odds-check",
+                        headers={"x-cloud-token": CLOUD_RUN_TOKEN},
+                    )
+                logger.info("analyze: odds-check lanzado en telegram-bot")
+            except Exception as _oce:
+                logger.debug("analyze: error lanzando odds-check — %s", _oce)
+
     except Exception as e:
         logger.error("analyze: error no controlado — %s", e, exc_info=True)
 
