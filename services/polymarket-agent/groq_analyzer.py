@@ -93,6 +93,11 @@ _UFC_RE = re.compile(
 _WIN_TOURNAMENT_RE = re.compile(
     r'will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)[\?\.\s]*$', re.I
 )
+# Patrón alternativo: "Who Will Win Series? - X vs. Y" (Polymarket NBA playoffs)
+_NBA_SERIES_VS_RE = re.compile(
+    r'who will win (?:the\s+)?series\??[\s\-–—]+(\w[\w\s.]+?)\s+vs\.?\s+',
+    re.I,
+)
 _TOURNAMENT_KW_RE = re.compile(
     r'\b(champions league|world cup|copa del rey|copa libertadores|europa league|'
     r'premier league|la liga|bundesliga|serie a|ligue 1|nba finals|nfl|mlb|nhl|'
@@ -437,6 +442,17 @@ def _get_current_crypto_price(question: str, enriched_market: dict | None = None
             except (TypeError, ValueError):
                 pass
     return None
+
+
+def _fix_encoding(s: object) -> object:
+    """Repara UTF-8 bytes decodificados como Latin-1 (e.g. 'estÃ¡' → 'está')."""
+    if not isinstance(s, str):
+        return s
+    try:
+        fixed = s.encode('latin-1').decode('utf-8')
+        return fixed if fixed != s else s
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
 
 
 def _extract_target_price(question: str) -> float | None:
@@ -1350,6 +1366,17 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             _nba_m = _WIN_TOURNAMENT_RE.search(question)
             if _nba_m:
                 _nba_team = _nba_m.group(1).strip()
+            else:
+                # Fallback: "Who Will Win Series? - Thunder vs. Lakers" format
+                _vs_m = _NBA_SERIES_VS_RE.search(question)
+                _nba_team = _vs_m.group(1).strip() if _vs_m else ""
+                if _nba_team:
+                    logger.info(
+                        "analyze_market(%s): NBA_SERIES_VS extraído '%s' de '%s'",
+                        market_id, _nba_team, question[:80],
+                    )
+
+            if _nba_team:
                 try:
                     _nba_win_prob = await asyncio.wait_for(
                         _fetch_nba_win_prob(_nba_team), timeout=5.0
@@ -2249,15 +2276,15 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     prediction = {
         "market_id": market_id,
-        "question": question,
+        "question": _fix_encoding(question),
         "market_price_yes": price_yes,
         "real_prob": round(real_prob, 4),
         "edge": round(edge, 4),
         "confidence": round(confidence, 4),
         "trend": trend,
         "recommendation": recommendation,
-        "key_factors": key_factors[:5] if key_factors else [],
-        "reasoning": reasoning[:1000] if reasoning else "",
+        "key_factors": [_fix_encoding(f) for f in (key_factors[:5] if key_factors else [])],
+        "reasoning": _fix_encoding(reasoning[:1000] if reasoning else ""),
         "volume_spike": bool(enriched_market.get("volume_spike", False)),
         "smart_money_detected": bool(smart_money.get("is_smart_money", False)),
         "category": category,
