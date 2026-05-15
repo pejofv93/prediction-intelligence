@@ -304,7 +304,7 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
     Senales base:
       poisson = poisson_home/away_win  (o 0.5 si None — no-football)
       elo     = elo_home_win_prob      — SOLO si elo_sufficient=True
-      form    = form_score / 100
+      form    = 0.5 + 0.6*(form_score/100 - 0.5)  — calibrado: regresion hacia 0.5
       h2h     = (h2h_advantage + 1) / 2  — SOLO si h2h_sufficient=True
 
     Señales excluidas cuando no hay datos reales (patrón uniforme):
@@ -341,14 +341,20 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
     poisson_away_s = float(poisson_away) if poisson_away is not None else 0.5
     elo_home_s = float(elo_home) if elo_home is not None else 0.5
 
+    # Form: regresion hacia 0.5 para evitar sobreconfianza — win-rate reciente sin ajuste
+    # de calidad de rival infla EV. Factor 0.6: form=80 → 0.68 (era 0.80), form=20 → 0.32.
+    _FORM_SHRINK = 0.6
+    form_home_cal = 0.5 + _FORM_SHRINK * (float(home_form) / 100.0 - 0.5)
+    form_away_cal = 0.5 + _FORM_SHRINK * (float(away_form) / 100.0 - 0.5)
+
     if team == "home":
-        signals = {"poisson": poisson_home_s, "form": float(home_form) / 100.0}
+        signals = {"poisson": poisson_home_s, "form": form_home_cal}
         if elo_sufficient:
             signals["elo"] = elo_home_s
         if h2h_sufficient:
             signals["h2h"] = (float(h2h_adv) + 1.0) / 2.0
     else:  # away
-        signals = {"poisson": poisson_away_s, "form": float(away_form) / 100.0}
+        signals = {"poisson": poisson_away_s, "form": form_away_cal}
         if elo_sufficient:
             signals["elo"] = 1.0 - elo_home_s
         if h2h_sufficient:

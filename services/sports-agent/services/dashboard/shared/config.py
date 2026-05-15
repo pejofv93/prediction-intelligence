@@ -109,8 +109,8 @@ TENNIS_WEIGHTS = {"form": 0.30, "surface": 0.30, "ranking": 0.25, "h2h": 0.15}
 LEARNING_RATE = 0.05
 DEFAULT_WEIGHTS = {
     # Pesos para ensemble_probability — deben coincidir con las 4 senales del modelo
-    "poisson": 0.40,      # modelo Poisson bivariado (mas robusto estadisticamente)
+    "poisson": 0.50,      # modelo Poisson bivariado (mas robusto estadisticamente)
     "elo": 0.25,          # rating ELO dinamico
-    "form": 0.20,         # forma reciente (ultimos 10 partidos)
+    "form": 0.10,         # forma reciente — reducido: sin ajuste de calidad de rival
     "h2h": 0.15,          # ventaja historica directa
 }
