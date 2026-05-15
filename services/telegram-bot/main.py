@@ -78,6 +78,42 @@ async def _bg_btc_snapshot() -> None:
         logger.error("btc-snapshot: error — %s", e, exc_info=True)
 
 
+@app.post("/run-odds-check", dependencies=[Depends(verify_token)])
+async def run_odds_check() -> JSONResponse:
+    """
+    Lee odds_cache de Firestore y compara contra predicciones pendientes.
+    Envia alerta Telegram si una cuota cambia >10% respecto a la original.
+    Llamado por sports-agent al final de /run-analyze.
+    """
+    asyncio.create_task(_bg_odds_check())
+    return JSONResponse(status_code=202, content={"status": "accepted", "job": "odds-check"})
+
+
+async def _bg_odds_check() -> None:
+    try:
+        from shared.firestore_client import col
+        from alert_manager import check_pending_odds_changes
+
+        # Leer cuotas actuales desde odds_cache (poblado por _save_odds_cache en sports-agent)
+        odds_docs = list(col("odds_cache").limit(500).stream())
+        current_odds_by_match: dict[str, float] = {}
+        for doc in odds_docs:
+            data = doc.to_dict()
+            mid = data.get("fixture_id") or doc.id
+            home_odds = float(data.get("home_odds") or 0)
+            if mid and home_odds > 1.0:
+                current_odds_by_match[str(mid)] = home_odds
+
+        if not current_odds_by_match:
+            logger.info("odds-check: odds_cache vacía — nada que comparar")
+            return
+
+        sent = await check_pending_odds_changes(current_odds_by_match)
+        logger.info("odds-check: %d alertas de cambio de cuota enviadas", sent)
+    except Exception as e:
+        logger.error("odds-check: error — %s", e, exc_info=True)
+
+
 @app.post("/send-alert", dependencies=[Depends(verify_token)])
 async def send_alert(request: Request) -> JSONResponse:
     """
