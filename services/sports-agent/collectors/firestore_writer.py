@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 _FOOTBALL_LEAGUE_CODES = set(SUPPORTED_FOOTBALL_LEAGUES.keys())
 
 
+def _fix_encoding(s: object) -> object:
+    """Repara UTF-8 bytes decodificados como Latin-1 (e.g. 'MÃ¼nchen' → 'München')."""
+    if not isinstance(s, str):
+        return s
+    try:
+        fixed = s.encode('latin-1').decode('utf-8')
+        return fixed if fixed != s else s
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+
+
 async def _firestore_set(
     collection_name: str, doc_id: str, data: dict, retries: int = 3
 ) -> bool:
@@ -100,8 +111,8 @@ async def save_upcoming_matches(matches: list[dict]) -> None:
 
         doc = {
             "match_id": match_id,
-            "home_team": m.get("home_team_name", m.get("home_team", "")),
-            "away_team": m.get("away_team_name", m.get("away_team", "")),
+            "home_team": _fix_encoding(m.get("home_team_name", m.get("home_team", "")) or ""),
+            "away_team": _fix_encoding(m.get("away_team_name", m.get("away_team", "")) or ""),
             "home_team_id": m.get("home_team_id"),
             "away_team_id": m.get("away_team_id"),
             "league": m.get("league", ""),
