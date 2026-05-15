@@ -15,6 +15,11 @@ interface PolyPrediction {
   reasoning: string
   analyzed_at: string
   alerted: boolean
+  data_quality?: string
+  slug?: string
+  category?: string
+  end_date_iso?: string
+  volume_24h?: number
 }
 
 function TrendBadge({ trend }: { trend: string }) {
@@ -123,6 +128,13 @@ function PolyCard({ p }: { p: PolyPrediction }) {
         </div>
       )}
 
+      {/* data_quality warning */}
+      {p.data_quality === 'improvised' && (
+        <div style={{ background: '#1a1200', border: '1px solid #F7931A44', borderRadius: 4, padding: '6px 10px', marginBottom: 8, fontSize: 11, color: '#F7931A' }}>
+          ⚠️ Sin datos externos verificables — ancla: precio mercado ±15%
+        </div>
+      )}
+
       {/* Reasoning */}
       {p.reasoning && (
         <div style={{ borderTop: '1px solid #1a1a1a', paddingTop: 8 }}>
@@ -133,8 +145,16 @@ function PolyCard({ p }: { p: PolyPrediction }) {
         </div>
       )}
 
-      <div style={{ color: '#444', fontSize: 11, marginTop: 10, textAlign: 'right' }}>
-        Analizado: {dateStr}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+        <div>
+          {p.slug && (
+            <a href={`https://polymarket.com/event/${p.slug}`} target="_blank" rel="noopener noreferrer"
+               style={{ color: '#F7931A', fontSize: 11, textDecoration: 'none' }}>
+              🔗 Ver mercado
+            </a>
+          )}
+        </div>
+        <div style={{ color: '#444', fontSize: 11 }}>Analizado: {dateStr}</div>
       </div>
     </div>
   )

@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.firestore_client import col
 
@@ -50,7 +51,7 @@ async def get_poly() -> list[dict]:
             "edge", "confidence", "trend", "recommendation",
             "volume_spike", "smart_money_detected", "key_factors",
             "reasoning", "analyzed_at", "alerted", "category",
-            "end_date_iso", "volume_24h",
+            "end_date_iso", "volume_24h", "data_quality", "slug",
         }
         result = []
         for d in docs:

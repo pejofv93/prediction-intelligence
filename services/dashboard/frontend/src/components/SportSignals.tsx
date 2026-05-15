@@ -37,6 +37,13 @@ function FactorBar({ label, value }: { label: string; value: number }) {
   )
 }
 
+function tierLabel(edge: number | null | undefined): string {
+  if (edge == null) return '📊 SIN EDGE'
+  if (edge >= 0.15) return '🔥 SEÑAL FUERTE'
+  if (edge >= 0.10) return '✅ SEÑAL DETECTADA'
+  return '📊 SEÑAL MODERADA'
+}
+
 function PredictionCard({ p }: { p: Prediction }) {
   const flag = LEAGUE_FLAGS[p.league] || '🏆'
   const dateStr = p.match_date
@@ -59,7 +66,16 @@ function PredictionCard({ p }: { p: Prediction }) {
     : isLowConf ? 'BAJA CONFIANZA'
     : 'Pendiente'
   const factors = p.factors || {}
-  const hasFourFactors = ['poisson', 'elo', 'form', 'h2h'].every(k => k in factors)
+  // Show factor bars if at least poisson + elo are present (rival_form replaces h2h in new pipeline)
+  const hasFactors = ['poisson', 'elo'].every(k => k in factors)
+
+  const edgeDisplay = p.edge != null ? `+${(p.edge * 100).toFixed(1)}%` : '—'
+  const edgeColor = p.edge != null ? '#00C853' : '#555'
+  const kellyDisplay = (p.kelly_fraction != null && p.kelly_fraction > 0)
+    ? `${(p.kelly_fraction * 100).toFixed(1)}%`
+    : null
+  const tier = (p.result === null && !isObsolete && !isLowConf) ? tierLabel(p.edge) : null
+  const factorKeys = Object.keys(factors)
 
   return (
     <div style={{ opacity: isLowConf ? 0.6 : 1 }}>
@@ -69,18 +85,25 @@ function PredictionCard({ p }: { p: Prediction }) {
             <div style={{ fontWeight: 'bold', fontSize: 15 }}>{p.home_team} vs {p.away_team}</div>
             <div style={{ color: '#666', fontSize: 12, marginTop: 2 }}>{flag} {p.league} · 📅 {dateStr}</div>
           </div>
-          <span style={{ background: badgeColor + '22', color: badgeColor, border: `1px solid ${badgeColor}44`, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 'bold', whiteSpace: 'nowrap' }}>
-            {resultLabel}
-          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+            {tier && (
+              <span style={{ background: '#F7931A22', color: '#F7931A', border: '1px solid #F7931A44', borderRadius: 4, padding: '2px 8px', fontSize: 10, fontWeight: 'bold' }}>
+                {tier}
+              </span>
+            )}
+            <span style={{ background: badgeColor + '22', color: badgeColor, border: `1px solid ${badgeColor}44`, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+              {resultLabel}
+            </span>
+          </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: hasFourFactors ? 12 : 0 }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: hasFactors ? 12 : 0 }}>
           {[
             { label: 'APOSTAR A', value: p.team_to_back, color: '#F7931A' },
             { label: 'CUOTA', value: p.odds?.toFixed(2), color: '#fff' },
-            { label: 'EDGE', value: `+${(p.edge * 100).toFixed(1)}%`, color: '#00C853' },
+            { label: 'EDGE', value: edgeDisplay, color: edgeColor },
             { label: 'CONFIANZA', value: `${(p.confidence * 100).toFixed(0)}%`, color: '#ccc' },
-            ...(p.kelly_fraction != null ? [{ label: 'KELLY', value: `${(p.kelly_fraction * 100).toFixed(1)}%`, color: '#ccc' }] : []),
+            ...(kellyDisplay ? [{ label: 'KELLY', value: kellyDisplay, color: '#ccc' }] : []),
           ].map(({ label, value, color }) => (
             <div key={label} style={{ background: '#1e1e1e', border: '1px solid #2e2e2e', borderRadius: 6, padding: '6px 12px', minWidth: 70 }}>
               <div style={{ color: '#555', fontSize: 10, marginBottom: 2 }}>{label}</div>
@@ -89,11 +112,11 @@ function PredictionCard({ p }: { p: Prediction }) {
           ))}
         </div>
 
-        {hasFourFactors && (
+        {hasFactors && (
           <div style={{ borderTop: '1px solid #222', paddingTop: 10 }}>
             <div style={{ color: '#444', fontSize: 11, marginBottom: 8, letterSpacing: 0.5 }}>SEÑALES DEL MODELO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              {['poisson', 'elo', 'form', 'h2h'].map(k => <FactorBar key={k} label={k} value={factors[k] ?? 0} />)}
+              {factorKeys.map(k => <FactorBar key={k} label={k.replace('_', ' ')} value={factors[k] ?? 0} />)}
             </div>
           </div>
         )}
