@@ -68,7 +68,9 @@ _NATIONAL_ELECTION_RE = re.compile(
 _ANGLOPHONE_COUNTRY_RE = re.compile(
     r'\b(usa|united states|america|uk|united kingdom|england|britain|canada|australia|new zealand|ireland|scotland|wales|'
     r'california|new york|los angeles|chicago|texas|florida|georgia|pennsylvania|ohio|michigan|illinois|'
-    r'arizona|north carolina|washington|colorado|nevada|virginia|maryland|massachusetts|minnesota)\b',
+    r'arizona|north carolina|washington|colorado|nevada|virginia|maryland|massachusetts|minnesota|'
+    r'queensland|new south wales|victoria|western australia|south australia|tasmania|northern territory|'
+    r'ontario|quebec|british columbia|alberta|manitoba|saskatchewan|nova scotia)\b',
     re.I,
 )
 
@@ -77,9 +79,9 @@ _SPORTS_DATA_CACHE: dict[str, tuple[str | None, float]] = {}
 _SPORTS_DATA_TTL: float = 7200.0  # 2h
 
 _TENNIS_RE = re.compile(
-    r'\b(atp|wta|internazionali|roland garros|wimbledon|us open|australian open|'
-    r'masters 1000|davis cup|indian wells|miami open|monte.?carlo|madrid open|'
-    r'rome|toronto|cincinnati|qualification|qualifier|tennis)\b',
+    r'\b(atp|wta|internazionali|french open|italian open|roland garros|wimbledon|'
+    r'us open|australian open|masters 1000|davis cup|indian wells|miami open|'
+    r'monte.?carlo|madrid open|qualification|qualifier|tennis)\b',
     re.I,
 )
 _UFC_RE = re.compile(
@@ -390,7 +392,7 @@ CATEGORY_KEYWORDS = {
     "crypto": ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "halving", "altcoin", "xrp", "bnb", "doge", "dogecoin", "stablecoin", "nft", "web3", "layer 2", "base chain"],
     "politics": ["election", "president", "vote", "congress", "senate", "minister", "parliament", "poll", "referendum", "prime minister", "chancellor", "governor", "ballot", "trump", "biden", "harris", "democrat", "republican"],
     "economy": ["fed", "interest rate", "inflation", "cpi", "gdp", "recession", "unemployment", "federal reserve", "rate hike", "rate cut", "jerome powell", "tariff", "trade war", "crude oil", "wti", "brent", "oil price", "gold price", "s&p", "nasdaq", "dow jones"],
-    "sports": ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "league", "nfl", "mlb", "wimbledon", "olympic", "football", "soccer", "formula 1", " f1 ", "tennis", "golf", "boxing", "ufc", "mma", "playoffs", "copa", "euro ", "roland garros", "us open", "masters", "nascar", "basketball", "baseball", "hockey", "cricket", "rugby", "atp", "wta", "fifa", "uefa", "premier league", "la liga", "bundesliga", "serie a", "grand prix"],
+    "sports": ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "league", "nfl", "mlb", "wimbledon", "olympic", "football", "soccer", "formula 1", " f1 ", "tennis", "golf", "boxing", "ufc", "mma", "playoffs", "copa", "euro ", "roland garros", "french open", "italian open", "us open", "masters", "nascar", "basketball", "baseball", "hockey", "cricket", "rugby", "atp", "wta", "fifa", "uefa", "premier league", "la liga", "bundesliga", "serie a", "grand prix"],
     "geopolitics": ["war", "ceasefire", "conflict", "nato", "military", "invasion", "sanctions", "treaty", "diplomacy", "nuclear", "iran", "hormuz", "strait", "ukraine", "russia", "china", "taiwan", "israel", "gaza", "hamas", "hezbollah", "korea", "missile", "drone", "coup", "regime", "peace deal", "cease fire", "truce", "embargo"],
     "business": ["apple", "tesla", "microsoft", "amazon", "google", "alphabet", "meta", "nvidia", "openai", "anthropic", "earnings", "merger", "acquisition", "ipo", "layoffs", "market cap", "revenue", "profit", "ceo", "stock", "shares", "valuation", "startup", "funding", "unicorn"],
     "science": ["climate", "nasa", "space", "vaccine", "fda", "cancer", "quantum", "discovery", "mission", "ai model", "chatgpt", "llm", "gpt", "gemini", "claude", "spacex", "rocket", "satellite", "drug approval", "clinical trial"],
@@ -654,35 +656,37 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
         except Exception as _cge:
             logger.debug("_fetch_current_price(%s): CoinGecko error — %s", asset_key, _cge)
 
-    # 3. Alpha Vantage — commodities: WTI via EIA, Gold/Silver via forex API
-    #    Más fiable que Yahoo Finance para futuros de materias primas
+    # 3. Alpha Vantage — commodities: WTI/Gold/Silver solo si key explícita.
+    #    La key "demo" tiene 5 req/min y 25/día — en la práctica siempre falla.
+    #    Sin key real, saltar directamente a Yahoo Finance (fallback 4).
     if price is None and asset_key in ("WTI", "GOLD", "SILVER"):
         import os as _os
-        _av_key = _os.environ.get("ALPHA_VANTAGE_KEY", "demo")
-        if asset_key == "WTI":
-            _av_url = (
-                f"https://www.alphavantage.co/query?function=WTI"
-                f"&interval=daily&apikey={_av_key}"
-            )
-            price = await loop.run_in_executor(
-                None,
-                lambda: _http_get(_av_url, lambda d: float(d["data"][0]["value"])),
-            )
-        else:
-            _fx = "XAU" if asset_key == "GOLD" else "XAG"
-            _av_url = (
-                f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
-                f"&from_currency={_fx}&to_currency=USD&apikey={_av_key}"
-            )
-            price = await loop.run_in_executor(
-                None,
-                lambda: _http_get(
-                    _av_url,
-                    lambda d: float(d["Realtime Currency Exchange Rate"]["5. Exchange Rate"]),
-                ),
-            )
-        if price:
-            logger.info("_fetch_current_price(%s): AlphaVantage OK $%.4g", asset_key, price)
+        _av_key = _os.environ.get("ALPHA_VANTAGE_KEY")
+        if _av_key:
+            if asset_key == "WTI":
+                _av_url = (
+                    f"https://www.alphavantage.co/query?function=WTI"
+                    f"&interval=daily&apikey={_av_key}"
+                )
+                price = await loop.run_in_executor(
+                    None,
+                    lambda: _http_get(_av_url, lambda d: float(d["data"][0]["value"])),
+                )
+            else:
+                _fx = "XAU" if asset_key == "GOLD" else "XAG"
+                _av_url = (
+                    f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
+                    f"&from_currency={_fx}&to_currency=USD&apikey={_av_key}"
+                )
+                price = await loop.run_in_executor(
+                    None,
+                    lambda: _http_get(
+                        _av_url,
+                        lambda d: float(d["Realtime Currency Exchange Rate"]["5. Exchange Rate"]),
+                    ),
+                )
+            if price:
+                logger.info("_fetch_current_price(%s): AlphaVantage OK $%.4g", asset_key, price)
 
     # 4. Yahoo Finance — fallback 3 (query1 primero, query2 como alternativa)
     if price is None and asset_key in _YAHOO_SYMBOLS:
@@ -709,15 +713,20 @@ def _clean_contradictory_reasoning(
     real_prob: float = 0.0,
 ) -> str:
     """
-    Reemplaza el reasoning con texto canónico cuando la dirección numérica
-    es consistente con la recomendación. No usa detección de palabras clave
-    — el texto del LLM siempre se descarta para señales BUY_NO/BUY_YES.
+    Garantiza que el reasoning sea coherente con la recommendation.
+    Preserva las notas técnicas (⚠️) añadidas por floors/caps — solo
+    reemplaza el texto del LLM, no los marcadores de ajuste del sistema.
     """
     if not reasoning:
         return reasoning
 
     mp_pct = f"{market_price:.0%}"
     rp_pct = f"{real_prob:.0%}"
+
+    # Extraer notas técnicas ⚠️ (añadidas por floors, caps, ALREADY_EXCEEDED, etc.)
+    # Se preservan en el texto final para trazabilidad en Telegram.
+    _tech_lines = [l for l in reasoning.split("\n") if l.strip().startswith("⚠️")]
+    _prefix = "\n".join(_tech_lines) + "\n" if _tech_lines else ""
 
     if recommendation == "BUY_NO" and market_price > real_prob:
         logger.warning(
@@ -726,7 +735,7 @@ def _clean_contradictory_reasoning(
             market_price, real_prob,
         )
         return (
-            f"El mercado sobrevalora esta probabilidad. "
+            f"{_prefix}El mercado sobrevalora esta probabilidad. "
             f"Precio actual ({mp_pct}) está por encima "
             f"de la probabilidad real estimada ({rp_pct}). "
             f"BUY_NO es la posición correcta."
@@ -739,7 +748,7 @@ def _clean_contradictory_reasoning(
             real_prob, market_price,
         )
         return (
-            f"El mercado infravalora esta probabilidad. "
+            f"{_prefix}El mercado infravalora esta probabilidad. "
             f"Precio actual ({mp_pct}) está por debajo "
             f"de la probabilidad real estimada ({rp_pct}). "
             f"BUY_YES es la posición correcta."
@@ -1412,25 +1421,29 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id,
                 )
 
-    # Detect "Will X reach $Y" markets and fetch live price
+    # Detect "Will X reach $Y" markets and fetch live price.
+    # Orden: ctc_price del enricher primero (ya fetcheado, evita 429s en Railway),
+    # luego HTTP (Binance→CoinGecko→Yahoo) solo si el enricher no lo tiene.
     _price_ctx = _detect_price_market(question)
     _current_price: float | None = None
     _pct_needed: float | None = None
     if _price_ctx:
         _p_asset, _p_cg_id, _p_target = _price_ctx
-        _current_price = await _fetch_current_price(_p_asset, _p_cg_id)
-        # Fallback: usar ctc_price del enricher si fetch HTTP falló (429 Railway)
-        if not _current_price and enriched_market:
+        # 1. ctc_price del enricher — primera opción, sin coste de red
+        if enriched_market:
             _ctc = enriched_market.get("ctc_price")
             if _ctc:
                 try:
                     _current_price = float(_ctc)
-                    logger.info(
-                        "analyze_market(%s): PRICE_FROM_CTC — %s=$%.2f (CoinGecko falló, usando enricher)",
+                    logger.debug(
+                        "analyze_market(%s): PRICE_FROM_CTC — %s=$%.2f",
                         market_id, _p_asset, _current_price,
                     )
                 except (TypeError, ValueError):
                     pass
+        # 2. HTTP fallback (Binance→CoinGecko→Yahoo) si ctc_price no disponible
+        if not _current_price:
+            _current_price = await _fetch_current_price(_p_asset, _p_cg_id)
         if not _current_price or _current_price <= 0:
             logger.info(
                 "analyze_market(%s): PRICE_UNAVAILABLE — precio de %s no obtenido "
@@ -1851,12 +1864,27 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     except Exception:
         pass
 
-    # Garantizar coherencia: si el texto del reasoning menciona una prob distinta
-    # a real_prob en >0.10, prepender nota aclaratoria para el mensaje Telegram.
-    # real_prob del JSON estructurado es siempre el valor canónico.
+    # FIX-BUG-6A: re-aplicar cap ±15% de mercados improvised DESPUÉS de la correlación.
+    # La corrección de correlación puede empujar real_prob fuera del rango [price_yes±0.15]
+    # establecido anteriormente. Los floors de precio (near-target, ALREADY_EXCEEDED)
+    # que vienen después siguen teniendo la última palabra.
+    if data_quality == "improvised":
+        _cap = 0.15
+        _capped_post = max(price_yes - _cap, min(price_yes + _cap, real_prob))
+        if abs(_capped_post - real_prob) > 0.001:
+            logger.info(
+                "analyze_market(%s): improvised cap re-aplicado post-corr %.3f→%.3f "
+                "(price_yes=%.3f, cap=±%.0f%%)",
+                market_id, real_prob, _capped_post, price_yes, _cap * 100,
+            )
+            real_prob = _capped_post
+            edge = round(real_prob - price_yes, 4)
+
+    # FIX-BUG-10: la limpieza de reasoning se mueve al final del pipeline (línea ~2230).
+    # Aplicarla aquí es redundante: los floors/caps posteriores modifican real_prob y
+    # recommendation, y la segunda llamada final usa los valores definitivos.
+    # Solo se mantiene _validate_prob_in_reasoning para marcar discrepancias tempranas.
     reasoning = _validate_prob_in_reasoning(real_prob, reasoning)
-    # Capa 2: reemplazar reasoning completo si contradice recommendation.
-    reasoning = _clean_contradictory_reasoning(recommendation, reasoning, price_yes, real_prob)
 
     # FIX 2: near-target floor — target < 10% de distancia → mínimo 60% + no señal contraria
     if _price_ctx and _pct_needed is not None and abs(_pct_needed) < 10.0:
@@ -2015,35 +2043,44 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         )
         recommendation = "PASS"
 
-    # SM confirma precio bajo (<20%): no apostar al alza
-    if _is_smart_money and price_yes < 0.20 and recommendation == "BUY_YES":
+    # SM o volume_spike confirman precio bajo (<20%): no apostar al alza.
+    # FIX-BUG-3C: incluir volume_spike para simetría con SM_HIGH_PRICE (línea ~2015).
+    if (_is_smart_money or _is_volume_spike) and price_yes < 0.20 and recommendation == "BUY_YES":
         logger.info(
             "analyze_market(%s): SM_LOW_PRICE BUY_YES→PASS "
-            "(smart_money=True price_yes=%.3f)",
-            market_id, price_yes,
+            "(smart_money=%s volume_spike=%s price_yes=%.3f)",
+            market_id, _is_smart_money, _is_volume_spike, price_yes,
         )
         recommendation = "PASS"
 
-    # Precio extremo alto con volumen alto: real_prob no puede caer >10pp bajo el mercado
+    # Precio extremo alto con volumen alto: real_prob no puede caer >10pp bajo el mercado.
+    # FIX-BUG-3A: actualizar real_prob AL VALOR DEL FLOOR antes de guardar en Firestore.
+    # Sin este fix, Firestore recibe el real_prob del LLM (incorrecto) que luego envenena
+    # el ancla de consistencia en el próximo ciclo de análisis.
     if price_yes > 0.85 and volume_24h > 50_000:
         _vol_floor = round(price_yes - 0.10, 4)
         if real_prob < _vol_floor:
             logger.info(
-                "analyze_market(%s): HIGH_PRICE_VOL_FLOOR real_prob=%.3f<floor=%.3f "
+                "analyze_market(%s): HIGH_PRICE_VOL_FLOOR real_prob=%.3f→%.3f "
                 "(price_yes=%.3f vol=$%.0f) → PASS",
                 market_id, real_prob, _vol_floor, price_yes, volume_24h,
             )
+            real_prob = _vol_floor
+            edge = round(real_prob - price_yes, 4)
             recommendation = "PASS"
 
-    # Precio extremo bajo con volumen alto: real_prob no puede subir >10pp sobre el mercado
+    # Precio extremo bajo con volumen alto: real_prob no puede subir >10pp sobre el mercado.
+    # Mismo principio: actualizar real_prob al techo antes de guardar.
     if price_yes < 0.15 and volume_24h > 50_000:
         _vol_ceil = round(price_yes + 0.10, 4)
         if real_prob > _vol_ceil:
             logger.info(
-                "analyze_market(%s): LOW_PRICE_VOL_CEIL real_prob=%.3f>ceil=%.3f "
+                "analyze_market(%s): LOW_PRICE_VOL_CEIL real_prob=%.3f→%.3f "
                 "(price_yes=%.3f vol=$%.0f) → PASS",
                 market_id, real_prob, _vol_ceil, price_yes, volume_24h,
             )
+            real_prob = _vol_ceil
+            edge = round(real_prob - price_yes, 4)
             recommendation = "PASS"
 
     # Fix 4: calibrar confidence con accuracy histórica por bucket de edge
