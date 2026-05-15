@@ -68,14 +68,17 @@ _STATUS_MAP: dict[str, str] = {
     "not started": "SCHEDULED",
     "scheduled":   "SCHEDULED",
     "ns":          "SCHEDULED",
-    # tennis API
+    # tennis API / odds-api.io
     "not_started": "SCHEDULED",
     "upcoming":    "SCHEDULED",
+    "pending":     "SCHEDULED",  # odds-api.io devuelve "pending" para partidos no iniciados
+    "pre":         "SCHEDULED",
     "timed":       "TIMED",
     # generic
     "live":        "LIVE",
     "in play":     "LIVE",
     "in_play":     "LIVE",
+    "inplay":      "LIVE",
     "halftime":    "LIVE",
     "finished":    "FINISHED",
     "ft":          "FINISHED",
