@@ -1890,8 +1890,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     _standings_confidence_adj *= 0.90
                     _motivation_log.append(f"{_team_name}:campeon_rotacion(−10%)")
                 elif _nothing_at_stake:
-                    _standings_confidence_adj *= 0.80
-                    _motivation_log.append(f"{_team_name}:sin_juego(−20%)")
+                    _standings_confidence_adj *= 0.90
+                    _motivation_log.append(f"{_team_name}:sin_juego(−10%)")
                 elif (
                     _pos is not None and _pos <= 4
                     and _fifth_points is not None
@@ -2326,7 +2326,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
 
     if not (_is_fuerte or _is_moderada or _is_detectada):
-        logger.debug(
+        logger.info(
             "generate_signal(%s): descartado — no cumple umbral "
             "(ev=%.1f%% min_ev=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
             match_id, best_ev * 100, _min_edge * 100, best_confidence * 100, best_odds,
