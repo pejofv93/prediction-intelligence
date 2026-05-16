@@ -1,0 +1,18 @@
+name: poly-websocket-keepalive
+on:
+  schedule:
+    - cron: '5 * * * *'   # cada hora a :05 — reactiva el WS si Cloud Run lo mató
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Restart WebSocket loop (background task en Cloud Run)
+        run: |
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-websocket" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30 \
+            --fail --silent --show-error

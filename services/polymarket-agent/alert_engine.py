@@ -180,6 +180,22 @@ async def check_and_alert(analysis: dict) -> bool:
         except Exception:
             pass
 
+    # Volume spike: movimiento brusco indica información nueva → umbrales más permisivos
+    _SPIKE_MAX_EDGE = 0.05
+    _SPIKE_MAX_CONF = 0.55
+    if volume_spike and effective_min_edge > _SPIKE_MAX_EDGE:
+        logger.info(
+            "check_and_alert(%s): volume_spike → edge reducido %.3f→%.3f",
+            analysis.get("market_id"), effective_min_edge, _SPIKE_MAX_EDGE,
+        )
+        effective_min_edge = _SPIKE_MAX_EDGE
+    if volume_spike and effective_min_conf > _SPIKE_MAX_CONF:
+        logger.info(
+            "check_and_alert(%s): volume_spike → conf reducida %.3f→%.3f",
+            analysis.get("market_id"), effective_min_conf, _SPIKE_MAX_CONF,
+        )
+        effective_min_conf = _SPIKE_MAX_CONF
+
     if abs(edge) < effective_min_edge:
         logger.info(
             "check_and_alert(%s): SKIP_EDGE abs(edge)=%.3f < %.3f (%s) — omitida",

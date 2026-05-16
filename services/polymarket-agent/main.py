@@ -808,9 +808,11 @@ async def _bg_analyze() -> dict:
                     else:
                         _edge_v = float(prediction.get("edge", 0))
                         _conf_v = float(prediction.get("confidence", 0))
+                        _vspike = bool(prediction.get("volume_spike", False))
+                        _thr_edge = 0.05 if _vspike else 0.08
                         if _rec not in ("BUY_YES", "BUY_NO"):
                             skipped_pass += 1
-                        elif abs(_edge_v) < 0.08 or _conf_v < 0.55:
+                        elif abs(_edge_v) < _thr_edge or _conf_v < 0.55:
                             skipped_threshold += 1
                         else:
                             skipped_dedup += 1

@@ -12,7 +12,7 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-_PRICE_MOVE_THRESHOLD = 0.08   # 8% en < 1h → alerta
+_PRICE_MOVE_THRESHOLD = 0.05   # 5% en < 1h → alerta (bajado de 8% para capturar movimientos geopolíticos)
 _DEDUP_WINDOW_SECONDS = 7_200  # no re-alertar el mismo mercado en 2h
 
 
