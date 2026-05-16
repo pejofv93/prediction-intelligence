@@ -5,7 +5,7 @@ on_snapshot ELIMINADO — incompatible con min-instances=0.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -429,6 +429,8 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
         logger.error("check_pending_odds_changes: error leyendo predictions pendientes", exc_info=True)
         return 0
 
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+
     for doc in pending_docs:
         try:
             pred = doc.to_dict()
@@ -447,6 +449,33 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
             pct_change = (current_odds - original_odds) / original_odds
             if abs(pct_change) <= _ODDS_CHANGE_THRESHOLD:
                 continue
+
+            # Dedup 24h: misma señal (match_id + market + cuota_actual) → omitir
+            market = pred.get("market_type", "h2h")
+            alert_key = f"{match_id}_{market}_{current_odds:.2f}"
+            try:
+                _dedup_docs = list(
+                    col("alerts_sent")
+                    .where(filter=FieldFilter("alert_key", "==", alert_key))
+                    .limit(1)
+                    .stream()
+                )
+                _already_sent = False
+                for _dd in _dedup_docs:
+                    _ddata = _dd.to_dict()
+                    _sat = _ddata.get("sent_at")
+                    if _sat is None:
+                        continue
+                    if hasattr(_sat, "tzinfo") and _sat.tzinfo is None:
+                        _sat = _sat.replace(tzinfo=timezone.utc)
+                    if _sat >= cutoff_24h:
+                        _already_sent = True
+                        break
+                if _already_sent:
+                    logger.debug("check_pending_odds_changes: dedup 24h → omitida (%s)", alert_key)
+                    continue
+            except Exception as _de:
+                logger.warning("check_pending_odds_changes: dedup falló [%s] → enviando igualmente", alert_key)
 
             # Calcular edge actualizado
             calculated_prob = float(pred.get("calculated_prob") or 0)
@@ -476,6 +505,14 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
                     "odds %.2f→%.2f (%s) edge_new=%.3f",
                     match_id, original_odds, current_odds, pct_str, new_edge,
                 )
+                try:
+                    col("alerts_sent").add({
+                        "alert_key": alert_key,
+                        "sent_at": datetime.now(timezone.utc),
+                        "type": "odds_change",
+                    })
+                except Exception:
+                    logger.error("check_pending_odds_changes: error guardando dedup (%s)", alert_key, exc_info=True)
             await asyncio.sleep(0.5)
         except Exception:
             logger.error(
