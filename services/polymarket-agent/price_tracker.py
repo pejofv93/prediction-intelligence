@@ -403,8 +403,8 @@ async def monitor_price_changes() -> int:
             if abs(pct_change) < _PRICE_MOVE_THRESHOLD:
                 continue
 
-            # Dedup — no re-alertar en 2h
-            dedup_key = f"price_alert_{market_id}"
+            # Dedup 2h — no re-alertar el mismo mercado si ya se envió en la ventana
+            dedup_key = f"{market_id}_price_movement"
             dedup_ref = col("alerts_sent").document(dedup_key)
             try:
                 dedup_doc = dedup_ref.get()
@@ -414,15 +414,16 @@ async def monitor_price_changes() -> int:
                         if hasattr(last_sent, "tzinfo") and last_sent.tzinfo is None:
                             last_sent = last_sent.replace(tzinfo=timezone.utc)
                         if (now - last_sent).total_seconds() < _DEDUP_WINDOW_SECONDS:
-                            logger.debug("monitor_price_changes(%s): dedup — alerta reciente", market_id)
+                            logger.info(
+                                "monitor_price_changes(%s): SKIP_DEDUP_2H — alerta enviada hace %.0f min",
+                                market_id, (now - last_sent).total_seconds() / 60,
+                            )
                             continue
             except Exception:
-                pass
+                logger.warning("monitor_price_changes(%s): error leyendo dedup — omitiendo alerta por seguridad", market_id)
+                continue
 
             vol_24h = float(latest.get("volume_24h", 0))
-            # FIX-PRICE-PP: mostrar cambio absoluto en puntos porcentuales (pp), no relativo.
-            # "-19.5% en 103 min" era confuso (es variación relativa del precio).
-            # Nuevo formato: "-4pp (20.5% → 16.5%) en 103 min" (variación absoluta).
             pp_change = (price_new - price_old) * 100
             pp_sign = "+" if pp_change > 0 else ""
             text = (
@@ -446,13 +447,13 @@ async def monitor_price_changes() -> int:
                     )
                 if resp.status_code in (200, 201, 202):
                     try:
-                        dedup_ref.set({"market_id": market_id, "sent_at": now})
+                        dedup_ref.set({"market_id": market_id, "sent_at": now, "pct_change": round(pct_change, 4)})
                     except Exception:
-                        pass
+                        logger.warning("monitor_price_changes(%s): error guardando dedup — puede re-alertar", market_id)
                     alerts_sent += 1
                     logger.info(
-                        "monitor_price_changes(%s): alerta enviada — cambio=%s%.1f%% en %.0fmin",
-                        market_id, sign, abs(pct_change) * 100, minutes_elapsed,
+                        "monitor_price_changes(%s): alerta enviada — cambio=%s%.1fpp en %.0fmin",
+                        market_id, pp_sign, abs(pp_change), minutes_elapsed,
                     )
                 else:
                     logger.warning(
