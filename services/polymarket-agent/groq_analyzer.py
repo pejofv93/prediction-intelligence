@@ -1424,7 +1424,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             elif _is_ufc:
                 _sports_query = f"{question} UFC odds betting prediction 2026"
             else:
-                _sports_query = f"{question} MLB game prediction odds 2026"
+                _sports_query = f"{question} starting pitcher MLB odds betting lines 2026"
 
             try:
                 _sports_context = await asyncio.wait_for(
@@ -1437,16 +1437,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 )
 
             if _sports_context is None:
-                if _is_tennis or _is_ufc:
-                    logger.info(
-                        "analyze_market(%s): %s_NO_DATA — sin odds/datos externos → PASS",
-                        market_id, _sport_label,
-                    )
-                    return None
-                logger.warning(
-                    "analyze_market(%s): MLB_NO_DATA — sin odds disponibles, confianza reducida",
-                    market_id,
+                logger.info(
+                    "analyze_market(%s): %s_NO_DATA — sin odds/datos externos → PASS",
+                    market_id, _sport_label,
                 )
+                return None
 
     # Detect "Will X reach $Y" markets and fetch live price.
     # Orden: ctc_price del enricher primero (ya fetcheado, evita 429s en Railway),
