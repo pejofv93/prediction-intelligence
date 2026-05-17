@@ -482,13 +482,34 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
             match_id, seed_diff, conf, home_name, away_name,
         )
 
-    # Odds
-    sport_key = _SPORT_KEY_MAP.get(league, "basketball_nba")
-    events = await _fetch_basketball_odds(sport_key)
-    event = _find_event(events, home_name, away_name)
+    # Odds — cascada de 3 fuentes:
+    # 1. odds-api.io (primario, ya tiene NBA=10/ACB=83 eventos con odds)
+    # 2. The Odds API (fallback si odds-api.io no tiene el partido)
+    # 3. ESPN odds embebidas en Firestore (fallback final para NBA)
+    event: dict | None = None
+    try:
+        from collectors.odds_apiio_client import get_league_odds as _get_league_odds_io
+        _io_events = await _get_league_odds_io(league)
+        event = _find_event(_io_events, home_name, away_name)
+        if event:
+            logger.info(
+                "basketball_analyzer(%s): odds via odds-api.io (%d eventos %s) [%s vs %s]",
+                match_id, len(_io_events), league, home_name, away_name,
+            )
+        else:
+            logger.info(
+                "basketball_analyzer(%s): odds-api.io sin partido (%d eventos %s) — intentando The Odds API [%s vs %s]",
+                match_id, len(_io_events), league, home_name, away_name,
+            )
+    except Exception as _oaio_err:
+        logger.warning("basketball_analyzer(%s): error odds-api.io — %s", match_id, _oaio_err)
 
-    # NBA: The Odds API free no incluye basketball_nba → fallback a odds ESPN/Caesars embebidas
-    # en el documento de Firestore (guardadas por get_nba_games_espn durante collect).
+    if event is None:
+        sport_key = _SPORT_KEY_MAP.get(league, "basketball_nba")
+        events = await _fetch_basketball_odds(sport_key)
+        event = _find_event(events, home_name, away_name)
+
+    # Fallback final NBA: odds ESPN/Caesars embebidas en Firestore (guardadas en collect).
     if event is None and league in ("NBA", "NBA_GL"):
         _espn_odds = game.get("espn_odds")
         if _espn_odds:
