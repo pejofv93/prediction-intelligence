@@ -423,6 +423,15 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     sigs = rats["signals"]
     conf = rats["confidence"]
     margin = rats["expected_margin"]
+    logger.info(
+        "basketball_analyzer(%s): ratings — p_home=%.3f margin=%.1f conf=%.3f "
+        "off_home=%.1f def_home=%.1f off_away=%.1f def_away=%.1f "
+        "form_h=%.1f form_a=%.1f sigs=%s [%s vs %s]",
+        match_id, rats["p_home_win"], margin, conf,
+        rats["off_home"], rats["def_home"], rats["off_away"], rats["def_away"],
+        float(home_stats.get("form_score", 50.0)), float(away_stats.get("form_score", 50.0)),
+        sigs, home_name, away_name,
+    )
 
     # --- Back-to-back detection ---
     yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
@@ -551,7 +560,22 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     # ── Moneyline ─────────────────────────────────────────────────────────────
     if event:
         ml = _get_moneyline_odds(event)
+        if not ml:
+            logger.info(
+                "basketball_analyzer(%s): _get_moneyline_odds=None — sin h2h market en event "
+                "bookmakers=%s [%s vs %s]",
+                match_id,
+                [{"bk": bk.get("key"), "mkts": [m.get("key") for m in bk.get("markets", [])]}
+                 for bk in event.get("bookmakers", [])],
+                home_name, away_name,
+            )
         if ml:
+            logger.info(
+                "basketball_analyzer(%s): moneyline home_odds=%.3f away_odds=%.3f bk=%s "
+                "p_home=%.3f conf=%.3f [%s vs %s]",
+                match_id, ml["home_odds"], ml["away_odds"], ml.get("bookmaker"),
+                rats["p_home_win"], conf, home_name, away_name,
+            )
             # Guardia de divergencia extrema: descarta si modelo difiere >2.5× del mercado
             _impl_home = 1.0 / ml["home_odds"] if ml["home_odds"] > 1.0 else 1.0
             _impl_away = 1.0 / ml["away_odds"] if ml["away_odds"] > 1.0 else 1.0
@@ -597,6 +621,16 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                     continue
                 # Descuento elite: rival con seed ≤2 → bookmakers más eficientes, −20% edge
                 edge_discount = 0.80 if (opp_seed and opp_seed <= 2) else 1.0
+                from analyzers.value_bet_engine import calculate_ev as _cev
+                _ev_check = _cev(prob, odds)
+                if _ev_check <= SPORTS_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
+                    logger.info(
+                        "basketball_analyzer(%s): ML %s FILTRADO — "
+                        "ev=%.4f (min=%.2f) conf=%.3f (min=%.2f) seed=%s opp_seed=%s [%s vs %s]",
+                        match_id, tag, _ev_check, SPORTS_MIN_EDGE,
+                        conf, SPORTS_MIN_CONFIDENCE,
+                        team_seed, opp_seed, home_name, away_name,
+                    )
                 pred = _make_pred(base, "h2h", team, odds, prob,
                                   sigs, conf, match_date, weights_version, ml["bookmaker"],
                                   edge_discount=edge_discount)
