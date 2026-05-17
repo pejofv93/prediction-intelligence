@@ -2073,6 +2073,16 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         else:
             recommendation = "PASS"
 
+    # NEAR_TARGET final gate: re-aplicar DESPUÉS del crypto validator.
+    # _validate_crypto_price_prediction puede resetear recommendation a BUY_NO
+    # aunque el near-target block anterior ya lo había cambiado a PASS.
+    if _price_ctx and _pct_needed is not None and abs(_pct_needed) < 10.0 and recommendation == "BUY_NO":
+        recommendation = "PASS"
+        logger.info(
+            "analyze_market(%s): NEAR_TARGET_FINAL_GATE BUY_NO→PASS (pct_needed=%.1f%%)",
+            market_id, _pct_needed,
+        )
+
     # Cap para mercados de baja probabilidad (precio < 15%): real_prob ≤ precio × 2.5
     # El LLM tiende a inflar probs en mercados geopolíticos/políticos extremos.
     if price_yes < 0.15 and real_prob > price_yes * 2.5:
@@ -2139,7 +2149,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # FIX-BUG-3A: actualizar real_prob AL VALOR DEL FLOOR antes de guardar en Firestore.
     # Sin este fix, Firestore recibe el real_prob del LLM (incorrecto) que luego envenena
     # el ancla de consistencia en el próximo ciclo de análisis.
-    if price_yes > 0.85 and volume_24h > 50_000:
+    if price_yes > 0.85 and volume_24h > 30_000:
         _vol_floor = round(price_yes - 0.10, 4)
         if real_prob < _vol_floor:
             logger.info(
@@ -2153,7 +2163,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     # Precio extremo bajo con volumen alto: real_prob no puede subir >10pp sobre el mercado.
     # Mismo principio: actualizar real_prob al techo antes de guardar.
-    if price_yes < 0.15 and volume_24h > 50_000:
+    if price_yes < 0.15 and volume_24h > 30_000:
         _vol_ceil = round(price_yes + 0.10, 4)
         if real_prob > _vol_ceil:
             logger.info(
@@ -2292,6 +2302,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     _nba_floor_reason: str = ""
     if _nba_series_wins is not None:
         _tw, _ow = _nba_series_wins
+        # Serie ya ganada (4 victorias en best-of-7) → mercado en resolución, descartarlo
+        if _tw >= 4 or _ow >= 4:
+            logger.info(
+                "analyze_market(%s): NBA_SERIES_OVER %d-%d → descartando (mercado ya resuelto)",
+                market_id, _tw, _ow,
+            )
+            return None
         if _tw == 3 and _ow == 0:
             _nba_floor = 0.90
             _nba_floor_reason = f"serie 3-0 → prob_min=90%"
@@ -2342,6 +2359,17 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 recommendation = "BUY_YES"
             elif edge > -POLY_MIN_EDGE:
                 recommendation = "PASS"
+
+    # FIX-NBA-SERIES-RESOLVED: fallback cuando ESPN ya no devuelve la serie (terminada).
+    # Si el mercado es NBA series con price_yes ≥ 92%, la serie está efectivamente resuelta
+    # y BUY_NO no tiene sentido (el mercado está esperando resolución formal).
+    if _is_nba_series_market and price_yes >= 0.92 and recommendation == "BUY_NO":
+        recommendation = "PASS"
+        logger.info(
+            "analyze_market(%s): NBA_SERIES_SETTLED BUY_NO→PASS "
+            "(price_yes=%.3f ≥ 0.92 — serie efectivamente resuelta)",
+            market_id, price_yes,
+        )
 
     # Aplicar ajuste Fear & Greed si es crypto
     if fear_greed and category == "crypto":
