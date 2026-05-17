@@ -233,6 +233,19 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
                         return int(raw) if raw is not None else None
                     except (TypeError, ValueError):
                         return None
+                # ESPN embeds Caesars odds in competition.odds — extraer para fallback en basketball_analyzer
+                espn_odds = None
+                for _o in comp.get("odds", []):
+                    _home_ml = (_o.get("homeTeamOdds") or {}).get("moneyLine")
+                    _away_ml = (_o.get("awayTeamOdds") or {}).get("moneyLine")
+                    if _home_ml and _away_ml:
+                        espn_odds = {
+                            "home_ml": int(_home_ml),
+                            "away_ml": int(_away_ml),
+                            "spread": _o.get("details"),       # e.g. "-4.5" or "Cavaliers -4"
+                            "total": _o.get("overUnder"),      # e.g. 218.5
+                        }
+                        break
                 games.append({
                     "match_id": str(event.get("id") or comp.get("id") or ""),
                     "date": comp.get("date", event.get("date", "")),
@@ -248,6 +261,7 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
                     "status": status,
                     "sport": "nba",
                     "source": "espn",
+                    "espn_odds": espn_odds,
                 })
         logger.info("ESPN NBA: %d partidos para %s", len(games), today)
         return games

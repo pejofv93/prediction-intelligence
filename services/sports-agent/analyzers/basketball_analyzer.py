@@ -47,15 +47,63 @@ _HOME_ADV = {
 }
 
 
+def _american_to_decimal(ml: int) -> float:
+    """Moneyline americano → decimal (Caesars, DraftKings)."""
+    if ml < 0:
+        return round(100 / abs(ml) + 1, 4)
+    return round(ml / 100 + 1, 4)
+
+
+def _build_event_from_espn_odds(home: str, away: str, espn_odds: dict) -> dict | None:
+    """
+    Construye un 'event' con formato The Odds API a partir de los odds de ESPN/Caesars
+    embebidos en la respuesta del scoreboard. Permite calcular edge sin The Odds API.
+    """
+    import re as _re2
+    home_ml = espn_odds.get("home_ml")
+    away_ml = espn_odds.get("away_ml")
+    if not home_ml or not away_ml:
+        return None
+    home_dec = _american_to_decimal(int(home_ml))
+    away_dec = _american_to_decimal(int(away_ml))
+    markets = [{
+        "key": "h2h",
+        "outcomes": [{"name": home, "price": home_dec}, {"name": away, "price": away_dec}],
+    }]
+    # Spread: ESPN "details" puede ser "-4", "+3.5" o "Cavaliers -4.5"
+    spread_str = str(espn_odds.get("spread") or "")
+    _sm = _re2.search(r'([+-]?\d+\.?\d*)\s*$', spread_str)
+    if _sm:
+        try:
+            spread_pt = float(_sm.group(1))
+            markets.append({
+                "key": "spreads",
+                "outcomes": [
+                    {"name": home, "point": spread_pt,  "price": 1.909},
+                    {"name": away, "point": -spread_pt, "price": 1.909},
+                ],
+            })
+        except (ValueError, TypeError):
+            pass
+    total = espn_odds.get("total")
+    if total:
+        markets.append({
+            "key": "totals",
+            "outcomes": [
+                {"name": "Over",  "point": float(total), "price": 1.909},
+                {"name": "Under", "point": float(total), "price": 1.909},
+            ],
+        })
+    return {"home_team": home, "away_team": away,
+            "bookmakers": [{"key": "espn_caesars", "markets": markets}]}
+
+
 async def _fetch_basketball_odds(sport_key: str) -> list:
     now = datetime.now(timezone.utc)
     cached = _LEAGUE_ODDS_CACHE.get(sport_key)
     if cached and (now - cached[0]) < _CACHE_TTL:
         return cached[1]
     if not ODDS_API_KEY:
-        return []
-    # basketball_nba devuelve 401 en el plan free — excluir para evitar spam de errores
-    if sport_key == "basketball_nba":
         return []
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
@@ -361,9 +409,12 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         return []
 
     if not home_stats.get("raw_matches") and not away_stats.get("raw_matches"):
-        logger.debug(
-            "basketball_analyzer(%s): sin team_stats para %s vs %s — skip (%s)",
+        logger.info(
+            "basketball_analyzer(%s): sin team_stats (raw_matches) para %s vs %s — skip (%s). "
+            "home_stats_keys=%s away_stats_keys=%s",
             match_id, home_name, away_name, league,
+            list(home_stats.keys()) if home_stats else "MISSING",
+            list(away_stats.keys()) if away_stats else "MISSING",
         )
         return []
 
@@ -435,6 +486,31 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     sport_key = _SPORT_KEY_MAP.get(league, "basketball_nba")
     events = await _fetch_basketball_odds(sport_key)
     event = _find_event(events, home_name, away_name)
+
+    # NBA: The Odds API free no incluye basketball_nba → fallback a odds ESPN/Caesars embebidas
+    # en el documento de Firestore (guardadas por get_nba_games_espn durante collect).
+    if event is None and league in ("NBA", "NBA_GL"):
+        _espn_odds = game.get("espn_odds")
+        if _espn_odds:
+            event = _build_event_from_espn_odds(home_name, away_name, _espn_odds)
+            if event:
+                logger.info(
+                    "basketball_analyzer(%s): odds ESPN/Caesars home_ml=%s away_ml=%s spread=%s total=%s [%s vs %s]",
+                    match_id, _espn_odds.get("home_ml"), _espn_odds.get("away_ml"),
+                    _espn_odds.get("spread"), _espn_odds.get("total"),
+                    home_name, away_name,
+                )
+            else:
+                logger.info(
+                    "basketball_analyzer(%s): ESPN odds incompletas (home_ml=%s away_ml=%s) — sin event [%s vs %s]",
+                    match_id, _espn_odds.get("home_ml"), _espn_odds.get("away_ml"),
+                    home_name, away_name,
+                )
+        else:
+            logger.info(
+                "basketball_analyzer(%s): sin odds ESPN en Firestore — recollect necesario [%s vs %s]",
+                match_id, home_name, away_name,
+            )
 
     base = {
         "match_id": match_id,

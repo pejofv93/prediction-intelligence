@@ -139,24 +139,33 @@ async def _fetch_acb_games() -> list[dict]:
     return result
 
 
-async def collect_basketball_games(days: int = 1) -> list[dict]:
+async def collect_basketball_games(days: int = 3) -> list[dict]:
     """
-    Recopila partidos de baloncesto de hoy.
+    Recopila partidos de baloncesto — hoy y próximos días.
 
-    NBA:        ESPN public scoreboard API (gratuito, sin clave).
+    NBA:        ESPN public scoreboard API (gratuito, sin clave) — days días consecutivos.
     EUROLEAGUE: feeds.incrowdsports.com API oficial (gratuito, sin clave).
     ACB:        TheSportsDB id=4408 (gratuito, sin clave).
     """
     all_games: list[dict] = []
 
-    # --- NBA via ESPN ---
+    # --- NBA via ESPN (hoy + próximos days-1 días para Playoffs) ---
     try:
-        nba_games = await get_nba_games_espn()
-        if nba_games:
-            logger.info("basketball NBA (ESPN): %d partidos", len(nba_games))
-        else:
-            logger.info("basketball NBA (ESPN): sin partidos hoy")
-        all_games.extend(nba_games)
+        _nba_seen: set[str] = set()
+        for _day_offset in range(max(1, days)):
+            _date_str = (datetime.now(timezone.utc) + timedelta(days=_day_offset)).date().isoformat()
+            try:
+                day_games = await get_nba_games_espn(date_str=_date_str)
+                new_games = [g for g in day_games if g.get("match_id") not in _nba_seen]
+                for g in new_games:
+                    _nba_seen.add(g["match_id"])
+                all_games.extend(new_games)
+                if new_games:
+                    logger.info("basketball NBA (ESPN %s): %d partidos", _date_str, len(new_games))
+            except Exception:
+                logger.warning("basketball_collector: error colectando NBA %s", _date_str, exc_info=True)
+        if not _nba_seen:
+            logger.info("basketball NBA (ESPN): sin partidos en los próximos %d días", days)
     except Exception:
         logger.error("basketball_collector: error colectando NBA via ESPN", exc_info=True)
 
