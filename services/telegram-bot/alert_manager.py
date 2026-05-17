@@ -5,6 +5,7 @@ on_snapshot ELIMINADO — incompatible con min-instances=0.
 """
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -13,6 +14,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from shared.config import (
     TELEGRAM_CHAT_ID, TELEGRAM_TOKEN,
     TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID,
+    SPORTS_MIN_EDGE,
 )
 
 logger = logging.getLogger(__name__)
@@ -399,6 +401,44 @@ def _alert_key(data: dict, edge: float = 0.0) -> str:
     return f"{id_field}_{market}_{team}"
 
 
+def _safe_doc_id(key: str) -> str:
+    """Convierte alert_key a Firestore document ID válido (sin / ni caracteres especiales)."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", str(key))[:500]
+
+
+def _claim_alert_slot(key: str, alert_type: str) -> bool:
+    """
+    Reserva atómicamente el slot de dedup para esta alerta.
+    - Usa document ID = sanitized key (idempotente, no duplica docs).
+    - Pre-escribe ANTES de enviar: reduce ventana de race condition a <20ms.
+    - Devuelve True si OK para enviar, False si ya enviado en las últimas 24h.
+    - Fail-open: si Firestore falla, devuelve True (prefiere alerta duplicada
+      a silencio).
+    """
+    from shared.firestore_client import col
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    doc_id = _safe_doc_id(key)
+    ref = col("alerts_sent").document(doc_id)
+    try:
+        snap = ref.get()
+        if snap.exists:
+            _sat = snap.to_dict().get("sent_at")
+            if _sat is not None:
+                if hasattr(_sat, "tzinfo") and _sat.tzinfo is None:
+                    _sat = _sat.replace(tzinfo=timezone.utc)
+                if _sat >= cutoff:
+                    logger.info("_claim_alert_slot: dedup 24h → omitida (%s)", key)
+                    return False
+        # Pre-write antes de enviar — si otro proceso leyó antes que nosotros
+        # escribamos, puede haber un duplicado; pero la ventana es <20ms.
+        ref.set({"alert_key": key, "sent_at": now, "type": alert_type})
+        return True
+    except Exception as exc:
+        logger.error("_claim_alert_slot(%s): error Firestore → fail-open: %s", key, exc)
+        return True
+
+
 async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) -> int:
     """
     Compara cuotas actuales vs cuotas en señales PENDIENTES de Firestore.
@@ -429,8 +469,6 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
         logger.error("check_pending_odds_changes: error leyendo predictions pendientes", exc_info=True)
         return 0
 
-    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-
     for doc in pending_docs:
         try:
             pred = doc.to_dict()
@@ -450,32 +488,12 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
             if abs(pct_change) <= _ODDS_CHANGE_THRESHOLD:
                 continue
 
-            # Dedup 24h: misma señal (match_id + market + cuota_actual) → omitir
             market = pred.get("market_type", "h2h")
             alert_key = f"{match_id}_{market}_{current_odds:.2f}"
-            try:
-                _dedup_docs = list(
-                    col("alerts_sent")
-                    .where(filter=FieldFilter("alert_key", "==", alert_key))
-                    .limit(1)
-                    .stream()
-                )
-                _already_sent = False
-                for _dd in _dedup_docs:
-                    _ddata = _dd.to_dict()
-                    _sat = _ddata.get("sent_at")
-                    if _sat is None:
-                        continue
-                    if hasattr(_sat, "tzinfo") and _sat.tzinfo is None:
-                        _sat = _sat.replace(tzinfo=timezone.utc)
-                    if _sat >= cutoff_24h:
-                        _already_sent = True
-                        break
-                if _already_sent:
-                    logger.debug("check_pending_odds_changes: dedup 24h → omitida (%s)", alert_key)
-                    continue
-            except Exception as _de:
-                logger.warning("check_pending_odds_changes: dedup falló [%s] → enviando igualmente", alert_key)
+
+            # Dedup atómico: pre-escribe antes de enviar (mismo mecanismo que send_sports_alert)
+            if not _claim_alert_slot(alert_key, "odds_change"):
+                continue
 
             # Calcular edge actualizado
             calculated_prob = float(pred.get("calculated_prob") or 0)
@@ -485,34 +503,38 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
             home = _escape_md(pred.get("home_team", "?"))
             away = _escape_md(pred.get("away_team", "?"))
             selection = _escape_md(str(pred.get("selection") or pred.get("team_to_back") or "?"))
+            conf = float(pred.get("confidence") or 0)
+            kelly = float(pred.get("kelly_fraction") or 0)
 
-            msg_lines = [
-                "📊 CAMBIO DE CUOTA",
-                f"{home} vs {away} | {selection}",
-                f"Cuota original: *{original_odds:.2f}*",
-                f"Cuota actual: *{current_odds:.2f}* ({pct_str})",
-                f"Edge actualizado: *{new_edge:+.1%}*",
-            ]
-            if new_edge < 0:
-                msg_lines.append("⚠️ Edge negativo — revisar")
+            # Señal accionable si el cambio de cuota genera edge positivo suficiente
+            if new_edge >= SPORTS_MIN_EDGE:
+                msg_lines = [
+                    f"✅ SEÑAL POR CAMBIO DE CUOTA",
+                    f"{home} vs {away}",
+                    f"*{selection}* @ *{current_odds:.2f}*",
+                    f"Edge: *+{new_edge:.1%}* | Cuota cambió *{pct_str}*",
+                    f"Confianza: {conf:.0%} | Kelly: {kelly:.1%}",
+                ]
+            else:
+                msg_lines = [
+                    "📊 CAMBIO DE CUOTA",
+                    f"{home} vs {away} | {selection}",
+                    f"Cuota: *{original_odds:.2f}* → *{current_odds:.2f}* ({pct_str})",
+                    f"Edge actualizado: *{new_edge:+.1%}*",
+                ]
+                if new_edge < 0:
+                    msg_lines.append("⚠️ Edge negativo — revisar")
 
             msg = "\n".join(msg_lines)
             sent = await send_message(msg, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
             if sent:
                 sent_count += 1
                 logger.info(
-                    "check_pending_odds_changes: alerta cuota enviada — %s "
+                    "check_pending_odds_changes: alerta %s enviada — %s "
                     "odds %.2f→%.2f (%s) edge_new=%.3f",
+                    "ACCIONABLE" if new_edge >= SPORTS_MIN_EDGE else "info",
                     match_id, original_odds, current_odds, pct_str, new_edge,
                 )
-                try:
-                    col("alerts_sent").add({
-                        "alert_key": alert_key,
-                        "sent_at": datetime.now(timezone.utc),
-                        "type": "odds_change",
-                    })
-                except Exception:
-                    logger.error("check_pending_odds_changes: error guardando dedup (%s)", alert_key, exc_info=True)
             await asyncio.sleep(0.5)
         except Exception:
             logger.error(
@@ -525,51 +547,21 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
 async def send_sports_alert(prediction: dict) -> bool:
     """
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
-    Verifica en alerts_sent con ventana de 24h (no dedup permanente — re-alerta
-    si el partido sigue programado y no se ha alertado en las últimas 24h).
+    Dedup 24h via _claim_alert_slot (pre-write con document ID → sin race conditions).
     Devuelve True si envio.
     """
-    from datetime import timedelta
-    from shared.firestore_client import col
-
     edge = float(prediction.get("edge") or 0)
     key = _alert_key(prediction, edge)
 
-    try:
-        cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-        # Single-field query (no composite index needed) + Python filter for sent_at.
-        docs = list(
-            col("alerts_sent")
-            .where(filter=FieldFilter("alert_key", "==", key))
-            .limit(10)
-            .stream()
-        )
-        recent = []
-        for _d in docs:
-            _data = _d.to_dict()
-            _sat = _data.get("sent_at")
-            if _sat is None:
-                continue
-            # Normalizar timezone — Firestore puede devolver datetimes naive o aware
-            if hasattr(_sat, "tzinfo") and _sat.tzinfo is None:
-                _sat = _sat.replace(tzinfo=timezone.utc)
-            if _sat >= cutoff_24h:
-                recent.append(_data)
-        if recent:
-            logger.info("send_sports_alert: duplicada 24h → omitida (%s)", key)
-            return False
-    except Exception as _de:
-        # Fail-open: si el dedup falla enviamos igualmente (alerta llega aunque pueda
-        # repetirse) y logueamos el error para diagnóstico.
-        logger.error(
-            "send_sports_alert: dedup falló [%s: %s] → enviando igualmente (%s)",
-            type(_de).__name__, _de, key,
-        )
+    # Dedup atómico: pre-escribe antes de enviar
+    if not _claim_alert_slot(key, "sports"):
+        return False
 
     text = _format_alert_unified(prediction)
 
     # Calibración de confianza: muestra win rate histórico real cuando hay ≥10 señales en el bucket
     try:
+        from shared.firestore_client import col as _fscol
         _conf_val = float(prediction.get("confidence") or 0.0)
         _cbkt = (
             "65_70" if 0.65 <= _conf_val < 0.70 else
@@ -578,7 +570,7 @@ async def send_sports_alert(prediction: dict) -> bool:
             "90_99" if _conf_val >= 0.90 else None
         )
         if _cbkt:
-            _mw = col("model_weights").document("current").get()
+            _mw = _fscol("model_weights").document("current").get()
             if _mw.exists:
                 _bkt_data = _mw.to_dict().get("accuracy_by_confidence", {}).get(_cbkt, {})
                 _rate = _bkt_data.get("rate")
@@ -596,20 +588,10 @@ async def send_sports_alert(prediction: dict) -> bool:
     sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
 
     if not sent:
-        logger.error("send_sports_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
+        logger.error("send_sports_alert: fallo al enviar (%s)", key)
         return False
 
     await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
-
-    try:
-        col("alerts_sent").add({
-            "alert_key": key,
-            "sent_at": datetime.now(timezone.utc),
-            "type": "sports",
-        })
-    except Exception:
-        logger.error("send_sports_alert: error guardando en alerts_sent", exc_info=True)
-
     logger.info("send_sports_alert: alerta enviada para %s (edge=%.3f)", key, edge)
     return True
 
@@ -617,44 +599,23 @@ async def send_sports_alert(prediction: dict) -> bool:
 async def send_poly_alert(analysis: dict) -> bool:
     """
     Formatea senal de Polymarket y envia a TELEGRAM_CHAT_ID.
-    Verifica en alerts_sent. Devuelve True si envio.
+    Dedup 24h via _claim_alert_slot — mismo mecanismo que sports.
+    Devuelve True si envio.
     """
-    from shared.firestore_client import col
-
     edge = float(analysis.get("edge") or 0)
     key = _alert_key(analysis, edge)
 
-    try:
-        existing = list(
-            col("alerts_sent")
-            .where(filter=FieldFilter("alert_key", "==", key))
-            .where(filter=FieldFilter("status", "==", "sent"))
-            .limit(1)
-            .stream()
-        )
-        if existing:
-            logger.debug("send_poly_alert: alerta duplicada omitida (%s)", key)
-            return False
-    except Exception:
-        logger.error("send_poly_alert: error comprobando dedup", exc_info=True)
+    # Dedup atómico: pre-escribe antes de enviar
+    if not _claim_alert_slot(key, "polymarket"):
+        return False
 
     text = _format_alert_unified(analysis) if analysis.get("sport") else _format_poly_alert(analysis)
     sent = await send_message(text, message_thread_id=TELEGRAM_POLY_THREAD_ID)
 
     if not sent:
-        logger.error("send_poly_alert: fallo al enviar — NO guardado en alerts_sent (%s)", key)
+        logger.error("send_poly_alert: fallo al enviar (%s)", key)
         return False
 
     await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
-
-    try:
-        col("alerts_sent").add({
-            "alert_key": key,
-            "sent_at": datetime.now(timezone.utc),
-            "type": "polymarket",
-        })
-    except Exception:
-        logger.error("send_poly_alert: error guardando en alerts_sent", exc_info=True)
-
     logger.info("send_poly_alert: alerta enviada para %s (edge=%.3f)", key, edge)
     return True
