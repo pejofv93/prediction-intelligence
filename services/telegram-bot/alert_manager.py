@@ -469,9 +469,26 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
         logger.error("check_pending_odds_changes: error leyendo predictions pendientes", exc_info=True)
         return 0
 
+    cutoff_48h = datetime.now(timezone.utc) - timedelta(hours=48)
+
     for doc in pending_docs:
         try:
             pred = doc.to_dict()
+
+            # Guardia defensiva: saltar predicciones de partidos ya jugados
+            _md = pred.get("match_date")
+            if _md is not None:
+                if isinstance(_md, str):
+                    try:
+                        _md = datetime.fromisoformat(_md.replace("Z", "+00:00"))
+                    except ValueError:
+                        _md = None
+                if _md is not None:
+                    if hasattr(_md, "tzinfo") and _md.tzinfo is None:
+                        _md = _md.replace(tzinfo=timezone.utc)
+                    if _md < cutoff_48h:
+                        continue
+
             match_id = str(pred.get("match_id") or doc.id)
             # Extraer el match_id base (sin sufijos _ml_home, _spread, etc.)
             base_id = match_id.split("_ml_")[0].split("_spread")[0].split("_tot_")[0].split("_h1_")[0].split("_q1_")[0]

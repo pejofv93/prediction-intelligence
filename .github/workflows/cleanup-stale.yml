@@ -1,0 +1,15 @@
+name: cleanup-stale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cleanup stale predictions, odds_cache, upcoming_matches
+        run: |
+          curl -s -X POST "${{ secrets.SPORTS_AGENT_URL }}/admin/cleanup-stale" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --fail --show-error | jq .

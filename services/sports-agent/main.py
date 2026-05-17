@@ -228,6 +228,34 @@ async def clear_odds_cache() -> dict:
     return {"ok": True, **result}
 
 
+@app.post("/admin/cleanup-stale", dependencies=[Depends(verify_token)])
+async def admin_cleanup_stale() -> dict:
+    """
+    Limpieza on-demand de datos stale:
+    - upcoming_matches FINISHED/SCHEDULED con fecha >48h → borrados
+    - predictions result=None con match_date >48h → marcadas expired
+    - odds_cache sin partido activo en upcoming_matches → borradas
+    Útil tras el fin de una serie de Playoffs para limpiar señales de cuota obsoletas.
+    """
+    try:
+        del_upcoming = await _cleanup_stale_upcoming()
+        del_preds    = await _cleanup_stale_predictions()
+        del_odds     = await _cleanup_stale_odds_cache()
+        logger.info(
+            "admin.cleanup-stale: upcoming=%d, predictions=%d, odds_cache=%d",
+            del_upcoming, del_preds, del_odds,
+        )
+        return {
+            "ok": True,
+            "upcoming_deleted": del_upcoming,
+            "predictions_expired": del_preds,
+            "odds_cache_deleted": del_odds,
+        }
+    except Exception as e:
+        logger.error("admin.cleanup-stale: error — %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/test-nba", dependencies=[Depends(verify_token)])
 async def test_nba() -> dict:
     """
@@ -328,11 +356,15 @@ async def _bg_collect() -> None:
         _status["last_collect"] = datetime.now(timezone.utc).isoformat()
         logger.info("collect: completado en %.1fs", elapsed)
 
-        # Limpieza de partidos FINISHED >48h (no bloquea el pipeline si falla)
+        # Limpieza de datos stale (no bloquea el pipeline si falla)
         try:
-            deleted = await _cleanup_stale_upcoming()
-            if deleted:
-                logger.info("collect.cleanup: %d partidos FINISHED eliminados de upcoming_matches", deleted)
+            del_upcoming = await _cleanup_stale_upcoming()
+            del_preds    = await _cleanup_stale_predictions()
+            del_odds     = await _cleanup_stale_odds_cache()
+            logger.info(
+                "collect.cleanup: upcoming=%d expirados, predictions=%d expiradas, odds_cache=%d eliminados",
+                del_upcoming, del_preds, del_odds,
+            )
         except Exception as exc:
             logger.warning("collect.cleanup: error no crítico — %s", exc)
 
@@ -397,6 +429,95 @@ async def _cleanup_stale_upcoming() -> int:
                 deleted += 1
             except Exception as exc:
                 logger.warning("_cleanup_stale_upcoming: error borrando %s — %s", doc.id, exc)
+
+    return deleted
+
+
+async def _cleanup_stale_predictions() -> int:
+    """
+    Marca como result='expired' predicciones con match_date >48h de antigüedad y result=None.
+    Previene que odds-check genere alertas de cuota para partidos ya terminados o series cerradas.
+    Devuelve número de predicciones expiradas.
+    """
+    from shared.firestore_client import col
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+    updated = 0
+
+    try:
+        pending_docs = list(
+            col("predictions")
+            .where(filter=FieldFilter("result", "==", None))
+            .limit(500)
+            .stream()
+        )
+    except Exception as exc:
+        logger.warning("_cleanup_stale_predictions: error leyendo predictions — %s", exc)
+        return 0
+
+    for doc in pending_docs:
+        try:
+            data = doc.to_dict()
+            match_date = data.get("match_date")
+            if not match_date:
+                continue
+            if isinstance(match_date, str):
+                try:
+                    match_date = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
+                match_date = match_date.replace(tzinfo=timezone.utc)
+            if match_date < cutoff:
+                doc.reference.update({"result": "expired"})
+                updated += 1
+        except Exception as exc:
+            logger.warning("_cleanup_stale_predictions: error marcando %s — %s", doc.id, exc)
+
+    return updated
+
+
+async def _cleanup_stale_odds_cache() -> int:
+    """
+    Elimina entradas de odds_cache cuyo match_id no está en upcoming_matches activos (SCHEDULED/TIMED).
+    Previene que odds-check procese cuotas de partidos ya terminados o series cerradas.
+    Devuelve número de docs eliminados.
+    """
+    from shared.firestore_client import col
+
+    # Obtener match_ids activos
+    try:
+        active_ids: set[str] = set()
+        upcoming_docs = list(
+            col("upcoming_matches")
+            .where(filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"]))
+            .stream()
+        )
+        for d in upcoming_docs:
+            mid = str(d.to_dict().get("match_id", ""))
+            if mid:
+                active_ids.add(mid)
+    except Exception as exc:
+        logger.warning("_cleanup_stale_odds_cache: error leyendo upcoming_matches — %s", exc)
+        return 0
+
+    # Borrar entradas huérfanas
+    try:
+        odds_docs = list(col("odds_cache").limit(1000).stream())
+    except Exception as exc:
+        logger.warning("_cleanup_stale_odds_cache: error leyendo odds_cache — %s", exc)
+        return 0
+
+    deleted = 0
+    for doc in odds_docs:
+        data = doc.to_dict()
+        fixture_id = str(data.get("fixture_id") or doc.id)
+        if fixture_id not in active_ids:
+            try:
+                doc.reference.delete()
+                deleted += 1
+            except Exception as exc:
+                logger.warning("_cleanup_stale_odds_cache: error borrando %s — %s", doc.id, exc)
 
     return deleted
 
