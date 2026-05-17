@@ -1203,7 +1203,9 @@ async def _fetch_sports_odds_context(query: str) -> str | None:
 
         has_data = bool(re.search(
             r'([+-]\d{2,4}|\d\.\d{2,3}\s*(odds|to\s+win)|\d+\s*%\s*(chance|win|probability)|'
-            r'\brank(ing)?\s*#?\d+|\bfavorit|\bunderdog|\bprediction|\bpick\b)',
+            r'\brank(ing)?\s*#?\d+|\bfavorit|\bunderdog|\bprediction|\bpick\b|'
+            r'\b\d{1,3}-\d{1,3}\b|\bera\b|\bstarter\b|\bpitcher\b|'
+            r'\bwins?\b.{0,30}\blosses?\b|\brecord\b.{0,20}\b\d{2})',
             text, re.I,
         ))
         result = text[:700] if (text and has_data) else None
@@ -1424,7 +1426,21 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             elif _is_ufc:
                 _sports_query = f"{question} UFC odds betting prediction 2026"
             else:
-                _sports_query = f"{question} starting pitcher MLB odds betting lines 2026"
+                # MLB: extraer equipos y fecha para query específica
+                _mlb_teams = re.findall(
+                    r'Will (?:the )?(.+?) win|([A-Z][a-z]+(?: [A-Z][a-z]+)*) vs\.? ([A-Z][a-z]+(?: [A-Z][a-z]+)*)',
+                    question, re.I,
+                )
+                _mlb_team_q = ""
+                if _mlb_teams:
+                    _flat = [g.strip() for t in _mlb_teams for g in t if g.strip()]
+                    _mlb_team_q = " vs ".join(_flat[:2]) if len(_flat) >= 2 else (_flat[0] if _flat else "")
+                _date_m = re.search(r'(\d{4}-\d{2}-\d{2})', question)
+                _date_q = _date_m.group(1) if _date_m else "2026"
+                if _mlb_team_q:
+                    _sports_query = f"{_mlb_team_q} MLB {_date_q} starting pitcher odds betting lines"
+                else:
+                    _sports_query = f"{question} starting pitcher MLB odds betting lines 2026"
 
             try:
                 _sports_context = await asyncio.wait_for(
@@ -1436,12 +1452,29 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id, _sport_label,
                 )
 
+            # MLB fallback: si la query de pitcher falla, buscar récord de temporada del equipo
+            if _is_mlb_game and _sports_context is None:
+                _mlb_record_q = f"{_mlb_team_q or question[:60]} MLB 2026 season record wins losses standings"
+                try:
+                    _sports_context = await asyncio.wait_for(
+                        _fetch_sports_odds_context(_mlb_record_q), timeout=5.0
+                    )
+                    if _sports_context:
+                        logger.info(
+                            "analyze_market(%s): MLB_RECORD_FALLBACK — récord de temporada obtenido",
+                            market_id,
+                        )
+                except asyncio.TimeoutError:
+                    pass
+
             if _sports_context is None:
+                # Sin datos externos: continuar con ancla de precio ±15% en lugar de PASS directo.
+                # Solo se descarta si es un mercado verdaderamente no evaluable (ligas menores,
+                # equipos desconocidos) — en esos casos el LLM devolverá PASS por sí mismo.
                 logger.info(
-                    "analyze_market(%s): %s_NO_DATA — sin odds/datos externos → PASS",
+                    "analyze_market(%s): %s_NO_DATA — sin odds externos, continuando con ancla ±15%%",
                     market_id, _sport_label,
                 )
-                return None
 
     # Detect "Will X reach $Y" markets and fetch live price.
     # Orden: ctc_price del enricher primero (ya fetcheado, evita 429s en Railway),
@@ -1543,6 +1576,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         or (news.get("headlines") and news.get("trend", "NO_DATA") != "NO_DATA")
     )
     _no_news = news.get("trend", "NO_DATA") == "NO_DATA" or not news.get("headlines")
+    _no_external_sports = _is_individual_match and _sports_context is None
     if _has_external_data:
         data_quality = "external_data"
     elif _no_news:
@@ -1613,15 +1647,27 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     if data_quality == "improvised":
         _lo = max(0.0, price_yes - 0.15)
         _hi = min(1.0, price_yes + 0.15)
-        user_prompt += (
-            f"\n\nANCLA DE MERCADO OBLIGATORIA: No tienes datos externos verificables "
-            f"para este mercado (sin noticias DDG, sin precios spot, sin encuestas recientes). "
-            f"Usa el precio del mercado ({price_yes:.1%}) como ancla base y ajusta "
-            f"MÁXIMO ±15% por sentiment/orderbook. "
-            f"Tu estimación de real_prob DEBE estar en [{_lo:.1%}, {_hi:.1%}]. "
-            f"Superar este rango sin datos externos verificables es una señal de alucinación. "
-            f"Si no puedes justificar la divergencia, recomienda WATCH o PASS."
-        )
+        if _no_external_sports:
+            _sport_type = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
+            user_prompt += (
+                f"\n\n⚠️ SIN DATOS DEPORTIVOS EXTERNOS ({_sport_type}): No se encontraron "
+                f"odds ni récords verificables para este partido. "
+                f"Usa el precio de mercado ({price_yes:.1%}) como ancla base. "
+                f"Ajusta MÁXIMO ±15% por orderbook/momentum/smart_money. "
+                f"Tu real_prob DEBE estar en [{_lo:.1%}, {_hi:.1%}]. "
+                f"Solo recomienda BUY si el edge supera 10% con orderbook/momentum claramente alineados. "
+                f"Si los datos de mercado son neutros, recomienda PASS."
+            )
+        else:
+            user_prompt += (
+                f"\n\nANCLA DE MERCADO OBLIGATORIA: No tienes datos externos verificables "
+                f"para este mercado (sin noticias DDG, sin precios spot, sin encuestas recientes). "
+                f"Usa el precio del mercado ({price_yes:.1%}) como ancla base y ajusta "
+                f"MÁXIMO ±15% por sentiment/orderbook. "
+                f"Tu estimación de real_prob DEBE estar en [{_lo:.1%}, {_hi:.1%}]. "
+                f"Superar este rango sin datos externos verificables es una señal de alucinación. "
+                f"Si no puedes justificar la divergencia, recomienda WATCH o PASS."
+            )
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
     if _sports_context:
@@ -2145,6 +2191,21 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             )
     except Exception:
         pass
+
+    # Mercados deportivos sin datos externos: exigir edge ≥ 10% para señal accionable.
+    # Con datos externos el umbral normal (8%) aplica; sin ellos necesitamos más convicción.
+    if _no_external_sports and recommendation in ("BUY_YES", "BUY_NO") and abs(edge) < 0.10:
+        logger.info(
+            "analyze_market(%s): NO_SPORTS_DATA_FILTER edge=%.3f<0.10 → PASS "
+            "(sin odds externos, requiere edge≥10%%)",
+            market_id, abs(edge),
+        )
+        recommendation = "PASS"
+    # Añadir ⚠️ al reasoning cuando la señal es por ancla sin datos externos
+    if _no_external_sports and recommendation in ("BUY_YES", "BUY_NO"):
+        _sport_type = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
+        reasoning = f"⚠️ Sin datos deportivos externos ({_sport_type}) — ancla precio mercado ±15%\n{reasoning}"
+        key_factors = ["no_external_sports_data"] + (key_factors or [])
 
     # Partidos individuales: edge > 40% → verificar contra odds reales o descartar
     if _is_individual_match and recommendation in ("BUY_YES", "BUY_NO") and abs(edge) > 0.40:
