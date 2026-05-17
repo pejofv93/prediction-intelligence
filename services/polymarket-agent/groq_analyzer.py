@@ -2105,7 +2105,10 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             edge = round(real_prob - price_yes, 4)
             recommendation = "PASS"
 
-    # Fix 4: calibrar confidence con accuracy histórica por bucket de edge
+    # Fix 4: calibrar confidence con accuracy histórica por bucket de edge.
+    # Solo aplicar con >= 50 outcomes resueltos por bucket — con menos, la muestra
+    # no es representativa y caps agresivos bloquean todas las señales.
+    # Floor de 0.55 garantiza que el cap nunca destruya señales legítimas.
     try:
         _weights = _get_poly_weights()
         _by_bucket = _weights.get("accuracy_by_bucket", {})
@@ -2114,10 +2117,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         _bs = _by_bucket.get(_bucket, {})
         _bn = int(_bs.get("n", 0))
         _bacc = float(_bs.get("accuracy", 0.0))
-        if _bn >= 10 and _bacc > 0:
-            _conf_cap = round(min(1.0, _bacc + 0.10), 4)
+        logger.info(
+            "analyze_market(%s): bucket=%s n=%d acc=%.0f%% conf_before=%.2f",
+            market_id, _bucket, _bn, _bacc * 100, confidence,
+        )
+        if _bn >= 50 and _bacc > 0:
+            _conf_cap = round(min(1.0, max(0.55, _bacc + 0.15)), 4)
             if confidence > _conf_cap:
-                logger.debug(
+                logger.info(
                     "analyze_market(%s): conf capped bucket=%s acc=%.0f%% n=%d: %.2f→%.2f",
                     market_id, _bucket, _bacc * 100, _bn, confidence, _conf_cap,
                 )
