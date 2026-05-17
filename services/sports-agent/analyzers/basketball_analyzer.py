@@ -22,7 +22,7 @@ import numpy as np
 from shared.config import (
     BASKETBALL_HOME_ADV_NBA, BASKETBALL_HOME_ADV_EURO, BASKETBALL_SPREAD_SIGMA,
     ODDS_API_KEY, SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE,
-    TAVILY_API_KEY,
+    BASKETBALL_MIN_EDGE, TAVILY_API_KEY,
 )
 from shared.firestore_client import col
 
@@ -273,7 +273,7 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
     from analyzers.value_bet_engine import kelly_criterion, calculate_ev
     edge = round((prob - 1.0 / odds) * edge_discount, 4) if odds > 1 else 0.0
     ev = calculate_ev(prob, odds)
-    if ev <= SPORTS_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
+    if ev <= BASKETBALL_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
         return None
     return {
         **base,
@@ -623,11 +623,11 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 edge_discount = 0.80 if (opp_seed and opp_seed <= 2) else 1.0
                 from analyzers.value_bet_engine import calculate_ev as _cev
                 _ev_check = _cev(prob, odds)
-                if _ev_check <= SPORTS_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
+                if _ev_check <= BASKETBALL_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
                     logger.info(
                         "basketball_analyzer(%s): ML %s FILTRADO — "
                         "ev=%.4f (min=%.2f) conf=%.3f (min=%.2f) seed=%s opp_seed=%s [%s vs %s]",
-                        match_id, tag, _ev_check, SPORTS_MIN_EDGE,
+                        match_id, tag, _ev_check, BASKETBALL_MIN_EDGE,
                         conf, SPORTS_MIN_CONFIDENCE,
                         team_seed, opp_seed, home_name, away_name,
                     )
