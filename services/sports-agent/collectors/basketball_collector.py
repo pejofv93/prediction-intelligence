@@ -276,8 +276,8 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
 
         for team_id_key in ("home_team_id", "away_team_id"):
             team_id = game.get(team_id_key)
-            if not team_id or team_id in teams_seen:
-                continue
+            if not team_id or int(team_id) <= 0 or team_id in teams_seen:
+                continue  # saltar None, TBD (-1/-2) y duplicados
 
             teams_seen.add(team_id)
             try:

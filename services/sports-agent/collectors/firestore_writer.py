@@ -125,7 +125,11 @@ async def save_upcoming_matches(matches: list[dict]) -> None:
             "collected_at": now,
         }
         # Campos opcionales por deporte (no sobrescribir con None)
-        for extra_key in ("surface", "tournament", "h2h_advantage", "source"):
+        for extra_key in (
+            "surface", "tournament", "h2h_advantage", "source",
+            # Basketball / NBA Playoffs
+            "espn_odds", "home_seed", "away_seed", "playoff", "series_title",
+        ):
             v = m.get(extra_key)
             if v is not None:
                 doc[extra_key] = v
