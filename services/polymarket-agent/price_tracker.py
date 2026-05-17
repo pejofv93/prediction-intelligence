@@ -2,6 +2,7 @@
 Price tracker — snapshots historicos, momentum, volume spike y monitor de movimientos bruscos.
 Persiste en Firestore poly_price_history para analisis posterior.
 """
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 _PRICE_MOVE_THRESHOLD = 0.05   # 5% en < 1h → alerta (bajado de 8% para capturar movimientos geopolíticos)
 _DEDUP_WINDOW_SECONDS = 7_200  # no re-alertar el mismo mercado en 2h
+_VOL_THRESHOLD_FOR_ANALYZE = 200_000  # $200k vol mínimo para lanzar mini-analyze post-movimiento
 
 
 async def save_price_snapshot(
@@ -455,6 +457,17 @@ async def monitor_price_changes() -> int:
                         "monitor_price_changes(%s): alerta enviada — cambio=%s%.1fpp en %.0fmin",
                         market_id, pp_sign, abs(pp_change), minutes_elapsed,
                     )
+                    # Mini-analyze: si volumen alto, evaluar señal accionable post-movimiento
+                    if vol_24h >= _VOL_THRESHOLD_FOR_ANALYZE:
+                        asyncio.create_task(
+                            _analyze_price_move(
+                                market_id, question, pct_change, price_new, vol_24h
+                            )
+                        )
+                        logger.info(
+                            "monitor_price_changes(%s): lanzando mini-analyze (vol=$%.0f move=%.1f%%)",
+                            market_id, vol_24h, pct_change * 100,
+                        )
                 else:
                     logger.warning(
                         "monitor_price_changes(%s): telegram-bot respondio %d", market_id, resp.status_code
@@ -467,6 +480,73 @@ async def monitor_price_changes() -> int:
 
     logger.info("monitor_price_changes: %d alertas enviadas de %d mercados", alerts_sent, len(markets))
     return alerts_sent
+
+
+async def _analyze_price_move(
+    market_id: str,
+    question: str,
+    pct_change: float,
+    price_new: float,
+    vol_24h: float,
+) -> None:
+    """
+    Mini-analyze post-movimiento brusco.
+    Si precio bajó → evalúa BUY_YES (mercado puede estar sobrevendido).
+    Si precio subió → evalúa BUY_NO (mercado puede estar sobrecomprado).
+    Genera señal Telegram si edge > 5% tras el movimiento.
+    Solo se lanza cuando vol_24h > $200k.
+    """
+    try:
+        from groq_analyzer import analyze_market
+        from alert_engine import check_and_alert
+
+        enriched_doc = col("enriched_markets").document(market_id).get()
+        if not enriched_doc.exists:
+            logger.info("_analyze_price_move(%s): no en enriched_markets — omitido", market_id)
+            return
+
+        enriched = enriched_doc.to_dict()
+        # Actualizar con precio actual post-movimiento para que Groq evalúe la nueva valoración
+        enriched["price_yes"] = price_new
+        enriched["volume_spike"] = True
+        enriched["movement_trigger"] = True
+        enriched["movement_pct"] = round(pct_change, 4)
+
+        prediction = await analyze_market(enriched)
+        if prediction is None:
+            logger.info("_analyze_price_move(%s): analyze_market devolvió None", market_id)
+            return
+
+        edge = float(prediction.get("edge", 0))
+        rec = str(prediction.get("recommendation", "PASS")).upper()
+
+        # Verificar coherencia: precio bajó → esperamos BUY_YES; precio subió → BUY_NO
+        direction_ok = (pct_change < 0 and rec == "BUY_YES") or (pct_change > 0 and rec == "BUY_NO")
+
+        if abs(edge) < 0.05:
+            logger.info(
+                "_analyze_price_move(%s): edge=%.3f < 0.05 — sin señal (move=%.1f%% rec=%s)",
+                market_id, edge, pct_change * 100, rec,
+            )
+            return
+
+        prediction["volume_spike"] = True
+        alerted = await check_and_alert(prediction)
+        logger.info(
+            "_analyze_price_move(%s): move=%.1f%% edge=%.3f conf=%.2f rec=%s dir_ok=%s alerted=%s",
+            market_id, pct_change * 100, edge,
+            float(prediction.get("confidence", 0)), rec, direction_ok, alerted,
+        )
+
+        if alerted:
+            try:
+                from shared.shadow_engine import track_new_signal
+                await track_new_signal(prediction, "polymarket_movement")
+            except Exception:
+                pass
+
+    except Exception:
+        logger.error("_analyze_price_move(%s): error", market_id, exc_info=True)
 
 
 def apply_whale_to_signal(signal: dict, whale_data: dict, signal_direction: str = "YES") -> dict:
