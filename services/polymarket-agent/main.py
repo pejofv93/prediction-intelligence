@@ -575,7 +575,7 @@ async def _bg_analyze() -> dict:
             return {"status": "skipped", "reason": "empty", "analyzed": 0, "alerts": 0}
 
         # Balanceo por categoría: top 5 frescos por enriched_at de cada categoría activa
-        from collections import Counter
+        from collections import Counter, defaultdict
         from datetime import timedelta
         from groq_analyzer import categorize_market, market_analysis_priority
 
@@ -722,16 +722,22 @@ async def _bg_analyze() -> dict:
         skipped_threshold = 0  # check_and_alert rechazó por edge/conf insuficiente
         skipped_dedup = 0      # check_and_alert rechazó por dedup 24h/7d
 
+        # Contadores por categoría para diagnóstico del funnel
+        _def_cat = lambda: {"analyzed": 0, "alerted": 0, "pass": 0, "threshold": 0, "dedup": 0, "error": 0}
+        cat_counters: dict[str, dict] = defaultdict(_def_cat)
+
         for i, enriched in enumerate(docs_balanced):
             if i > 0:
                 await asyncio.sleep(GROQ_CALL_DELAY)
 
+            _mcat = categorize_market(enriched.get("question", ""))
             try:
                 prediction = await analyze_market(enriched)
                 if prediction is None:
                     skipped_volume += 1
                 else:
                     predictions_generated += 1
+                    cat_counters[_mcat]["analyzed"] += 1
 
                     # Whale detection (heurística de volumen)
                     try:
@@ -799,6 +805,7 @@ async def _bg_analyze() -> dict:
                     alerted = await check_and_alert(prediction)
                     if alerted:
                         alerts_sent += 1
+                        cat_counters[_mcat]["alerted"] += 1
                         # Registrar señal en shadow trading
                         try:
                             from shared.shadow_engine import track_new_signal
@@ -812,16 +819,20 @@ async def _bg_analyze() -> dict:
                         _thr_edge = 0.05 if _vspike else 0.08
                         if _rec not in ("BUY_YES", "BUY_NO"):
                             skipped_pass += 1
+                            cat_counters[_mcat]["pass"] += 1
                         elif abs(_edge_v) < _thr_edge or _conf_v < 0.55:
                             skipped_threshold += 1
+                            cat_counters[_mcat]["threshold"] += 1
                         else:
                             skipped_dedup += 1
+                            cat_counters[_mcat]["dedup"] += 1
                         logger.info(
-                            "analyze: FUNNEL %s rec=%s edge=%.3f conf=%.2f → no alerta",
-                            enriched.get("market_id"), _rec, _edge_v, _conf_v,
+                            "analyze: FUNNEL %s cat=%s rec=%s edge=%.3f conf=%.2f → no alerta",
+                            enriched.get("market_id"), _mcat, _rec, _edge_v, _conf_v,
                         )
             except Exception:
                 skipped_groq += 1
+                cat_counters[_mcat]["error"] += 1
                 logger.error(
                     "analyze: error en mercado %s",
                     enriched.get("market_id"), exc_info=True,
@@ -835,6 +846,14 @@ async def _bg_analyze() -> dict:
             skipped_volume, skipped_groq, skipped_pass, skipped_threshold, skipped_dedup,
             elapsed,
         )
+        # Funnel por categoría — diagnóstico de por qué categorías no generan señales
+        for _c, _cv in sorted(cat_counters.items()):
+            if _cv["analyzed"] > 0:
+                logger.info(
+                    "analyze: CAT %-12s analyzed=%d alerted=%d pass=%d threshold=%d dedup=%d err=%d",
+                    _c, _cv["analyzed"], _cv["alerted"], _cv["pass"],
+                    _cv["threshold"], _cv["dedup"], _cv["error"],
+                )
 
         # Asignar grupos tematicos a mercados (una sola vez al deploy)
         global _groups_labeled
@@ -863,6 +882,7 @@ async def _bg_analyze() -> dict:
             "skip_threshold": skipped_threshold,
             "skip_dedup": skipped_dedup,
             "elapsed_s": round(elapsed, 1),
+            "cat_funnel": {c: dict(v) for c, v in cat_counters.items() if v["analyzed"] > 0},
         }
 
     except Exception as e:
