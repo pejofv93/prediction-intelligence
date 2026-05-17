@@ -98,6 +98,14 @@ _NBA_SERIES_VS_RE = re.compile(
     r'who will win (?:the\s+)?series\??[\s\-–—]+(\w[\w\s.]+?)\s+vs\.?\s+',
     re.I,
 )
+# NBA team nicknames para detectar mercados NBA aunque no digan "nba" en el texto
+_NBA_TEAM_NAMES = frozenset({
+    "cavaliers", "pistons", "celtics", "knicks", "heat", "bucks", "nets",
+    "raptors", "bulls", "pacers", "hawks", "wizards", "lakers", "warriors",
+    "nuggets", "suns", "clippers", "thunder", "timberwolves", "wolves",
+    "grizzlies", "pelicans", "rockets", "spurs", "mavericks", "mavs",
+    "sixers", "76ers", "blazers", "jazz", "kings", "magic", "hornets",
+})
 _TOURNAMENT_KW_RE = re.compile(
     r'\b(champions league|world cup|copa del rey|copa libertadores|europa league|'
     r'premier league|la liga|bundesliga|serie a|ligue 1|nba finals|nfl|mlb|nhl|'
@@ -1364,7 +1372,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
         # NBA playoff series: pre-fetch ESPN win probability + series state for post-LLM floor
         q_lower = question.lower()
-        if "nba" in q_lower and ("series" in q_lower or "playoffs" in q_lower or "finals" in q_lower):
+        _nba_slug = market_data.get("slug", "").lower()
+        _is_nba_series_market = (
+            ("nba" in q_lower or _nba_slug.startswith("nba-") or
+             any(t in q_lower for t in _NBA_TEAM_NAMES))
+            and any(kw in q_lower for kw in ("series", "playoffs", "finals", "round", "win"))
+        )
+        if _is_nba_series_market:
             _nba_m = _WIN_TOURNAMENT_RE.search(question)
             if _nba_m:
                 _nba_team = _nba_m.group(1).strip()
@@ -2312,16 +2326,22 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         # Causa bug: "OKC 1-0" era _tw=1 >= 2 = False → BUY_NO contra Thunder no se bloqueaba.
         _team_leading = _nba_series_wins is not None and _nba_series_wins[0] > _nba_series_wins[1]
         _espn_dominant = _nba_win_prob is not None and _nba_win_prob > 0.85
+        _buy_no_blocked = False
         if recommendation == "BUY_NO" and (_team_leading or _espn_dominant):
             recommendation = "PASS"
+            _buy_no_blocked = True
             logger.info(
                 "analyze_market(%s): NBA_NO_CONTRA BUY_NO→PASS (%s)",
                 market_id, _nba_floor_reason,
             )
-        if edge >= POLY_MIN_EDGE:
-            recommendation = "BUY_YES"
-        elif edge > -POLY_MIN_EDGE:
-            recommendation = "PASS"
+        # Re-evaluar recomendación solo si el floor ajustó el edge y NO bloqueamos BUY_NO.
+        # Si bloqueamos BUY_NO, el PASS es definitivo — no permitir que edge positivo post-floor
+        # lo convierta en BUY_YES silenciosamente.
+        if not _buy_no_blocked:
+            if edge >= POLY_MIN_EDGE:
+                recommendation = "BUY_YES"
+            elif edge > -POLY_MIN_EDGE:
+                recommendation = "PASS"
 
     # Aplicar ajuste Fear & Greed si es crypto
     if fear_greed and category == "crypto":
