@@ -525,8 +525,8 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
 async def send_sports_alert(prediction: dict) -> bool:
     """
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
-    Verifica en alerts_sent con ventana de 48h (no dedup permanente — re-alerta
-    si el partido sigue programado y no se ha alertado en las últimas 48h).
+    Verifica en alerts_sent con ventana de 24h (no dedup permanente — re-alerta
+    si el partido sigue programado y no se ha alertado en las últimas 24h).
     Devuelve True si envio.
     """
     from datetime import timedelta
@@ -536,7 +536,7 @@ async def send_sports_alert(prediction: dict) -> bool:
     key = _alert_key(prediction, edge)
 
     try:
-        cutoff_48h = datetime.now(timezone.utc) - timedelta(hours=48)
+        cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
         # Single-field query (no composite index needed) + Python filter for sent_at.
         docs = list(
             col("alerts_sent")
@@ -553,10 +553,10 @@ async def send_sports_alert(prediction: dict) -> bool:
             # Normalizar timezone — Firestore puede devolver datetimes naive o aware
             if hasattr(_sat, "tzinfo") and _sat.tzinfo is None:
                 _sat = _sat.replace(tzinfo=timezone.utc)
-            if _sat >= cutoff_48h:
+            if _sat >= cutoff_24h:
                 recent.append(_data)
         if recent:
-            logger.info("send_sports_alert: duplicada 48h → omitida (%s)", key)
+            logger.info("send_sports_alert: duplicada 24h → omitida (%s)", key)
             return False
     except Exception as _de:
         # Fail-open: si el dedup falla enviamos igualmente (alerta llega aunque pueda
