@@ -427,8 +427,8 @@ async def _collect_football() -> None:
     from collectors.football_api import get_upcoming_matches, get_team_stats, get_h2h
     from collectors.firestore_writer import save_upcoming_matches, save_team_stats, save_h2h
 
-    logger.info("collect.football: obteniendo partidos proximos 7 dias")
-    matches = await get_upcoming_matches(days=7)
+    logger.info("collect.football: obteniendo partidos proximos 14 dias")
+    matches = await get_upcoming_matches(days=14)
 
     if not matches:
         logger.warning("collect.football: ningun partido encontrado")
