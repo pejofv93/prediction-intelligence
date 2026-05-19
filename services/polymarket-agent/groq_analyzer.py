@@ -89,6 +89,10 @@ _UFC_RE = re.compile(
     r'lightweight|welterweight|featherweight|bantamweight|flyweight)\b',
     re.I,
 )
+_NHL_RE = re.compile(
+    r'\b(nhl|stanley cup|ice hockey|nhl playoffs|nhl final|nhl series)\b',
+    re.I,
+)
 
 _WIN_TOURNAMENT_RE = re.compile(
     r'will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)[\?\.\s]*$', re.I
@@ -1596,7 +1600,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         _is_tennis = _slug.startswith(("atp-", "wta-")) or bool(_TENNIS_RE.search(question))
         _is_ufc = _slug.startswith("ufc-") or bool(_UFC_RE.search(question))
         _is_mlb_game = _slug.startswith("mlb-") or bool(_MLB_RE.search(question))
-        _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game
+        _is_nhl_game = _slug.startswith("nhl-") or bool(_NHL_RE.search(question))
+        _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game or _is_nhl_game
 
         if _is_individual_match:
             _sport_label = "TENNIS" if _is_tennis else ("UFC" if _is_ufc else "MLB")
@@ -2454,6 +2459,42 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id, real_prob,
                 )
                 recommendation = "PASS"
+
+    # SPORTS_SINGLE_NO_BLOCK: en mercados deportivos de partido único (tenis, UFC, MLB, NHL)
+    # no generar BUY_NO cuando price_yes > 55%.
+    # Patrón histórico: el mercado ya refleja al favorito y BUY_NO pierde sistemáticamente.
+    # Excepción: price_yes > 75% Y tenemos datos externos que contradigan al mercado.
+    if _is_individual_match and recommendation == "BUY_NO" and price_yes > 0.55:
+        _has_external = bool(_sports_context)
+        if price_yes > 0.75 and _has_external:
+            logger.info(
+                "analyze_market(%s): SPORTS_SINGLE_NO_ALLOW — BUY_NO permitido "
+                "(price_yes=%.2f > 75%% con datos externos)",
+                market_id, price_yes,
+            )
+        else:
+            logger.info(
+                "analyze_market(%s): SPORTS_SINGLE_NO_BLOCK BUY_NO→PASS "
+                "(price_yes=%.2f > 55%% sin evidencia externa suficiente, external=%s)",
+                market_id, price_yes, _has_external,
+            )
+            recommendation = "PASS"
+
+    # SPORTS_BUY_NO_THRESHOLD: aplicar umbral de edge más alto para BUY_NO en deportes
+    # cuando el learning engine detecta accuracy baja en esa categoría.
+    if _is_individual_match and recommendation == "BUY_NO":
+        try:
+            _w = _get_poly_weights()
+            _sports_no_edge = float(_w.get("buy_no_sports_min_edge", 0.0))
+            if _sports_no_edge > 0 and abs(edge) < _sports_no_edge:
+                logger.info(
+                    "analyze_market(%s): SPORTS_BUY_NO_THRESHOLD BUY_NO→PASS "
+                    "edge=%.3f < sports_no_min_edge=%.3f (learning engine)",
+                    market_id, abs(edge), _sports_no_edge,
+                )
+                recommendation = "PASS"
+        except Exception:
+            pass
 
     # Title race cap — equipo a >10 pts del líder cerca del final de temporada → prob_max 15%
     if category == "sports" and recommendation in ("BUY_YES", "WATCH") and real_prob > 0.15 and days_to_close < 90:
