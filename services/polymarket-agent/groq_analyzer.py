@@ -2177,28 +2177,62 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # FINALIST_FLOOR: equipo conocido en fases finales de torneo → prob mínima floor
     # floor=0.35 para finales de 2 equipos (≈50% base); floor=0.20 para semifinales (≈25% base)
     # El LLM sin contexto devuelve probs absurdas (5%) al no saber que el equipo llegó a la final.
+    #
+    # FIX FINALIST_FINAL: para finales de 2 equipos (floor≥0.30):
+    #   - Sin datos externos: anclar real_prob a price_yes (mercado es la mejor estimación
+    #     disponible ~50/50) → edge=0 → PASS. Evita BUY_NO espurio cuando floor=35% < price=58%.
+    #   - Con datos externos: respetar estimación del LLM (tiene info real).
+    #     Solo señal si abs(edge) > 20% (exigencia mayor para finales inciertas).
+    # Semifinales (floor<0.30): comportamiento original (floor solo corrige LLM sin contexto).
     if _finalist_floor_value > 0.0 and real_prob < _finalist_floor_value:
         _old_finalist = real_prob
-        real_prob = _finalist_floor_value
-        edge = round(real_prob - price_yes, 4)
-        if edge >= POLY_MIN_EDGE:
-            recommendation = "BUY_YES"
-        elif edge <= -POLY_MIN_EDGE:
-            recommendation = "BUY_NO"
+        if _finalist_floor_value >= 0.30:
+            # Final de 2 equipos
+            if not _sports_context:
+                # Sin datos externos: el LLM no conoce el torneo → anclar a price_yes
+                real_prob = price_yes
+            # Con datos externos: mantener estimación del LLM (aunque esté bajo el floor)
+            # El floor ya no se aplica porque la señal necesita edge>20% de cualquier forma
         else:
-            recommendation = "PASS"
+            # Semifinal (floor=0.20): comportamiento original
+            real_prob = _finalist_floor_value
+        edge = round(real_prob - price_yes, 4)
         _finalist_note = (
             f"⚠️ Finalista conocido: prob_min={_finalist_floor_value:.0%} "
             f"(equipo en fase final del torneo)"
         )
         reasoning = f"{_finalist_note}\n{reasoning}" if reasoning else _finalist_note
         logger.info(
-            "analyze_market(%s): FINALIST_FLOOR %.3f→%.3f → rec=%s edge=%.3f",
-            market_id, _old_finalist, _finalist_floor_value, recommendation, edge,
+            "analyze_market(%s): FINALIST_FLOOR %.3f→%.3f edge=%.3f (floor_min=%.2f external=%s)",
+            market_id, _old_finalist, real_prob, edge, _finalist_floor_value, bool(_sports_context),
         )
-        # Registrar como floor explícito para que FLOOR_REENFORCE lo proteja de caps posteriores
-        _price_floor_applied = True
-        _price_floor_value = _finalist_floor_value
+        # Para finales: asignar recomendación con umbral de edge más alto
+        if _finalist_floor_value >= 0.30:
+            if abs(edge) > 0.20 and _sports_context:
+                if edge >= POLY_MIN_EDGE:
+                    recommendation = "BUY_YES"
+                elif edge <= -POLY_MIN_EDGE:
+                    recommendation = "BUY_NO"
+                else:
+                    recommendation = "PASS"
+            else:
+                recommendation = "PASS"
+                logger.info(
+                    "analyze_market(%s): FINALIST_FINAL_GATE → PASS "
+                    "(final 2 equipos: edge=%.3f requiere >20%% + datos externos, external=%s)",
+                    market_id, edge, bool(_sports_context),
+                )
+        else:
+            if edge >= POLY_MIN_EDGE:
+                recommendation = "BUY_YES"
+            elif edge <= -POLY_MIN_EDGE:
+                recommendation = "BUY_NO"
+            else:
+                recommendation = "PASS"
+        # Floor explícito solo para semifinales (no finales — en finales es ancla de mercado)
+        if _finalist_floor_value < 0.30:
+            _price_floor_applied = True
+            _price_floor_value = _finalist_floor_value
 
     # ALREADY_EXCEEDED: precio actual ya superó el target → prob mínima 90%
     # Aplica cuando current_price > target Y la pregunta implica alcanzar un precio al alza
