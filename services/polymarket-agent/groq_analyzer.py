@@ -1334,6 +1334,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # Discard "Will X win [tournament]" markets where team is already eliminated
     _nba_win_prob: float | None = None
     _nba_series_wins: tuple[int, int] | None = None
+    _is_nba_series_market = False  # default; re-evaluated inside sports block
     if category == "sports":
         _tt = _extract_team_tournament(question)
         if _tt:
