@@ -1103,16 +1103,139 @@ _KNOWN_ELIMINATED: dict[str, dict[str, bool]] = {
     },
 }
 
-# Equipos que están EN LA FINAL de un torneo → prob mínima 35% (2-team final ≈ 50% base)
-# El LLM sin contexto externo puede dar probabilidades absurdamente bajas (5-10%) para
-# finalistas cuando no sabe que el equipo llegó a la final.
-# floor=0.35 → con precio mercado >0.42 el edge queda en [-0.07, ...] → PASS en lugar de BUY_NO.
-_KNOWN_FINALISTS: dict[str, list[str]] = {
-    # UCL 2025-26: final el 31-mayo-2026 en Budapest
-    "champions league": ["arsenal", "psg", "paris saint-germain"],
-    "europa league": [],   # completar cuando se conozca la final
-    "conference league": [],
+# Equipos con presencia confirmada en fases finales de torneos activos.
+# Estructura: tournament_key → (list[team_aliases_lower], floor_probability)
+#   floor 0.35 → 2-team final confirmada (equipo tiene ~50% base → floor conservador)
+#   floor 0.20 → 4-team semi-final (equipo tiene ~25% base → floor conservador)
+# Actualizar tras cada eliminación o resolución de torneo.
+_KNOWN_FINALISTS: dict[str, tuple[list[str], float]] = {
+    # UEFA 2025-26
+    "champions league": (
+        ["arsenal", "psg", "paris saint-germain", "paris sg"],
+        0.35,   # final 31-mayo-2026 Budapest
+    ),
+    "europa league": (
+        ["freiburg", "sc freiburg", "aston villa"],
+        0.35,   # final 21-mayo-2026 Bilbao
+    ),
+    "conference league": (
+        ["crystal palace", "rayo vallecano", "rayo"],
+        0.35,   # final 28-mayo-2026 Wroclaw
+    ),
+    # Euroleague Basketball 2025-26 — 4 semifinalistas (semis 22-mayo, final 24-mayo Atenas)
+    "euroleague": (
+        ["olympiacos", "olympiacos piraeus", "fenerbahce", "valencia", "real madrid"],
+        0.20,
+    ),
+    # NBA 2025-26 — Conference Finals en curso (19-mayo); Finals desde 3-junio
+    "nba finals": (
+        [
+            "knicks", "new york knicks",
+            "cavaliers", "cleveland cavaliers",
+            "thunder", "oklahoma city thunder",
+            "spurs", "san antonio spurs",
+        ],
+        0.20,
+    ),
+    "nba championship": (
+        [
+            "knicks", "new york knicks",
+            "cavaliers", "cleveland cavaliers",
+            "thunder", "oklahoma city thunder",
+            "spurs", "san antonio spurs",
+        ],
+        0.20,
+    ),
 }
+
+# Cache para resultados DDG de `_check_team_is_finalist` (TTL 1h)
+_FINALIST_CACHE: dict[str, tuple[bool, float]] = {}
+_FINALIST_TTL: float = 3600.0
+
+
+async def _check_team_is_finalist(team: str, tournament: str) -> tuple[bool, float]:
+    """
+    Returns (is_finalist, floor_prob).
+    1. Checks _KNOWN_FINALISTS hardcoded first (fast, authoritative).
+    2. Falls back to DDG search for confirmation signals.
+    Falls back to (False, 0.0) on any error — never blocks a signal spuriously.
+    """
+    import urllib.parse
+    import urllib.request
+
+    team_lower = team.lower().strip()
+    tournament_lower = tournament.lower().strip()
+
+    # 1. Hardcoded knowledge — fastest path
+    for trn_key, (finalists, floor) in _KNOWN_FINALISTS.items():
+        if trn_key in tournament_lower or tournament_lower in trn_key:
+            is_fin = any(ft in team_lower or team_lower in ft for ft in finalists)
+            if is_fin:
+                logger.info(
+                    "_check_team_is_finalist(%s, %s): HARDCODED → finalist floor=%.2f",
+                    team, tournament, floor,
+                )
+            return (is_fin, floor if is_fin else 0.0)
+
+    # 2. DDG cache
+    cache_key = f"finalist|{team_lower}|{tournament_lower}"
+    now_ts = _time.monotonic()
+    if cache_key in _FINALIST_CACHE:
+        cached_result, cached_ts = _FINALIST_CACHE[cache_key]
+        if now_ts - cached_ts < _FINALIST_TTL:
+            return (cached_result, 0.35 if cached_result else 0.0)
+
+    # 3. DDG search — buscar señales positivas de presencia en la final
+    query = f"{team} {tournament} 2026 final finalist confirmed"
+    url = f"https://html.duckduckgo.com/html/?{urllib.parse.urlencode({'q': query})}"
+
+    def _fetch() -> str:
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (compatible; prediction-bot/1.0)"}
+            )
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except Exception as _e:
+            logger.debug("_check_team_is_finalist(%s): DDG fetch error — %s", team, _e)
+            return ""
+
+    import asyncio as _asyncio
+    loop = _asyncio.get_running_loop()
+    html = await loop.run_in_executor(None, _fetch)
+
+    if not html:
+        _FINALIST_CACHE[cache_key] = (False, now_ts)
+        return (False, 0.0)
+
+    html_lower = html.lower()
+    finalist_signals = [
+        "in the final", "reaches the final", "reached the final",
+        "advances to the final", "advance to the final",
+        "will face", "set to face", "headed to the final",
+        "heading to the final", "confirmed their place in the final",
+        "championship final", "grand final", "title game",
+    ]
+
+    is_finalist = False
+    for signal in finalist_signals:
+        idx = html_lower.find(signal)
+        while idx != -1:
+            window = html_lower[max(0, idx - 200): idx + 200]
+            if team_lower in window:
+                is_finalist = True
+                break
+            idx = html_lower.find(signal, idx + 1)
+        if is_finalist:
+            break
+
+    _FINALIST_CACHE[cache_key] = (is_finalist, now_ts)
+    if is_finalist:
+        logger.info(
+            "_check_team_is_finalist(%s, %s): DDG → IS FINALIST (floor=0.35)",
+            team, tournament,
+        )
+    return (is_finalist, 0.35 if is_finalist else 0.0)
 
 async def _check_team_eliminated(team: str, tournament: str) -> bool:
     """
@@ -1346,7 +1469,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     _nba_win_prob: float | None = None
     _nba_series_wins: tuple[int, int] | None = None
     _is_nba_series_market = False  # default; re-evaluated inside sports block
-    _is_known_finalist = False      # default; set below when team is in _KNOWN_FINALISTS
+    _finalist_floor_value: float = 0.0  # 0.0 → no floor; >0 → apply post-LLM
     if category == "sports":
         _tt = _extract_team_tournament(question)
         if _tt:
@@ -1370,16 +1493,22 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 )
 
             # Detectar si el equipo es finalista conocido → activar floor post-LLM
-            _tm_lower = _tm.lower().strip()
-            for _f_trn, _f_teams in _KNOWN_FINALISTS.items():
-                if _f_trn in _trn.lower() or _trn.lower() in _f_trn:
-                    if any(_ft in _tm_lower or _tm_lower in _ft for _ft in _f_teams):
-                        _is_known_finalist = True
-                        logger.info(
-                            "analyze_market(%s): KNOWN_FINALIST %s (%s) — floor 35%% activado",
-                            market_id, _tm, _trn,
-                        )
-                        break
+            try:
+                _fin_result, _fin_floor = await asyncio.wait_for(
+                    _check_team_is_finalist(_tm, _trn), timeout=5.0
+                )
+                if _fin_result:
+                    _finalist_floor_value = _fin_floor
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "analyze_market(%s): _check_team_is_finalist timeout >5s — skip (%s)",
+                    market_id, _tm,
+                )
+            except Exception as _fe:
+                logger.debug(
+                    "analyze_market(%s): error verificando finalista %s — %s",
+                    market_id, _tm, _fe,
+                )
 
         # FIX 4: "Will X win on YYYY-MM-DD" — partido concreto de liga desconocida → PASS
         # Solo bloquear si el equipo NO aparece en ninguna liga soportada.
@@ -2029,13 +2158,12 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 market_id, _pct_needed,
             )
 
-    # FINALIST_FLOOR: equipo conocido en la final de torneo → prob mínima 35%
-    # El LLM sin contexto externo devuelve probs absurdas (5-10%) para finalistas.
-    # Un equipo en una final de 2 participantes tiene ≥35% de probabilidad real.
-    # floor=0.35 con mercado a 0.42 → edge=-0.07 → PASS (nunca BUY_NO).
-    if _is_known_finalist and real_prob < 0.35:
+    # FINALIST_FLOOR: equipo conocido en fases finales de torneo → prob mínima floor
+    # floor=0.35 para finales de 2 equipos (≈50% base); floor=0.20 para semifinales (≈25% base)
+    # El LLM sin contexto devuelve probs absurdas (5%) al no saber que el equipo llegó a la final.
+    if _finalist_floor_value > 0.0 and real_prob < _finalist_floor_value:
         _old_finalist = real_prob
-        real_prob = 0.35
+        real_prob = _finalist_floor_value
         edge = round(real_prob - price_yes, 4)
         if edge >= POLY_MIN_EDGE:
             recommendation = "BUY_YES"
@@ -2043,15 +2171,18 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             recommendation = "BUY_NO"
         else:
             recommendation = "PASS"
-        _finalist_note = "⚠️ Finalista conocido: prob_min=35% (equipo en final del torneo)"
+        _finalist_note = (
+            f"⚠️ Finalista conocido: prob_min={_finalist_floor_value:.0%} "
+            f"(equipo en fase final del torneo)"
+        )
         reasoning = f"{_finalist_note}\n{reasoning}" if reasoning else _finalist_note
         logger.info(
-            "analyze_market(%s): FINALIST_FLOOR %.3f→0.350 → rec=%s edge=%.3f",
-            market_id, _old_finalist, recommendation, edge,
+            "analyze_market(%s): FINALIST_FLOOR %.3f→%.3f → rec=%s edge=%.3f",
+            market_id, _old_finalist, _finalist_floor_value, recommendation, edge,
         )
         # Registrar como floor explícito para que FLOOR_REENFORCE lo proteja de caps posteriores
         _price_floor_applied = True
-        _price_floor_value = 0.35
+        _price_floor_value = _finalist_floor_value
 
     # ALREADY_EXCEEDED: precio actual ya superó el target → prob mínima 90%
     # Aplica cuando current_price > target Y la pregunta implica alcanzar un precio al alza
