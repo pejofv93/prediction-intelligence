@@ -19,22 +19,68 @@ _HTTP_TIMEOUT = 20.0
 
 # Categorías para buckets específicos — variedad forzada por categoría
 _SCAN_CATEGORIES: dict[str, list[str]] = {
-    "crypto":      ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "altcoin", "halving"],
-    "sports":      ["world cup", "champions league", "nba", "super bowl", "final", "tournament", "championship", "nfl", "mlb", "wimbledon", "olympic", "copa"],
-    "politics":    ["election", "president", "vote", "congress", "senate", "minister", "parliament", "referendum", "prime minister", "chancellor"],
-    "culture":     ["oscar", "grammy", "emmy", "movie", "album", "singer", "actor", "celebrity", "taylor", "award", "box office", "netflix", "spotify", "billboard"],
-    "geopolitics": ["war", "ceasefire", "iran", "strait", "hormuz", "conflict", "nato", "military", "invasion", "sanctions", "nuclear", "missile"],
-    "science":     ["climate", "nasa", "space", "vaccine", "fda", "cancer", "quantum", "discovery", "mission", "ai model"],
-    "business":    ["apple", "tesla", "microsoft", "amazon", "google", "meta", "nvidia", "earnings", "merger", "acquisition", "ipo", "layoffs"],
+    "crypto": [
+        "btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "sol",
+        "defi", "blockchain", "altcoin", "halving", "xrp", "ripple",
+        "doge", "dogecoin", "bnb", "binance", "usdc", "stablecoin",
+        "coinbase", "bybit", "kraken", "spot etf", "crypto etf",
+    ],
+    "sports": [
+        "world cup", "champions league", "nba", "super bowl", "final",
+        "tournament", "championship", "nfl", "mlb", "wimbledon", "olympic",
+        "copa", "roland garros", "french open", "us open", "atp", "wta",
+        "premier league", "la liga", "bundesliga", "serie a", "ligue 1",
+        "formula 1", " f1 ", "ufc", "boxing", "playoffs", "stanley cup",
+    ],
+    "politics": [
+        # cargos y procesos electorales
+        "election", "president", "vote", "congress", "senate", "minister",
+        "parliament", "referendum", "prime minister", "chancellor",
+        "governor", "mayor", "cabinet", "supreme court", "nominee",
+        "midterm", "primary", "administration", "secretary of state",
+        # personas y partidos — Polymarket tiene muchos mercados con nombres propios
+        "trump", "biden", "harris", "democrat", "republican", "gop",
+        "white house", "oval office", "executive order", "impeach",
+        "xi jinping", "macron", "modi", "scholz", "starmer", "meloni",
+        # framing habitual en mercados Polymarket de política
+        "win the", "win a", "win his", "win her", "be elected",
+        "be confirmed", "be appointed", "be nominated", "be impeached",
+        "pass the", "sign the", "veto", "declare", "resign", "fired",
+    ],
+    "culture": [
+        "oscar", "grammy", "emmy", "movie", "album", "singer", "actor",
+        "celebrity", "taylor", "award", "box office", "netflix", "spotify",
+        "billboard", "superbowl halftime", "bafta", "cannes", "golden globe",
+        "kardashian", "beyonce", "swift", "rihanna", "drake", "music chart",
+    ],
+    "geopolitics": [
+        "war", "ceasefire", "iran", "strait", "hormuz", "conflict", "nato",
+        "military", "invasion", "sanctions", "nuclear", "missile",
+        "ukraine", "russia", "israel", "gaza", "china", "taiwan",
+        "north korea", "south china sea", "peace deal", "peace agreement",
+        "treaty", "diplomatic", "regime", "coup", "uprising",
+    ],
+    "science": [
+        "climate", "nasa", "space", "vaccine", "fda", "cancer", "quantum",
+        "discovery", "mission", "ai model", "openai", "anthropic", "gpt",
+        "starship", "moon", "mars", "cern",
+    ],
+    "business": [
+        "apple", "tesla", "microsoft", "amazon", "google", "meta", "nvidia",
+        "earnings", "merger", "acquisition", "ipo", "layoffs", "recession",
+        "fed rate", "interest rate", "inflation", "gdp", "s&p", "dow jones",
+        "nasdaq", "stock market", "oil price", "gold price",
+    ],
 }
 
 # Límites por bucket de categoría
-_BUCKET_CRYPTO   = 10
-_BUCKET_SPORTS   = 10
-_BUCKET_POLITICS = 10
-_BUCKET_CULTURE  = 5
-_BUCKET_OTHER    = 10   # geopolítica + ciencia + negocio + otros combinados
-_BUCKET_NEW      = 20   # mercados creados últimas 48h
+_BUCKET_CRYPTO     = 10
+_BUCKET_SPORTS     = 10
+_BUCKET_POLITICS   = 10
+_BUCKET_GEOPOLITICS = 8  # bucket propio — muchos mercados de alto volumen (Iran, Ucrania…)
+_BUCKET_CULTURE    = 5
+_BUCKET_OTHER      = 7   # ciencia + negocio + otros no clasificados
+_BUCKET_NEW        = 20  # mercados creados últimas 48h
 
 # Keywords específicos de deportes para el bucket deportivo dedicado
 _SPORTS_KEYWORDS = [
@@ -325,42 +371,75 @@ def _parse_market(raw: dict) -> dict | None:
 
 
 async def _fetch_raw_pool(order: str = "volume24hr", limit: int = 500) -> list[dict]:
-    """Fetch genérico de mercados activos de la Gamma API. Devuelve parsed list."""
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(
-                f"{GAMMA_API}/markets",
-                params={"active": "true", "closed": "false",
-                        "order": order, "ascending": "false", "limit": str(limit)},
-            )
-        if resp.status_code != 200:
-            logger.error("_fetch_raw_pool(%s): API respondio %d", order, resp.status_code)
-            return []
-        raw_data = resp.json()
-        raw_list = raw_data if isinstance(raw_data, list) else raw_data.get("markets", raw_data.get("data", []))
-    except Exception:
-        logger.error("_fetch_raw_pool(%s): error de red", order, exc_info=True)
-        return []
-    result = []
-    for raw in raw_list:
-        try:
-            m = _parse_market(raw)
-            if m:
-                result.append(m)
-        except Exception:
-            pass
-    return result
+    """
+    Fetch paginado de mercados activos de la Gamma API.
+    La API tiene un tope real de ~100 por página aunque se pida limit=500.
+    Itera con offset hasta completar `limit` resultados o agotar páginas.
+    """
+    _PAGE_SIZE = 100  # tope real de la API
+    result: list[dict] = []
+    seen_ids: set[str] = set()
+    offset = 0
+
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        while len(result) < limit:
+            try:
+                resp = await client.get(
+                    f"{GAMMA_API}/markets",
+                    params={
+                        "active": "true",
+                        "closed": "false",
+                        "order": order,
+                        "ascending": "false",
+                        "limit": str(_PAGE_SIZE),
+                        "offset": str(offset),
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.error("_fetch_raw_pool(%s) offset=%d: API respondio %d", order, offset, resp.status_code)
+                    break
+                raw_data = resp.json()
+                raw_list = raw_data if isinstance(raw_data, list) else raw_data.get("markets", raw_data.get("data", []))
+            except Exception:
+                logger.error("_fetch_raw_pool(%s) offset=%d: error de red", order, offset, exc_info=True)
+                break
+
+            if not raw_list:
+                break
+
+            page_added = 0
+            for raw in raw_list:
+                try:
+                    m = _parse_market(raw)
+                    if m and m["market_id"] not in seen_ids:
+                        seen_ids.add(m["market_id"])
+                        result.append(m)
+                        page_added += 1
+                except Exception:
+                    pass
+
+            logger.debug("_fetch_raw_pool(%s) offset=%d: %d en página, total=%d", order, offset, page_added, len(result))
+
+            # Si la página vino incompleta, no hay más resultados
+            if len(raw_list) < _PAGE_SIZE:
+                break
+            offset += _PAGE_SIZE
+
+    return result[:limit]
 
 
 async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
     """
-    ~65 mercados por ciclo en 6 buckets con variedad forzada por categoría:
-      - Crypto   10: top 10 crypto por volumen (BTC, ETH, SOL…)
-      - Sports   10: top 10 deportes por volumen (NBA, UCL, F1…)
-      - Politics 10: top 10 políticos por volumen (elecciones, congreso…)
-      - Culture   5: top 5 cultura/entretenimiento (Oscar, Grammy…)
-      - Other    10: geopolítica + ciencia + negocio + resto (máx 10 en total)
-      - New      20: creados últimas 48h (precio aún no calibrado)
+    ~70 mercados por ciclo en 7 buckets con variedad forzada por categoría:
+      - Crypto       10: BTC, ETH, SOL, DeFi…
+      - Sports       10: NBA, Copa del Mundo, Roland Garros…
+      - Politics     10: elecciones, Trump, congreso…
+      - Geopolitics   8: Irán, Ucrania, Rusia, Israel…  (bucket propio)
+      - Culture       5: Oscar, Grammy, Netflix…
+      - Other         7: ciencia + negocio + miscelánea
+      - New          20: creados últimas 48h
+    Pool paginado (offset+100 hasta 500 total) para superar el tope real
+    de ~100 resultados por página de la Gamma API.
     Guarda en Firestore poly_markets. Devuelve lista combinada.
     """
     now = datetime.now(timezone.utc)
@@ -386,17 +465,17 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
         return result
 
     # Buckets específicos — variedad garantizada por categoría
-    bucket_crypto   = _take(buckets["crypto"], _BUCKET_CRYPTO)
+    bucket_crypto      = _take(buckets["crypto"], _BUCKET_CRYPTO)
     # Sports usa los keywords extendidos (_is_sports_market) + categoría
     sports_all = [m for m in by_vol if _is_sports_market(m.get("question", ""))]
-    bucket_sports   = _take(sports_all, _BUCKET_SPORTS)
-    bucket_politics = _take(buckets["politics"], _BUCKET_POLITICS)
-    bucket_culture  = _take(buckets["culture"], _BUCKET_CULTURE)
+    bucket_sports      = _take(sports_all, _BUCKET_SPORTS)
+    bucket_politics    = _take(buckets["politics"], _BUCKET_POLITICS)
+    bucket_geopolitics = _take(buckets["geopolitics"], _BUCKET_GEOPOLITICS)
+    bucket_culture     = _take(buckets["culture"], _BUCKET_CULTURE)
 
-    # Other: geopolítica + ciencia + negocio + sin categoría — máximo 10 total
+    # Other: ciencia + negocio + sin categoría — máximo _BUCKET_OTHER total
     other_pool = (
-        buckets.get("geopolitics", [])
-        + buckets.get("science", [])
+        buckets.get("science", [])
         + buckets.get("business", [])
         + buckets.get("other", [])
     )
@@ -418,7 +497,7 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
 
     combined = (
         bucket_crypto + bucket_sports + bucket_politics
-        + bucket_culture + bucket_other + bucket_new
+        + bucket_geopolitics + bucket_culture + bucket_other + bucket_new
     )
 
     saved = 0
@@ -430,10 +509,10 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
             logger.error("fetch_diverse_markets: error guardando %s", market["market_id"], exc_info=True)
 
     logger.info(
-        "fetch_diverse_markets: crypto=%d sports=%d politics=%d culture=%d other=%d nuevos=%d total=%d saved=%d",
+        "fetch_diverse_markets: crypto=%d sports=%d politics=%d geo=%d culture=%d other=%d nuevos=%d total=%d saved=%d",
         len(bucket_crypto), len(bucket_sports), len(bucket_politics),
-        len(bucket_culture), len(bucket_other), len(bucket_new),
-        len(combined), saved,
+        len(bucket_geopolitics), len(bucket_culture), len(bucket_other),
+        len(bucket_new), len(combined), saved,
     )
     return combined
 
