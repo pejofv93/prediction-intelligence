@@ -333,20 +333,20 @@ async def send_weekly_report() -> JSONResponse:
         if week_preds:
             correct_preds = [p for p in week_preds if p.get("correct") is True]
             if correct_preds:
-                best_pred = max(correct_preds, key=lambda p: float(p.get("edge", 0)))
+                best_pred = max(correct_preds, key=lambda p: float(p.get("edge") or 0))
                 best_match = (
                     f"{best_pred.get('home_team', '?')} vs {best_pred.get('away_team', '?')}"
                 )
-                best_edge = float(best_pred.get("edge", 0))
+                best_edge = float(best_pred.get("edge") or 0)
                 best_result = best_pred.get("result", "N/A") or "N/A"
 
             wrong_preds = [p for p in week_preds if p.get("correct") is False]
             if wrong_preds:
-                worst_pred = min(wrong_preds, key=lambda p: float(p.get("confidence", 1)))
+                worst_pred = min(wrong_preds, key=lambda p: float(p.get("confidence") or 1))
                 worst_match = (
                     f"{worst_pred.get('home_team', '?')} vs {worst_pred.get('away_team', '?')}"
                 )
-                worst_edge = float(worst_pred.get("edge", 0))
+                worst_edge = float(worst_pred.get("edge") or 0)
                 worst_error = worst_pred.get("error_type", "N/A") or "N/A"
 
         # 4. poly_predictions de la semana anterior
@@ -360,7 +360,7 @@ async def send_weekly_report() -> JSONResponse:
         poly_total = len(poly_preds)
         poly_alerts = sum(1 for p in poly_preds if p.get("alerted") is True)
         poly_avg_edge = (
-            sum(float(p.get("edge", 0)) for p in poly_preds) / poly_total
+            sum(float(p.get("edge") or 0) for p in poly_preds) / poly_total
             if poly_total > 0
             else 0.0
         )

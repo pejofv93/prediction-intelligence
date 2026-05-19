@@ -15,9 +15,6 @@ jobs:
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
             --connect-timeout 60 \
             --max-time 300 \
-            --retry 2 \
-            --retry-delay 15 \
-            --retry-connrefused \
             --fail --silent --show-error
 
       - name: Trigger production backtest (actualiza model_weights con datos reales)
