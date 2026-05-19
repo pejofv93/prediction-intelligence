@@ -1092,7 +1092,7 @@ def _extract_team_tournament(question: str) -> tuple[str, str] | None:
 
 
 _KNOWN_ELIMINATED: dict[str, dict[str, bool]] = {
-    # UCL 2025-26: Bayern eliminado por PSG el 6-mayo-2026; final PSG vs Arsenal 30-mayo Budapest
+    # UCL 2025-26: Bayern eliminado por PSG el 6-mayo-2026; final PSG vs Arsenal 31-mayo Budapest
     "champions league": {
         "bayern": True, "bayern munich": True, "fc bayern": True,
         "real madrid": True, "barcelona": True, "atletico madrid": True,
@@ -1101,6 +1101,17 @@ _KNOWN_ELIMINATED: dict[str, dict[str, bool]] = {
         "psg": False, "paris saint-germain": False,  # PSG finalista
         "arsenal": False,                              # Arsenal finalista
     },
+}
+
+# Equipos que están EN LA FINAL de un torneo → prob mínima 35% (2-team final ≈ 50% base)
+# El LLM sin contexto externo puede dar probabilidades absurdamente bajas (5-10%) para
+# finalistas cuando no sabe que el equipo llegó a la final.
+# floor=0.35 → con precio mercado >0.42 el edge queda en [-0.07, ...] → PASS en lugar de BUY_NO.
+_KNOWN_FINALISTS: dict[str, list[str]] = {
+    # UCL 2025-26: final el 31-mayo-2026 en Budapest
+    "champions league": ["arsenal", "psg", "paris saint-germain"],
+    "europa league": [],   # completar cuando se conozca la final
+    "conference league": [],
 }
 
 async def _check_team_eliminated(team: str, tournament: str) -> bool:
@@ -1335,6 +1346,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     _nba_win_prob: float | None = None
     _nba_series_wins: tuple[int, int] | None = None
     _is_nba_series_market = False  # default; re-evaluated inside sports block
+    _is_known_finalist = False      # default; set below when team is in _KNOWN_FINALISTS
     if category == "sports":
         _tt = _extract_team_tournament(question)
         if _tt:
@@ -1356,6 +1368,18 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     "analyze_market(%s): error verificando eliminación de %s — %s",
                     market_id, _tm, _te,
                 )
+
+            # Detectar si el equipo es finalista conocido → activar floor post-LLM
+            _tm_lower = _tm.lower().strip()
+            for _f_trn, _f_teams in _KNOWN_FINALISTS.items():
+                if _f_trn in _trn.lower() or _trn.lower() in _f_trn:
+                    if any(_ft in _tm_lower or _tm_lower in _ft for _ft in _f_teams):
+                        _is_known_finalist = True
+                        logger.info(
+                            "analyze_market(%s): KNOWN_FINALIST %s (%s) — floor 35%% activado",
+                            market_id, _tm, _trn,
+                        )
+                        break
 
         # FIX 4: "Will X win on YYYY-MM-DD" — partido concreto de liga desconocida → PASS
         # Solo bloquear si el equipo NO aparece en ninguna liga soportada.
@@ -2004,6 +2028,30 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "analyze_market(%s): NEAR_TARGET_NO_CONTRA BUY_NO→PASS (dip %.1f%% cercano)",
                 market_id, _pct_needed,
             )
+
+    # FINALIST_FLOOR: equipo conocido en la final de torneo → prob mínima 35%
+    # El LLM sin contexto externo devuelve probs absurdas (5-10%) para finalistas.
+    # Un equipo en una final de 2 participantes tiene ≥35% de probabilidad real.
+    # floor=0.35 con mercado a 0.42 → edge=-0.07 → PASS (nunca BUY_NO).
+    if _is_known_finalist and real_prob < 0.35:
+        _old_finalist = real_prob
+        real_prob = 0.35
+        edge = round(real_prob - price_yes, 4)
+        if edge >= POLY_MIN_EDGE:
+            recommendation = "BUY_YES"
+        elif edge <= -POLY_MIN_EDGE:
+            recommendation = "BUY_NO"
+        else:
+            recommendation = "PASS"
+        _finalist_note = "⚠️ Finalista conocido: prob_min=35% (equipo en final del torneo)"
+        reasoning = f"{_finalist_note}\n{reasoning}" if reasoning else _finalist_note
+        logger.info(
+            "analyze_market(%s): FINALIST_FLOOR %.3f→0.350 → rec=%s edge=%.3f",
+            market_id, _old_finalist, recommendation, edge,
+        )
+        # Registrar como floor explícito para que FLOOR_REENFORCE lo proteja de caps posteriores
+        _price_floor_applied = True
+        _price_floor_value = 0.35
 
     # ALREADY_EXCEEDED: precio actual ya superó el target → prob mínima 90%
     # Aplica cuando current_price > target Y la pregunta implica alcanzar un precio al alza
