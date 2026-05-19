@@ -299,7 +299,10 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
         return []
 
     if not p1_stats and not p2_stats:
-        logger.debug("tennis_analyzer(%s): sin stats para %s o %s", match_id, p1_name, p2_name)
+        logger.debug(
+            "tennis_analyzer(%s): sin stats para '%s' (id=%s) ni '%s' (id=%s)",
+            match_id, p1_name, home_id, p2_name, away_id,
+        )
         return []
 
     # H2H desde el campo del match (guardado por tennis_collector)

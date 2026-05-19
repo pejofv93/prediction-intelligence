@@ -21,7 +21,9 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-_HOST = "tennisapi1.p.rapidapi.com"  # sustituye tennis-api-atp-wta-itf (404)
+# tennisapi1.p.rapidapi.com → 404 en todos los endpoints desde 2026-05-01
+# api-tennis.p.rapidapi.com es el host alternativo con misma clave RapidAPI
+_HOST = "api-tennis.p.rapidapi.com"
 _BASE = f"https://{_HOST}"
 _HTTP_TIMEOUT = 20.0
 _DELAY = 1.5

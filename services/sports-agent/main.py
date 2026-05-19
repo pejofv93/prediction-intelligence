@@ -1130,13 +1130,22 @@ async def _bg_analyze() -> None:
                 and str(d.to_dict().get("match_id", "")) in upcoming_ids_48h
             ]
             logger.info("analyze: %d partidos de tenis (48h) a analizar", len(tennis_docs))
+            _tennis_sigs = 0
+            _tennis_no_stats = 0
             for tdoc in tennis_docs:
                 match = tdoc.to_dict()
                 try:
                     sigs = await generate_tennis_signals(match, weights_version)
-                    signals_generated += len(sigs)
+                    if sigs:
+                        _tennis_sigs += len(sigs)
+                    else:
+                        _tennis_no_stats += 1
                 except Exception:
                     logger.error("analyze: error tennis %s", match.get("match_id"), exc_info=True)
+            logger.info(
+                "analyze: tenis — %d señales, %d sin stats (RapidAPI host roto: necesita api-tennis.p.rapidapi.com)",
+                _tennis_sigs, _tennis_no_stats,
+            ) if _tennis_no_stats else logger.info("analyze: tenis — %d señales generadas", _tennis_sigs)
         except Exception:
             logger.error("analyze: error cargando tennis_analyzer", exc_info=True)
 
