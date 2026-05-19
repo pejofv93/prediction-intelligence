@@ -63,14 +63,24 @@ def _is_sports_market(question: str) -> bool:
     return any(kw in q for kw in _SPORTS_KEYWORDS)
 
 
-def _quality_ok(market: dict, now: datetime) -> bool:
+def _quality_ok(
+    market: dict,
+    now: datetime,
+    min_volume: float = 1000,
+    max_days: int = 60,
+) -> bool:
     """
     Filtro de calidad mínima común a todos los buckets:
-    - volume_24h >= 5000
-    - days_to_close entre 2 y 30
+    - volume_24h >= min_volume
+    - days_to_close entre 1 y max_days
     - price_yes no extremo (no prácticamente resuelto)
+    min_volume default 1000 (más permisivo que el 5000 anterior para capturar
+    mercados válidos con volumen moderado).
+    max_days default 60 — los 30 anteriores excluían la mayoría de mercados
+    crypto/política cuyas resoluciones son típicamente a 30-90 días.
+    min_days bajado a 1 — permite mercados deportivos del mismo día o siguiente.
     """
-    if market.get("volume_24h", 0) < 5000:
+    if market.get("volume_24h", 0) < min_volume:
         return False
     end_date = market.get("end_date")
     if not end_date or not isinstance(end_date, datetime):
@@ -78,7 +88,7 @@ def _quality_ok(market: dict, now: datetime) -> bool:
     if end_date.tzinfo is None:
         end_date = end_date.replace(tzinfo=timezone.utc)
     days = (end_date - now).total_seconds() / 86400
-    if days < 2 or days > 30:
+    if days < 1 or days > max_days:
         return False
     price_yes = market.get("price_yes", 0.5)
     if price_yes < 0.05 or price_yes > 0.95:
@@ -358,8 +368,12 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
 
     # Pool principal por volumen descendente
     vol_pool = await _fetch_raw_pool(order="volume24hr", limit=500)
-    qualified = [m for m in vol_pool if _quality_ok(m, now)]
+    qualified = [m for m in vol_pool if _quality_ok(m, now, min_volume=min_volume)]
     by_vol = sorted(qualified, key=lambda m: m["volume_24h"], reverse=True)
+    logger.info(
+        "fetch_diverse_markets: pool=%d qualified=%d (vol>=%.0f, days 1-60)",
+        len(vol_pool), len(qualified), min_volume,
+    )
 
     # Clasificar por categoría
     buckets = _build_category_buckets(by_vol)
@@ -392,7 +406,7 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
     new_pool = await _fetch_raw_pool(order="startDate", limit=150)
     new_qualified = [
         m for m in new_pool
-        if _quality_ok(m, now)
+        if _quality_ok(m, now, min_volume=min_volume)
         and m["market_id"] not in used_ids
         and m.get("created_at") is not None
         and (

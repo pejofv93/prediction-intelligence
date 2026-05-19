@@ -1970,12 +1970,16 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     reasoning = _validate_prob_in_reasoning(real_prob, reasoning)
 
     # FIX 2: near-target floor — target < 10% de distancia → mínimo 60% + no señal contraria
+    _price_floor_applied = False
+    _price_floor_value: float = 0.0
     if _price_ctx and _pct_needed is not None and abs(_pct_needed) < 10.0:
         _near_floor = 0.60
         if real_prob <= _near_floor:
             _old_near = real_prob
             real_prob = _near_floor
             edge = round(real_prob - price_yes, 4)
+            _price_floor_applied = True
+            _price_floor_value = _near_floor
             _near_dir = "subida" if _pct_needed > 0 else "bajada"
             _near_note = (
                 f"⚠️ Floor target cercano: {_price_ctx[0]} a solo "
@@ -2017,6 +2021,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             _old_rp_exc = real_prob
             real_prob = _exceeded_floor
             edge = round(real_prob - price_yes, 4)
+            _price_floor_applied = True
+            _price_floor_value = _exceeded_floor
             _exc_note = (
                 f"⚠️ Target ya superado: {_price_ctx[0]} cotiza "
                 f"${_current_price:,.2f} > target ${_price_ctx[2]:,.0f} "
@@ -2381,6 +2387,24 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             confidence = float(_tmp.get("confidence", confidence))
         except Exception as _fga:
             logger.debug("groq_analyzer: error aplicando F&G — %s", _fga)
+
+    # Re-enforce explicit price floor — takes priority over LOW_PRICE_CAP, LOW_PRICE_VOL_CEIL, etc.
+    # The near-target floor and already-exceeded floor are grounded in real price data,
+    # so they must survive downstream caps that don't know the asset is that close to target.
+    if _price_floor_applied and real_prob < _price_floor_value:
+        _old_pre_floor = real_prob
+        real_prob = _price_floor_value
+        edge = round(real_prob - price_yes, 4)
+        if edge >= POLY_MIN_EDGE:
+            recommendation = "BUY_YES"
+        elif edge <= -POLY_MIN_EDGE:
+            recommendation = "BUY_NO"
+        else:
+            recommendation = "PASS"
+        logger.info(
+            "analyze_market(%s): FLOOR_REENFORCE %.3f→%.3f (floor=%.2f post-cap recovery)",
+            market_id, _old_pre_floor, real_prob, _price_floor_value,
+        )
 
     # Capa final: re-aplicar limpieza de reasoning con los valores definitivos
     # (recommendation puede haber cambiado por auto-corrección, correlación, etc.)
