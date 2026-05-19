@@ -46,6 +46,15 @@ _HOME_ADV = {
     "ACB":        BASKETBALL_HOME_ADV_EURO,
 }
 
+# Mercados NBA son más eficientes → exigir edge mayor antes de alertar.
+# Euroleague/ACB: menor liquidez → umbral menor.
+_LEAGUE_MIN_EDGE = {
+    "NBA":        0.06,
+    "NBA_GL":     0.05,
+    "EUROLEAGUE": 0.04,
+    "ACB":        0.04,
+}
+
 
 def _american_to_decimal(ml: int) -> float:
     """Moneyline americano → decimal (Caesars, DraftKings)."""
@@ -443,6 +452,32 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 return True
         return False
 
+    def _days_since_last_game(raw_matches: list) -> int | None:
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+        for m in reversed(raw_matches[-5:]):
+            d = str(m.get("match_date", ""))[:10]
+            if d and d < today_iso:
+                try:
+                    from datetime import date as _date
+                    return (_date.fromisoformat(today_iso) - _date.fromisoformat(d)).days
+                except ValueError:
+                    pass
+        return None
+
+    def _consecutive_wins(raw_matches: list, team_id: int) -> int:
+        streak = 0
+        for m in reversed(raw_matches[-10:]):
+            is_home = m.get("home_team_id") == team_id or m.get("was_home") is True
+            gh = float(m.get("goals_home", 0) or 0)
+            ga = float(m.get("goals_away", 0) or 0)
+            pts_for = gh if is_home else ga
+            pts_against = ga if is_home else gh
+            if pts_for > pts_against:
+                streak += 1
+            else:
+                break
+        return streak
+
     home_b2b = _played_yesterday(home_stats.get("raw_matches", []))
     away_b2b = _played_yesterday(away_stats.get("raw_matches", []))
 
@@ -478,6 +513,50 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
             match_id, away_name, adj_p,
         )
         rats = {**rats, "p_home_win": adj_p}
+
+    # --- REST_ADVANTAGE: 3+ días descanso vs 1 día → ventaja real en NBA ---
+    _home_rest = _days_since_last_game(home_stats.get("raw_matches", []))
+    _away_rest = _days_since_last_game(away_stats.get("raw_matches", []))
+    if _home_rest is not None and _away_rest is not None:
+        _rest_diff = _home_rest - _away_rest
+        if _rest_diff >= 2:
+            # Local con 2+ días más de descanso → ventaja probabilística
+            p_before = rats["p_home_win"]
+            rats = {**rats, "p_home_win": round(min(0.99, p_before + 0.03), 4)}
+            logger.info(
+                "basketball_analyzer(%s): REST_ADVANTAGE home=%ddays away=%ddays → p_home %.3f→%.3f",
+                match_id, _home_rest, _away_rest, p_before, rats["p_home_win"],
+            )
+        elif _rest_diff <= -2:
+            p_before = rats["p_home_win"]
+            rats = {**rats, "p_home_win": round(max(0.01, p_before - 0.03), 4)}
+            logger.info(
+                "basketball_analyzer(%s): REST_DISADVANTAGE home=%ddays away=%ddays → p_home %.3f→%.3f",
+                match_id, _home_rest, _away_rest, p_before, rats["p_home_win"],
+            )
+
+    # --- FORM_CONTEXT_PENALTY: diferencia de forma >20pp → -10% conf ---
+    _form_h_raw = float(home_stats.get("form_score", 50.0))
+    _form_a_raw = float(away_stats.get("form_score", 50.0))
+    _form_diff = abs(_form_h_raw - _form_a_raw)
+    if _form_diff > 20.0:
+        conf = round(conf * 0.90, 4)
+        logger.info(
+            "basketball_analyzer(%s): FORM_CONTEXT_PENALTY form_h=%.0f form_a=%.0f diff=%.0f → conf=%.3f",
+            match_id, _form_h_raw, _form_a_raw, _form_diff, conf,
+        )
+
+    # --- STREAK_PENALTY: rival en racha de 3+ victorias consecutivas → -10% conf ---
+    _home_id_int = int(home_stats.get("team_id", 0))
+    _away_id_int = int(away_stats.get("team_id", 0))
+    _away_streak = _consecutive_wins(away_stats.get("raw_matches", []), _away_id_int)
+    _home_streak = _consecutive_wins(home_stats.get("raw_matches", []), _home_id_int)
+    if _away_streak >= 3 or _home_streak >= 3:
+        conf = round(conf * 0.90, 4)
+        logger.info(
+            "basketball_analyzer(%s): STREAK_PENALTY home_streak=%d away_streak=%d → conf=%.3f",
+            match_id, _home_streak, _away_streak, conf,
+        )
 
     # --- Seeding NBA Playoffs ---
     home_seed: int | None = game.get("home_seed")
@@ -591,6 +670,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 )
                 ml = None
         if ml:
+            _league_min_edge = _LEAGUE_MIN_EDGE.get(league, BASKETBALL_MIN_EDGE)
             for team, prob, odds, tag, team_seed, opp_seed in [
                 (home_name, rats["p_home_win"], ml["home_odds"], "home", home_seed, away_seed),
                 (away_name, 1.0 - rats["p_home_win"], ml["away_odds"], "away", away_seed, home_seed),
@@ -623,11 +703,11 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 edge_discount = 0.80 if (opp_seed and opp_seed <= 2) else 1.0
                 from analyzers.value_bet_engine import calculate_ev as _cev
                 _ev_check = _cev(prob, odds)
-                if _ev_check <= BASKETBALL_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
+                if _ev_check <= _league_min_edge or conf <= SPORTS_MIN_CONFIDENCE:
                     logger.info(
                         "basketball_analyzer(%s): ML %s FILTRADO — "
-                        "ev=%.4f (min=%.2f) conf=%.3f (min=%.2f) seed=%s opp_seed=%s [%s vs %s]",
-                        match_id, tag, _ev_check, BASKETBALL_MIN_EDGE,
+                        "ev=%.4f (min=%.2f league=%s) conf=%.3f (min=%.2f) seed=%s opp_seed=%s [%s vs %s]",
+                        match_id, tag, _ev_check, _league_min_edge, league,
                         conf, SPORTS_MIN_CONFIDENCE,
                         team_seed, opp_seed, home_name, away_name,
                     )
