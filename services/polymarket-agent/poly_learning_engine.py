@@ -131,6 +131,22 @@ def _analyze(trades: list[dict]) -> dict:
             }
         return result
 
+    def _buy_no_sports_stats() -> dict:
+        """BUY_NO específicamente en categoría sports — para threshold separado."""
+        subset = [
+            t for t in trades
+            if _get_selection(t) == "BUY_NO"
+            and (t.get("category") == "sports" or t.get("signal_data", {}).get("category") == "sports")
+        ]
+        w = [t for t in subset if t.get("result") == "win"]
+        edges = [abs(float(t.get("edge", 0))) for t in subset]
+        return {
+            "total": len(subset),
+            "wins": len(w),
+            "accuracy": round(len(w) / len(subset), 4) if subset else 0.0,
+            "avg_abs_edge": round(sum(edges) / len(edges), 4) if edges else 0.0,
+        }
+
     return {
         "total": total,
         "wins": len(wins),
@@ -138,6 +154,7 @@ def _analyze(trades: list[dict]) -> dict:
         "accuracy": accuracy,
         "buy_yes": _dir_stats("BUY_YES"),
         "buy_no": _dir_stats("BUY_NO"),
+        "buy_no_sports": _buy_no_sports_stats(),
         "vol_spike": _vol_stats(),
         "by_category": _cat_stats(),
     }
@@ -305,11 +322,13 @@ def run_poly_learning() -> dict:
     bucket_stats = _bucket_stats(trades)
     llm_bias = _category_llm_bias(trades)
     logger.info("run_poly_learning: buckets=%s bias_cats=%s", list(bucket_stats.keys()), list(llm_bias.keys()))
+    _bns = stats["buy_no_sports"]
     logger.info(
-        "run_poly_learning: total=%d acc=%.0f%% | BUY_YES %d/%.0f%% | BUY_NO %d/%.0f%%",
+        "run_poly_learning: total=%d acc=%.0f%% | BUY_YES %d/%.0f%% | BUY_NO %d/%.0f%% | BUY_NO_sports %d/%.0f%%",
         stats["total"], stats["accuracy"] * 100,
         stats["buy_yes"]["total"], stats["buy_yes"]["accuracy"] * 100,
         stats["buy_no"]["total"], stats["buy_no"]["accuracy"] * 100,
+        _bns["total"], _bns["accuracy"] * 100,
     )
 
     # 3. Cargar pesos actuales
@@ -329,6 +348,23 @@ def run_poly_learning() -> dict:
         "BUY_NO",
     )
 
+    # Umbral BUY_NO específico para deportes.
+    # Si accuracy de BUY_NO en sports < 50% con ≥ 3 trades → subir edge mínimo 50% sobre base.
+    # Si < 3 trades: usar el mismo threshold que BUY_NO global.
+    _prev_sports_no_edge = float(current.get("buy_no_sports_min_edge", new_no_edge))
+    if _bns["total"] >= 3 and _bns["accuracy"] < 0.50:
+        # Accuracy mala: subir threshold un 50% sobre el edge mínimo de BUY_NO global
+        new_no_sports_edge = round(min(_EDGE_MAX, max(_prev_sports_no_edge, new_no_edge * 1.5)), 4)
+    elif _bns["total"] >= 3 and _bns["accuracy"] >= 0.65:
+        # Accuracy buena: bajar threshold ligeramente hacia el global
+        new_no_sports_edge = round(max(new_no_edge, _prev_sports_no_edge * 0.95), 4)
+    else:
+        new_no_sports_edge = _prev_sports_no_edge
+    logger.info(
+        "run_poly_learning: buy_no_sports_min_edge: %.3f → %.3f (sports_acc=%.0f%% n=%d)",
+        _prev_sports_no_edge, new_no_sports_edge, _bns["accuracy"] * 100, _bns["total"],
+    )
+
     # Umbral global = el más restrictivo de los dos (conservador)
     new_global_edge = round(max(new_yes_edge, new_no_edge), 4)
     new_global_conf = round(max(new_yes_conf, new_no_conf), 4)
@@ -346,14 +382,17 @@ def run_poly_learning() -> dict:
         "buy_yes_min_confidence": new_yes_conf,
         "buy_no_min_edge": new_no_edge,
         "buy_no_min_confidence": new_no_conf,
+        "buy_no_sports_min_edge": new_no_sports_edge,
         # Snapshot de accuracy
         "accuracy_overall": stats["accuracy"],
         "accuracy_buy_yes": stats["buy_yes"]["accuracy"],
         "accuracy_buy_no": stats["buy_no"]["accuracy"],
+        "accuracy_buy_no_sports": _bns["accuracy"],
         "accuracy_vol_spike": stats["vol_spike"]["accuracy"],
         "sample_size": stats["total"],
         "sample_buy_yes": stats["buy_yes"]["total"],
         "sample_buy_no": stats["buy_no"]["total"],
+        "sample_buy_no_sports": _bns["total"],
         "by_category": stats["by_category"],
         # Herencia de versión anterior para trazabilidad
         "prev_min_edge": current.get("min_edge", POLY_MIN_EDGE),
