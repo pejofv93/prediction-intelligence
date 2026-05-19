@@ -172,7 +172,7 @@ def _is_known_football_team(team: str) -> bool:
     return any(kw in t or t in kw for kw in _KNOWN_FOOTBALL_TEAMS)
 
 _YAHOO_SYMBOLS: dict[str, str] = {
-    "WTI":    "CL=F",   # WTI crude oil futures — raw symbol, se encoda en URL
+    "WTI":    "CL=F",   # WTI crude oil futures — Yahoo futures symbol (safe="=^" en urlquote)
     "GOLD":   "GC=F",   # Gold futures
     "SILVER": "SI=F",   # Silver futures
     # Crypto fallback 2 (Binance es fallback 1, Yahoo es fallback 2)
@@ -713,16 +713,27 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
                 logger.info("_fetch_current_price(%s): AlphaVantage OK $%.4g", asset_key, price)
 
     # 4. Yahoo Finance — fallback 3 (query1 primero, query2 como alternativa)
+    #    safe="=^" preserva los caracteres de símbolos de futuros ("CL=F", "GC=F")
+    #    sin safe="" → "CL%3DF" que Yahoo no reconoce → precio incorrecto
     if price is None and asset_key in _YAHOO_SYMBOLS:
         from urllib.parse import quote as _urlquote
-        _sym = _urlquote(_YAHOO_SYMBOLS[asset_key], safe="")
+        _sym = _urlquote(_YAHOO_SYMBOLS[asset_key], safe="=^")
         for _yhost in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
             _yurl = f"https://{_yhost}/v8/finance/chart/{_sym}?interval=1d&range=1d"
-            price = await loop.run_in_executor(
+            _yraw = await loop.run_in_executor(
                 None, lambda u=_yurl: _http_get(u, lambda d: d["chart"]["result"][0]["meta"]["regularMarketPrice"])
             )
-            if price:
-                break
+            if _yraw and _yraw > 0:
+                # Sanity check: WTI hasn't been above $100 since mid-2022
+                if asset_key == "WTI" and _yraw > 100:
+                    logger.warning(
+                        "_fetch_current_price(WTI): Yahoo devolvió $%.1f — sospechoso (WTI real ~$60-85). "
+                        "Posible símbolo incorrecto o contrato roll. Ignorando.",
+                        _yraw,
+                    )
+                else:
+                    price = _yraw
+                    break
 
     if price and price > 0:
         _PRICE_CACHE[asset_key] = (price, now_ts)
