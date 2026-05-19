@@ -465,13 +465,19 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         return None
 
     def _consecutive_wins(raw_matches: list, team_id: int) -> int:
+        # was_home es fiable (seteado por el collector); fallback a comparación de id
+        # con normalización a str para evitar mismatch int/str según la fuente.
+        team_id_str = str(team_id)
         streak = 0
         for m in reversed(raw_matches[-10:]):
-            is_home = m.get("home_team_id") == team_id or m.get("was_home") is True
+            was_home = m.get("was_home")
+            if was_home is None:
+                htid = m.get("home_team_id")
+                was_home = (htid == team_id or str(htid) == team_id_str)
             gh = float(m.get("goals_home", 0) or 0)
             ga = float(m.get("goals_away", 0) or 0)
-            pts_for = gh if is_home else ga
-            pts_against = ga if is_home else gh
+            pts_for = gh if was_home else ga
+            pts_against = ga if was_home else gh
             if pts_for > pts_against:
                 streak += 1
             else:
