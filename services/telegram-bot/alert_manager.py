@@ -394,10 +394,33 @@ def _format_poly_alert(analysis: dict) -> str:
 
 
 def _alert_key(data: dict, edge: float = 0.0) -> str:
-    """Genera clave de deduplicacion. Edge excluido — mismo partido/mercado/seleccion = misma clave."""
-    id_field = data.get("match_id") or data.get("market_id") or "unknown"
-    market = data.get("market_type", "h2h")
+    """
+    Genera clave de deduplicacion. Edge excluido — mismo partido/mercado/seleccion = misma clave.
+
+    Deportes (tiene home_team + away_team + sport):
+      Base = "{home}_vs_{away}" en minúsculas.
+      Clave = "{base}_{market}_{selection}"
+      Esto agrupa todos los juegos de una misma serie (ej. NBA Playoffs Game 3, 4, 5…)
+      bajo el mismo slot de dedup, evitando alertas duplicadas cuando varios
+      partidos de la misma eliminatoria están en ventana al mismo tiempo.
+
+    Polymarket / mercados sin equipos (no tiene sport):
+      Base = match_id / market_id (específico del mercado).
+    """
+    market = data.get("market_type") or "h2h"
     team = data.get("team_to_back") or data.get("selection") or ""
+
+    home = data.get("home_team", "")
+    away = data.get("away_team", "")
+    sport = data.get("sport", "")
+
+    if home and away and sport:
+        # Dedup basado en equipos — independiente del game-specific match_id
+        base = f"{home.lower().strip()}_vs_{away.lower().strip()}"
+        return f"{base}_{market}_{team}"
+
+    # Polymarket y otras fuentes sin home/away
+    id_field = data.get("match_id") or data.get("market_id") or "unknown"
     return f"{id_field}_{market}_{team}"
 
 
