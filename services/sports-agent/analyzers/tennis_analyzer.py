@@ -89,6 +89,8 @@ async def _fetch_tennis_odds(sport_key: str, match_id: str) -> list:
         logger.warning("tennis_analyzer: The Odds API %s → HTTP %d", sport_key, resp.status_code)
     except Exception:
         logger.error("tennis_analyzer: error fetching odds %s", sport_key, exc_info=True)
+    # Cachear fallo 15 min — impide storm de requests por cada partido con mismo sport_key
+    _LEAGUE_ODDS_CACHE[sport_key] = (now - _CACHE_TTL + timedelta(minutes=15), [])
     logger.info("tennis_analyzer: %s falla → fallback odds-api.io", sport_key)
     return await _fetch_tennis_odds_oddsapiio()
 
