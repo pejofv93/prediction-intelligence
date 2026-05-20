@@ -93,6 +93,10 @@ _NHL_RE = re.compile(
     r'\b(nhl|stanley cup|ice hockey|nhl playoffs|nhl final|nhl series)\b',
     re.I,
 )
+_CRICKET_RE = re.compile(
+    r'\b(ipl|indian premier league|cricket|t20|odi|test match|csk|kkr|mi |rcb|srh|dc |gt |lsg|pbks|rr )\b',
+    re.I,
+)
 
 _WIN_TOURNAMENT_RE = re.compile(
     r'will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)[\?\.\s]*$', re.I
@@ -420,9 +424,8 @@ CATEGORY_KEYWORDS = {
 def categorize_market(question: str) -> str:
     """Categoriza un mercado Polymarket según su pregunta. Devuelve categoria o 'other'."""
     q_lower = question.lower()
-    # Sports override: detecta torneos de tenis antes del scan general.
-    # Evita que apellidos como "Solana" (jugadora) activen la categoría crypto.
-    if _TENNIS_RE.search(q_lower):
+    # Sports override: detecta deporte antes del scan general para evitar falsos positivos crypto.
+    if _TENNIS_RE.search(q_lower) or _CRICKET_RE.search(q_lower):
         return "sports"
     for category, keywords in CATEGORY_KEYWORDS.items():
         if any(kw in q_lower for kw in keywords):
@@ -1601,14 +1604,22 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         _is_ufc = _slug.startswith("ufc-") or bool(_UFC_RE.search(question))
         _is_mlb_game = _slug.startswith("mlb-") or bool(_MLB_RE.search(question))
         _is_nhl_game = _slug.startswith("nhl-") or bool(_NHL_RE.search(question))
-        _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game or _is_nhl_game
+        _is_cricket = _slug.startswith(("ipl-", "cricket-")) or bool(_CRICKET_RE.search(question))
+        _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game or _is_nhl_game or _is_cricket
 
         if _is_individual_match:
-            _sport_label = "TENNIS" if _is_tennis else ("UFC" if _is_ufc else "MLB")
+            _sport_label = (
+                "TENNIS" if _is_tennis else
+                "UFC" if _is_ufc else
+                "CRICKET" if _is_cricket else
+                "MLB"
+            )
             if _is_tennis:
                 _sports_query = f"{question} odds ATP WTA ranking 2026"
             elif _is_ufc:
                 _sports_query = f"{question} UFC odds betting prediction 2026"
+            elif _is_cricket:
+                _sports_query = f"{question} IPL cricket odds betting prediction 2026"
             else:
                 # MLB: extraer equipos y fecha para query específica
                 _mlb_teams = re.findall(
