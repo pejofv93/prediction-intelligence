@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 _PRICE_MOVE_THRESHOLD = 0.05   # 5% en < 1h → alerta (bajado de 8% para capturar movimientos geopolíticos)
 _DEDUP_WINDOW_SECONDS = 7_200  # no re-alertar el mismo mercado en 2h
-_VOL_THRESHOLD_FOR_ANALYZE = 200_000  # $200k vol mínimo para lanzar mini-analyze post-movimiento
+_VOL_THRESHOLD_FOR_ANALYZE = 200_000   # $200k vol mínimo (movimiento normal ≥5pp)
+_VOL_THRESHOLD_BIG_MOVE   =  25_000   # $25k vol mínimo cuando movimiento ≥20pp (información real)
 
 
 async def save_price_snapshot(
@@ -457,16 +458,18 @@ async def monitor_price_changes() -> int:
                         "monitor_price_changes(%s): alerta enviada — cambio=%s%.1fpp en %.0fmin",
                         market_id, pp_sign, abs(pp_change), minutes_elapsed,
                     )
-                    # Mini-analyze: si volumen alto, evaluar señal accionable post-movimiento
-                    if vol_24h >= _VOL_THRESHOLD_FOR_ANALYZE:
+                    # Mini-analyze: umbral de volumen reducido para movimientos muy grandes (≥20pp)
+                    _big_move = abs(pct_change) >= 0.20
+                    _vol_floor = _VOL_THRESHOLD_BIG_MOVE if _big_move else _VOL_THRESHOLD_FOR_ANALYZE
+                    if vol_24h >= _vol_floor:
                         asyncio.create_task(
                             _analyze_price_move(
                                 market_id, question, pct_change, price_new, vol_24h
                             )
                         )
                         logger.info(
-                            "monitor_price_changes(%s): lanzando mini-analyze (vol=$%.0f move=%.1f%%)",
-                            market_id, vol_24h, pct_change * 100,
+                            "monitor_price_changes(%s): lanzando mini-analyze (vol=$%.0f move=%.1f%% big_move=%s)",
+                            market_id, vol_24h, pct_change * 100, _big_move,
                         )
                 else:
                     logger.warning(
@@ -494,7 +497,7 @@ async def _analyze_price_move(
     Si precio bajó → evalúa BUY_YES (mercado puede estar sobrevendido).
     Si precio subió → evalúa BUY_NO (mercado puede estar sobrecomprado).
     Genera señal Telegram si edge > 5% tras el movimiento.
-    Solo se lanza cuando vol_24h > $200k.
+    Solo se lanza cuando vol_24h > $200k (movimiento normal) o > $25k (movimiento ≥20pp).
     """
     try:
         from groq_analyzer import analyze_market
