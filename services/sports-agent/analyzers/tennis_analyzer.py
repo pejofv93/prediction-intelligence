@@ -118,9 +118,12 @@ async def _fetch_tennis_odds_oddsapiio() -> list:
                 _ODDSAPIIO_ODDS_CACHE[cache_key] = (now, events)
                 logger.info("tennis_analyzer oddsapiio: %d eventos con odds h2h", len(events))
                 return events
-        logger.debug("tennis_analyzer oddsapiio odds: HTTP %d", resp.status_code)
+        # Cachear 429/error como lista vacía 15 min — evita storm de requests por partido
+        logger.debug("tennis_analyzer oddsapiio odds: HTTP %d — cacheando vacío 15min", resp.status_code)
+        _ODDSAPIIO_ODDS_CACHE[cache_key] = (now - timedelta(hours=2) + timedelta(minutes=15), [])
     except Exception:
         logger.debug("tennis_analyzer oddsapiio odds: error de red", exc_info=True)
+        _ODDSAPIIO_ODDS_CACHE[cache_key] = (now - timedelta(hours=2) + timedelta(minutes=15), [])
     return []
 
 
@@ -416,15 +419,28 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
             "tennis_analyzer(%s): sin stats → odds-only (%s vs %s)",
             match_id, p1_name, p2_name,
         )
-        _sport_key = _TENNIS_SPORT_KEYS.get(league, _TENNIS_SPORT_KEYS.get("ATP", "tennis_atp"))
-        _ev_list = await _fetch_tennis_odds(_sport_key, match_id)
-        _ev = _find_event(_ev_list, p1_name, p2_name)
-        if not _ev:
-            logger.debug("tennis_analyzer(%s): odds-only sin evento en fuente — sin señal", match_id)
-            return []
-        _bh = _get_best_h2h_odds(_ev, p1_name)
-        if not _bh:
-            return []
+        # Prioridad 1: odds embebidas por el collector (0 req HTTP extra)
+        _h_emb = float(match.get("home_odds", 0))
+        _a_emb = float(match.get("away_odds", 0))
+        if _h_emb > 1.0 and _a_emb > 1.0:
+            _bh = {
+                "p1_odds": _h_emb, "p2_odds": _a_emb,
+                "avg_p1_odds": _h_emb, "avg_p2_odds": _a_emb,
+                "bookmaker": match.get("odds_bookmaker", "oddsapiio"),
+                "bookmaker_count": 1,
+            }
+            _ev = None  # sin evento externo — solo h2h posible
+        else:
+            # Prioridad 2: fetch HTTP (puede estar rate-limited)
+            _sport_key = _TENNIS_SPORT_KEYS.get(league, _TENNIS_SPORT_KEYS.get("ATP", "tennis_atp"))
+            _ev_list = await _fetch_tennis_odds(_sport_key, match_id)
+            _ev = _find_event(_ev_list, p1_name, p2_name)
+            if not _ev:
+                logger.debug("tennis_analyzer(%s): odds-only sin evento — sin señal", match_id)
+                return []
+            _bh = _get_best_h2h_odds(_ev, p1_name)
+            if not _bh:
+                return []
         _prob1, _conf, _sigs = _prob_from_market_odds(_bh["avg_p1_odds"], _bh["avg_p2_odds"])
         _sigs["bookmaker_count"] = _bh["bookmaker_count"]
         _base_oo = {

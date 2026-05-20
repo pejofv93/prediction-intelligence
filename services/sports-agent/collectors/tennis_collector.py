@@ -12,6 +12,8 @@ Escribe en Firestore: upcoming_matches + team_stats (usando player_id como clave
 """
 import asyncio
 import logging
+import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -272,6 +274,69 @@ _ODDSAPIIO_COMP_MAP = {
 }
 
 
+def _norm_name(name: str) -> str:
+    n = unicodedata.normalize("NFD", name.lower().strip()).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z ]", "", n).strip()
+
+
+async def _fetch_oddsapiio_h2h_odds() -> dict[str, dict]:
+    """
+    Fetch h2h odds de tenis en bulk desde odds-api.io (1 sola request).
+    Devuelve dict {norm_home8|norm_away8 → {home_odds, away_odds, bookmaker}}.
+    Se llama UNA VEZ en collect y las odds se embeben en cada match doc.
+    """
+    if not ODDSAPIIO_KEY:
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{_ODDSAPIIO_BASE}/odds",
+                params={"sport": "tennis", "markets": "h2h", "apiKey": ODDSAPIIO_KEY},
+            )
+        if resp.status_code != 200:
+            logger.debug("tennis_collector: oddsapiio /v3/odds HTTP %d", resp.status_code)
+            return {}
+        data = resp.json()
+        events = data if isinstance(data, list) else data.get("data", data.get("events", []))
+        if not isinstance(events, list):
+            return {}
+    except Exception:
+        logger.debug("tennis_collector: oddsapiio odds bulk error", exc_info=True)
+        return {}
+
+    result: dict[str, dict] = {}
+    for ev in events:
+        home_raw = ev.get("home_team") or ev.get("homeTeam") or ""
+        away_raw = ev.get("away_team") or ev.get("awayTeam") or ""
+        if not home_raw or not away_raw:
+            continue
+        h_norm = _norm_name(home_raw)[:8]
+        a_norm = _norm_name(away_raw)[:8]
+        for bk in (ev.get("bookmakers") or []):
+            for mkt in (bk.get("markets") or []):
+                if mkt.get("key") != "h2h":
+                    continue
+                home_price = away_price = None
+                for o in mkt.get("outcomes", []):
+                    nm = _norm_name(o.get("name", ""))[:8]
+                    pr = float(o.get("price", 0))
+                    if nm == h_norm or h_norm[:5] in nm:
+                        home_price = pr
+                    else:
+                        away_price = pr
+                if home_price and away_price:
+                    entry = {"home_odds": home_price, "away_odds": away_price,
+                             "bookmaker": bk.get("key", "oddsapiio")}
+                    result[f"{h_norm}|{a_norm}"] = entry
+                    result[f"{a_norm}|{h_norm}"] = {
+                        "home_odds": away_price, "away_odds": home_price,
+                        "bookmaker": bk.get("key", "oddsapiio"),
+                    }
+                    break
+    logger.info("tennis_collector: %d pares de odds h2h desde oddsapiio", len(result) // 2)
+    return result
+
+
 def _oddsapiio_comp_to_league(comp: str) -> tuple[str, str, str]:
     """Mapea nombre de competición de odds-api.io al código interno."""
     comp_lower = comp.lower()
@@ -294,6 +359,10 @@ async def _fetch_tennis_from_oddsapiio(days: int) -> list[dict]:
     cutoff = datetime.now(timezone.utc) + timedelta(days=days)
     matches: list[dict] = []
     seen_ids: set[str] = set()
+
+    # Fetch h2h odds en bulk (1 request) — se embeben en cada match doc
+    # para que el analyzer no tenga que hacer requests individuales durante analyze.
+    odds_by_pair = await _fetch_oddsapiio_h2h_odds()
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -344,7 +413,11 @@ async def _fetch_tennis_from_oddsapiio(days: int) -> list[dict]:
         league_code, surface, tournament_name = _oddsapiio_comp_to_league(comp)
 
         seen_ids.add(ev_id)
-        matches.append({
+        # Buscar odds embebidas por par normalizado de nombres
+        h_norm = _norm_name(home)[:8]
+        a_norm = _norm_name(away)[:8]
+        odds_pair = odds_by_pair.get(f"{h_norm}|{a_norm}", {})
+        match_doc: dict = {
             "match_id": f"tennis_oapiio_{ev_id}",
             "date": commence.isoformat(),
             "home_team_id": hash(home) % 1_000_000,
@@ -362,7 +435,12 @@ async def _fetch_tennis_from_oddsapiio(days: int) -> list[dict]:
             "surface": surface,
             "tournament": tournament_name,
             "source": "oddsapiio_fallback",
-        })
+        }
+        if odds_pair:
+            match_doc["home_odds"]      = odds_pair["home_odds"]
+            match_doc["away_odds"]      = odds_pair["away_odds"]
+            match_doc["odds_bookmaker"] = odds_pair["bookmaker"]
+        matches.append(match_doc)
 
     logger.info("tennis_collector oddsapiio: %d partidos via odds-api.io", len(matches))
     return matches
