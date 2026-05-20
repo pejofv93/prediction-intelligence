@@ -19,7 +19,7 @@ import httpx
 import numpy as np
 
 from shared.config import (
-    ODDS_API_KEY, SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE,
+    ODDS_API_KEY, ODDSAPIIO_KEY, SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE,
     SPORTS_MIN_EDGE, TENNIS_WEIGHTS,
 )
 from shared.firestore_client import col
@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 _HTTP_TIMEOUT = 15.0
 _LEAGUE_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
+_ODDSAPIIO_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
 _CACHE_TTL = timedelta(hours=24)
+_ODDS_ONLY_MIN_EDGE = 0.03        # umbral relajado: sin stats de RapidAPI
+_ODDS_ONLY_MIN_CONFIDENCE = 0.55  # confianza base odds-only
+_ODDS_REGRESSION_WEIGHT = 0.80    # 80% mercado + 20% media → corrige sesgo favorito
 
 # Sport keys de The Odds API para tenis
 # Claves específicas mejoran precisión; genéricas (ATP/WTA/ITF) actúan de fallback.
@@ -85,6 +89,38 @@ async def _fetch_tennis_odds(sport_key: str, match_id: str) -> list:
         logger.warning("tennis_analyzer: The Odds API %s → HTTP %d", sport_key, resp.status_code)
     except Exception:
         logger.error("tennis_analyzer: error fetching odds %s", sport_key, exc_info=True)
+    logger.info("tennis_analyzer: %s falla → fallback odds-api.io", sport_key)
+    return await _fetch_tennis_odds_oddsapiio()
+
+
+async def _fetch_tennis_odds_oddsapiio() -> list:
+    """
+    Fetch h2h odds para tenis desde odds-api.io.
+    Fallback cuando The Odds API devuelve 404. Caché 2h.
+    """
+    cache_key = "oddsapiio_tennis_odds"
+    now = datetime.now(timezone.utc)
+    cached = _ODDSAPIIO_ODDS_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < timedelta(hours=2):
+        return cached[1]
+    if not ODDSAPIIO_KEY:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.odds-api.io/v3/odds",
+                params={"sport": "tennis", "markets": "h2h", "apiKey": ODDSAPIIO_KEY},
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            events = data if isinstance(data, list) else data.get("data", data.get("events", []))
+            if isinstance(events, list):
+                _ODDSAPIIO_ODDS_CACHE[cache_key] = (now, events)
+                logger.info("tennis_analyzer oddsapiio: %d eventos con odds h2h", len(events))
+                return events
+        logger.debug("tennis_analyzer oddsapiio odds: HTTP %d", resp.status_code)
+    except Exception:
+        logger.debug("tennis_analyzer oddsapiio odds: error de red", exc_info=True)
     return []
 
 
@@ -135,6 +171,57 @@ def _get_h2h_odds(event: dict, p1: str) -> dict | None:
     return None
 
 
+def _get_best_h2h_odds(event: dict, p1: str) -> dict | None:
+    """
+    Mejores cuotas h2h para p1 a través de todos los bookmakers.
+    Devuelve best (para calcular edge) y avg (para fair-value).
+    """
+    home_is_p1 = _normalize(p1)[:6] in _normalize(event.get("home_team", ""))[:6]
+    home_team = event.get("home_team", "")
+    best_p1 = best_p2 = 0.0
+    best_bk = "unknown"
+    all_p1: list[float] = []
+    all_p2: list[float] = []
+
+    for bk in event.get("bookmakers", []):
+        for mkt in bk.get("markets", []):
+            if mkt.get("key") != "h2h":
+                continue
+            p1o = p2o = None
+            for o in mkt.get("outcomes", []):
+                nm = o.get("name", "")
+                pr = float(o.get("price", 0))
+                is_home = _normalize(nm)[:5] == _normalize(home_team)[:5]
+                if home_is_p1:
+                    if is_home:
+                        p1o = pr
+                    else:
+                        p2o = pr
+                else:
+                    if is_home:
+                        p2o = pr
+                    else:
+                        p1o = pr
+            if p1o and p1o > 1.0 and p2o and p2o > 1.0:
+                all_p1.append(p1o)
+                all_p2.append(p2o)
+                if p1o > best_p1:
+                    best_p1, best_bk = p1o, bk.get("key", "unknown")
+                if p2o > best_p2:
+                    best_p2 = p2o
+
+    if not all_p1 or not all_p2:
+        return None
+    return {
+        "p1_odds":      round(best_p1, 3),
+        "p2_odds":      round(best_p2, 3),
+        "avg_p1_odds":  round(sum(all_p1) / len(all_p1), 3),
+        "avg_p2_odds":  round(sum(all_p2) / len(all_p2), 3),
+        "bookmaker":    best_bk,
+        "bookmaker_count": len(all_p1),
+    }
+
+
 def _get_spreads_odds(event: dict) -> dict | None:
     """Busca set handicap -1.5 para el favorito."""
     for bk in event.get("bookmakers", []):
@@ -178,6 +265,28 @@ def _get_totals_odds(event: dict, line: float = 2.5) -> dict | None:
                 return {"over_odds": over, "under_odds": under,
                         "line": line, "bookmaker": bk.get("key", "pinnacle")}
     return None
+
+
+def _prob_from_market_odds(avg_p1_odds: float, avg_p2_odds: float) -> tuple[float, float, dict]:
+    """
+    Probabilidad justa (sin margen) con regresión al 20% hacia la media.
+    Justificación: el mercado sobreestima sistemáticamente a favoritos en tenis
+    (documentado en Grand Slams, especialmente clay). Regresión 80/20 es conservadora.
+    Devuelve (model_prob_p1, confidence, signals_dict).
+    """
+    if avg_p1_odds <= 1.0 or avg_p2_odds <= 1.0:
+        return 0.5, 0.0, {}
+    impl1 = 1.0 / avg_p1_odds
+    impl2 = 1.0 / avg_p2_odds
+    overround = impl1 + impl2
+    fair_p1 = impl1 / overround
+    model_p1 = round(_ODDS_REGRESSION_WEIGHT * fair_p1 + (1.0 - _ODDS_REGRESSION_WEIGHT) * 0.5, 4)
+    conf = round(min(0.65, 0.40 + abs(fair_p1 - 0.5) * 0.50), 4)
+    return model_p1, conf, {
+        "odds_fair_p1":  round(fair_p1, 4),
+        "odds_model_p1": model_p1,
+        "overround":     round(overround - 1.0, 3),
+    }
 
 
 # ── Modelo ────────────────────────────────────────────────────────────────────
@@ -299,11 +408,69 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
         return []
 
     if not p1_stats and not p2_stats:
-        logger.debug(
-            "tennis_analyzer(%s): sin stats para '%s' (id=%s) ni '%s' (id=%s)",
-            match_id, p1_name, home_id, p2_name, away_id,
+        # ── ODDS-ONLY PATH ────────────────────────────────────────────────────
+        # RapidAPI sin stats → usar cuotas de mercado como proxy de probabilidad.
+        # Modelo: 80% fair-prob (margin-stripped) + 20% media (corrige sesgo favorito).
+        # Edge positivo aparece cuando el favorito cotiza < ~1.35 y el underdog > ~3.50.
+        logger.info(
+            "tennis_analyzer(%s): sin stats → odds-only (%s vs %s)",
+            match_id, p1_name, p2_name,
         )
-        return []
+        _sport_key = _TENNIS_SPORT_KEYS.get(league, _TENNIS_SPORT_KEYS.get("ATP", "tennis_atp"))
+        _ev_list = await _fetch_tennis_odds(_sport_key, match_id)
+        _ev = _find_event(_ev_list, p1_name, p2_name)
+        if not _ev:
+            logger.debug("tennis_analyzer(%s): odds-only sin evento en fuente — sin señal", match_id)
+            return []
+        _bh = _get_best_h2h_odds(_ev, p1_name)
+        if not _bh:
+            return []
+        _prob1, _conf, _sigs = _prob_from_market_odds(_bh["avg_p1_odds"], _bh["avg_p2_odds"])
+        _sigs["bookmaker_count"] = _bh["bookmaker_count"]
+        _base_oo = {
+            "match_id": match_id, "home_team": p1_name, "away_team": p2_name,
+            "sport": "tennis", "league": league,
+            "elo_sufficient": False, "h2h_sufficient": False,
+        }
+        _preds_oo: list[dict] = []
+        _batch_oo = _get_fs_client().batch()
+        from analyzers.value_bet_engine import kelly_criterion as _kc
+        for _sel, _prob, _best_odds, _did in [
+            (p1_name,  _prob1,          _bh["p1_odds"], f"{match_id}_h2h_p1_oo"),
+            (p2_name, 1.0 - _prob1,     _bh["p2_odds"], f"{match_id}_h2h_p2_oo"),
+        ]:
+            _edge = round(_prob - 1.0 / _best_odds, 4)
+            if _edge < _ODDS_ONLY_MIN_EDGE or _conf < _ODDS_ONLY_MIN_CONFIDENCE:
+                continue
+            _pred_oo = {
+                **_base_oo,
+                "market_type": "h2h",
+                "selection":   _sel,
+                "bookmaker":   _bh["bookmaker"],
+                "odds":        round(_best_odds, 3),
+                "calculated_prob": round(_prob, 4),
+                "edge":        _edge,
+                "confidence":  round(_conf, 4),
+                "kelly_fraction": _kc(_edge, _best_odds),
+                "signals": _sigs, "factors": _sigs,
+                "data_source": "odds_only",
+                "match_date":  match_date,
+                "weights_version": weights_version,
+                "created_at":  datetime.now(timezone.utc),
+                "result": None, "correct": None, "error_type": None,
+            }
+            await _save_and_alert(_pred_oo, _did, _base_oo, _ev, batch=_batch_oo)
+            _preds_oo.append(_pred_oo)
+        try:
+            _batch_oo.commit()
+        except Exception:
+            logger.error("tennis_analyzer(%s): error batch commit odds-only", match_id, exc_info=True)
+        if _preds_oo:
+            logger.info(
+                "tennis_analyzer(%s): %d señales odds-only — %s vs %s (sin stats RapidAPI)",
+                match_id, len(_preds_oo), p1_name, p2_name,
+            )
+        return _preds_oo
 
     # H2H desde el campo del match (guardado por tennis_collector)
     h2h_adv = float(match.get("h2h_advantage", 0.0))
