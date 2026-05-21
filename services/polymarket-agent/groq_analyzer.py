@@ -147,7 +147,17 @@ _NHL_RE = re.compile(
     re.I,
 )
 _CRICKET_RE = re.compile(
-    r'\b(ipl|indian premier league|cricket|t20|odi|test match|csk|kkr|mi |rcb|srh|dc |gt |lsg|pbks|rr )\b',
+    r'\b('
+    r'ipl|indian premier league|cricket|t20|odi|test match'
+    # Abreviaturas IPL
+    r'|csk|kkr|rcb|srh|pbks|lsg|gt '
+    # Nombres completos equipos IPL — necesarios cuando el slug/question no usa abreviaturas
+    r'|rajasthan royals|lucknow super giants|mumbai indians|chennai super kings'
+    r'|royal challengers|sunrisers hyderabad|delhi capitals|gujarat titans'
+    r'|punjab kings|kolkata knight riders'
+    # Abreviaturas adicionales con posible confusión
+    r'|rr(?=\s)|mi(?=\s)|dc(?=\s)'
+    r')\b',
     re.I,
 )
 
@@ -784,11 +794,12 @@ async def _fetch_current_price(asset_key: str, coingecko_id: str | None) -> floa
                 None, lambda u=_yurl: _http_get(u, lambda d: d["chart"]["result"][0]["meta"]["regularMarketPrice"])
             )
             if _yraw and _yraw > 0:
-                # Sanity check: WTI hasn't been above $100 since mid-2022
-                if asset_key == "WTI" and _yraw > 100:
+                # Sanity check: WTI no ha superado $85 desde oct-2023; rango razonable $35-$85.
+                # $99 de Yahoo es contrato equivocado o roll de futuros — ignorar.
+                if asset_key == "WTI" and (_yraw > 85 or _yraw < 30):
                     logger.warning(
-                        "_fetch_current_price(WTI): Yahoo devolvió $%.1f — sospechoso (WTI real ~$60-85). "
-                        "Posible símbolo incorrecto o contrato roll. Ignorando.",
+                        "_fetch_current_price(WTI): Yahoo devolvió $%.1f — fuera de rango razonable "
+                        "[$30,$85] (WTI real ~$60-65). Contrato incorrecto o roll. Ignorando.",
                         _yraw,
                     )
                 else:
@@ -1927,7 +1938,10 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     _is_tennis = False
     _is_ufc = False
     _is_mlb_game = False
+    _is_nhl_game = False
+    _is_cricket = False
     _is_individual_match = False
+    _sport_label = ""
     if category == "sports":
         _slug = market_data.get("slug", "")
         _is_tennis = _slug.startswith(("atp-", "wta-")) or bool(_TENNIS_RE.search(question))
@@ -2577,6 +2591,24 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 market_id, real_prob, _capped_post, price_yes, category, _cap * 100,
             )
             real_prob = _capped_post
+            edge = round(real_prob - price_yes, 4)
+
+    # Cap incondicional para partidos individuales (tenis, UFC, MLB, NHL, cricket).
+    # Se aplica SIEMPRE, independientemente de data_quality, porque incluso si hay
+    # noticias en el enricher (data_quality="external_data"), eso NO son odds del partido —
+    # el LLM puede alucinar wildly en predicciones de partido específico.
+    # Usar el cap de sports (±20%) como techo duro sobre price_yes.
+    if _is_individual_match:
+        _match_cap = _IMPROVISED_CAPS.get("sports", 0.20)
+        _match_capped = max(price_yes - _match_cap, min(price_yes + _match_cap, real_prob))
+        if abs(_match_capped - real_prob) > 0.001:
+            logger.info(
+                "analyze_market(%s): INDIVIDUAL_MATCH_CAP %.3f→%.3f "
+                "(price_yes=%.3f, cap=±%.0f%%, sport=%s, data_quality=%s)",
+                market_id, real_prob, _match_capped, price_yes,
+                _match_cap * 100, _sport_label, data_quality,
+            )
+            real_prob = _match_capped
             edge = round(real_prob - price_yes, 4)
 
     # FIX-BUG-10: la limpieza de reasoning se mueve al final del pipeline (línea ~2230).
