@@ -115,6 +115,22 @@ _ODDS_API_DAILY_LIMIT: int = 10
 _ESPN_CACHE: dict[str, tuple[str | None, float]] = {}
 _ESPN_CACHE_TTL: float = 14400.0  # 4h
 
+# Cap improvised por categoría — cuánto puede alejarse real_prob de price_yes sin datos externos.
+# Geo/politics: ±15% (muchas variables, alta incertidumbre → conservador).
+# Economy/business: ±20-25% (datos macro más disponibles, LLM puede aportar más).
+# Sports: ±20% (DDG/ESPN/Odds dan algo de contexto).
+_IMPROVISED_CAPS: dict[str, float] = {
+    "geopolitics": 0.15,
+    "politics":    0.15,
+    "economy":     0.20,
+    "business":    0.25,
+    "sports":      0.20,
+    "culture":     0.20,
+    "science":     0.20,
+    "crypto":      0.20,
+    "other":       0.20,
+}
+
 _TENNIS_RE = re.compile(
     r'\b(atp|wta|internazionali|french open|italian open|roland garros|wimbledon|'
     r'us open|australian open|masters 1000|davis cup|indian wells|miami open|'
@@ -2259,15 +2275,16 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             f"justifica explícitamente qué cambió."
         )
     if data_quality == "improvised":
-        _lo = max(0.0, price_yes - 0.15)
-        _hi = min(1.0, price_yes + 0.15)
+        _improv_cap = _IMPROVISED_CAPS.get(category, 0.20)
+        _lo = max(0.0, price_yes - _improv_cap)
+        _hi = min(1.0, price_yes + _improv_cap)
         if _no_external_sports:
             _sport_type = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
             user_prompt += (
                 f"\n\n⚠️ SIN DATOS DEPORTIVOS EXTERNOS ({_sport_type}): No se encontraron "
                 f"odds ni récords verificables para este partido. "
                 f"Usa el precio de mercado ({price_yes:.1%}) como ancla base. "
-                f"Ajusta MÁXIMO ±15% por orderbook/momentum/smart_money. "
+                f"Ajusta MÁXIMO ±{_improv_cap:.0%} por orderbook/momentum/smart_money. "
                 f"Tu real_prob DEBE estar en [{_lo:.1%}, {_hi:.1%}]. "
                 f"Solo recomienda BUY si el edge supera 10% con orderbook/momentum claramente alineados. "
                 f"Si los datos de mercado son neutros, recomienda PASS."
@@ -2277,7 +2294,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 f"\n\nANCLA DE MERCADO OBLIGATORIA: No tienes datos externos verificables "
                 f"para este mercado (sin noticias DDG, sin precios spot, sin encuestas recientes). "
                 f"Usa el precio del mercado ({price_yes:.1%}) como ancla base y ajusta "
-                f"MÁXIMO ±15% por sentiment/orderbook. "
+                f"MÁXIMO ±{_improv_cap:.0%} por sentiment/orderbook. "
                 f"Tu estimación de real_prob DEBE estar en [{_lo:.1%}, {_hi:.1%}]. "
                 f"Superar este rango sin datos externos verificables es una señal de alucinación. "
                 f"Si no puedes justificar la divergencia, recomienda WATCH o PASS."
@@ -2466,14 +2483,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # Recalcular edge siempre desde real_prob normalizado (no confiar en el edge del LLM)
     edge = round(real_prob - price_yes, 4)
 
-    # Hard cap ±15% cuando no hay datos externos verificables
+    # Hard cap por categoría cuando no hay datos externos verificables
     if data_quality == "improvised":
-        _cap = 0.15
+        _cap = _IMPROVISED_CAPS.get(category, 0.20)
         _capped = max(price_yes - _cap, min(price_yes + _cap, real_prob))
         if abs(_capped - real_prob) > 0.001:
             logger.info(
-                "analyze_market(%s): real_prob capped %.3f→%.3f (data_quality=improvised, price_yes=%.3f)",
-                market_id, real_prob, _capped, price_yes,
+                "analyze_market(%s): real_prob capped %.3f→%.3f (data_quality=improvised, cat=%s, cap=±%.0f%%)",
+                market_id, real_prob, _capped, category, _cap * 100,
             )
             real_prob = _capped
             edge = round(real_prob - price_yes, 4)
@@ -2551,13 +2568,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # establecido anteriormente. Los floors de precio (near-target, ALREADY_EXCEEDED)
     # que vienen después siguen teniendo la última palabra.
     if data_quality == "improvised":
-        _cap = 0.15
+        _cap = _IMPROVISED_CAPS.get(category, 0.20)
         _capped_post = max(price_yes - _cap, min(price_yes + _cap, real_prob))
         if abs(_capped_post - real_prob) > 0.001:
             logger.info(
                 "analyze_market(%s): improvised cap re-aplicado post-corr %.3f→%.3f "
-                "(price_yes=%.3f, cap=±%.0f%%)",
-                market_id, real_prob, _capped_post, price_yes, _cap * 100,
+                "(price_yes=%.3f, cat=%s, cap=±%.0f%%)",
+                market_id, real_prob, _capped_post, price_yes, category, _cap * 100,
             )
             real_prob = _capped_post
             edge = round(real_prob - price_yes, 4)
