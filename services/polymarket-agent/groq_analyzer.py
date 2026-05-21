@@ -2068,7 +2068,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 resp = groq_client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    max_tokens=500,
+                    max_tokens=750,
                     temperature=0.35,
                 )
                 raw_response = resp.choices[0].message.content
@@ -2152,7 +2152,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                             {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + _json_strict},
                             {"role": "user", "content": user_prompt + "\n\n" + _json_strict},
                         ],
-                        max_tokens=500,
+                        max_tokens=750,
                         temperature=0.0,
                     )
                     _raw = _r.choices[0].message.content
