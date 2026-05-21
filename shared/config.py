@@ -44,6 +44,7 @@ SPORTS_ALERT_EDGE = 0.08
 BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral menor
 POLY_MIN_EDGE = 0.08
 POLY_MIN_CONFIDENCE = 0.65
+POLY_MIN_VOLUME = 5_000   # volumen 24h mínimo para analizar — por debajo el spread es inejecutable
 
 # Thresholds por liga — calibrados por backtest histórico (prodmatch_results)
 # Ligas con ROI positivo en backtest → umbral más bajo (más señales)

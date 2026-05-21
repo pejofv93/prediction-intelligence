@@ -6,7 +6,7 @@ import logging
 import re
 import time as _time
 
-from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE
+from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, POLY_MIN_VOLUME
 from shared.groq_client import GROQ_CALL_DELAY
 
 # ---------------------------------------------------------------------------
@@ -1538,6 +1538,12 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         return None
 
     volume_24h = float(market_data.get("volume_24h", 0))
+    if volume_24h < POLY_MIN_VOLUME:
+        logger.debug(
+            "analyze_market(%s): vol=%.0f < %d — skip (spread inejecutable)",
+            market_id, volume_24h, POLY_MIN_VOLUME,
+        )
+        return None
 
     now_utc = datetime.now(timezone.utc)
     end_date = market_data.get("end_date")
