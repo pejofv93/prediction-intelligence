@@ -104,6 +104,17 @@ _ANGLOPHONE_COUNTRY_RE = re.compile(
 _SPORTS_DATA_CACHE: dict[str, tuple[str | None, float]] = {}
 _SPORTS_DATA_TTL: float = 7200.0  # 2h
 
+# The Odds API — budget: 500 req/mes → ~16/día → limitar a 10 llamadas/día
+_ODDS_API_CACHE: dict[str, tuple[str | None, float]] = {}
+_ODDS_API_CACHE_TTL: float = 7200.0  # 2h
+_ODDS_API_CALLS_TODAY: int = 0
+_ODDS_API_CALLS_DATE: str = ""
+_ODDS_API_DAILY_LIMIT: int = 10
+
+# ESPN standings — público, sin key, caché 4h
+_ESPN_CACHE: dict[str, tuple[str | None, float]] = {}
+_ESPN_CACHE_TTL: float = 14400.0  # 4h
+
 _TENNIS_RE = re.compile(
     r'\b(atp|wta|internazionali|french open|italian open|roland garros|wimbledon|'
     r'us open|australian open|masters 1000|davis cup|indian wells|miami open|'
@@ -1506,6 +1517,190 @@ def _parse_implied_prob(text: str) -> float | None:
     return None
 
 
+def _extract_match_teams(question: str, slug: str) -> tuple[str, str] | None:
+    """
+    Extrae (team_a, team_b) de una pregunta o slug de partido.
+    Devuelve None si no puede identificar dos equipos distintos.
+    """
+    # Patrón "X vs Y" o "X versus Y"
+    m = re.search(r'(?:will\s+)?(.+?)\s+(?:vs\.?|versus)\s+(.+?)[\?\.\s]*$', question, re.I)
+    if m:
+        a, b = m.group(1).strip(), m.group(2).strip()
+        a = re.sub(r'\bwill\b', '', a, flags=re.I).strip()
+        if a and b and a.lower() != b.lower():
+            return a[:40], b[:40]
+    # Patrón "Will X win" / "Will X beat Y"
+    m2 = re.search(r'will\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat)\s+(?:the\s+)?(.+?)[\?\.]?$', question, re.I)
+    if m2:
+        a, b = m2.group(1).strip(), m2.group(2).strip()
+        if a and b and a.lower() != b.lower():
+            return a[:40], b[:40]
+    # Fallback: slug "sport-team-a-vs-team-b-date"
+    sm = re.search(r'([a-z]+-[a-z]+)-vs-([a-z]+-[a-z]+)', slug, re.I)
+    if sm:
+        return sm.group(1).replace('-', ' ').title(), sm.group(2).replace('-', ' ').title()
+    return None
+
+
+async def _fetch_odds_api_context(sport_key: str, team_a: str, team_b: str) -> str | None:
+    """
+    Llama The Odds API v4 para obtener odds h2h de un partido.
+    Budget: max _ODDS_API_DAILY_LIMIT llamadas/día.
+    Retorna texto con implied probabilities vig-removed, o None si falla / presupuesto agotado.
+    sport_key ejemplos: 'baseball_mlb', 'mma_mixed_martial_arts', 'icehockey_nhl'
+    """
+    global _ODDS_API_CALLS_TODAY, _ODDS_API_CALLS_DATE
+    import urllib.request, urllib.parse, json as _json
+
+    from shared.config import ODDS_API_KEY  # ODDSAPIIO_KEY es diferente; esta es The Odds API
+    # The Odds API usa ODDS_API_KEY (theOddsApi.com)
+    _api_key = ODDS_API_KEY
+    if not _api_key:
+        return None
+
+    # Control de budget diario
+    today_str = __import__('datetime').date.today().isoformat()
+    if _ODDS_API_CALLS_DATE != today_str:
+        _ODDS_API_CALLS_TODAY = 0
+        _ODDS_API_CALLS_DATE = today_str
+    if _ODDS_API_CALLS_TODAY >= _ODDS_API_DAILY_LIMIT:
+        logger.debug("_fetch_odds_api_context: budget diario agotado (%d/%d)", _ODDS_API_CALLS_TODAY, _ODDS_API_DAILY_LIMIT)
+        return None
+
+    cache_key = f"{sport_key}|{team_a.lower()}|{team_b.lower()}"
+    now_ts = _time.monotonic()
+    cached = _ODDS_API_CACHE.get(cache_key)
+    if cached and now_ts - cached[1] < _ODDS_API_CACHE_TTL:
+        return cached[0]
+
+    try:
+        params = urllib.parse.urlencode({
+            "apiKey": _api_key,
+            "regions": "us,uk",
+            "markets": "h2h",
+            "oddsFormat": "decimal",
+        })
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?{params}"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read().decode())
+        _ODDS_API_CALLS_TODAY += 1
+
+        ta_lower, tb_lower = team_a.lower(), team_b.lower()
+        for game in data:
+            home = (game.get("home_team") or "").lower()
+            away = (game.get("away_team") or "").lower()
+            # Match si alguno de los nombres contiene la subcadena del equipo buscado
+            home_match = any(t in home or home in t for t in [ta_lower, tb_lower] if len(t) > 3)
+            away_match = any(t in away or away in t for t in [ta_lower, tb_lower] if len(t) > 3)
+            if not (home_match or away_match):
+                continue
+
+            # Recopilar implied probs de todos los bookmakers (h2h, vig-removed)
+            home_probs, away_probs = [], []
+            for bm in game.get("bookmakers", []):
+                for mkt in bm.get("markets", []):
+                    if mkt.get("key") != "h2h":
+                        continue
+                    outcomes = {o["name"].lower(): float(o["price"]) for o in mkt.get("outcomes", [])}
+                    if len(outcomes) >= 2:
+                        vals = list(outcomes.values())
+                        total = sum(1.0 / v for v in vals)
+                        for name, price in outcomes.items():
+                            implied = (1.0 / price) / total  # vig-removed
+                            if any(t in name for t in [ta_lower, tb_lower] if len(t) > 3):
+                                if home in name or name in home:
+                                    home_probs.append(implied)
+                                else:
+                                    away_probs.append(implied)
+
+            if not home_probs and not away_probs:
+                continue
+
+            home_avg = sum(home_probs) / len(home_probs) if home_probs else None
+            away_avg = sum(away_probs) / len(away_probs) if away_probs else None
+            lines = [f"The Odds API — {game.get('home_team')} vs {game.get('away_team')} ({sport_key}):"]
+            if home_avg is not None:
+                lines.append(f"  {game.get('home_team')}: {home_avg:.1%} implied win prob ({len(home_probs)} books)")
+            if away_avg is not None:
+                lines.append(f"  {game.get('away_team')}: {away_avg:.1%} implied win prob ({len(away_probs)} books)")
+            lines.append(f"  Commence: {game.get('commence_time', 'unknown')}")
+            result = "\n".join(lines)
+            _ODDS_API_CACHE[cache_key] = (result, now_ts)
+            logger.info(
+                "_fetch_odds_api_context: %s vs %s → home=%.1f%% away=%.1f%% (%d books)",
+                team_a, team_b,
+                (home_avg or 0) * 100, (away_avg or 0) * 100,
+                max(len(home_probs), len(away_probs)),
+            )
+            return result
+
+        # No match encontrado en los juegos disponibles
+        _ODDS_API_CACHE[cache_key] = (None, now_ts)
+        return None
+
+    except Exception as _oae:
+        logger.debug("_fetch_odds_api_context(%s, %s vs %s): %s", sport_key, team_a, team_b, _oae)
+        _ODDS_API_CACHE[cache_key] = (None, now_ts)
+        return None
+
+
+async def _fetch_espn_standings_context(sport: str, team_name: str) -> str | None:
+    """
+    Consulta ESPN public API para standings del equipo.
+    sport: 'baseball/mlb', 'hockey/nhl', 'football/nfl', 'basketball/nba'
+    No requiere API key. Caché 4h.
+    """
+    import urllib.request, json as _json
+
+    cache_key = f"{sport}|{team_name.lower()[:30]}"
+    now_ts = _time.monotonic()
+    cached = _ESPN_CACHE.get(cache_key)
+    if cached and now_ts - cached[1] < _ESPN_CACHE_TTL:
+        return cached[0]
+
+    try:
+        url = f"https://site.api.espn.com/apis/v2/sports/{sport}/standings"
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read().decode())
+
+        team_lower = team_name.lower()
+        lines: list[str] = []
+        for group in data.get("children", []) or [data]:
+            for entry in group.get("standings", {}).get("entries", []):
+                team_info = entry.get("team", {})
+                t_name = (team_info.get("displayName") or team_info.get("name") or "").lower()
+                t_abbr = (team_info.get("abbreviation") or "").lower()
+                if not (team_lower in t_name or t_name in team_lower or team_lower[:4] in t_abbr):
+                    continue
+                stats = {s["name"]: s.get("displayValue", s.get("value", "")) for s in entry.get("stats", [])}
+                w = stats.get("wins", stats.get("W", "?"))
+                l = stats.get("losses", stats.get("L", "?"))
+                pct = stats.get("winPercent", stats.get("PCT", ""))
+                gb = stats.get("gamesBehind", stats.get("GB", ""))
+                lines.append(
+                    f"ESPN standings — {team_info.get('displayName', team_name)}: "
+                    f"{w}W-{l}L"
+                    + (f" .{str(pct).replace('0.','')}PCT" if pct else "")
+                    + (f" {gb}GB" if gb and gb != "0" else " (division leader)")
+                )
+                break
+            if lines:
+                break
+
+        result = lines[0] if lines else None
+        _ESPN_CACHE[cache_key] = (result, now_ts)
+        if result:
+            logger.info("_fetch_espn_standings_context(%s, %s): %s", sport, team_name, result)
+        return result
+
+    except Exception as _espe:
+        logger.debug("_fetch_espn_standings_context(%s, %s): %s", sport, team_name, _espe)
+        _ESPN_CACHE[cache_key] = (None, now_ts)
+        return None
+
+
 async def analyze_market(enriched_market: dict) -> dict | None:
     """
     Solo analiza si: volume_24h > 5000 AND days_to_close > 2.
@@ -1731,55 +1926,117 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "TENNIS" if _is_tennis else
                 "UFC" if _is_ufc else
                 "CRICKET" if _is_cricket else
+                "NHL" if _is_nhl_game else
                 "MLB"
             )
-            if _is_tennis:
-                _sports_query = f"{question} odds ATP WTA ranking 2026"
+
+            # Extraer equipos/nombres para Odds API y ESPN
+            _match_teams = _extract_match_teams(question, _slug)
+            _team_a = _match_teams[0] if _match_teams else ""
+            _team_b = _match_teams[1] if _match_teams else ""
+
+            # --- NIVEL 1: The Odds API (datos estructurados, implied probs vig-removed) ---
+            # Solo para MLB, UFC y NHL (no tennis/cricket — no disponibles en plan básico)
+            _odds_api_sport_key: str | None = None
+            if _is_mlb_game:
+                _odds_api_sport_key = "baseball_mlb"
             elif _is_ufc:
-                _sports_query = f"{question} UFC odds betting prediction 2026"
-            elif _is_cricket:
-                _sports_query = f"{question} IPL cricket odds betting prediction 2026"
-            else:
-                # MLB: extraer equipos y fecha para query específica
-                _mlb_teams = re.findall(
-                    r'Will (?:the )?(.+?) win|([A-Z][a-z]+(?: [A-Z][a-z]+)*) vs\.? ([A-Z][a-z]+(?: [A-Z][a-z]+)*)',
-                    question, re.I,
-                )
-                _mlb_team_q = ""
-                if _mlb_teams:
-                    _flat = [g.strip() for t in _mlb_teams for g in t if g.strip()]
-                    _mlb_team_q = " vs ".join(_flat[:2]) if len(_flat) >= 2 else (_flat[0] if _flat else "")
-                _date_m = re.search(r'(\d{4}-\d{2}-\d{2})', question)
-                _date_q = _date_m.group(1) if _date_m else "2026"
-                if _mlb_team_q:
-                    _sports_query = f"{_mlb_team_q} MLB {_date_q} starting pitcher odds betting lines"
-                else:
-                    _sports_query = f"{question} starting pitcher MLB odds betting lines 2026"
+                _odds_api_sport_key = "mma_mixed_martial_arts"
+            elif _is_nhl_game:
+                _odds_api_sport_key = "icehockey_nhl"
 
-            try:
-                _sports_context = await asyncio.wait_for(
-                    _fetch_sports_odds_context(_sports_query), timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "analyze_market(%s): _fetch_sports_odds_context timeout >5s (%s)",
-                    market_id, _sport_label,
-                )
-
-            # MLB fallback: si la query de pitcher falla, buscar récord de temporada del equipo
-            if _is_mlb_game and _sports_context is None:
-                _mlb_record_q = f"{_mlb_team_q or question[:60]} MLB 2026 season record wins losses standings"
+            if _odds_api_sport_key and _team_a:
                 try:
-                    _sports_context = await asyncio.wait_for(
-                        _fetch_sports_odds_context(_mlb_record_q), timeout=5.0
+                    _odds_ctx = await asyncio.wait_for(
+                        _fetch_odds_api_context(_odds_api_sport_key, _team_a, _team_b or _team_a),
+                        timeout=5.0,
                     )
-                    if _sports_context:
+                    if _odds_ctx:
+                        _sports_context = _odds_ctx
                         logger.info(
-                            "analyze_market(%s): MLB_RECORD_FALLBACK — récord de temporada obtenido",
-                            market_id,
+                            "analyze_market(%s): ODDS_API_HIT sport=%s teams='%s vs %s'",
+                            market_id, _odds_api_sport_key, _team_a, _team_b,
                         )
                 except asyncio.TimeoutError:
-                    pass
+                    logger.warning("analyze_market(%s): _fetch_odds_api_context timeout >5s", market_id)
+                except Exception as _oae:
+                    logger.debug("analyze_market(%s): Odds API error: %s", market_id, _oae)
+
+            # --- NIVEL 2: ESPN standings (MLB/NHL) si Odds API no tuvo partido ---
+            if _sports_context is None and (_is_mlb_game or _is_nhl_game) and _team_a:
+                _espn_sport = "baseball/mlb" if _is_mlb_game else "hockey/nhl"
+                try:
+                    _espn_a = await asyncio.wait_for(
+                        _fetch_espn_standings_context(_espn_sport, _team_a), timeout=5.0
+                    )
+                    _espn_b = None
+                    if _team_b:
+                        _espn_b = await asyncio.wait_for(
+                            _fetch_espn_standings_context(_espn_sport, _team_b), timeout=5.0
+                        )
+                    _espn_parts = [s for s in [_espn_a, _espn_b] if s]
+                    if _espn_parts:
+                        _sports_context = "\n".join(_espn_parts)
+                        logger.info(
+                            "analyze_market(%s): ESPN_STANDINGS_HIT sport=%s",
+                            market_id, _espn_sport,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning("analyze_market(%s): ESPN standings timeout >5s", market_id)
+                except Exception as _espe2:
+                    logger.debug("analyze_market(%s): ESPN error: %s", market_id, _espe2)
+
+            # --- NIVEL 3: DDG search (todos los deportes, fallback) ---
+            if _sports_context is None:
+                if _is_tennis:
+                    _sports_query = f"{question} odds ATP WTA ranking 2026"
+                elif _is_ufc:
+                    _sports_query = f"{question} UFC odds betting prediction 2026"
+                elif _is_cricket:
+                    _sports_query = f"{question} IPL cricket odds betting prediction 2026"
+                else:
+                    # MLB/NHL: extraer equipos y fecha para query específica
+                    _mlb_teams = re.findall(
+                        r'Will (?:the )?(.+?) win|([A-Z][a-z]+(?: [A-Z][a-z]+)*) vs\.? ([A-Z][a-z]+(?: [A-Z][a-z]+)*)',
+                        question, re.I,
+                    )
+                    _mlb_team_q = _team_a if _team_a else ""
+                    if not _mlb_team_q and _mlb_teams:
+                        _flat = [g.strip() for t in _mlb_teams for g in t if g.strip()]
+                        _mlb_team_q = " vs ".join(_flat[:2]) if len(_flat) >= 2 else (_flat[0] if _flat else "")
+                    _date_m = re.search(r'(\d{4}-\d{2}-\d{2})', question)
+                    _date_q = _date_m.group(1) if _date_m else "2026"
+                    if _is_nhl_game:
+                        _sports_query = f"{_mlb_team_q or question[:60]} NHL {_date_q} odds betting lines"
+                    elif _mlb_team_q:
+                        _sports_query = f"{_mlb_team_q} MLB {_date_q} starting pitcher odds betting lines"
+                    else:
+                        _sports_query = f"{question} starting pitcher MLB odds betting lines 2026"
+
+                try:
+                    _sports_context = await asyncio.wait_for(
+                        _fetch_sports_odds_context(_sports_query), timeout=5.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "analyze_market(%s): _fetch_sports_odds_context timeout >5s (%s)",
+                        market_id, _sport_label,
+                    )
+
+                # MLB fallback: si la query de pitcher falla, buscar récord de temporada del equipo
+                if _is_mlb_game and _sports_context is None:
+                    _mlb_record_q = f"{_mlb_team_q or question[:60]} MLB 2026 season record wins losses standings"
+                    try:
+                        _sports_context = await asyncio.wait_for(
+                            _fetch_sports_odds_context(_mlb_record_q), timeout=5.0
+                        )
+                        if _sports_context:
+                            logger.info(
+                                "analyze_market(%s): MLB_RECORD_FALLBACK — récord de temporada obtenido",
+                                market_id,
+                            )
+                    except asyncio.TimeoutError:
+                        pass
 
             if _sports_context is None:
                 # Sin datos externos: continuar con ancla de precio ±15% en lugar de PASS directo.
