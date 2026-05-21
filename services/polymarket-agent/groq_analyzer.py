@@ -1903,6 +1903,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     smart_money = enriched_market.get("smart_money", {})
     arbitrage = enriched_market.get("arbitrage", {})
 
+    # Pre-computar señales del orderbook para el LLM
+    _ob_bp     = orderbook.get("buy_pressure", 0.5)
+    _ob_depth  = orderbook.get("depth", 0.0)
+    _ob_spread = orderbook.get("spread", 0.0)
+    _ob_signal = orderbook.get("imbalance_signal", "NEUTRAL")
+    _ob_div    = round(_ob_bp - price_yes, 3)  # divergencia entre dinero apostado y precio
+
     # Clasificar calidad de datos disponibles para el LLM
     _has_external_data = bool(
         _sports_context
@@ -1939,9 +1946,10 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"Momentum de precio: {enriched_market.get('price_momentum', 'STABLE')}\n"
         f"Volume spike: {enriched_market.get('volume_spike', False)}\n"
         f"Smart money detectado: {smart_money.get('is_smart_money', False)}\n"
-        f"Order book — buy_pressure: {orderbook.get('buy_pressure', 0.5):.3f}, "
-        f"spread: {orderbook.get('spread', 0):.4f}, "
-        f"imbalance: {orderbook.get('imbalance_signal', 'NEUTRAL')}\n"
+        f"Orderbook CLOB: buy_pressure={_ob_bp:.3f} ({_ob_bp*100:.0f}% YES), "
+        f"spread={_ob_spread:.4f}, depth=${_ob_depth:,.0f}, señal={_ob_signal}\n"
+        f"  Divergencia orderbook-precio: {_ob_div:+.3f}"
+        f"{' ← DIVERGENCIA FUERTE' if abs(_ob_div) >= 0.10 else ''}\n"
         f"{_corr_block}\n"
         f"Arbitrage: detected={arbitrage.get('detected', False)}, "
         f"inefficiency={arbitrage.get('inefficiency', 0):.3f}\n"
@@ -1950,8 +1958,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"titulares={news.get('headlines', [])[:5]}\n"
         f"\nEl precio de mercado YES = {price_yes:.3f}. "
         f"Estima la probabilidad REAL de YES basandote en todos los datos. "
-        f"Si buy_pressure > 0.6 y momentum es RISING, el mercado puede estar subvaluado. "
-        f"Si buy_pressure < 0.4 y momentum es FALLING, puede estar sobrevaluado. "
+        f"Divergencia orderbook-precio={_ob_div:+.3f}: si abs>0.10, el precio tenderá a alinearse con el orderbook. "
+        f"{'Liquidez baja (spread>5%) — reduce tu confidence. ' if _ob_spread > 0.05 else ''}"
         f"Si smart_money = True, hay informacion privilegiada — ajusta real_prob significativamente. "
         f"Si arbitrage.detected = True, hay ineficiencia confirmada — usa inefficiency como lower bound del edge. "
         f"Sé explícito sobre la divergencia: edge = real_prob - {price_yes:.3f}. "
