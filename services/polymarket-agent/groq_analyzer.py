@@ -1903,6 +1903,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     smart_money = enriched_market.get("smart_money", {})
     arbitrage = enriched_market.get("arbitrage", {})
 
+    # Cambio de precio en los últimos 7 días
+    _p7d = enriched_market.get("price_7d_change_pct")
+    if _p7d is not None:
+        _p7d_icon = "▲" if _p7d > 0.03 else ("▼" if _p7d < -0.03 else "→")
+        _p7d_str = f"{_p7d:+.3f} ({_p7d_icon} {abs(_p7d)*100:.1f}pp en 7d)"
+    else:
+        _p7d_str = "sin historia (mercado nuevo o primera semana)"
+
     # Pre-computar señales del orderbook para el LLM
     _ob_bp     = orderbook.get("buy_pressure", 0.5)
     _ob_depth  = orderbook.get("depth", 0.0)
@@ -1944,6 +1952,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         f"Volumen 24h: ${volume_24h:,.0f}\n"
         f"Dias al cierre: {days_to_close}\n"
         f"Momentum de precio: {enriched_market.get('price_momentum', 'STABLE')}\n"
+        f"Cambio precio 7d: {_p7d_str}\n"
         f"Volume spike: {enriched_market.get('volume_spike', False)}\n"
         f"Smart money detectado: {smart_money.get('is_smart_money', False)}\n"
         f"Orderbook CLOB: buy_pressure={_ob_bp:.3f} ({_ob_bp*100:.0f}% YES), "

@@ -24,7 +24,7 @@ async def enrich_market(market: dict, all_markets: list[dict] | None = None) -> 
       data_quality: str  # "full" | "partial"
       enriched_at: datetime
     """
-    from price_tracker import price_momentum, volume_spike, smart_money_detection
+    from price_tracker import price_momentum, volume_spike, smart_money_detection, get_price_7d_change
     from enrichers.orderbook_analyzer import analyze_orderbook
     from enrichers.correlation_detector import find_correlated_markets, detect_arbitrage
     from enrichers.news_sentiment import fetch_news_sentiment
@@ -33,13 +33,20 @@ async def enrich_market(market: dict, all_markets: list[dict] | None = None) -> 
     question = market.get("question", "")
     data_quality = "full"
 
-    # 1. Price momentum
+    # 1. Price momentum + cambio 7 días
+    current_price_yes = float(market.get("price_yes") or 0.5)
     try:
         momentum = await price_momentum(market_id)
     except Exception:
         logger.error("enrich_market(%s): error en price_momentum", market_id, exc_info=True)
         momentum = "STABLE"
         data_quality = "partial"
+
+    try:
+        price_7d_change = await get_price_7d_change(market_id, current_price_yes)
+    except Exception:
+        logger.error("enrich_market(%s): error en get_price_7d_change", market_id, exc_info=True)
+        price_7d_change = None
 
     # 2. Volume spike
     try:
@@ -93,6 +100,7 @@ async def enrich_market(market: dict, all_markets: list[dict] | None = None) -> 
         "end_date": market.get("end_date"),
         "price_yes": float(market.get("price_yes") or 0.5),
         "price_momentum": momentum,
+        "price_7d_change_pct": price_7d_change,  # float (ej. +0.12 = +12pp) o None
         "volume_spike": vol_spike,
         "smart_money": smart_money,
         "orderbook": orderbook,

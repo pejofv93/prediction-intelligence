@@ -72,6 +72,36 @@ async def price_momentum(market_id: str) -> str:
         return "STABLE"
 
 
+async def get_price_7d_change(market_id: str, current_price: float) -> float | None:
+    """
+    Compara current_price con el snapshot más reciente en la ventana [6d, 8d] atrás.
+    Retorna float (ej. +0.12 = subida de 12pp) o None si no hay historia suficiente.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        cutoff_from = now - timedelta(days=8)
+        cutoff_to   = now - timedelta(days=6)
+        docs = (
+            col("poly_price_history")
+            .where(filter=FieldFilter("market_id", "==", market_id))
+            .where(filter=FieldFilter("timestamp", ">=", cutoff_from))
+            .where(filter=FieldFilter("timestamp", "<=", cutoff_to))
+            .order_by("timestamp")
+            .limit(1)
+            .stream()
+        )
+        snaps = [d.to_dict() for d in docs]
+        if not snaps:
+            return None
+        price_7d_ago = float(snaps[0].get("price_yes", 0))
+        if price_7d_ago <= 0:
+            return None
+        return round(current_price - price_7d_ago, 4)
+    except Exception:
+        logger.error("get_price_7d_change(%s): error", market_id, exc_info=True)
+        return None
+
+
 async def volume_spike(market_id: str) -> bool:
     """True si vol_24h_actual > 3 x media de los ultimos 3 dias (min 2 snapshots)."""
     try:
