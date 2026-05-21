@@ -73,14 +73,14 @@ _SCAN_CATEGORIES: dict[str, list[str]] = {
     ],
 }
 
-# Límites por bucket de categoría
-_BUCKET_CRYPTO     = 10
-_BUCKET_SPORTS     = 10
-_BUCKET_POLITICS   = 10
-_BUCKET_GEOPOLITICS = 8  # bucket propio — muchos mercados de alto volumen (Iran, Ucrania…)
-_BUCKET_CULTURE    = 5
-_BUCKET_OTHER      = 7   # ciencia + negocio + otros no clasificados
-_BUCKET_NEW        = 20  # mercados creados últimas 48h
+# Límites por bucket de categoría — ~200 mercados total
+_BUCKET_CRYPTO      = 20   # era 10
+_BUCKET_SPORTS      = 20   # era 10
+_BUCKET_POLITICS    = 20   # era 10
+_BUCKET_GEOPOLITICS = 16   # era 8 — muchos mercados de alto volumen (Iran, Ucrania…)
+_BUCKET_CULTURE     = 5    # sin cambio — poco volumen accionable
+_BUCKET_OTHER       = 14   # era 7 — ciencia + negocio + otros no clasificados
+_BUCKET_NEW         = 40   # era 20 — mercados creados últimas 48h
 
 # Keywords específicos de deportes para el bucket deportivo dedicado
 _SPORTS_KEYWORDS = [
