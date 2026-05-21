@@ -2927,13 +2927,14 @@ async def analyze_market(enriched_market: dict) -> dict | None:
 
     # Mercados deportivos sin datos externos: exigir edge ≥ 10% para señal accionable.
     # Con datos externos el umbral normal (8%) aplica; sin ellos necesitamos más convicción.
+    # WATCH en lugar de PASS: el mercado sigue siendo interesante pero sin confianza para actuar.
     if _no_external_sports and recommendation in ("BUY_YES", "BUY_NO") and abs(edge) < 0.10:
         logger.info(
-            "analyze_market(%s): NO_SPORTS_DATA_FILTER edge=%.3f<0.10 → PASS "
-            "(sin odds externos, requiere edge≥10%%)",
+            "analyze_market(%s): NO_SPORTS_DATA_FILTER edge=%.3f<0.10 → WATCH "
+            "(sin odds externos, requiere edge≥10%% para BUY)",
             market_id, abs(edge),
         )
-        recommendation = "PASS"
+        recommendation = "WATCH"
     # Añadir ⚠️ al reasoning cuando la señal es por ancla sin datos externos
     if _no_external_sports and recommendation in ("BUY_YES", "BUY_NO"):
         _sport_type = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
