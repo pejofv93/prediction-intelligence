@@ -50,6 +50,32 @@ _PTS_BEHIND_PATTERNS = [
     re.compile(r'gap\s+(?:of|is)\s+(\d{1,2})', re.I),
 ]
 
+# Market-cap ranking DDG cache (6h TTL)
+_MCAP_RANK_CACHE: dict[str, tuple[bool, float | None, float]] = {}
+_MCAP_RANK_TTL: float = 21600.0
+
+_MCAP_LARGEST_RE = re.compile(
+    r'will\s+(.+?)\s+(?:be(?:come)?|surpass|overtake|remain|still\s+be)\s+(?:the\s+)?'
+    r'(?:world[\'s]?\s+|global[ly]?\s+)?(?:most\s+valuable|largest|biggest|#\s*1|number[\s-]?one)\s*'
+    r'(?:company|corporation|firm|stock|public\s+company)?',
+    re.I,
+)
+
+# Known rankings as of May 2026 — fallback when DDG is ambiguous or fails
+# (is_no1, gap_vs_current_leader_in_billions)
+_MCAP_KNOWN_RANKS: dict[str, tuple[bool, float]] = {
+    "nvidia": (True, 0.0),
+    "alphabet": (False, 1500.0),
+    "google": (False, 1500.0),
+    "apple": (False, 1400.0),
+    "microsoft": (False, 1300.0),
+    "meta": (False, 2000.0),
+    "amazon": (False, 1800.0),
+    "tesla": (False, 3500.0),
+    "samsung": (False, 4000.0),
+    "berkshire": (False, 3000.0),
+}
+
 _MLB_RE = re.compile(r'\b(mlb|baseball|major league baseball)\b', re.I)
 
 # FIX-LOCAL-ELECTION: elecciones locales en países no anglófonos
@@ -953,6 +979,93 @@ async def _get_title_race_points_behind(team: str, league: str) -> int | None:
     return result_pts
 
 
+async def _get_market_cap_ranking(company: str) -> tuple[bool, float | None]:
+    """
+    DDG search for current market cap ranking of a company.
+    Returns (is_currently_number_one, gap_vs_leader_in_billions).
+    Falls back to _MCAP_KNOWN_RANKS when DDG is ambiguous or fails. Cache 6h.
+    """
+    import asyncio
+    import urllib.parse
+    import urllib.request
+
+    company_norm = company.lower().strip()
+    for alias in ("google", "alphabet"):
+        if alias in company_norm:
+            company_norm = "alphabet"
+            break
+    for suffix in (" inc", " corp", " corporation", " platforms", " technologies", " .com", " ltd"):
+        company_norm = company_norm.replace(suffix, "")
+    company_norm = company_norm.strip()
+
+    now_ts = _time.monotonic()
+    if company_norm in _MCAP_RANK_CACHE:
+        is_no1, gap_b, ts = _MCAP_RANK_CACHE[company_norm]
+        if now_ts - ts < _MCAP_RANK_TTL:
+            return is_no1, gap_b
+
+    # Start with hardcoded knowledge as baseline
+    is_no1: bool = False
+    gap_b: float | None = None
+    if company_norm in _MCAP_KNOWN_RANKS:
+        is_no1, gap_b = _MCAP_KNOWN_RANKS[company_norm]
+
+    query = f"{company} market cap ranking largest company 2026"
+    url = f"https://html.duckduckgo.com/html/?{urllib.parse.urlencode({'q': query})}"
+
+    def _fetch() -> str:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except Exception as _e:
+            logger.debug("_get_market_cap_ranking(%s): DDG error — %s", company, _e)
+            return ""
+
+    html = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+    if html:
+        html_lower = html.lower()
+        # Positive signals: company IS #1 in the HTML
+        _pos = [
+            re.compile(
+                rf'{re.escape(company_norm)}.{{0,120}}'
+                rf'(?:most\s+valuable|largest|number[\s-]?one|#\s*1)\s+company', re.I,
+            ),
+            re.compile(
+                rf'(?:most\s+valuable|largest|number[\s-]?one|#\s*1)\s+company'
+                rf'.{{0,120}}{re.escape(company_norm)}', re.I,
+            ),
+        ]
+        # Negative signals: company is explicitly behind someone
+        _neg = [
+            re.compile(rf'{re.escape(company_norm)}.{{0,80}}(?:second|2nd|#\s*2|behind|trails?)', re.I),
+            re.compile(rf'(?:second|2nd|#\s*2).{{0,80}}{re.escape(company_norm)}', re.I),
+            re.compile(r'(?:nvidia|apple|microsoft).{0,80}(?:most\s+valuable|largest|#\s*1)\s+company', re.I),
+        ]
+        found_pos = any(p.search(html_lower) for p in _pos)
+        if found_pos:
+            is_no1 = True
+            gap_b = 0.0
+        else:
+            if any(p.search(html_lower) for p in _neg):
+                is_no1 = False
+            # Try to extract a gap in trillions from the snippet
+            if not is_no1 and gap_b is None:
+                for m in re.finditer(r'\$([\d.]+)\s*trillion', html_lower):
+                    try:
+                        gap_b = float(m.group(1)) * 1000
+                        break
+                    except Exception:
+                        pass
+
+    _MCAP_RANK_CACHE[company_norm] = (is_no1, gap_b, now_ts)
+    logger.info(
+        "_get_market_cap_ranking(%s): is_no1=%s gap=%s",
+        company_norm, is_no1, f"{gap_b:.0f}B" if gap_b is not None else "unknown",
+    )
+    return is_no1, gap_b
+
+
 async def _fetch_nba_win_prob(team_name: str) -> float | None:
     """
     Fetch game-level win probability for a team from ESPN scoreboard predictor.
@@ -1726,6 +1839,32 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 )
                 return None
 
+    # Detect "Will X be the largest company by market cap" markets
+    _mcap_company: str | None = None
+    _mcap_is_no1: bool = True   # True = no restriction; False = cap applies
+    _mcap_gap_b: float | None = None
+    _m_mcap = _MCAP_LARGEST_RE.search(question)
+    if _m_mcap:
+        _mcap_company = _m_mcap.group(1).strip()
+        try:
+            _mcap_is_no1, _mcap_gap_b = await asyncio.wait_for(
+                _get_market_cap_ranking(_mcap_company), timeout=5.0
+            )
+            logger.info(
+                "analyze_market(%s): MCAP_RANKING %s — is_no1=%s gap=%s",
+                market_id, _mcap_company, _mcap_is_no1,
+                f"{_mcap_gap_b:.0f}B" if _mcap_gap_b is not None else "unknown",
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "analyze_market(%s): _get_market_cap_ranking timeout >5s — skip (%s)",
+                market_id, _mcap_company,
+            )
+        except Exception as _mce:
+            logger.debug(
+                "analyze_market(%s): _get_market_cap_ranking error — %s", market_id, _mce,
+            )
+
     # Fear & Greed para mercados crypto
     fear_greed: dict = {}
     if category == "crypto":
@@ -2342,6 +2481,32 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             "analyze_market(%s): LOW_PRICE_CAP %.3f→%.3f (price_yes=%.3f, cat=%s)",
             market_id, old_prob, real_prob, price_yes, category,
         )
+
+    # MCAP_RANK_CAP: empresa no es actualmente #1 → real_prob ≤ price_yes × 1.5
+    # Si gap con el líder > $500B → no BUY_YES (salto imposible en días/semanas)
+    if _mcap_company and not _mcap_is_no1:
+        _mcap_max = round(min(price_yes * 1.5, 0.95), 4)
+        if real_prob > _mcap_max:
+            _old_mcap = real_prob
+            real_prob = _mcap_max
+            edge = round(real_prob - price_yes, 4)
+            _gap_str = f" (gap≈${_mcap_gap_b / 1000:.1f}T vs líder)" if _mcap_gap_b else ""
+            note = (
+                f"⚠️ {_mcap_company} no es #1 en market cap{_gap_str} → "
+                f"real_prob máx={real_prob:.1%}"
+            )
+            reasoning = f"{note}\n{reasoning}" if reasoning else note
+            logger.info(
+                "analyze_market(%s): MCAP_RANK_CAP %.3f→%.3f (%s no es #1%s)",
+                market_id, _old_mcap, real_prob, _mcap_company, _gap_str,
+            )
+        if _mcap_gap_b is not None and _mcap_gap_b > 500 and recommendation == "BUY_YES":
+            logger.info(
+                "analyze_market(%s): MCAP_GAP_FILTER BUY_YES→PASS "
+                "(%s gap=%.0fB>$500B vs líder)",
+                market_id, _mcap_company, _mcap_gap_b,
+            )
+            recommendation = "PASS"
 
     # Para geopolítica/política con precio < 15%: exigir edge ≥ 0.20 para BUY
     if price_yes < 0.15 and category in ("geopolitics", "politics"):
