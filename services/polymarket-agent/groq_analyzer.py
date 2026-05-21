@@ -2667,20 +2667,34 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # Re-enforce explicit price floor — takes priority over LOW_PRICE_CAP, LOW_PRICE_VOL_CEIL, etc.
     # The near-target floor and already-exceeded floor are grounded in real price data,
     # so they must survive downstream caps that don't know the asset is that close to target.
+    #
+    # EXCEPCIÓN: cuando price_yes < 15%, LOW_PRICE_CAP tiene prioridad sobre el floor.
+    # El floor no puede superar price_yes × 2.5 en mercados de baja probabilidad — de lo
+    # contrario un NEAR_TARGET_FLOOR del 60% sobre un precio del 8% genera edge ficticio de +52%.
     if _price_floor_applied and real_prob < _price_floor_value:
-        _old_pre_floor = real_prob
-        real_prob = _price_floor_value
-        edge = round(real_prob - price_yes, 4)
-        if edge >= POLY_MIN_EDGE:
-            recommendation = "BUY_YES"
-        elif edge <= -POLY_MIN_EDGE:
-            recommendation = "BUY_NO"
-        else:
-            recommendation = "PASS"
-        logger.info(
-            "analyze_market(%s): FLOOR_REENFORCE %.3f→%.3f (floor=%.2f post-cap recovery)",
-            market_id, _old_pre_floor, real_prob, _price_floor_value,
-        )
+        _effective_floor = _price_floor_value
+        if price_yes < 0.15:
+            _effective_floor = min(_price_floor_value, price_yes * 2.5)
+            if _effective_floor < _price_floor_value:
+                logger.info(
+                    "analyze_market(%s): FLOOR_REENFORCE clamp floor %.3f→%.3f "
+                    "(price_yes=%.3f<15%%, LOW_PRICE_CAP prioridad)",
+                    market_id, _price_floor_value, _effective_floor, price_yes,
+                )
+        if real_prob < _effective_floor:
+            _old_pre_floor = real_prob
+            real_prob = _effective_floor
+            edge = round(real_prob - price_yes, 4)
+            if edge >= POLY_MIN_EDGE:
+                recommendation = "BUY_YES"
+            elif edge <= -POLY_MIN_EDGE:
+                recommendation = "BUY_NO"
+            else:
+                recommendation = "PASS"
+            logger.info(
+                "analyze_market(%s): FLOOR_REENFORCE %.3f→%.3f (floor=%.2f post-cap recovery)",
+                market_id, _old_pre_floor, real_prob, _effective_floor,
+            )
 
     # Capa final: re-aplicar limpieza de reasoning con los valores definitivos
     # (recommendation puede haber cambiado por auto-corrección, correlación, etc.)
