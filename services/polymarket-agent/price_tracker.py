@@ -376,13 +376,18 @@ async def monitor_price_changes() -> int:
 
     # Leer mercados activos de enriched_markets
     try:
-        raw_docs = list(col("enriched_markets").limit(150).stream(timeout=30.0))
+        raw_docs = list(
+            col("enriched_markets")
+            .order_by("volume_24h", direction="DESCENDING")
+            .limit(200)
+            .stream(timeout=30.0)
+        )
         markets = [d.to_dict() for d in raw_docs if d.to_dict().get("market_id")]
     except Exception:
         logger.error("monitor_price_changes: error leyendo enriched_markets", exc_info=True)
         return 0
 
-    logger.info("monitor_price_changes: evaluando %d mercados", len(markets))
+    logger.info("monitor_price_changes: evaluando %d mercados (top por volume_24h)", len(markets))
 
     for market in markets:
         market_id = market.get("market_id", "")
