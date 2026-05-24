@@ -135,6 +135,51 @@ _MARKET_LABEL = {
 }
 
 
+def _format_match_date_madrid(match_date) -> str:
+    """
+    Convierte match_date (datetime o ISO string) a hora Madrid.
+    Devuelve: "📅 Hoy 24/05 a las 21:00 Madrid"
+              "📅 Mañana 25/05 a las 02:30 Madrid"
+              "📅 26/05 a las 19:00 Madrid"
+    Devuelve "" si match_date es None o no parseable.
+    """
+    from zoneinfo import ZoneInfo
+
+    madrid = ZoneInfo("Europe/Madrid")
+
+    if match_date is None:
+        return ""
+    if isinstance(match_date, str):
+        raw = match_date.strip()
+        if not raw:
+            return ""
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+    elif hasattr(match_date, "strftime"):
+        dt = match_date
+    else:
+        return ""
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    dt_madrid = dt.astimezone(madrid)
+    today_madrid = datetime.now(madrid).date()
+    match_day = dt_madrid.date()
+
+    time_str = dt_madrid.strftime("%H:%M")
+    date_str = dt_madrid.strftime("%d/%m")
+
+    if match_day == today_madrid:
+        return f"📅 Hoy {date_str} a las {time_str} Madrid"
+    elif match_day == today_madrid + timedelta(days=1):
+        return f"📅 Mañana {date_str} a las {time_str} Madrid"
+    else:
+        return f"📅 {date_str} a las {time_str} Madrid"
+
+
 def _format_alert_unified(prediction: dict) -> str:
     """Formato unificado para todos los deportes y mercados."""
     sport = prediction.get("sport", "football")
@@ -181,9 +226,13 @@ def _format_alert_unified(prediction: dict) -> str:
         direction = om.get("direction", "")
         om_line = f"\n📈 Cuota subió {pct:.0f}% en 24h — bookmaker alargando ({direction})"
 
+    _date_madrid = _format_match_date_madrid(prediction.get("match_date"))
+    _date_line = f"{_date_madrid}\n" if _date_madrid else ""
+
     msg = (
         f"{intensity} | {sport_emoji} {league_label}\n"
         f"{home} vs {away}\n"
+        f"{_date_line}"
         f"Mercado: {market_label} | Selección: *{selection}*\n"
         f"Cuota: *{odds:.2f}* | Edge: *+{edge:.1%}* | Confianza: *{conf:.0%}*\n"
         f"Factores: {factors_text}"
@@ -210,12 +259,8 @@ def _format_sports_alert(prediction: dict) -> str:
     market_type = prediction.get("market_type", "h2h")
     emoji = _SPORT_EMOJI.get(sport, "🏟")
 
-    match_date = prediction.get("match_date")
-    if hasattr(match_date, "strftime"):
-        date_str = match_date.strftime("%d/%m %H:%M UTC")
-    else:
-        raw = str(match_date or "")
-        date_str = raw[:16].replace("T", " ") if raw else "?"
+    _date_madrid = _format_match_date_madrid(prediction.get("match_date"))
+    date_str = _date_madrid if _date_madrid else "?"
 
     odds = float(prediction.get("odds") or 0)
     edge = float(prediction.get("edge") or 0)
@@ -229,7 +274,7 @@ def _format_sports_alert(prediction: dict) -> str:
     else:
         label = "📊 SEÑAL MODERADA"
     header = f"{emoji} {label}\n\n"
-    match_line = f"🏟 {home} vs {away}\n🏆 {league} | 📅 {date_str}\n\n"
+    match_line = f"🏟 {home} vs {away}\n🏆 {league} | {date_str}\n\n"
 
     if market_type == "totals":
         selection = _escape_md(prediction.get("selection", "Over 2.5"))
