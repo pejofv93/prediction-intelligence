@@ -406,11 +406,28 @@ async def monitor_price_changes() -> int:
                 .stream()
             ]
 
-            if len(snaps) < 2:
+            if len(snaps) == 0:
                 continue
-
-            oldest = snaps[0]
-            latest = snaps[-1]
+            elif len(snaps) == 1:
+                # Un solo snapshot en la ventana de 2h: el movimiento ocurrió justo
+                # antes de la ventana. Comparar contra el precio guardado en
+                # enriched_markets (última enrichment, tipicamente hace ≤4h).
+                enriched_price = float(market.get("price_yes") or 0)
+                snap_price = float(snaps[0].get("price_yes", 0))
+                if enriched_price <= 0 or snap_price <= 0:
+                    continue
+                if abs((snap_price - enriched_price) / enriched_price) < _PRICE_MOVE_THRESHOLD:
+                    continue
+                # Construir "oldest" sintético para reutilizar el resto del flujo
+                oldest = {
+                    "price_yes": enriched_price,
+                    "timestamp": cutoff_2h,
+                    "volume_24h": market.get("volume_24h", 0),
+                }
+                latest = snaps[0]
+            else:
+                oldest = snaps[0]
+                latest = snaps[-1]
 
             t_old = oldest.get("timestamp")
             t_new = latest.get("timestamp")
