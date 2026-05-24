@@ -1991,7 +1991,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     _sport_label = ""
     if category == "sports":
         _slug = market_data.get("slug", "")
-        _is_tennis = _slug.startswith(("atp-", "wta-")) or bool(_TENNIS_RE.search(question))
+        _is_tennis = (
+            _slug.startswith(("atp-", "wta-"))
+            or bool(_TENNIS_RE.search(question))
+            or bool(_TENNIS_RE.search(_slug.replace("-", " ")))
+        )
         _is_ufc = _slug.startswith("ufc-") or bool(_UFC_RE.search(question))
         _is_mlb_game = _slug.startswith("mlb-") or bool(_MLB_RE.search(question))
         _is_nhl_game = _slug.startswith("nhl-") or bool(_NHL_RE.search(question))
