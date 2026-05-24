@@ -1177,8 +1177,8 @@ async def _fetch_nba_win_prob(team_name: str) -> float | None:
 
 async def _fetch_nba_series_state(team_name: str) -> tuple[int, int] | None:
     """
-    Returns (team_wins, opp_wins) from ESPN NBA playoff scoreboard.
-    Works between games — the scoreboard always shows the most recent/upcoming series.
+    Returns (team_wins, opp_wins) from ESPN NBA playoff endpoints.
+    Tries today's scoreboard first, then the full playoff schedule (works between games).
     Cache 30 min.
     """
     import asyncio
@@ -1192,22 +1192,16 @@ async def _fetch_nba_series_state(team_name: str) -> tuple[int, int] | None:
         if now_ts - ts < _NBA_SERIES_TTL:
             return state
 
-    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+    team_lower = team_name.lower()
 
-    def _fetch() -> dict | None:
+    def _fetch_url(url: str) -> dict | None:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=4) as resp:
                 return json.loads(resp.read())
         except Exception as _e:
-            logger.debug("_fetch_nba_series_state: ESPN error — %s", _e)
+            logger.debug("_fetch_nba_series_state: ESPN error %s — %s", url, _e)
             return None
-
-    data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
-    if not data:
-        return None
-
-    team_lower = team_name.lower()
 
     def _team_matches(competitor: dict) -> bool:
         t = competitor.get("team", {})
@@ -1218,32 +1212,54 @@ async def _fetch_nba_series_state(team_name: str) -> tuple[int, int] | None:
         ]
         return any(c and (team_lower in c or c in team_lower) for c in candidates)
 
-    for event in data.get("events", []):
-        for comp in event.get("competitions", []):
-            series = comp.get("series")
-            if not series:
-                continue
-            competitors = comp.get("competitors", [])
-            target = next((c for c in competitors if _team_matches(c)), None)
-            opponent = next((c for c in competitors if not _team_matches(c)), None)
-            if target is None or opponent is None:
-                continue
-            target_id = target.get("id", "")
-            opp_id = opponent.get("id", "")
-            team_wins = 0
-            opp_wins = 0
-            for sc in series.get("competitors", []):
-                wins = int(sc.get("wins", 0))
-                if sc.get("id", "") == target_id:
-                    team_wins = wins
-                elif sc.get("id", "") == opp_id:
-                    opp_wins = wins
-            result = (team_wins, opp_wins)
-            _NBA_SERIES_STATE_CACHE[cache_key] = (result, now_ts)
-            logger.info("_fetch_nba_series_state: %s → %d-%d", team_name, team_wins, opp_wins)
-            return result
+    def _parse_series(data: dict | None) -> tuple[int, int] | None:
+        if not data:
+            return None
+        for event in data.get("events", []):
+            for comp in event.get("competitions", []):
+                series = comp.get("series")
+                if not series:
+                    continue
+                competitors = comp.get("competitors", [])
+                target = next((c for c in competitors if _team_matches(c)), None)
+                opponent = next((c for c in competitors if not _team_matches(c)), None)
+                if target is None or opponent is None:
+                    continue
+                target_id = target.get("id", "")
+                opp_id = opponent.get("id", "")
+                team_wins = 0
+                opp_wins = 0
+                for sc in series.get("competitors", []):
+                    wins = int(sc.get("wins", 0))
+                    if sc.get("id", "") == target_id:
+                        team_wins = wins
+                    elif sc.get("id", "") == opp_id:
+                        opp_wins = wins
+                return (team_wins, opp_wins)
+        return None
 
-    return None
+    loop = asyncio.get_running_loop()
+
+    # Primary: today's scoreboard
+    data = await loop.run_in_executor(
+        None,
+        _fetch_url,
+        "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+    )
+    result = _parse_series(data)
+    if result is None:
+        # Fallback: full playoff schedule — includes rest-day games and upcoming games
+        data2 = await loop.run_in_executor(
+            None,
+            _fetch_url,
+            "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?seasontype=3",
+        )
+        result = _parse_series(data2)
+
+    if result is not None:
+        _NBA_SERIES_STATE_CACHE[cache_key] = (result, now_ts)
+        logger.info("_fetch_nba_series_state: %s → %d-%d", team_name, result[0], result[1])
+    return result
 
 
 def _extract_team_tournament(question: str) -> tuple[str, str] | None:
@@ -1314,6 +1330,37 @@ _KNOWN_FINALISTS: dict[str, tuple[list[str], float]] = {
             "spurs", "san antonio spurs",
         ],
         0.20,
+    ),
+    # NBA 2025-26 — Conference Finals en curso
+    # floor=0.35 → final 2 equipos: sin datos externos ancla a price_yes (edge=0 → PASS)
+    # Cubre mercados "Will X win the Eastern/Western Conference?"
+    "eastern conference": (
+        [
+            "knicks", "new york knicks",
+            "cavaliers", "cleveland cavaliers",
+        ],
+        0.35,
+    ),
+    "eastern conference finals": (
+        [
+            "knicks", "new york knicks",
+            "cavaliers", "cleveland cavaliers",
+        ],
+        0.35,
+    ),
+    "western conference": (
+        [
+            "thunder", "oklahoma city thunder",
+            "spurs", "san antonio spurs",
+        ],
+        0.35,
+    ),
+    "western conference finals": (
+        [
+            "thunder", "oklahoma city thunder",
+            "spurs", "san antonio spurs",
+        ],
+        0.35,
     ),
 }
 
