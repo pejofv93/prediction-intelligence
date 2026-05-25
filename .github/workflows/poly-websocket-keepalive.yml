@@ -14,5 +14,5 @@ jobs:
           curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-websocket" \
             -H "Content-Type: application/json" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 30 \
+            --max-time 60 \
             --fail --silent --show-error
