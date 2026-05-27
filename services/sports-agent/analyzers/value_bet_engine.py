@@ -10,6 +10,7 @@ Flujo por llamada a generate_signal():
 import asyncio
 import json
 import logging
+import time as _time_mod
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -32,6 +33,80 @@ from shared.api_quota_manager import quota
 from enrichers.elo_rating import DEFAULT_ELO
 
 logger = logging.getLogger(__name__)
+
+# ── Dynamic filter params ─────────────────────────────────────────────────────
+_DEFAULT_FILTER_PARAMS: dict = {
+    "HIGH_DRAW_PROB":   {"threshold": 0.30},
+    "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 5.0, "FL1": 5.0},
+    "AWAY_DEAD_ZONE":   {"odds_min": 2.5, "odds_max": 3.5},
+    "AWAY_PD_FILTER":   {"odds_threshold": 2.5},
+    "AWAY_GATE_CONF":   {"conf_threshold": 0.85},
+}
+
+_FILTER_PARAMS_CACHE: dict = {}
+_FILTER_PARAMS_CACHE_TS: float = 0.0
+_FILTER_PARAMS_TTL: float = 1800.0  # 30 min
+
+
+def _get_filter_params() -> dict:
+    """Lee parámetros dinámicos de filtros desde Firestore con caché 30min."""
+    global _FILTER_PARAMS_CACHE, _FILTER_PARAMS_CACHE_TS
+    now = _time_mod.monotonic()
+    if _FILTER_PARAMS_CACHE and (now - _FILTER_PARAMS_CACHE_TS) < _FILTER_PARAMS_TTL:
+        return _FILTER_PARAMS_CACHE
+    try:
+        doc = col("model_weights").document("filter_performance").get()
+        if doc.exists:
+            stored = doc.to_dict().get("params", {})
+            merged = {k: dict(v) for k, v in _DEFAULT_FILTER_PARAMS.items()}
+            for fname, fparams in stored.items():
+                if fname in merged and isinstance(fparams, dict):
+                    merged[fname].update(fparams)
+            _FILTER_PARAMS_CACHE = merged
+        else:
+            _FILTER_PARAMS_CACHE = {k: dict(v) for k, v in _DEFAULT_FILTER_PARAMS.items()}
+    except Exception:
+        logger.warning("_get_filter_params: error leyendo Firestore — usando defaults")
+        _FILTER_PARAMS_CACHE = {k: dict(v) for k, v in _DEFAULT_FILTER_PARAMS.items()}
+    _FILTER_PARAMS_CACHE_TS = now
+    return _FILTER_PARAMS_CACHE
+
+
+def _log_filter_block(
+    filter_name: str,
+    match_id: str,
+    team_to_back: str,
+    league: str,
+    home_team: str,
+    away_team: str,
+    odds: float,
+    confidence: float,
+    extra: dict | None = None,
+) -> None:
+    """Registra un bloqueo de filtro en Firestore para evaluación posterior."""
+    try:
+        doc_id = f"{filter_name}_{match_id}"
+        payload: dict = {
+            "filter_name": filter_name,
+            "match_id": match_id,
+            "team_to_back": team_to_back,
+            "league": league,
+            "home_team": home_team,
+            "away_team": away_team,
+            "odds": round(float(odds), 4),
+            "confidence": round(float(confidence), 4),
+            "blocked_at": datetime.now(timezone.utc),
+            "result": None,
+        }
+        if extra:
+            payload.update(extra)
+        col("filter_blocks").document(doc_id).set(payload)
+    except Exception:
+        logger.warning(
+            "_log_filter_block(%s, %s): error escribiendo Firestore",
+            filter_name, match_id,
+        )
+
 
 # The Odds API — fuente primaria de cuotas
 _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
@@ -1946,12 +2021,19 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     prob_away_raw = result_away["prob"]
     if prob_home_raw < 0.45 and prob_away_raw < 0.45:
         prob_draw_est = max(0.0, 1.0 - prob_home_raw - prob_away_raw)
-        if prob_draw_est > 0.30:
+        _draw_threshold = _get_filter_params()["HIGH_DRAW_PROB"]["threshold"]
+        if prob_draw_est > _draw_threshold:
             logger.info(
                 "generate_signal(%s): señal descartada — alta probabilidad de empate estimada "
-                "(p_home=%.2f p_away=%.2f p_draw≈%.2f) [%s vs %s | %s]",
-                match_id, prob_home_raw, prob_away_raw, prob_draw_est,
+                "(p_home=%.2f p_away=%.2f p_draw≈%.2f > %.2f) [%s vs %s | %s]",
+                match_id, prob_home_raw, prob_away_raw, prob_draw_est, _draw_threshold,
                 home_team, away_team, league,
+            )
+            _tob_guess = str(home_team) if prob_home_raw >= prob_away_raw else str(away_team)
+            _log_filter_block(
+                "HIGH_DRAW_PROB", match_id, _tob_guess, league,
+                str(home_team), str(away_team), 0.0, 0.0,
+                {"prob_draw": round(prob_draw_est, 4)},
             )
             return []
 
@@ -2080,7 +2162,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # --- 5b. Filtro underdog extremo: umbral dinámico por liga vs rival top-6 ---
     rival_team = str(away_team) if team_to_back == str(home_team) else str(home_team)
     top6_keywords = _TOP6_KEYWORDS.get(league, [])
-    underdog_threshold = _EXTREME_UNDERDOG_ODDS.get(league, 5.0)
+    _underdog_dyn = _get_filter_params()["UNDERDOG_EXTREME"]
+    underdog_threshold = _underdog_dyn.get(league, _EXTREME_UNDERDOG_ODDS.get(league, 5.0))
     if best_odds > underdog_threshold and top6_keywords:
         rival_lower = rival_team.lower()
         if any(kw in rival_lower for kw in top6_keywords):
@@ -2088,6 +2171,11 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "generate_signal(%s): señal descartada — underdog extremo (odds=%.2f > %.1f) "
                 "vs rival top-6 '%s' [%s]",
                 match_id, best_odds, underdog_threshold, rival_team, league,
+            )
+            _log_filter_block(
+                "UNDERDOG_EXTREME", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
+                {"rival_team": rival_team},
             )
             return []
 
@@ -2123,33 +2211,50 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # --- 5e. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
     _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
     if _lado == "AWAY":
-        # F1: zona muerta 2.5–3.5 (0% acierto histórico en este rango)
-        if 2.5 <= best_odds < 3.5:
+        # F1: zona muerta dinámica (históricamente 0% acierto en rango 2.5–3.5)
+        _dz = _get_filter_params()["AWAY_DEAD_ZONE"]
+        _dz_min = _dz.get("odds_min", 2.5)
+        _dz_max = _dz.get("odds_max", 3.5)
+        if _dz_min <= best_odds < _dz_max:
             logger.info(
-                "generate_signal(%s): AWAY zona muerta descartada (odds=%.2f entre 2.5-3.5) [%s vs %s | %s]",
-                match_id, best_odds, home_team, away_team, league,
+                "generate_signal(%s): AWAY zona muerta descartada (odds=%.2f en [%.2f, %.2f)) [%s vs %s | %s]",
+                match_id, best_odds, _dz_min, _dz_max, home_team, away_team, league,
+            )
+            _log_filter_block(
+                "AWAY_DEAD_ZONE", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
             )
             return []
-        # F2: AWAY en PD/DED con odds > 2.5 — 0% accuracy histórico en ambas ligas
-        if league == "PD" and best_odds > 2.5:
+        # F2: AWAY en PD con odds > umbral dinámico — 0% accuracy histórico
+        _pd_threshold = _get_filter_params()["AWAY_PD_FILTER"].get("odds_threshold", 2.5)
+        if league == "PD" and best_odds > _pd_threshold:
             logger.info(
-                "generate_signal(%s): AWAY underdog descartada en %s (odds=%.2f > 2.5) [%s vs %s]",
-                match_id, league, best_odds, home_team, away_team,
+                "generate_signal(%s): AWAY underdog descartada en %s (odds=%.2f > %.2f) [%s vs %s]",
+                match_id, league, best_odds, _pd_threshold, home_team, away_team,
+            )
+            _log_filter_block(
+                "AWAY_PD_FILTER", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
             )
             return []
-        # F3: gate final
+        # F3: gate final con umbral de confianza dinámico
         # CL/EL/ECL: cualquier underdog hasta 6.00 con conf>0.65 (torneos eliminatorios)
-        # Resto: solo favorito (<2.5) o underdog extremo (>3.5 + conf>0.85)
+        # Resto: solo favorito (<2.5) o underdog extremo (>3.5 + conf>umbral dinámico)
         _intl_away_leagues = {"CL", "EL", "ECL"}
+        _gate_conf = _get_filter_params()["AWAY_GATE_CONF"].get("conf_threshold", 0.85)
         if league in _intl_away_leagues:
             _gate_ok = best_odds < 6.00 and best_confidence > 0.65
         else:
-            _gate_ok = best_odds < 2.5 or (best_odds > 3.5 and best_confidence > 0.85)
+            _gate_ok = best_odds < 2.5 or (best_odds > 3.5 and best_confidence > _gate_conf)
         if not _gate_ok:
             logger.info(
                 "generate_signal(%s): AWAY gate descartada "
-                "(odds=%.2f conf=%.2f) [%s vs %s | %s]",
-                match_id, best_odds, best_confidence, home_team, away_team, league,
+                "(odds=%.2f conf=%.2f < %.2f) [%s vs %s | %s]",
+                match_id, best_odds, best_confidence, _gate_conf, home_team, away_team, league,
+            )
+            _log_filter_block(
+                "AWAY_GATE_CONF", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
             )
             return []
 

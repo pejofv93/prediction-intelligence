@@ -41,6 +41,34 @@ ERROR_TO_WEIGHT: dict[str, str | None] = {
 # Ligas de futbol con modelo estadistico completo
 _FOOTBALL_LEAGUES = set(SUPPORTED_FOOTBALL_LEAGUES.keys())
 
+# ── Parámetros por defecto de filtros de bloqueo ─────────────────────────────
+_DEFAULT_FILTER_PARAMS: dict = {
+    "HIGH_DRAW_PROB":   {"threshold": 0.30},
+    "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 5.0, "FL1": 5.0},
+    "AWAY_DEAD_ZONE":   {"odds_min": 2.5, "odds_max": 3.5},
+    "AWAY_PD_FILTER":   {"odds_threshold": 2.5},
+    "AWAY_GATE_CONF":   {"conf_threshold": 0.85},
+}
+
+# Límites máximos/mínimos que puede alcanzar cada parámetro por ajuste automático
+_FILTER_PARAM_BOUNDS: dict = {
+    "HIGH_DRAW_PROB":   {"threshold": (0.22, 0.40)},
+    "UNDERDOG_EXTREME": {"PD": (3.5, 6.0), "SA": (3.5, 6.0), "PL": (3.5, 6.0),
+                         "BL1": (4.0, 7.0), "FL1": (4.0, 7.0)},
+    "AWAY_DEAD_ZONE":   {"odds_min": (2.0, 2.8), "odds_max": (3.0, 4.2)},
+    "AWAY_PD_FILTER":   {"odds_threshold": (1.8, 3.5)},
+    "AWAY_GATE_CONF":   {"conf_threshold": (0.70, 0.95)},
+}
+
+# Incremento por paso de ajuste
+_FILTER_ADJUSTMENT_STEP: dict = {
+    "HIGH_DRAW_PROB":   {"threshold": 0.02},
+    "UNDERDOG_EXTREME": {"PD": 0.25, "SA": 0.25, "PL": 0.25, "BL1": 0.25, "FL1": 0.25},
+    "AWAY_DEAD_ZONE":   {"odds_min": 0.10, "odds_max": 0.10},
+    "AWAY_PD_FILTER":   {"odds_threshold": 0.10},
+    "AWAY_GATE_CONF":   {"conf_threshold": 0.03},
+}
+
 # Mapeo de market_type → bucket canónico para tracking de accuracy por mercado
 _MARKET_BUCKETS: dict[str, str] = {
     "h2h":                      "1X2",
@@ -664,6 +692,12 @@ async def run_daily_learning() -> None:
         len(processed_predictions), week_accuracy * 100,
     )
 
+    # --- 8. Evaluación semanal de filtros de bloqueo ---
+    try:
+        await _maybe_evaluate_filters(now)
+    except Exception:
+        logger.error("run_daily_learning: error evaluando filtros", exc_info=True)
+
 
 def _get_historical_counts() -> tuple[int, int]:
     """Lee totales historicos de model_weights para acumularlos correctamente."""
@@ -691,3 +725,270 @@ def _get_prev_week_accuracy(current_week: str) -> float | None:
     except Exception:
         logger.error("_get_prev_week_accuracy: error leyendo Firestore", exc_info=True)
     return None
+
+
+def _adjust_filter_params(filter_name: str, params: dict, direction: str) -> dict:
+    """
+    Ajusta un único paso los parámetros de un filtro.
+    direction: "relax" (menos agresivo) | "tighten" (más agresivo)
+    """
+    new_params = dict(params)
+    bounds = _FILTER_PARAM_BOUNDS.get(filter_name, {})
+    steps = _FILTER_ADJUSTMENT_STEP.get(filter_name, {})
+
+    if filter_name == "HIGH_DRAW_PROB":
+        step = steps.get("threshold", 0.02)
+        lo, hi = bounds.get("threshold", (0.22, 0.40))
+        cur = params.get("threshold", 0.30)
+        # relax → aumentar umbral (bloquea menos partidos con posible empate)
+        # tighten → reducir umbral (bloquea más partidos con posible empate)
+        new_params["threshold"] = (
+            min(hi, round(cur + step, 3)) if direction == "relax"
+            else max(lo, round(cur - step, 3))
+        )
+
+    elif filter_name == "UNDERDOG_EXTREME":
+        for lk in ["PD", "SA", "PL", "BL1", "FL1"]:
+            if lk not in params:
+                continue
+            step = steps.get(lk, 0.25)
+            lo, hi = bounds.get(lk, (3.5, 7.0))
+            cur = params[lk]
+            # relax → subir umbral de cuota (permite underdogs más grandes)
+            # tighten → bajar umbral (bloquea underdogs más pequeños)
+            new_params[lk] = (
+                min(hi, round(cur + step, 2)) if direction == "relax"
+                else max(lo, round(cur - step, 2))
+            )
+
+    elif filter_name == "AWAY_DEAD_ZONE":
+        step_min = steps.get("odds_min", 0.10)
+        step_max = steps.get("odds_max", 0.10)
+        lo_min, hi_min = bounds.get("odds_min", (2.0, 2.8))
+        lo_max, hi_max = bounds.get("odds_max", (3.0, 4.2))
+        cur_min = params.get("odds_min", 2.5)
+        cur_max = params.get("odds_max", 3.5)
+        if direction == "relax":
+            # Reducir la zona muerta: subir mínimo y bajar máximo
+            new_params["odds_min"] = min(hi_min, round(cur_min + step_min, 2))
+            new_params["odds_max"] = max(lo_max, round(cur_max - step_max, 2))
+        else:
+            # Ampliar la zona muerta: bajar mínimo y subir máximo
+            new_params["odds_min"] = max(lo_min, round(cur_min - step_min, 2))
+            new_params["odds_max"] = min(hi_max, round(cur_max + step_max, 2))
+
+    elif filter_name == "AWAY_PD_FILTER":
+        step = steps.get("odds_threshold", 0.10)
+        lo, hi = bounds.get("odds_threshold", (1.8, 3.5))
+        cur = params.get("odds_threshold", 2.5)
+        # relax → subir umbral (permite odds más altas en PD)
+        # tighten → bajar umbral
+        new_params["odds_threshold"] = (
+            min(hi, round(cur + step, 2)) if direction == "relax"
+            else max(lo, round(cur - step, 2))
+        )
+
+    elif filter_name == "AWAY_GATE_CONF":
+        step = steps.get("conf_threshold", 0.03)
+        lo, hi = bounds.get("conf_threshold", (0.70, 0.95))
+        cur = params.get("conf_threshold", 0.85)
+        # relax → bajar umbral de confianza requerido (permite señales menos seguras)
+        # tighten → subir umbral (exige mayor confianza)
+        new_params["conf_threshold"] = (
+            max(lo, round(cur - step, 3)) if direction == "relax"
+            else min(hi, round(cur + step, 3))
+        )
+
+    return new_params
+
+
+async def evaluate_filter_performance() -> None:
+    """
+    Evalúa el rendimiento de cada filtro de bloqueo en las últimas 4 semanas.
+
+    Para cada filtro:
+      - Cuenta los bloqueos con resultado de partido conocido
+      - Calcula win_rate: fracción de señales bloqueadas que habrían acertado
+      - win_rate > 0.45 → relajar filtro (bloqueaba buenas señales)
+      - win_rate < 0.30 → endurecer filtro (bloqueos eran correctos)
+      - Requiere mínimo 10 bloqueos y 5 con resultado para ajustar
+
+    Guarda resultado en model_weights/filter_performance.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff_4w = now - timedelta(weeks=4)
+
+    logger.info(
+        "evaluate_filter_performance: inicio — ventana 4 semanas desde %s",
+        cutoff_4w.date(),
+    )
+
+    # --- 1. Leer todos los filter_blocks de las últimas 4 semanas ---
+    blocks_by_filter: dict[str, list[dict]] = {k: [] for k in _DEFAULT_FILTER_PARAMS}
+    try:
+        docs = list(
+            col("filter_blocks")
+            .where(filter=FieldFilter("blocked_at", ">=", cutoff_4w))
+            .stream()
+        )
+    except Exception:
+        logger.error("evaluate_filter_performance: error leyendo filter_blocks", exc_info=True)
+        return
+
+    for doc in docs:
+        data = doc.to_dict()
+        fname = data.get("filter_name")
+        if fname in blocks_by_filter:
+            blocks_by_filter[fname].append(data)
+
+    logger.info(
+        "evaluate_filter_performance: bloques encontrados — %s",
+        {k: len(v) for k, v in blocks_by_filter.items()},
+    )
+
+    # --- 2. Paralelizar check_result para todos los match_ids únicos ---
+    all_match_ids: set[str] = set()
+    for blocks in blocks_by_filter.values():
+        for b in blocks:
+            if b.get("match_id"):
+                all_match_ids.add(str(b["match_id"]))
+
+    if not all_match_ids:
+        logger.info("evaluate_filter_performance: sin match_ids — saltando")
+        return
+
+    mid_list = sorted(all_match_ids)
+    raw_results = await asyncio.gather(
+        *[check_result(mid) for mid in mid_list],
+        return_exceptions=True,
+    )
+    results_map: dict[str, str | None] = {
+        mid: (r if isinstance(r, str) else None)
+        for mid, r in zip(mid_list, raw_results)
+    }
+
+    # --- 3. Cargar parámetros actuales (con fallback a defaults) ---
+    current_params: dict = {k: dict(v) for k, v in _DEFAULT_FILTER_PARAMS.items()}
+    try:
+        fp_doc = col("model_weights").document("filter_performance").get()
+        if fp_doc.exists:
+            stored = fp_doc.to_dict().get("params", {})
+            for fname, fparams in stored.items():
+                if fname in current_params and isinstance(fparams, dict):
+                    current_params[fname].update(fparams)
+    except Exception:
+        logger.warning(
+            "evaluate_filter_performance: error leyendo params actuales — usando defaults"
+        )
+
+    # --- 4. Evaluar y ajustar cada filtro ---
+    filter_stats: dict[str, dict] = {}
+    updated_params: dict[str, dict] = {k: dict(v) for k, v in current_params.items()}
+
+    for filter_name, blocks in blocks_by_filter.items():
+        if len(blocks) < 10:
+            logger.info(
+                "evaluate_filter_performance: %s — %d bloques (min 10) — sin ajuste",
+                filter_name, len(blocks),
+            )
+            filter_stats[filter_name] = {
+                "blocks": len(blocks), "evaluated": 0,
+                "win_rate": None, "action": "skip_insufficient_data",
+            }
+            continue
+
+        wins = 0
+        evaluated = 0
+        for b in blocks:
+            mid = str(b.get("match_id", ""))
+            actual = results_map.get(mid)
+            if actual is None:
+                continue
+            ttb = _norm(str(b.get("team_to_back", "")))
+            home = _norm(str(b.get("home_team", "")))
+            away = _norm(str(b.get("away_team", "")))
+            if ttb == home:
+                correct = actual == "HOME_WIN"
+            elif ttb == away:
+                correct = actual == "AWAY_WIN"
+            else:
+                continue  # equipo no identificable — omitir
+            evaluated += 1
+            if correct:
+                wins += 1
+
+        if evaluated < 5:
+            logger.info(
+                "evaluate_filter_performance: %s — solo %d evaluados con resultado — sin ajuste",
+                filter_name, evaluated,
+            )
+            filter_stats[filter_name] = {
+                "blocks": len(blocks), "evaluated": evaluated,
+                "win_rate": None, "action": "skip_no_results",
+            }
+            continue
+
+        win_rate = wins / evaluated
+        action = "no_change"
+
+        if win_rate > 0.45:
+            action = "relax"
+            updated_params[filter_name] = _adjust_filter_params(
+                filter_name, current_params[filter_name], direction="relax"
+            )
+        elif win_rate < 0.30:
+            action = "tighten"
+            updated_params[filter_name] = _adjust_filter_params(
+                filter_name, current_params[filter_name], direction="tighten"
+            )
+
+        logger.info(
+            "evaluate_filter_performance: %s — %d bloques, %d evaluados, "
+            "win_rate=%.1f%% → %s",
+            filter_name, len(blocks), evaluated, win_rate * 100, action,
+        )
+        filter_stats[filter_name] = {
+            "blocks": len(blocks),
+            "evaluated": evaluated,
+            "wins": wins,
+            "win_rate": round(win_rate, 4),
+            "action": action,
+            "params_before": current_params[filter_name],
+            "params_after": updated_params[filter_name],
+        }
+
+    # --- 5. Guardar resultado en Firestore ---
+    try:
+        col("model_weights").document("filter_performance").set({
+            "params": updated_params,
+            "last_evaluated": now,
+            "stats": filter_stats,
+        })
+        logger.info(
+            "evaluate_filter_performance: guardado — acciones=%s",
+            {k: v.get("action", "?") for k, v in filter_stats.items()},
+        )
+    except Exception:
+        logger.error(
+            "evaluate_filter_performance: error guardando filter_performance", exc_info=True
+        )
+
+
+async def _maybe_evaluate_filters(now: datetime) -> None:
+    """Ejecuta evaluate_filter_performance si han pasado ≥7 días desde la última evaluación."""
+    try:
+        fp_doc = col("model_weights").document("filter_performance").get()
+        if fp_doc.exists:
+            last_eval = fp_doc.to_dict().get("last_evaluated")
+            if last_eval is not None:
+                if hasattr(last_eval, "tzinfo") and last_eval.tzinfo is None:
+                    last_eval = last_eval.replace(tzinfo=timezone.utc)
+                if (now - last_eval).days < 7:
+                    logger.info(
+                        "_maybe_evaluate_filters: evaluación reciente (%s) — saltando",
+                        last_eval.date(),
+                    )
+                    return
+    except Exception:
+        pass  # si falla la lectura, ejecutar igualmente
+    await evaluate_filter_performance()
