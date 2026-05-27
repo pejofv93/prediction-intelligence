@@ -160,6 +160,18 @@ _CRICKET_RE = re.compile(
     r')\b',
     re.I,
 )
+_F1_RE = re.compile(
+    r'\b(formula.?1|formula one|grand prix|gp race|gp driver|'
+    r'f1 driver|f1 race|f1 season|verstappen|hamilton|leclerc|'
+    r'norris|antonelli|russell|alonso|sainz|piastri|qualifying|'
+    r'pole position|fastest lap|monaco gp|bahrain gp|spanish gp)\b',
+    re.I,
+)
+
+# In-run cache: señales direccionales crypto para bloquear BUY_YES contradictorios
+# key: asset_key → (direction "UP"/"DOWN", monotonic_ts, target_price)
+_CRYPTO_DIRECTIONAL_SIGNALS: dict[str, tuple[str, float, float]] = {}
+_CRYPTO_DIRECTION_WINDOW: float = 21600.0  # 6h en segundos monotónicos
 
 _WIN_TOURNAMENT_RE = re.compile(
     r'will\s+(.+?)\s+win\s+(?:the\s+)?(.+?)[\?\.\s]*$', re.I
@@ -2000,7 +2012,12 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         _is_mlb_game = _slug.startswith("mlb-") or bool(_MLB_RE.search(question))
         _is_nhl_game = _slug.startswith("nhl-") or bool(_NHL_RE.search(question))
         _is_cricket = _slug.startswith(("ipl-", "cricket-")) or bool(_CRICKET_RE.search(question))
-        _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game or _is_nhl_game or _is_cricket
+        _is_f1 = (
+            _slug.startswith(("formula-1-", "f1-", "formula-one-"))
+            or bool(_F1_RE.search(question))
+            or bool(_F1_RE.search(_slug.replace("-", " ")))
+        )
+        _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game or _is_nhl_game or _is_cricket or _is_f1
 
         if _is_individual_match:
             _sport_label = (
@@ -2008,6 +2025,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "UFC" if _is_ufc else
                 "CRICKET" if _is_cricket else
                 "NHL" if _is_nhl_game else
+                "F1" if _is_f1 else
                 "MLB"
             )
 
@@ -2075,6 +2093,16 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     _sports_query = f"{question} UFC odds betting prediction 2026"
                 elif _is_cricket:
                     _sports_query = f"{question} IPL cricket odds betting prediction 2026"
+                elif _is_f1:
+                    # F1: buscar tiempos de clasificación + favoritos antes de generar señal
+                    _f1_driver_m = re.search(r'\b(Russell|Antonelli|Verstappen|Hamilton|Leclerc|Norris|Piastri|Alonso|Sainz)\b', question, re.I)
+                    _f1_driver = _f1_driver_m.group(1) if _f1_driver_m else ""
+                    _f1_gp_m = re.search(r'(\w+\s+(?:Grand Prix|GP))', question, re.I)
+                    _f1_gp = _f1_gp_m.group(1) if _f1_gp_m else "Formula 1"
+                    _sports_query = (
+                        f"{_f1_driver or question[:60]} {_f1_gp} 2026 "
+                        f"qualifying results practice times odds favorites"
+                    )
                 else:
                     # MLB/NHL: extraer equipos y fecha para query específica
                     _mlb_teams = re.findall(
@@ -3241,6 +3269,26 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 "analyze_market(%s): FLOOR_REENFORCE %.3f→%.3f (floor=%.2f post-cap recovery)",
                 market_id, _old_pre_floor, real_prob, _effective_floor,
             )
+
+    # FIX 1: bloquear señales BUY_YES direccionalmente contradictorias para el mismo activo
+    # Ejemplo: BTC $80k BUY_YES (subida) + BTC $72k BUY_YES (bajada) en la misma sesión.
+    if _price_ctx and recommendation == "BUY_YES" and _current_price and _current_price > 0:
+        _dir_asset, _, _dir_target = _price_ctx
+        _new_direction = "UP" if _dir_target > _current_price else "DOWN"
+        _prev_dir_signal = _CRYPTO_DIRECTIONAL_SIGNALS.get(_dir_asset)
+        if _prev_dir_signal:
+            _prev_dir, _prev_dir_ts, _prev_dir_target = _prev_dir_signal
+            _elapsed_dir = _time.monotonic() - _prev_dir_ts
+            if _prev_dir != _new_direction and _elapsed_dir < _CRYPTO_DIRECTION_WINDOW:
+                logger.warning(
+                    "analyze_market(%s): CRYPTO_DIRECTION_CONFLICT — %s tiene señal activa %s "
+                    "(target=%.0f, hace %.0fmin), nueva señal %s (target=%.0f) contradictoria → PASS",
+                    market_id, _dir_asset, _prev_dir, _prev_dir_target,
+                    _elapsed_dir / 60.0, _new_direction, _dir_target,
+                )
+                recommendation = "PASS"
+        if recommendation == "BUY_YES":
+            _CRYPTO_DIRECTIONAL_SIGNALS[_dir_asset] = (_new_direction, _time.monotonic(), _dir_target)
 
     # Capa final: re-aplicar limpieza de reasoning con los valores definitivos
     # (recommendation puede haber cambiado por auto-corrección, correlación, etc.)
