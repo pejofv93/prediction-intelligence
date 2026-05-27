@@ -199,6 +199,16 @@ def _build_ratings(home_stats: dict, away_stats: dict, league: str) -> dict:
     if all(abs(v - 0.5) < 0.001 for v in signals.values()):
         conf = min(conf, 0.60)
         logger.debug("_build_ratings: señales todas default (0.50) → conf capped 0.60")
+    # FIX: off_edge=0.00 AND form=0.00 → datos de entrada extremos/inválidos → cap conf 60%
+    # Causa: std([0, 0, 0]) = 0 → conf = 1.0, señal falsa con edge enorme (+50%+).
+    # Ocurre cuando form_score=0 para ambos equipos Y los ratings están invertidos.
+    if off_sig < 0.001 and form_sig < 0.001:
+        conf = min(conf, 0.60)
+        logger.warning(
+            "_build_ratings: SYNTHETIC_DEFAULT_CAP off_edge=%.4f AND form=%.4f "
+            "— datos inválidos → conf capped 0.60",
+            off_sig, form_sig,
+        )
 
     return {
         "off_home": off_home, "def_home": def_home,
