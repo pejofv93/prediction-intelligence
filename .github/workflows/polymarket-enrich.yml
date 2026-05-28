@@ -15,4 +15,5 @@ jobs:
             -H "Content-Type: application/json" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
             --max-time 1200 \
+            --retry 3 --retry-delay 60 \
             --fail --silent --show-error
