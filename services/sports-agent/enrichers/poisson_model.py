@@ -243,3 +243,45 @@ def predict_match_probs(
         "away_xg": round(mu_away, 3),
         "score_matrix": score_matrix.tolist(),
     }
+
+
+def predict_match_probs_from_xg(home_xg: float, away_xg: float) -> dict:
+    """
+    Calcula probabilidades Poisson usando xG reales de Sofascore como λ y μ.
+    Más preciso que fit_attack_defense cuando se tienen xG recientes (hasXg=True).
+
+    home_xg: xG medio del equipo local en los últimos N partidos (sf_xg_for)
+    away_xg: xG medio del equipo visitante en los últimos N partidos (sf_xg_for)
+    """
+    MAX_GOALS = 8
+    lambda_home = max(float(home_xg), 0.1)
+    mu_away = max(float(away_xg), 0.1)
+
+    correction = dixon_coles_correction(lambda_home, mu_away)
+    score_matrix = np.zeros((MAX_GOALS + 1, MAX_GOALS + 1))
+    for i in range(MAX_GOALS + 1):
+        for j in range(MAX_GOALS + 1):
+            p = float(poisson.pmf(i, lambda_home)) * float(poisson.pmf(j, mu_away))
+            if i <= 1 and j <= 1:
+                p *= correction[i, j]
+            score_matrix[i, j] = p
+
+    total = score_matrix.sum()
+    if total > 1e-10:
+        score_matrix /= total
+
+    home_win = float(np.sum(np.tril(score_matrix, k=-1)))
+    draw = float(np.trace(score_matrix))
+    away_win = float(np.sum(np.triu(score_matrix, k=1)))
+
+    logger.debug(
+        "predict_match_probs_from_xg(λ=%.2f μ=%.2f): H=%.3f D=%.3f A=%.3f",
+        lambda_home, mu_away, home_win, draw, away_win,
+    )
+    return {
+        "home_win": round(home_win, 4),
+        "draw": round(draw, 4),
+        "away_win": round(away_win, 4),
+        "home_xg": round(lambda_home, 3),
+        "away_xg": round(mu_away, 3),
+    }

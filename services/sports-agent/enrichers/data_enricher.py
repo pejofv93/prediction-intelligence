@@ -19,7 +19,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from shared.config import MIN_MATCHES_TO_FIT, SUPPORTED_FOOTBALL_LEAGUES
 from shared.firestore_client import col
 
-from enrichers.poisson_model import fit_attack_defense, predict_match_probs
+from enrichers.poisson_model import fit_attack_defense, predict_match_probs, predict_match_probs_from_xg
 from enrichers.elo_rating import elo_win_probability, get_team_elo
 
 logger = logging.getLogger(__name__)
@@ -315,6 +315,36 @@ async def enrich_match(match: dict) -> dict:
                 poisson_away_win = probs["away_win"]
                 home_xg = probs["home_xg"]
                 away_xg = probs["away_xg"]
+
+                # Blend con xG real de Sofascore si está disponible
+                # w_xg crece con el número de partidos con xG (máx 60% a partir de 10 partidos)
+                sf_xg_h = home_stats.get("sf_xg_for")
+                sf_xg_a = away_stats.get("sf_xg_for")
+                sf_n_h = home_stats.get("sf_xg_matches", 0)
+                sf_n_a = away_stats.get("sf_xg_matches", 0)
+                if sf_xg_h and sf_xg_a and sf_n_h >= 3 and sf_n_a >= 3:
+                    # xG del local = lo que genera; xG "against" del visitante = lo que concede
+                    sf_xg_against_a = away_stats.get("sf_xg_against", sf_xg_a)
+                    # lambda = media de (xG generado local + xG concedido visitante)
+                    blended_lambda = (sf_xg_h + sf_xg_against_a) / 2.0
+                    sf_xg_against_h = home_stats.get("sf_xg_against", sf_xg_h)
+                    blended_mu = (sf_xg_a + sf_xg_against_h) / 2.0
+                    xg_probs = predict_match_probs_from_xg(blended_lambda, blended_mu)
+                    # Peso xG: 0.3 con 3 partidos → 0.6 con ≥10 partidos
+                    w_xg = min((sf_n_h + sf_n_a) / 20.0, 0.6)
+                    w_hist = 1.0 - w_xg
+                    poisson_home_win = round(w_hist * poisson_home_win + w_xg * xg_probs["home_win"], 4)
+                    poisson_draw = round(w_hist * poisson_draw + w_xg * xg_probs["draw"], 4)
+                    poisson_away_win = round(w_hist * poisson_away_win + w_xg * xg_probs["away_win"], 4)
+                    home_xg = round(blended_lambda, 3)
+                    away_xg = round(blended_mu, 3)
+                    logger.debug(
+                        "enrich_match(%s): xG blend w_xg=%.2f "
+                        "λ_hist=%.2f→%.2f μ_hist=%.2f→%.2f",
+                        match_id, w_xg,
+                        probs["home_xg"], home_xg,
+                        probs["away_xg"], away_xg,
+                    )
         except Exception:
             logger.error(
                 "enrich_match(%s): error en modelo Poisson", match_id, exc_info=True

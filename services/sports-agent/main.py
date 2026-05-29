@@ -679,12 +679,24 @@ async def _collect_football() -> None:
     except Exception:
         logger.error("collect.football: error actualizando ELO ratings", exc_info=True)
 
-    # Enriquecimiento Sofascore: xG real + form de 20 partidos para equipos CL
+    # Enriquecimiento Sofascore: xG real + form 20 partidos para CL, EL, ECL y ligas domésticas
     try:
-        from collectors.sofascore_football import enrich_cl_teams_sofascore
-        await enrich_cl_teams_sofascore(matches)
+        from collectors.sofascore_football import enrich_teams_sofascore
+        await enrich_teams_sofascore(matches)
     except Exception:
-        logger.warning("collect.football: Sofascore CL enrichment falló (no crítico)", exc_info=True)
+        logger.warning("collect.football: Sofascore enrichment falló (no crítico)", exc_info=True)
+
+    # Colección Sofascore-native: WSL, Liga F, UCL Femenina, Brasileirao
+    try:
+        from collectors.sofascore_football import collect_sofascore_native_games
+        from collectors.firestore_writer import save_upcoming_matches
+        native_games = await collect_sofascore_native_games()
+        if native_games:
+            await save_upcoming_matches(native_games)
+            logger.info("collect.football: %d partidos nativos Sofascore guardados", len(native_games))
+            await enrich_teams_sofascore(native_games)
+    except Exception:
+        logger.warning("collect.football: Sofascore native games falló (no crítico)", exc_info=True)
 
 
 async def _collect_standings() -> None:

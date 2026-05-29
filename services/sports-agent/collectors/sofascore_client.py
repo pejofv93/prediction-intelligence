@@ -31,14 +31,36 @@ _HEADERS = {
 }
 _TIMEOUT = 12
 
-# Torneos y temporadas conocidas {año_fin: season_id}
+# Torneos y temporadas conocidas {año_fin_o_clave: season_id}
 TOURNAMENTS: dict[str, dict] = {
+    # Baloncesto
     "acb":              {"id": 264,  "sport": "basketball", "surface": None,   "seasons": {2026: 80922}},
+    # Tenis
     "roland_garros_atp":{"id": 2480, "sport": "tennis",     "surface": "clay", "seasons": {2026: 85951, 2025: 61364}},
     "roland_garros_wta":{"id": 2577, "sport": "tennis",     "surface": "clay", "seasons": {2026: 85953, 2025: 61366}},
-    "champions_league": {"id": 7,    "sport": "football",   "surface": None,   "seasons": {2425: 61644, 2526: 76953}},
-    "laliga":           {"id": 8,    "sport": "football",   "surface": None,   "seasons": {2425: 61643, 2526: 77559}},
-    "premier_league":   {"id": 17,   "sport": "football",   "surface": None,   "seasons": {2425: 61627, 2526: 76986}},
+    # Fútbol masculino — Europa
+    "champions_league": {"id": 7,    "sport": "football",   "surface": None,   "league_code": "CL",  "seasons": {2425: 61644, 2526: 76953}},
+    "europa_league":    {"id": 679,  "sport": "football",   "surface": None,   "league_code": "EL",  "seasons": {2425: 61645, 2526: 76984}},
+    "conference_league":{"id": 17015,"sport": "football",   "surface": None,   "league_code": "ECL", "seasons": {2425: 61648, 2526: 76960}},
+    "premier_league":   {"id": 17,   "sport": "football",   "surface": None,   "league_code": "PL",  "seasons": {2425: 61627, 2526: 76986}},
+    "laliga":           {"id": 8,    "sport": "football",   "surface": None,   "league_code": "PD",  "seasons": {2425: 61643, 2526: 77559}},
+    "bundesliga":       {"id": 35,   "sport": "football",   "surface": None,   "league_code": "BL1", "seasons": {2425: 63516, 2526: 77333}},
+    "serie_a":          {"id": 23,   "sport": "football",   "surface": None,   "league_code": "SA",  "seasons": {2425: 63515, 2526: 76457}},
+    "ligue_1":          {"id": 34,   "sport": "football",   "surface": None,   "league_code": "FL1", "seasons": {2425: 61736, 2526: 77356}},
+    # Fútbol femenino
+    "wsl":              {"id": 1044, "sport": "football",   "surface": None,   "league_code": "WSL", "seasons": {2425: 64370, 2526: 79227}},
+    "liga_f":           {"id": 1127, "sport": "football",   "surface": None,   "league_code": "LIGA_F", "seasons": {2425: 65687, 2526: 77723}},
+    "women_cl":         {"id": 696,  "sport": "football",   "surface": None,   "league_code": "WCL", "seasons": {2425: 63572, 2526: 77328}},
+    # Fútbol internacional
+    "brasileirao":      {"id": 325,  "sport": "football",   "surface": None,   "league_code": "BSA", "seasons": {2025: 72034, 2026: 87678}},
+    "copa_america":     {"id": 133,  "sport": "football",   "surface": None,   "league_code": "CA",  "seasons": {2024: 57114}},
+}
+
+# Mapeo rápido league_code → clave en TOURNAMENTS (para lookup inverso)
+LEAGUE_CODE_TO_TOURNAMENT: dict[str, str] = {
+    v["league_code"]: k
+    for k, v in TOURNAMENTS.items()
+    if "league_code" in v
 }
 
 

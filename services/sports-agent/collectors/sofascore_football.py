@@ -1,18 +1,22 @@
 """
-Enriquecedor de fútbol vía Sofascore — Champions League y ligas europeas.
+Enriquecedor de fútbol vía Sofascore — todas las competiciones europeas + Brasil + mujeres.
 
 Qué aporta vs football-data.org (free tier):
-  ✓ Historial de equipo con más partidos (20 por página, sin límite duro de 10)
-  ✓ hasXg flag por partido — identifica partidos con datos xG reales
-  ✓ Cubre ligas no disponibles en football-data.org free (Bundesliga segunda división, etc.)
-  ✓ Champions League con datos de equipo completos (no solo partidos del grupo)
-  ✗ xG absoluto requiere call adicional por partido (/event/{id}/statistics)
-     → implementado con límite de 5 partidos por equipo para no sobrecargar
+  ✓ xG real por partido (hasXg=true en 82% de PL/CL/La Liga)
+  ✓ Historial de 20 partidos (vs máximo 10 del free tier)
+  ✓ Cubre EL, ECL (mismos IDs que CL) sin restricciones
+  ✓ Liga Femenina, WSL, UCL Femenina, Brasileirao (no en football-data.org free)
 
 Estrategia de ID mapping:
   football-data.org team_id ≠ Sofascore team_id.
-  Solución: fetch de standings de CL → tabla {nombre_normalizado: sf_id}.
-  Para equipos que no aparecen en CL standings, se intenta búsqueda por nombre.
+  Solución: standings de cada competición → {nombre_norm: sf_id}.
+  Los nombres se normalizan (minúsculas, sin acentos) para fuzzy match.
+
+Ligas cubiertas por el enriquecedor:
+  CL, EL, ECL — standings disponibles las dos temporadas (2425, 2526)
+  PL, PD, BL1, SA, FL1 — idem
+  WSL, LIGA_F, WCL — fútbol femenino
+  BSA — Brasileirao
 """
 import asyncio
 import logging
@@ -20,6 +24,7 @@ from datetime import datetime, timezone
 
 from collectors.sofascore_client import (
     TOURNAMENTS,
+    LEAGUE_CODE_TO_TOURNAMENT,
     fetch_team_events,
     fetch_tournament_standings,
     fetch_event_statistics,
@@ -29,51 +34,80 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-_CL_TOURNAMENT_ID = TOURNAMENTS["champions_league"]["id"]    # 7
-_CL_SEASON_2425   = TOURNAMENTS["champions_league"]["seasons"][2425]   # 61644
-_CL_SEASON_2526   = TOURNAMENTS["champions_league"]["seasons"][2526]   # 76953
+# Competiciones de las que cargamos el team map (en orden → primero cargado tiene prioridad)
+_MAP_SOURCES: list[str] = [
+    "champions_league", "europa_league", "conference_league",
+    "premier_league", "laliga", "bundesliga", "serie_a", "ligue_1",
+    "wsl", "liga_f", "women_cl", "brasileirao",
+]
 
-# Caché en proceso (evita re-fetch del mismo equipo en la misma ejecución)
-_SF_TEAM_MAP: dict[str, int] = {}       # {nombre_normalizado: sf_team_id}
+# Liga codes que el enriquecedor procesa (todas las que tenemos en Sofascore)
+_ENRICHABLE_LEAGUE_CODES: set[str] = {
+    "CL", "EL", "ECL",
+    "PL", "PD", "BL1", "SA", "FL1",
+    "WSL", "LIGA_F", "WCL", "BSA",
+    # Alias que pueden aparecer en los game dicts
+    "UEFA Champions League", "UEFA Europa League", "UEFA Conference League",
+    "CHAMPIONS_LEAGUE", "EUROPA_LEAGUE", "CONFERENCE_LEAGUE",
+}
+
+# Caché global de proceso: {nombre_norm: sf_team_id}
+_SF_TEAM_MAP: dict[str, int] = {}
 _SF_TEAM_MAP_LOADED = False
 
 
-async def _load_cl_team_map(season_id: int | None = None) -> dict[str, int]:
+async def _load_multi_league_team_map() -> dict[str, int]:
     """
-    Construye {nombre_normalizado → sofascore_team_id} desde standings de CL.
-    Intenta temporada actual (2526) y anterior (2425) para máxima cobertura.
+    Construye {nombre_normalizado → sofascore_team_id} cargando standings de
+    todas las competiciones en _MAP_SOURCES. Resultado cacheado en proceso.
     """
     global _SF_TEAM_MAP, _SF_TEAM_MAP_LOADED
     if _SF_TEAM_MAP_LOADED:
         return _SF_TEAM_MAP
 
-    seasons = [_CL_SEASON_2526, _CL_SEASON_2425] if season_id is None else [season_id]
-    for sid in seasons:
-        rows = await fetch_tournament_standings(_CL_TOURNAMENT_ID, sid)
-        for row in rows:
-            team = row.get("team") or {}
-            name = team.get("name") or team.get("shortName") or ""
-            sf_id = team.get("id")
-            if name and sf_id:
-                _SF_TEAM_MAP[normalize_name(name)] = int(sf_id)
-                # También indexar shortName si distinto
-                short = team.get("shortName") or ""
-                if short and normalize_name(short) != normalize_name(name):
-                    _SF_TEAM_MAP[normalize_name(short)] = int(sf_id)
-        if _SF_TEAM_MAP:
-            break
+    for key in _MAP_SOURCES:
+        t = TOURNAMENTS.get(key)
+        if not t:
+            continue
+        t_id = t["id"]
+        # Intentar temporada más reciente, luego anterior
+        season_ids = sorted(t.get("seasons", {}).values(), reverse=True)
+        for sid in season_ids[:2]:
+            try:
+                rows = await fetch_tournament_standings(t_id, sid)
+                added = 0
+                for row in rows:
+                    team = row.get("team") or {}
+                    sf_id = team.get("id")
+                    if not sf_id:
+                        continue
+                    for name_field in ("name", "shortName"):
+                        raw_name = team.get(name_field) or ""
+                        if raw_name:
+                            _SF_TEAM_MAP[normalize_name(raw_name)] = int(sf_id)
+                            added += 1
+                if added:
+                    logger.debug(
+                        "sofascore_football: mapa %s (season %d) → %d entradas",
+                        key, sid, added,
+                    )
+                    break  # temporada OK, no necesitamos la anterior
+            except Exception:
+                logger.debug("sofascore_football: error cargando %s season %d", key, sid, exc_info=True)
+        await asyncio.sleep(0.15)  # cortesía entre llamadas de standings
 
     _SF_TEAM_MAP_LOADED = True
-    logger.info("sofascore_football: CL team map cargado — %d equipos", len(_SF_TEAM_MAP))
+    logger.info("sofascore_football: team map cargado — %d equipos de %d competiciones",
+                len(_SF_TEAM_MAP), len(_MAP_SOURCES))
     return _SF_TEAM_MAP
 
 
 def _find_sf_team_id(team_name: str, team_map: dict[str, int]) -> int | None:
-    """Busca Sofascore team ID por nombre (exacto → apellido → parcial)."""
+    """Búsqueda por nombre exacto → palabra clave → parcial."""
     norm = normalize_name(team_name)
     if norm in team_map:
         return team_map[norm]
-    # Coincidencia parcial: alguna palabra del nombre del equipo
+    # Palabras significativas del nombre (>3 chars)
     parts = [p for p in norm.split() if len(p) > 3]
     for part in parts:
         for key, sf_id in team_map.items():
@@ -82,15 +116,17 @@ def _find_sf_team_id(team_name: str, team_map: dict[str, int]) -> int | None:
     return None
 
 
-async def _fetch_team_xg_from_sofascore(sf_team_id: int, max_xg_matches: int = 5) -> dict:
+async def _fetch_team_xg_and_form(sf_team_id: int, max_xg_matches: int = 5) -> dict:
     """
-    Obtiene últimos eventos del equipo + xG de los primeros max_xg_matches partidos
-    que tienen hasXg=True. Limita las llamadas adicionales para no sobrecargar.
+    Últimos ~20 eventos de un equipo:
+      - Form score ponderado (20 partidos, W=3 D=1 L=0)
+      - xG medio real de los primeros max_xg_matches con hasXg=True
     """
     events = await fetch_team_events(sf_team_id, page=0)
     if not events:
         return {}
 
+    # --- xG real (requiere call por partido) ---
     xg_for_list: list[float] = []
     xg_against_list: list[float] = []
     xg_calls = 0
@@ -103,44 +139,34 @@ async def _fetch_team_xg_from_sofascore(sf_team_id: int, max_xg_matches: int = 5
         event_id = e.get("id")
         if not event_id:
             continue
-
         try:
             stats_data = await fetch_event_statistics(event_id)
-            stats_groups = stats_data.get("statistics", [])
-            for group in stats_groups:
+            for group in stats_data.get("statistics", []):
                 if group.get("period") != "ALL":
                     continue
                 for item in group.get("groups", []):
                     for stat in item.get("statisticsItems", []):
                         if stat.get("name", "").lower() in ("expected goals", "xg", "xgoals"):
                             try:
-                                home_val = float(stat.get("home") or 0)
-                                away_val = float(stat.get("away") or 0)
-                                # Determinar si el equipo es local o visitante
-                                is_home = e.get("homeTeam", {}).get("id") == sf_team_id
-                                xg_for_list.append(home_val if is_home else away_val)
-                                xg_against_list.append(away_val if is_home else home_val)
+                                h_val = float(stat.get("home") or 0)
+                                a_val = float(stat.get("away") or 0)
+                                is_home = (e.get("homeTeam") or {}).get("id") == sf_team_id
+                                xg_for_list.append(h_val if is_home else a_val)
+                                xg_against_list.append(a_val if is_home else h_val)
                             except (TypeError, ValueError):
                                 pass
             xg_calls += 1
-            await asyncio.sleep(0.2)  # cortesía mínima
+            await asyncio.sleep(0.15)
         except Exception:
-            logger.debug("sofascore_football: error fetch xG event %d", event_id, exc_info=True)
+            logger.debug("sofascore_football: xG event %d error", event_id, exc_info=True)
 
-    result: dict = {}
-    if xg_for_list:
-        result["sf_xg_for"] = round(sum(xg_for_list) / len(xg_for_list), 3)
-        result["sf_xg_against"] = round(sum(xg_against_list) / len(xg_against_list), 3)
-        result["sf_xg_matches"] = len(xg_for_list)
-
-    # Form score básico de los 20 últimos eventos (sin xG calls adicionales)
+    # --- Form score de 20 partidos ---
     wins = losses = draws = 0
     for e in events[:20]:
-        status_type = (e.get("status") or {}).get("type", "")
-        if status_type != "finished":
+        if (e.get("status") or {}).get("type") != "finished":
             continue
         wc = e.get("winnerCode")
-        is_home = e.get("homeTeam", {}).get("id") == sf_team_id
+        is_home = (e.get("homeTeam") or {}).get("id") == sf_team_id
         if wc == 0:
             draws += 1
         elif (wc == 1 and is_home) or (wc == 2 and not is_home):
@@ -148,73 +174,137 @@ async def _fetch_team_xg_from_sofascore(sf_team_id: int, max_xg_matches: int = 5
         else:
             losses += 1
 
+    result: dict = {}
     total = wins + losses + draws
     if total > 0:
-        result["sf_form_score"] = round(((wins * 3 + draws) / (total * 3)) * 100, 1)
-        result["sf_form_matches"] = total
-        result["sf_form_wins"] = wins
-        result["sf_form_losses"] = losses
-        result["sf_form_draws"] = draws
+        result.update({
+            "sf_form_score": round(((wins * 3 + draws) / (total * 3)) * 100, 1),
+            "sf_form_matches": total,
+            "sf_form_wins": wins,
+            "sf_form_losses": losses,
+            "sf_form_draws": draws,
+        })
+    if xg_for_list:
+        result.update({
+            "sf_xg_for": round(sum(xg_for_list) / len(xg_for_list), 3),
+            "sf_xg_against": round(sum(xg_against_list) / len(xg_against_list), 3),
+            "sf_xg_matches": len(xg_for_list),
+        })
 
     return result
 
 
-async def enrich_cl_teams_sofascore(games: list[dict]) -> None:
+async def enrich_teams_sofascore(games: list[dict]) -> None:
     """
-    Para partidos de Champions League, enriquece team_stats en Firestore
-    con datos adicionales de Sofascore (form_score basado en 20 partidos + xG real).
+    Enriquece team_stats en Firestore con datos Sofascore para todos los partidos
+    cuya liga esté en _ENRICHABLE_LEAGUE_CODES.
 
-    Sólo actúa sobre partidos con league='CL' para minimizar calls.
+    Guarda (merge=True): sf_form_score, sf_xg_for, sf_xg_against, sf_team_id, sf_updated_at
+    Estos campos los usa data_enricher.py para ajustar el modelo Poisson con xG real.
     """
-    cl_games = [g for g in games if g.get("league") in ("CL", "UEFA Champions League", "CHAMPIONS_LEAGUE")]
-    if not cl_games:
+    target_games = [g for g in games if g.get("league") in _ENRICHABLE_LEAGUE_CODES]
+    if not target_games:
         return
 
-    team_map = await _load_cl_team_map()
+    team_map = await _load_multi_league_team_map()
     if not team_map:
-        logger.warning("sofascore_football: CL team map vacío — sin enriquecimiento")
+        logger.warning("sofascore_football: team map vacío — sin enriquecimiento")
         return
 
-    enriched_teams: set[int] = set()
+    enriched: set[int] = set()
 
-    for game in cl_games:
+    for game in target_games:
         for side in ("home", "away"):
             team_id = game.get(f"{side}_team_id")
             team_name = game.get(f"{side}_team", game.get(f"{side}_team_name", ""))
-            if not team_id or not team_name:
-                continue
-
-            if team_id in enriched_teams:
+            if not team_id or not team_name or team_id in enriched:
                 continue
 
             sf_id = _find_sf_team_id(team_name, team_map)
             if not sf_id:
-                logger.debug(
-                    "sofascore_football: sin Sofascore ID para '%s' — skip", team_name
-                )
+                logger.debug("sofascore_football: sin SF ID para '%s'", team_name)
                 continue
 
             try:
-                xg_form = await _fetch_team_xg_from_sofascore(sf_id)
-                if xg_form:
-                    xg_form["sf_team_id"] = sf_id
-                    xg_form["sf_updated_at"] = datetime.now(timezone.utc)
-                    col("team_stats").document(str(team_id)).set(xg_form, merge=True)
+                data = await _fetch_team_xg_and_form(sf_id)
+                if data:
+                    data["sf_team_id"] = sf_id
+                    data["sf_updated_at"] = datetime.now(timezone.utc)
+                    col("team_stats").document(str(team_id)).set(data, merge=True)
                     logger.info(
-                        "sofascore_football: %s (sf_id=%d) enriquecido — "
-                        "sf_form=%.1f%% xG_for=%.2f xG_against=%.2f",
-                        team_name, sf_id,
-                        xg_form.get("sf_form_score", 0),
-                        xg_form.get("sf_xg_for", 0),
-                        xg_form.get("sf_xg_against", 0),
+                        "sofascore_football: %s (%s sf=%d) "
+                        "form=%.0f%% xG_for=%.2f xG_ag=%.2f matches=%d",
+                        team_name, game.get("league", ""), sf_id,
+                        data.get("sf_form_score", 0),
+                        data.get("sf_xg_for", 0),
+                        data.get("sf_xg_against", 0),
+                        data.get("sf_xg_matches", 0),
                     )
-                    enriched_teams.add(team_id)
+                    enriched.add(team_id)
             except Exception:
-                logger.warning(
-                    "sofascore_football: error enriqueciendo %s", team_name, exc_info=True
-                )
+                logger.warning("sofascore_football: error enriqueciendo %s", team_name, exc_info=True)
 
     logger.info(
-        "sofascore_football: %d/%d equipos CL enriquecidos con Sofascore",
-        len(enriched_teams), len({g.get("home_team_id") for g in cl_games} | {g.get("away_team_id") for g in cl_games}) - 1,
+        "sofascore_football: %d equipos enriquecidos (%d ligas cubiertas)",
+        len(enriched), len({g.get("league") for g in target_games}),
     )
+
+
+async def collect_sofascore_native_games(
+    league_keys: list[str] | None = None,
+) -> list[dict]:
+    """
+    Obtiene próximos partidos de ligas NO cubiertas por football-data.org
+    (WSL, Liga F, UCL Femenina, Brasileirao) directamente desde Sofascore.
+
+    league_keys: lista de claves de TOURNAMENTS a procesar.
+                 Por defecto: WSL, Liga F, UCL Femenina, Brasileirao.
+    """
+    if league_keys is None:
+        league_keys = ["wsl", "liga_f", "women_cl", "brasileirao"]
+
+    from collectors.sofascore_client import fetch_tournament_events
+
+    result: list[dict] = []
+    for key in league_keys:
+        t = TOURNAMENTS.get(key)
+        if not t:
+            continue
+        t_id = t["id"]
+        league_code = t.get("league_code", key.upper())
+        season_id = max(t.get("seasons", {}).values())
+
+        try:
+            for page in range(2):
+                events = await fetch_tournament_events(t_id, season_id, page=page, direction="next")
+                if not events:
+                    break
+                for e in events:
+                    ht = e.get("homeTeam") or {}
+                    at = e.get("awayTeam") or {}
+                    ts = e.get("startTimestamp")
+                    match_date = (
+                        datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                        if ts else ""
+                    )
+                    status_type = (e.get("status") or {}).get("type", "notstarted")
+                    try:
+                        result.append({
+                            "match_id": f"{key.upper()}_SF_{e['id']}",
+                            "home_team_id": int(ht["id"]),
+                            "away_team_id": int(at["id"]),
+                            "home_team": ht.get("name", ""),
+                            "away_team": at.get("name", ""),
+                            "league": league_code,
+                            "sport": "football",
+                            "source": "sofascore",
+                            "match_date": match_date,
+                            "status": "FINISHED" if status_type == "finished" else "SCHEDULED",
+                        })
+                    except (KeyError, TypeError):
+                        continue
+            logger.info("sofascore_football: %s → %d partidos próximos", key, len(result))
+        except Exception:
+            logger.warning("sofascore_football: error recogiendo %s", key, exc_info=True)
+
+    return result
