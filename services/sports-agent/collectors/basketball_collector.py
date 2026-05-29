@@ -4,7 +4,7 @@ Collector de baloncesto — NBA via ESPN + Euroleague + ACB via APIs gratuitas.
 Fuentes:
   NBA        — ESPN public scoreboard API (sin key)
   EUROLEAGUE — feeds.incrowdsports.com (API oficial gratuita, sin key)
-  ACB        — TheSportsDB id=4408 (API pública gratuita, sin key)
+  ACB        — Sofascore public API (sin key, primario) + TheSportsDB fallback
 """
 import asyncio
 import hashlib
@@ -36,6 +36,16 @@ _ACB_NEXT_URL = "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?
 _ACB_PREV_URL = "https://www.thesportsdb.com/api/v1/json/3/eventspastleague.php?id=4408"
 _HTTP_TIMEOUT = 15
 
+# Sofascore — ACB Liga Endesa (tournament 264, season 80922 = 2025-26)
+_SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
+_SOFASCORE_ACB_TOURNAMENT = 264
+_SOFASCORE_ACB_SEASON = 80922
+_SOFASCORE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:119.0) Gecko/20100101 Firefox/119.0",
+    "Accept": "application/json",
+    "Referer": "https://www.sofascore.com/",
+}
+
 
 def _hash_team_id(code: str) -> int:
     """Convierte código de equipo en entero estable (para Euroleague)."""
@@ -59,6 +69,111 @@ def _http_get(url: str) -> dict | list | None:
     except Exception as e:
         logger.warning("_http_get(%s): %s", url, e)
         return None
+
+
+def _http_get_sofascore(url: str) -> dict | None:
+    try:
+        req = urllib.request.Request(url, headers=_SOFASCORE_HEADERS)
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+            return _json.loads(r.read().decode())
+    except Exception as e:
+        logger.warning("_http_get_sofascore(%s): %s", url, e)
+        return None
+
+
+async def _fetch_acb_history_sofascore(pages: int = 3) -> list[dict]:
+    """
+    Historial ACB terminado vía Sofascore (pages×20 partidos ≈ últimas 6-7 jornadas).
+    Una sola fuente para todos los equipos — igual que _fetch_euroleague_history.
+    """
+    loop = asyncio.get_event_loop()
+    result: list[dict] = []
+    for page in range(pages):
+        url = (
+            f"{_SOFASCORE_BASE}/unique-tournament/{_SOFASCORE_ACB_TOURNAMENT}"
+            f"/season/{_SOFASCORE_ACB_SEASON}/events/last/{page}"
+        )
+        data = await loop.run_in_executor(None, _http_get_sofascore, url)
+        if not data:
+            break
+        events = data.get("events", [])
+        if not events:
+            break
+        for e in events:
+            hs = (e.get("homeScore") or {}).get("current")
+            as_ = (e.get("awayScore") or {}).get("current")
+            if hs is None or as_ is None:
+                continue
+            ht = e.get("homeTeam", {})
+            at = e.get("awayTeam", {})
+            ts = e.get("startTimestamp")
+            match_date = (
+                datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+                if ts else ""
+            )
+            try:
+                result.append({
+                    "match_id": f"ACB_SF_{e['id']}",
+                    "home_team_id": int(ht["id"]),
+                    "away_team_id": int(at["id"]),
+                    "home_team_name": ht.get("name", ""),
+                    "away_team_name": at.get("name", ""),
+                    "goals_home": float(hs),
+                    "goals_away": float(as_),
+                    "match_date": match_date,
+                    "status": "FINISHED",
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+    logger.info(
+        "_fetch_acb_history_sofascore: %d partidos terminados (%d páginas)",
+        len(result), pages,
+    )
+    return result
+
+
+async def _fetch_acb_games_sofascore() -> list[dict]:
+    """Próximos partidos ACB vía Sofascore public API (sin key)."""
+    loop = asyncio.get_event_loop()
+    result: list[dict] = []
+    for page in range(2):
+        url = (
+            f"{_SOFASCORE_BASE}/unique-tournament/{_SOFASCORE_ACB_TOURNAMENT}"
+            f"/season/{_SOFASCORE_ACB_SEASON}/events/next/{page}"
+        )
+        data = await loop.run_in_executor(None, _http_get_sofascore, url)
+        if not data:
+            break
+        events = data.get("events", [])
+        if not events:
+            break
+        for e in events:
+            ht = e.get("homeTeam", {})
+            at = e.get("awayTeam", {})
+            ts = e.get("startTimestamp")
+            match_date = (
+                datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                if ts else ""
+            )
+            status_type = (e.get("status") or {}).get("type", "notstarted")
+            status = "FINISHED" if status_type == "finished" else "SCHEDULED"
+            try:
+                result.append({
+                    "match_id": f"ACB_SF_{e['id']}",
+                    "home_team_id": int(ht["id"]),
+                    "away_team_id": int(at["id"]),
+                    "home_team_name": ht.get("name", ""),
+                    "away_team_name": at.get("name", ""),
+                    "league": "ACB",
+                    "sport": "basketball",
+                    "source": "sofascore_acb",
+                    "match_date": match_date,
+                    "status": status,
+                })
+            except (KeyError, TypeError):
+                continue
+    logger.info("_fetch_acb_games_sofascore: %d partidos próximos ACB", len(result))
+    return result
 
 
 async def _fetch_euroleague_games() -> list[dict]:
@@ -103,7 +218,21 @@ async def _fetch_euroleague_games() -> list[dict]:
 
 
 async def _fetch_acb_games() -> list[dict]:
-    """Próximos partidos ACB desde TheSportsDB (id=4408). Sin key."""
+    """
+    Próximos partidos ACB.
+    Primario: Sofascore (18 equipos, datos completos, sin key).
+    Fallback: TheSportsDB (sparse pero operativo).
+    """
+    # Sofascore primario
+    try:
+        sf_games = await _fetch_acb_games_sofascore()
+        if sf_games:
+            return sf_games
+        logger.info("_fetch_acb_games: Sofascore sin resultados, usando TheSportsDB fallback")
+    except Exception:
+        logger.warning("_fetch_acb_games: Sofascore falló, usando TheSportsDB fallback", exc_info=True)
+
+    # TheSportsDB fallback
     loop = asyncio.get_event_loop()
     data = await loop.run_in_executor(None, _http_get, _ACB_NEXT_URL)
     events = (data or {}).get("events") or []
@@ -135,7 +264,7 @@ async def _fetch_acb_games() -> list[dict]:
             "status": status,
         })
 
-    logger.info("_fetch_acb_games: %d partidos próximos ACB", len(result))
+    logger.info("_fetch_acb_games: %d partidos próximos ACB (TheSportsDB fallback)", len(result))
     return result
 
 
@@ -271,6 +400,14 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
         except Exception:
             logger.warning("basketball_collector: error cargando historial Euroleague", exc_info=True)
 
+    # Pre-fetch historial ACB vía Sofascore (3 páginas × 20 = ~60 partidos, cubre last-10 por equipo)
+    acb_sf_history: list[dict] = []
+    if any(g.get("source") == "sofascore_acb" for g in games):
+        try:
+            acb_sf_history = await _fetch_acb_history_sofascore(pages=3)
+        except Exception:
+            logger.warning("basketball_collector: error cargando historial ACB Sofascore", exc_info=True)
+
     for game in games:
         source = game.get("source", "")
 
@@ -281,8 +418,20 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
 
             teams_seen.add(team_id)
             try:
-                if source in ("thesportsdb", "euroleague_incrowd"):
-                    if source == "thesportsdb":
+                if source in ("thesportsdb", "euroleague_incrowd", "sofascore_acb"):
+                    if source == "sofascore_acb":
+                        team_matches = [
+                            {
+                                "goals_home": m["goals_home"],
+                                "goals_away": m["goals_away"],
+                                "home_team_id": m["home_team_id"],
+                                "was_home": m["home_team_id"] == team_id,
+                                "match_date": m.get("match_date", ""),
+                            }
+                            for m in acb_sf_history
+                            if m.get("home_team_id") == team_id or m.get("away_team_id") == team_id
+                        ]
+                    elif source == "thesportsdb":
                         team_matches = await _fetch_acb_team_last_games(team_id)
                     else:
                         team_matches = [
