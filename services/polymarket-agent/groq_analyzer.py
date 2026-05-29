@@ -1575,7 +1575,9 @@ async def _fetch_sports_odds_context(query: str) -> str | None:
             r'([+-]\d{2,4}|\d\.\d{2,3}\s*(odds|to\s+win)|\d+\s*%\s*(chance|win|probability)|'
             r'\brank(ing)?\s*#?\d+|\bfavorit|\bunderdog|\bprediction|\bpick\b|'
             r'\b\d{1,3}-\d{1,3}\b|\bera\b|\bstarter\b|\bpitcher\b|'
-            r'\bwins?\b.{0,30}\blosses?\b|\brecord\b.{0,20}\b\d{2})',
+            r'\bwins?\b.{0,30}\blosses?\b|\brecord\b.{0,20}\b\d{2}|'
+            r'\$\d+[Mm](illion)?\b|\bopening\s+weekend\b|\btracking\b|\bprojection\b|'
+            r'\bfrontrunner\b|\bnominat|\bshortlist|\bBillboard\b|\bchart\b)',
             text, re.I,
         ))
         result = text[:700] if (text and has_data) else None
@@ -2155,6 +2157,52 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     "analyze_market(%s): %s_NO_DATA — sin odds externos, continuando con ancla ±15%%",
                     market_id, _sport_label,
                 )
+
+    elif category == "culture":
+        # DDG search para mercados de cultura: taquilla, premios, música
+        _q_lower_c = question.lower()
+        _is_box_office = any(kw in _q_lower_c for kw in (
+            "box office", "gross", "opening weekend", "domestic", "theater", "theatre", "million"
+        ))
+        _is_award = any(kw in _q_lower_c for kw in (
+            "oscar", "grammy", "emmy", "golden globe", "bafta", "award", "win best", "nominated"
+        ))
+        _is_music = any(kw in _q_lower_c for kw in (
+            "chart", "album", "song", "billboard", "spotify", "streams", "number one", "#1"
+        ))
+
+        if _is_box_office:
+            _movie_m = re.search(r'"([^"]{3,50})"', question)
+            _movie = _movie_m.group(1) if _movie_m else question[:60]
+            _culture_query = f"{_movie} box office tracking opening weekend prediction 2026"
+        elif _is_award:
+            _award_kws = ["Oscar", "Grammy", "Emmy", "Golden Globe", "BAFTA"]
+            _award_found = next((kw for kw in _award_kws if kw.lower() in _q_lower_c), "award")
+            _culture_query = f"{question[:70]} {_award_found} odds favorites 2026"
+        elif _is_music:
+            _culture_query = f"{question[:70]} chart prediction Billboard 2026"
+        else:
+            _culture_query = f"{question[:80]} odds prediction 2026"
+
+        try:
+            _sports_context = await asyncio.wait_for(
+                _fetch_sports_odds_context(_culture_query), timeout=5.0
+            )
+            if _sports_context:
+                logger.info(
+                    "analyze_market(%s): CULTURE_DDG_HIT — %d chars (%s)",
+                    market_id, len(_sports_context),
+                    "box_office" if _is_box_office else "award" if _is_award else "music" if _is_music else "generic",
+                )
+            else:
+                logger.info(
+                    "analyze_market(%s): CULTURE_NO_DATA — sin datos externos, ancla ±20%%",
+                    market_id,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "analyze_market(%s): culture DDG timeout >5s — ancla ±20%%", market_id
+            )
 
     # Detect "Will X reach $Y" markets and fetch live price.
     # Orden: ctc_price del enricher primero (ya fetcheado, evita 429s en Railway),
