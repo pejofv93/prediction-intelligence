@@ -52,8 +52,18 @@ TOURNAMENTS: dict[str, dict] = {
     "liga_f":           {"id": 1127, "sport": "football",   "surface": None,   "league_code": "LIGA_F", "seasons": {2425: 65687, 2526: 77723}},
     "women_cl":         {"id": 696,  "sport": "football",   "surface": None,   "league_code": "WCL", "seasons": {2425: 63572, 2526: 77328}},
     # Fútbol internacional
-    "brasileirao":      {"id": 325,  "sport": "football",   "surface": None,   "league_code": "BSA", "seasons": {2025: 72034, 2026: 87678}},
-    "copa_america":     {"id": 133,  "sport": "football",   "surface": None,   "league_code": "CA",  "seasons": {2024: 57114}},
+    "brasileirao":      {"id": 325,  "sport": "football",   "surface": None,   "league_code": "BSA",  "seasons": {2025: 72034, 2026: 87678}},
+    "copa_america":     {"id": 133,  "sport": "football",   "surface": None,   "league_code": "CA",   "seasons": {2024: 57114}},
+    # Mundial 2026 y clasificatorias
+    "world_cup_2026":   {"id": 16,   "sport": "football",   "surface": None,   "league_code": "WC26", "seasons": {2026: 58210}},
+    "wcq_uefa":         {"id": 11,   "sport": "football",   "surface": None,   "league_code": "WCQ_UEFA",     "seasons": {2026: 69427}},
+    "wcq_conmebol":     {"id": 295,  "sport": "football",   "surface": None,   "league_code": "WCQ_CONMEBOL", "seasons": {2025: 53820}},
+    "wcq_caf":          {"id": 13,   "sport": "football",   "surface": None,   "league_code": "WCQ_CAF",      "seasons": {2025: 56249}},
+    "wcq_afc":          {"id": 308,  "sport": "football",   "surface": None,   "league_code": "WCQ_AFC",      "seasons": {2025: 53508}},
+    "wcq_concacaf":     {"id": 14,   "sport": "football",   "surface": None,   "league_code": "WCQ_CONCACAF", "seasons": {2026: 58146}},
+    # Torneos recientes con xG para selecciones (fuente de xG para el WC)
+    "euro_2024":        {"id": 1,    "sport": "football",   "surface": None,   "league_code": "EURO24",  "seasons": {2024: 56953}},
+    "copa_america_2024":{"id": 133,  "sport": "football",   "surface": None,   "league_code": "CA24",    "seasons": {2024: 57114}},
 }
 
 # Mapeo rápido league_code → clave en TOURNAMENTS (para lookup inverso)

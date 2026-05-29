@@ -349,6 +349,9 @@ async def _bg_collect() -> None:
         # --- 5. Fútbol europeo (football-data.org — lento, rate-limit 10 req/min) ---
         await _collect_football()
 
+        # --- 5b. Mundial 2026 (Sofascore — selecciones nacionales) ---
+        await _collect_wc2026()
+
         # --- 6. Clasificaciones domésticas (flags motivacionales para MOTIVATION_CHECK) ---
         await _collect_standings()
 
@@ -697,6 +700,24 @@ async def _collect_football() -> None:
             await enrich_teams_sofascore(native_games)
     except Exception:
         logger.warning("collect.football: Sofascore native games falló (no crítico)", exc_info=True)
+
+
+async def _collect_wc2026() -> None:
+    """
+    Colecta partidos y stats de selecciones para el Mundial 2026 vía Sofascore.
+    TTL implícito: corre cada 6h junto con el collect principal.
+    No bloquea el pipeline si falla — los datos WC son opcionales.
+    """
+    try:
+        from collectors.sofascore_wc import run_wc2026_collection
+        from collectors.firestore_writer import save_upcoming_matches
+
+        wc_matches = await run_wc2026_collection()
+        if wc_matches:
+            await save_upcoming_matches(wc_matches)
+            logger.info("collect.wc2026: %d partidos WC 2026 guardados", len(wc_matches))
+    except Exception:
+        logger.warning("collect.wc2026: falló (no crítico)", exc_info=True)
 
 
 async def _collect_standings() -> None:
