@@ -679,6 +679,13 @@ async def _collect_football() -> None:
     except Exception:
         logger.error("collect.football: error actualizando ELO ratings", exc_info=True)
 
+    # Enriquecimiento Sofascore: xG real + form de 20 partidos para equipos CL
+    try:
+        from collectors.sofascore_football import enrich_cl_teams_sofascore
+        await enrich_cl_teams_sofascore(matches)
+    except Exception:
+        logger.warning("collect.football: Sofascore CL enrichment falló (no crítico)", exc_info=True)
+
 
 async def _collect_standings() -> None:
     """

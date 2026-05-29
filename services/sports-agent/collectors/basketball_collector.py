@@ -37,9 +37,14 @@ _ACB_PREV_URL = "https://www.thesportsdb.com/api/v1/json/3/eventspastleague.php?
 _HTTP_TIMEOUT = 15
 
 # Sofascore — ACB Liga Endesa (tournament 264, season 80922 = 2025-26)
+from collectors.sofascore_client import (
+    TOURNAMENTS as _SF_TOURNAMENTS,
+    fetch_tournament_events as _sf_fetch_events,
+    normalize_name as _sf_normalize,
+)
 _SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
-_SOFASCORE_ACB_TOURNAMENT = 264
-_SOFASCORE_ACB_SEASON = 80922
+_SOFASCORE_ACB_TOURNAMENT = _SF_TOURNAMENTS["acb"]["id"]       # 264
+_SOFASCORE_ACB_SEASON     = _SF_TOURNAMENTS["acb"]["seasons"][2026]  # 80922
 _SOFASCORE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:119.0) Gecko/20100101 Firefox/119.0",
     "Accept": "application/json",

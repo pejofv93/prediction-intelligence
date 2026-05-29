@@ -539,7 +539,23 @@ async def collect_tennis_matches(days: int = 7) -> list[dict]:
     """
     tournaments = await get_active_tournaments()
     if not tournaments:
-        logger.warning("tennis_collector: sin torneos activos vía RapidAPI — activando fallback The Odds API")
+        logger.warning("tennis_collector: sin torneos activos vía RapidAPI — intentando Sofascore RG")
+        try:
+            from collectors.sofascore_tennis import collect_rg_upcoming_as_fallback, build_rg_clay_cache
+            sf_atp = await collect_rg_upcoming_as_fallback(tour="atp")
+            sf_wta = await collect_rg_upcoming_as_fallback(tour="wta")
+            sf_matches = sf_atp + sf_wta
+            if sf_matches:
+                logger.info("tennis_collector: Sofascore RG → %d partidos próximos", len(sf_matches))
+                # Enriquecer team_stats con historial clay RG
+                clay_cache = await build_rg_clay_cache()
+                player_ids = list({m["home_team_id"] for m in sf_matches} | {m["away_team_id"] for m in sf_matches})
+                from collectors.sofascore_tennis import enrich_players_with_rg_clay
+                await enrich_players_with_rg_clay(player_ids, clay_cache)
+                return sf_matches
+        except Exception:
+            logger.warning("tennis_collector: Sofascore RG fallback falló", exc_info=True)
+        logger.warning("tennis_collector: activando fallback The Odds API")
         return await collect_tennis_from_odds_api(days=days)
 
     # Rankings para asignar ranking a jugadores
