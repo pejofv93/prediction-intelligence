@@ -1839,6 +1839,258 @@ async def _fetch_sofascore_context_for_teams(teams: list[str]) -> str | None:
     return "DATOS SOFASCORE (xG + form reales):\n" + body + footer
 
 
+# ---------------------------------------------------------------------------
+# Basketball data lookup — mercados Polymarket NBA / Euroleague / ACB
+# ---------------------------------------------------------------------------
+
+_NBA_FULL_NAMES: dict[str, list[str]] = {
+    "cavaliers":     ["Cleveland Cavaliers"],
+    "cavs":          ["Cleveland Cavaliers"],
+    "knicks":        ["New York Knicks"],
+    "celtics":       ["Boston Celtics"],
+    "heat":          ["Miami Heat"],
+    "bucks":         ["Milwaukee Bucks"],
+    "nets":          ["Brooklyn Nets"],
+    "raptors":       ["Toronto Raptors"],
+    "bulls":         ["Chicago Bulls"],
+    "pacers":        ["Indiana Pacers"],
+    "hawks":         ["Atlanta Hawks"],
+    "wizards":       ["Washington Wizards"],
+    "lakers":        ["Los Angeles Lakers"],
+    "warriors":      ["Golden State Warriors"],
+    "nuggets":       ["Denver Nuggets"],
+    "suns":          ["Phoenix Suns"],
+    "clippers":      ["Los Angeles Clippers"],
+    "thunder":       ["Oklahoma City Thunder"],
+    "timberwolves":  ["Minnesota Timberwolves"],
+    "wolves":        ["Minnesota Timberwolves"],
+    "grizzlies":     ["Memphis Grizzlies"],
+    "pelicans":      ["New Orleans Pelicans"],
+    "rockets":       ["Houston Rockets"],
+    "spurs":         ["San Antonio Spurs"],
+    "mavericks":     ["Dallas Mavericks"],
+    "mavs":          ["Dallas Mavericks"],
+    "sixers":        ["Philadelphia 76ers"],
+    "76ers":         ["Philadelphia 76ers"],
+    "blazers":       ["Portland Trail Blazers"],
+    "jazz":          ["Utah Jazz"],
+    "kings":         ["Sacramento Kings"],
+    "magic":         ["Orlando Magic"],
+    "hornets":       ["Charlotte Hornets"],
+    "pistons":       ["Detroit Pistons"],
+    # Euroleague / ACB aliases habituales
+    "cska":          ["CSKA Moscow", "CSKA"],
+    "real madrid":   ["Real Madrid", "Real Madrid Basketball"],
+    "barcelona":     ["FC Barcelona", "Barca"],
+    "fenerbahce":    ["Fenerbahce", "Fenerbahçe Beko"],
+    "olympiacos":    ["Olympiacos", "Olympiacos Piraeus"],
+    "panathinaikos": ["Panathinaikos", "Panathinaikos BC"],
+    "valencia":      ["Valencia Basket"],
+}
+
+
+async def _fetch_basketball_context_for_teams(teams: list[str]) -> str | None:
+    """
+    Busca en Firestore team_stats (doc ID = bball_{team_id}) los datos de forma
+    para los equipos de baloncesto dados. Devuelve texto para el LLM o None.
+    """
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from shared.firestore_client import col
+
+    results: list[str] = []
+
+    for team_name in teams:
+        t_lower = team_name.lower().strip()
+        candidates: list[str] = []
+        candidates.extend(_NBA_FULL_NAMES.get(t_lower, []))
+        candidates.append(team_name)
+        candidates.append(team_name.title())
+        seen: set[str] = set()
+        unique_candidates = [c for c in candidates if c and not (seen.add(c) or c in seen)]  # type: ignore[func-returns-value]
+
+        doc_data: dict | None = None
+        for candidate in unique_candidates:
+            try:
+                docs = list(
+                    col("team_stats")
+                    .where(filter=FieldFilter("team_name", "==", candidate))
+                    .limit(3)
+                    .stream()
+                )
+                for d in docs:
+                    data = d.to_dict() or {}
+                    if data.get("sport") in ("basketball", "nba") or data.get("form_score") is not None:
+                        doc_data = data
+                        break
+                if doc_data:
+                    break
+            except Exception as _e:
+                logger.debug("_fetch_basketball_context: query error '%s': %s", candidate, _e)
+
+        if not doc_data:
+            logger.debug("_fetch_basketball_context: sin datos para '%s'", team_name)
+            continue
+
+        form_score = doc_data.get("form_score")
+        last_10 = doc_data.get("last_10", [])
+        streak = doc_data.get("streak") or {}
+        stored_name = doc_data.get("team_name", team_name)
+        league = doc_data.get("league", "NBA")
+        source = doc_data.get("source", "")
+
+        lines: list[str] = [f"Datos Firestore — {stored_name} ({league}):"]
+        if form_score is not None:
+            lines.append(f"  Form score: {form_score:.1f}% (últimos {len(last_10)} partidos)")
+        if last_10:
+            lines.append(f"  Últimos {len(last_10)}: {' '.join(str(r) for r in last_10)}")
+        streak_type = streak.get("type", "")
+        streak_count = streak.get("count", 0)
+        if streak_type and streak_count:
+            verb = "victorias" if streak_type.upper() in ("W", "win") else "derrotas"
+            lines.append(f"  Racha: {streak_count} {verb} consecutivas")
+        if source:
+            lines.append(f"  Fuente: {source}")
+
+        results.append("\n".join(lines))
+
+    if not results:
+        return None
+
+    footer = (
+        "\nIMPORTANTE: Datos reales de ESPN/Sofascore. "
+        "Form score >70% = equipo en forma. Racha larga = momentum relevante. "
+        "Calibra real_prob contra precio de mercado."
+    )
+    return "DATOS BALONCESTO (form + historial reales):\n" + "\n\n".join(results) + footer
+
+
+# ---------------------------------------------------------------------------
+# Tennis data lookup — Roland Garros y arcilla — Firestore team_stats
+# ---------------------------------------------------------------------------
+
+_TENNIS_PLAYER_ALIASES: dict[str, list[str]] = {
+    # ATP Top — nombres como los guarda API-Sports
+    "djokovic":     ["Novak Djokovic", "N. Djokovic"],
+    "alcaraz":      ["Carlos Alcaraz", "C. Alcaraz"],
+    "sinner":       ["Jannik Sinner", "J. Sinner"],
+    "zverev":       ["Alexander Zverev", "A. Zverev"],
+    "medvedev":     ["Daniil Medvedev", "D. Medvedev"],
+    "tsitsipas":    ["Stefanos Tsitsipas", "S. Tsitsipas"],
+    "rublev":       ["Andrey Rublev", "A. Rublev"],
+    "ruud":         ["Casper Ruud", "C. Ruud"],
+    "dimitrov":     ["Grigor Dimitrov", "G. Dimitrov"],
+    "fritz":        ["Taylor Fritz", "T. Fritz"],
+    "paul":         ["Tommy Paul", "T. Paul"],
+    "de minaur":    ["Alex De Minaur", "A. De Minaur"],
+    "musetti":      ["Lorenzo Musetti", "L. Musetti"],
+    "hurkacz":      ["Hubert Hurkacz", "H. Hurkacz"],
+    "khachanov":    ["Karen Khachanov", "K. Khachanov"],
+    "tiafoe":       ["Frances Tiafoe", "F. Tiafoe"],
+    "norrie":       ["Cameron Norrie", "C. Norrie"],
+    "berrettini":   ["Matteo Berrettini", "M. Berrettini"],
+    "auger-aliassime": ["Felix Auger-Aliassime", "F. Auger-Aliassime"],
+    "faa":          ["Felix Auger-Aliassime"],
+    # WTA Top
+    "swiatek":      ["Iga Swiatek", "I. Swiatek"],
+    "sabalenka":    ["Aryna Sabalenka", "A. Sabalenka"],
+    "gauff":        ["Coco Gauff", "C. Gauff"],
+    "rybakina":     ["Elena Rybakina", "E. Rybakina"],
+    "pegula":       ["Jessica Pegula", "J. Pegula"],
+    "jabeur":       ["Ons Jabeur", "O. Jabeur"],
+    "keys":         ["Madison Keys", "M. Keys"],
+    "collins":      ["Danielle Collins", "D. Collins"],
+    "andreeva":     ["Mirra Andreeva", "M. Andreeva"],
+    "paolini":      ["Jasmine Paolini", "J. Paolini"],
+    "ostapenko":    ["Jelena Ostapenko", "J. Ostapenko"],
+    "wozniacki":    ["Caroline Wozniacki", "C. Wozniacki"],
+    "azarenka":     ["Victoria Azarenka", "V. Azarenka"],
+    "kvitova":      ["Petra Kvitova", "P. Kvitova"],
+}
+
+
+async def _fetch_tennis_context_for_players(players: list[str]) -> str | None:
+    """
+    Busca en Firestore team_stats los datos de jugadores de tenis
+    (clay_rg_win_rate, clay_rg_form, clay_rg_deepest_round, ranking, form_score).
+    Devuelve texto enriquecido para el LLM o None si no hay datos SF.
+    """
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from shared.firestore_client import col
+
+    results: list[str] = []
+
+    for player_name in players:
+        p_lower = player_name.lower().strip()
+        candidates: list[str] = []
+        candidates.extend(_TENNIS_PLAYER_ALIASES.get(p_lower, []))
+        candidates.append(player_name)
+        candidates.append(player_name.title())
+        seen: set[str] = set()
+        unique_candidates = [c for c in candidates if c and not (seen.add(c) or c in seen)]  # type: ignore[func-returns-value]
+
+        doc_data: dict | None = None
+        for candidate in unique_candidates:
+            try:
+                docs = list(
+                    col("team_stats")
+                    .where(filter=FieldFilter("name", "==", candidate))
+                    .limit(2)
+                    .stream()
+                )
+                for d in docs:
+                    data = d.to_dict() or {}
+                    if data.get("clay_rg_win_rate") is not None or data.get("ranking") is not None:
+                        doc_data = data
+                        break
+                if doc_data:
+                    break
+            except Exception as _e:
+                logger.debug("_fetch_tennis_context: query error '%s': %s", candidate, _e)
+
+        if not doc_data:
+            logger.debug("_fetch_tennis_context: sin datos para '%s'", player_name)
+            continue
+
+        stored_name = doc_data.get("name", player_name)
+        ranking = doc_data.get("ranking")
+        form_score = doc_data.get("form_score")
+        win_rate_clay = doc_data.get("win_rate_clay") or doc_data.get("clay_rg_win_rate")
+        clay_rg_win_rate = doc_data.get("clay_rg_win_rate")
+        clay_rg_form = doc_data.get("clay_rg_form")
+        clay_rg_wins = doc_data.get("clay_rg_wins", 0)
+        clay_rg_losses = doc_data.get("clay_rg_losses", 0)
+        clay_rg_matches = doc_data.get("clay_rg_matches", 0)
+        clay_rg_deepest = doc_data.get("clay_rg_deepest_round", "")
+
+        rank_str = f" (Ranking: {ranking})" if ranking else ""
+        lines: list[str] = [f"Datos Firestore/Sofascore — {stored_name}{rank_str}:"]
+        if form_score is not None:
+            lines.append(f"  Form score general: {form_score:.1f}%")
+        if win_rate_clay is not None:
+            lines.append(f"  Win rate en arcilla: {win_rate_clay*100:.1f}%")
+        if clay_rg_win_rate is not None and clay_rg_matches:
+            lines.append(
+                f"  Roland Garros — historial: {clay_rg_wins}W {clay_rg_losses}L "
+                f"en {clay_rg_matches} partidos ({clay_rg_win_rate*100:.0f}%)"
+            )
+        if clay_rg_form is not None:
+            lines.append(f"  Forma ponderada RG: {clay_rg_form*100:.0f}%")
+        if clay_rg_deepest:
+            lines.append(f"  Ronda más profunda en RG: {clay_rg_deepest}")
+
+        results.append("\n".join(lines))
+
+    if not results:
+        return None
+
+    footer = (
+        "\nIMPORTANTE: Datos reales de Sofascore/API-Sports. "
+        "clay_rg_win_rate >70% = especialista en tierra. Ronda profunda = experiencia en el torneo. "
+        "Calibra real_prob contra el precio de mercado y el ranking del rival."
+    )
+    return "DATOS TENIS EN TIERRA (Sofascore + Roland Garros):\n" + "\n\n".join(results) + footer
+
+
 async def _fetch_odds_api_context(sport_key: str, team_a: str, team_b: str) -> str | None:
     """
     Llama The Odds API v4 para obtener odds h2h de un partido.
@@ -2245,6 +2497,35 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             _team_a = _match_teams[0] if _match_teams else ""
             _team_b = _match_teams[1] if _match_teams else ""
 
+            # --- NIVEL 0: Sofascore clay data (solo tenis — Roland Garros y tierra) ---
+            if _is_tennis and (_team_a or _team_b):
+                _tennis_players = [p for p in [_team_a, _team_b] if p]
+                try:
+                    _sf_tennis_ctx = await asyncio.wait_for(
+                        _fetch_tennis_context_for_players(_tennis_players),
+                        timeout=4.0,
+                    )
+                    if _sf_tennis_ctx:
+                        _sports_context = _sf_tennis_ctx
+                        logger.info(
+                            "analyze_market(%s): SOFASCORE_TENNIS_HIT players=%s",
+                            market_id, _tennis_players,
+                        )
+                    else:
+                        logger.info(
+                            "analyze_market(%s): SOFASCORE_TENNIS_MISS — sin datos SF players=%s",
+                            market_id, _tennis_players,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "analyze_market(%s): _fetch_tennis_context_for_players timeout >4s players=%s",
+                        market_id, _tennis_players,
+                    )
+                except Exception as _tfe:
+                    logger.debug(
+                        "analyze_market(%s): tennis Sofascore fetch error: %s", market_id, _tfe,
+                    )
+
             # --- NIVEL 1: The Odds API (datos estructurados, implied probs vig-removed) ---
             # Solo para MLB, UFC y NHL (no tennis/cricket — no disponibles en plan básico)
             _odds_api_sport_key: str | None = None
@@ -2368,34 +2649,81 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 )
 
         else:
-            # --- Fútbol: CL, EL, ECL, ligas domésticas —  buscar datos Sofascore en Firestore ---
-            _football_teams = _extract_football_teams_from_question(question, _slug)
-            if _football_teams:
-                try:
-                    _sf_ctx = await asyncio.wait_for(
-                        _fetch_sofascore_context_for_teams(_football_teams),
-                        timeout=6.0,
-                    )
-                    if _sf_ctx:
-                        _sports_context = _sf_ctx
-                        logger.info(
-                            "analyze_market(%s): SOFASCORE_FOOTBALL_HIT teams=%s",
+            # --- Baloncesto o Fútbol: detectar cuál es y buscar datos en Firestore ---
+            _q_lower_s = question.lower()
+            _is_bball_mkt = (
+                any(t in _q_lower_s for t in _NBA_TEAM_NAMES)
+                or "euroleague" in _q_lower_s
+                or " acb " in _q_lower_s
+                or "nba" in _q_lower_s
+                or _slug.startswith(("nba-", "euroleague-", "acb-"))
+            )
+
+            if _is_bball_mkt:
+                # --- Baloncesto: NBA / Euroleague / ACB ---
+                _bball_match = _extract_match_teams(question, _slug)
+                _bball_teams = [t for t in (_bball_match or ()) if t]
+                # Fallback: extraer el primer equipo de "Will X win..."
+                if not _bball_teams:
+                    _bw = re.search(r'will\s+(?:the\s+)?(.+?)\s+(?:win|beat|advance)', question, re.I)
+                    if _bw:
+                        _bball_teams = [_bw.group(1).strip()]
+                if _bball_teams:
+                    try:
+                        _bball_ctx = await asyncio.wait_for(
+                            _fetch_basketball_context_for_teams(_bball_teams),
+                            timeout=5.0,
+                        )
+                        if _bball_ctx:
+                            _sports_context = _bball_ctx
+                            logger.info(
+                                "analyze_market(%s): BASKETBALL_FIRESTORE_HIT teams=%s",
+                                market_id, _bball_teams,
+                            )
+                        else:
+                            logger.info(
+                                "analyze_market(%s): BASKETBALL_FIRESTORE_MISS — sin datos teams=%s",
+                                market_id, _bball_teams,
+                            )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "analyze_market(%s): _fetch_basketball_context timeout >5s teams=%s",
+                            market_id, _bball_teams,
+                        )
+                    except Exception as _bfe:
+                        logger.debug(
+                            "analyze_market(%s): basketball Firestore error: %s", market_id, _bfe,
+                        )
+
+            else:
+                # --- Fútbol: CL, EL, ECL, ligas domésticas ---
+                _football_teams = _extract_football_teams_from_question(question, _slug)
+                if _football_teams:
+                    try:
+                        _sf_ctx = await asyncio.wait_for(
+                            _fetch_sofascore_context_for_teams(_football_teams),
+                            timeout=6.0,
+                        )
+                        if _sf_ctx:
+                            _sports_context = _sf_ctx
+                            logger.info(
+                                "analyze_market(%s): SOFASCORE_FOOTBALL_HIT teams=%s",
+                                market_id, _football_teams,
+                            )
+                        else:
+                            logger.info(
+                                "analyze_market(%s): SOFASCORE_FOOTBALL_MISS — sin datos SF teams=%s",
+                                market_id, _football_teams,
+                            )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "analyze_market(%s): _fetch_sofascore_context_for_teams timeout >6s teams=%s",
                             market_id, _football_teams,
                         )
-                    else:
-                        logger.info(
-                            "analyze_market(%s): SOFASCORE_FOOTBALL_MISS — sin datos SF teams=%s",
-                            market_id, _football_teams,
+                    except Exception as _sfe:
+                        logger.debug(
+                            "analyze_market(%s): Sofascore fetch error: %s", market_id, _sfe,
                         )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "analyze_market(%s): _fetch_sofascore_context_for_teams timeout >6s teams=%s",
-                        market_id, _football_teams,
-                    )
-                except Exception as _sfe:
-                    logger.debug(
-                        "analyze_market(%s): Sofascore fetch error: %s", market_id, _sfe,
-                    )
 
     elif category == "culture":
         # DDG search para mercados de cultura: taquilla, premios, música
@@ -2682,8 +3010,12 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
     if _sports_context:
-        if not _is_individual_match:
-            # Fútbol: el contexto viene de Sofascore, ya tiene su propio encabezado
+        _ctx_is_structured = (
+            not _is_individual_match
+            or _sports_context.startswith("DATOS ")
+        )
+        if _ctx_is_structured:
+            # Sofascore/Firestore data — ya tiene encabezado propio (fútbol, baloncesto, tenis clay)
             user_prompt += f"\n\n{_sports_context}"
         else:
             _slabel = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
