@@ -1679,21 +1679,36 @@ def _extract_football_teams_from_question(question: str, slug: str) -> list[str]
     teams: list[str] = []
     q = question.strip()
 
-    # "Will X win/beat/defeat/advance/qualify/be relegated/finish..."
-    m = re.search(
-        r'will\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat|advance|qualify|finish|be\s+relegated|be\s+promoted)',
+    # "Will X beat/defeat Y" — captura ambos equipos
+    m_beat = re.search(
+        r'will\s+(?:the\s+)?(.+?)\s+(?:beat|defeat)\s+(?:the\s+)?(.+?)[\?\.]*$',
         q, re.I,
     )
-    if m:
-        candidate = re.sub(r'\s+(?:the|a|an)\s*$', '', m.group(1).strip(), flags=re.I).strip()
-        if candidate and _is_known_football_team(candidate):
-            teams.append(candidate)
+    if m_beat:
+        for raw in (m_beat.group(1), m_beat.group(2)):
+            c = raw.strip()
+            if c and _is_known_football_team(c) and c not in teams:
+                teams.append(c)
 
-    # "X vs Y" — en pregunta o en slug
-    m2 = re.search(r'(.+?)\s+vs\.?\s+(.+?)(?:\s*[-–—?]|$)', q, re.I)
+    # "Will X win/advance/qualify/finish/be relegated..." — captura el primer equipo
+    if not teams:
+        m = re.search(
+            r'will\s+(?:the\s+)?(.+?)\s+(?:win|advance|qualify|finish|be\s+relegated|be\s+promoted)',
+            q, re.I,
+        )
+        if m:
+            candidate = re.sub(r'\s+(?:the|a|an)\s*$', '', m.group(1).strip(), flags=re.I).strip()
+            if candidate and _is_known_football_team(candidate):
+                teams.append(candidate)
+
+    # "X vs Y" — limpiar trailing junk como "- Who wins?" o "?"
+    m2 = re.search(r'(.+?)\s+vs\.?\s+(.+?)(?:\s*[-–—]\s*\w|\?|$)', q, re.I)
     if m2:
         for raw in (m2.group(1), m2.group(2)):
-            c = re.sub(r'\bwill\b', '', raw, flags=re.I).strip()
+            # strip trailing "- Who wins" style fragments
+            c = re.sub(r'\s*[-–—].*$', '', raw, flags=re.I).strip()
+            c = re.sub(r'\bwill\b', '', c, flags=re.I).strip()
+            c = re.sub(r'\?$', '', c).strip()
             if c and _is_known_football_team(c) and c not in teams:
                 teams.append(c)
 
