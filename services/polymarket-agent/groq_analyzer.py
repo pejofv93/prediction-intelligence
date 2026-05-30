@@ -1630,6 +1630,200 @@ def _extract_match_teams(question: str, slug: str) -> tuple[str, str] | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Sofascore football data lookup — mercados Polymarket de fútbol
+# ---------------------------------------------------------------------------
+
+# Aliases: nombre como aparece en Polymarket → variantes en Firestore team_stats
+_FOOTBALL_TEAM_ALIASES: dict[str, list[str]] = {
+    "psg":               ["Paris Saint-Germain", "PSG"],
+    "paris":             ["Paris Saint-Germain"],
+    "paris sg":          ["Paris Saint-Germain"],
+    "man city":          ["Manchester City"],
+    "man utd":           ["Manchester United"],
+    "man united":        ["Manchester United"],
+    "fc barcelona":      ["Barcelona"],
+    "barca":             ["Barcelona"],
+    "bvb":               ["Borussia Dortmund"],
+    "inter":             ["Inter Milan", "Internazionale", "FC Internazionale"],
+    "inter milan":       ["Internazionale", "Inter Milan", "FC Internazionale"],
+    "ac milan":          ["Milan", "AC Milan"],
+    "atletico":          ["Atletico Madrid", "Atlético de Madrid", "Club Atlético de Madrid"],
+    "atletico madrid":   ["Atlético de Madrid", "Atletico Madrid"],
+    "atlético madrid":   ["Atlético de Madrid", "Atletico Madrid"],
+    "rb leipzig":        ["RB Leipzig", "RasenBallsport Leipzig"],
+    "red bull leipzig":  ["RB Leipzig"],
+    "sporting":          ["Sporting CP", "Sporting de Lisboa"],
+    "sporting lisbon":   ["Sporting CP"],
+    "sporting cp":       ["Sporting CP"],
+    "red star":          ["Crvena zvezda", "Red Star Belgrade", "FK Crvena zvezda"],
+    "young boys":        ["Young Boys", "BSC Young Boys"],
+    "wolves":            ["Wolverhampton Wanderers", "Wolves"],
+    "spurs":             ["Tottenham Hotspur", "Tottenham"],
+    "nottm forest":      ["Nottingham Forest"],
+    "nottingham forest": ["Nottingham Forest"],
+    "real betis":        ["Real Betis"],
+    "betis":             ["Real Betis"],
+    "celta":             ["Celta Vigo", "RC Celta"],
+    "celta vigo":        ["Celta Vigo", "RC Celta"],
+    "eibar":             ["SD Eibar"],
+    "eintracht":         ["Eintracht Frankfurt"],
+}
+
+
+def _extract_football_teams_from_question(question: str, slug: str) -> list[str]:
+    """
+    Extrae nombres de equipos de fútbol de la pregunta de un mercado Polymarket.
+    Devuelve lista de 1-2 nombres (vacía si no se detecta ningún equipo conocido).
+    """
+    teams: list[str] = []
+    q = question.strip()
+
+    # "Will X win/beat/defeat/advance/qualify/be relegated/finish..."
+    m = re.search(
+        r'will\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat|advance|qualify|finish|be\s+relegated|be\s+promoted)',
+        q, re.I,
+    )
+    if m:
+        candidate = re.sub(r'\s+(?:the|a|an)\s*$', '', m.group(1).strip(), flags=re.I).strip()
+        if candidate and _is_known_football_team(candidate):
+            teams.append(candidate)
+
+    # "X vs Y" — en pregunta o en slug
+    m2 = re.search(r'(.+?)\s+vs\.?\s+(.+?)(?:\s*[-–—?]|$)', q, re.I)
+    if m2:
+        for raw in (m2.group(1), m2.group(2)):
+            c = re.sub(r'\bwill\b', '', raw, flags=re.I).strip()
+            if c and _is_known_football_team(c) and c not in teams:
+                teams.append(c)
+
+    # Fallback: slug "football-team-a-vs-team-b"
+    if not teams:
+        sm = re.search(r'([a-z]+-[a-z]+(?:-[a-z]+)?)-vs-([a-z]+-[a-z]+(?:-[a-z]+)?)', slug, re.I)
+        if sm:
+            for raw in (sm.group(1), sm.group(2)):
+                c = raw.replace('-', ' ').title()
+                if _is_known_football_team(c):
+                    teams.append(c)
+
+    return teams[:2]
+
+
+def _normalize_team_candidates(name: str) -> list[str]:
+    """
+    Genera variantes del nombre de equipo para la búsqueda en Firestore.
+    Incluye aliases conocidos primero, luego normalizaciones comunes.
+    """
+    norm_lower = name.lower().strip()
+    candidates: list[str] = []
+
+    # Aliases explícitos
+    candidates.extend(_FOOTBALL_TEAM_ALIASES.get(norm_lower, []))
+
+    # Original y title-case
+    candidates.append(name)
+    candidates.append(name.title())
+
+    # Sin sufijos comunes
+    for suffix in (" FC", " CF", " SC", " AC", " FK", " BV", " SV", " 04"):
+        if norm_lower.endswith(suffix.lower()):
+            stripped = name[:len(name) - len(suffix)].strip()
+            candidates.append(stripped)
+            candidates.append(stripped.title())
+
+    # Eliminar duplicados manteniendo orden
+    seen: set[str] = set()
+    result: list[str] = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
+async def _fetch_sofascore_context_for_teams(teams: list[str]) -> str | None:
+    """
+    Para cada equipo busca en Firestore team_stats los campos Sofascore
+    (sf_form_score, sf_xg_for, sf_xg_against) y construye un bloque de texto
+    listo para inyectar en el user_prompt del LLM.
+
+    Devuelve None si no hay datos Sofascore para ningún equipo de la lista.
+    """
+    import asyncio
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from shared.firestore_client import col
+
+    results: list[str] = []
+
+    for team_name in teams:
+        candidates = _normalize_team_candidates(team_name)
+        doc_data: dict | None = None
+
+        for candidate in candidates:
+            try:
+                docs = list(
+                    col("team_stats")
+                    .where(filter=FieldFilter("team_name", "==", candidate))
+                    .limit(2)
+                    .stream()
+                )
+                for d in docs:
+                    data = d.to_dict() or {}
+                    if data.get("sf_form_score") is not None or data.get("sf_xg_for") is not None:
+                        doc_data = data
+                        break
+                if doc_data:
+                    break
+            except Exception as _e:
+                logger.debug(
+                    "_fetch_sofascore_context_for_teams(%s): query error: %s", candidate, _e
+                )
+
+        if not doc_data:
+            logger.debug(
+                "_fetch_sofascore_context_for_teams: sin datos SF para '%s'", team_name
+            )
+            continue
+
+        sf_form = doc_data.get("sf_form_score")
+        sf_xg_for = doc_data.get("sf_xg_for")
+        sf_xg_ag = doc_data.get("sf_xg_against")
+        sf_xg_n = doc_data.get("sf_xg_matches", 0)
+        sf_wins = doc_data.get("sf_form_wins", 0)
+        sf_draws = doc_data.get("sf_form_draws", 0)
+        sf_losses = doc_data.get("sf_form_losses", 0)
+        sf_total = doc_data.get("sf_form_matches", sf_wins + sf_draws + sf_losses)
+        stored_name = doc_data.get("team_name", team_name)
+
+        lines: list[str] = [f"Datos Sofascore — {stored_name}:"]
+        if sf_form is not None:
+            lines.append(
+                f"  Form score: {sf_form:.1f}% "
+                f"({sf_wins}W {sf_draws}D {sf_losses}L en {sf_total} partidos)"
+            )
+        if sf_xg_for is not None and sf_xg_ag is not None:
+            lines.append(
+                f"  xG medio (últimos {sf_xg_n} partidos): "
+                f"xGF={sf_xg_for:.2f} | xGA={sf_xg_ag:.2f} "
+                f"(diferencial: {sf_xg_for - sf_xg_ag:+.2f})"
+            )
+        elif sf_xg_for is not None:
+            lines.append(f"  xG for (media): {sf_xg_for:.2f}")
+
+        results.append("\n".join(lines))
+
+    if not results:
+        return None
+
+    body = "\n\n".join(results)
+    footer = (
+        "\nIMPORTANTE: Datos reales de Sofascore. Úsalos como ancla primaria. "
+        "xGF alto y xGA bajo = equipo dominante. Form score >75% = buena racha. "
+        "Calibra real_prob contra el precio de mercado — no ajustes >25% sin evidencia adicional."
+    )
+    return "DATOS SOFASCORE (xG + form reales):\n" + body + footer
+
+
 async def _fetch_odds_api_context(sport_key: str, team_a: str, team_b: str) -> str | None:
     """
     Llama The Odds API v4 para obtener odds h2h de un partido.
@@ -2158,6 +2352,36 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id, _sport_label,
                 )
 
+        else:
+            # --- Fútbol: CL, EL, ECL, ligas domésticas —  buscar datos Sofascore en Firestore ---
+            _football_teams = _extract_football_teams_from_question(question, _slug)
+            if _football_teams:
+                try:
+                    _sf_ctx = await asyncio.wait_for(
+                        _fetch_sofascore_context_for_teams(_football_teams),
+                        timeout=6.0,
+                    )
+                    if _sf_ctx:
+                        _sports_context = _sf_ctx
+                        logger.info(
+                            "analyze_market(%s): SOFASCORE_FOOTBALL_HIT teams=%s",
+                            market_id, _football_teams,
+                        )
+                    else:
+                        logger.info(
+                            "analyze_market(%s): SOFASCORE_FOOTBALL_MISS — sin datos SF teams=%s",
+                            market_id, _football_teams,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "analyze_market(%s): _fetch_sofascore_context_for_teams timeout >6s teams=%s",
+                        market_id, _football_teams,
+                    )
+                except Exception as _sfe:
+                    logger.debug(
+                        "analyze_market(%s): Sofascore fetch error: %s", market_id, _sfe,
+                    )
+
     elif category == "culture":
         # DDG search para mercados de cultura: taquilla, premios, música
         _q_lower_c = question.lower()
@@ -2443,12 +2667,16 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     if category_context:
         user_prompt += f"\n\nCONTEXTO ADICIONAL:\n{category_context}"
     if _sports_context:
-        _slabel = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
-        user_prompt += (
-            f"\n\nDATOS EXTERNOS {_slabel} (fuente: DDG):\n{_sports_context}\n"
-            f"IMPORTANTE: Calibra real_prob usando las odds/rankings reales de arriba como ancla primaria. "
-            f"Si las odds implican una probabilidad, úsala como base antes de ajustar por orderbook/sentiment."
-        )
+        if not _is_individual_match:
+            # Fútbol: el contexto viene de Sofascore, ya tiene su propio encabezado
+            user_prompt += f"\n\n{_sports_context}"
+        else:
+            _slabel = "TENIS" if _is_tennis else ("UFC/MMA" if _is_ufc else "MLB")
+            user_prompt += (
+                f"\n\nDATOS EXTERNOS {_slabel} (fuente: DDG):\n{_sports_context}\n"
+                f"IMPORTANTE: Calibra real_prob usando las odds/rankings reales de arriba como ancla primaria. "
+                f"Si las odds implican una probabilidad, úsala como base antes de ajustar por orderbook/sentiment."
+            )
     if _current_price is not None and _pct_needed is not None and _price_ctx:
         _direction = "subida" if _pct_needed > 0 else "bajada"
         user_prompt += (
