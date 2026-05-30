@@ -2282,10 +2282,20 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         return None
 
     volume_24h = float(market_data.get("volume_24h", 0))
-    if volume_24h < POLY_MIN_VOLUME:
-        logger.debug(
-            "analyze_market(%s): vol=%.0f < %d — skip (spread inejecutable)",
-            market_id, volume_24h, POLY_MIN_VOLUME,
+    _question_for_vol = market_data.get("question", "")
+    # Finales importantes (Champions, World Cup, NBA Finals...): umbral reducido a $500
+    # para no perder señales de mercados a punto de cerrarse con poco volumen reciente.
+    _is_final_mkt = any(
+        kw in _question_for_vol.lower()
+        for kw in ("champions league", "world cup", "nba finals", "super bowl",
+                   "europa league", "conference league", "copa libertadores", "final")
+    )
+    _vol_threshold = 500 if _is_final_mkt else POLY_MIN_VOLUME
+    if volume_24h < _vol_threshold:
+        logger.info(
+            "analyze_market(%s): SKIP_VOL vol=%.0f < %d — %s",
+            market_id, volume_24h, _vol_threshold,
+            _question_for_vol[:60],
         )
         return None
 
