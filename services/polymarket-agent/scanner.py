@@ -109,6 +109,26 @@ def _is_sports_market(question: str) -> bool:
     return any(kw in q for kw in _SPORTS_KEYWORDS)
 
 
+# Keywords de eventos finales de alto impacto — exentos del filtro days_to_close < 1
+# para que se analicen aunque queden <24h (último tren antes del partido/ceremonia).
+# Keywords de eventos finales de alto impacto — exentos del filtro days_to_close < 1.
+# Nota: "final" (sin espacios) captura "the final", "a final", "roland garros final",
+# pero no "finalize"/"finally" que son improbables en preguntas de Polymarket.
+_HIGH_STAKES_FINAL_KW: frozenset[str] = frozenset({
+    "champions league", "world cup", "copa del mundo",
+    "nba finals", "super bowl", "stanley cup finals",
+    "wimbledon", "europa league", "conference league",
+    "copa libertadores", "copa america", "euros final",
+    "final",  # cubre: "in the final", "the final", "roland garros final", etc.
+})
+
+
+def _is_high_stakes_final(question: str) -> bool:
+    """True si el mercado es una final importante que debe analizarse aunque queden <24h."""
+    q = question.lower()
+    return any(kw in q for kw in _HIGH_STAKES_FINAL_KW)
+
+
 def _quality_ok(
     market: dict,
     now: datetime,
@@ -118,13 +138,14 @@ def _quality_ok(
     """
     Filtro de calidad mínima común a todos los buckets:
     - volume_24h >= min_volume
-    - days_to_close entre 1 y max_days
+    - days_to_close entre 0.25 y max_days (excepción: finales importantes → 0.25 días)
     - price_yes no extremo (no prácticamente resuelto)
     min_volume default 1000 (más permisivo que el 5000 anterior para capturar
     mercados válidos con volumen moderado).
     max_days default 60 — los 30 anteriores excluían la mayoría de mercados
     crypto/política cuyas resoluciones son típicamente a 30-90 días.
-    min_days bajado a 1 — permite mercados deportivos del mismo día o siguiente.
+    Excepción finals: Champions League, World Cup, NBA Finals, etc. pasan con
+    days >= 0.25 (6h) para que el último analyze antes del partido los capture.
     """
     if market.get("volume_24h", 0) < min_volume:
         return False
@@ -134,7 +155,11 @@ def _quality_ok(
     if end_date.tzinfo is None:
         end_date = end_date.replace(tzinfo=timezone.utc)
     days = (end_date - now).total_seconds() / 86400
-    if days < 1 or days > max_days:
+    if days > max_days:
+        return False
+    question = market.get("question", "")
+    min_days = 0.25 if _is_high_stakes_final(question) else 1.0
+    if days < min_days:
         return False
     price_yes = market.get("price_yes", 0.5)
     if price_yes < 0.05 or price_yes > 0.95:
