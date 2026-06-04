@@ -775,10 +775,6 @@ async def _collect_tennis() -> None:
         from collectors.tennis_collector import collect_tennis_matches
         from collectors.firestore_writer import save_upcoming_matches
 
-        if not os.environ.get("FOOTBALL_RAPID_API_KEY"):
-            logger.warning("collect.tennis: FOOTBALL_RAPID_API_KEY no configurada")
-            return
-
         matches = await collect_tennis_matches(days=7)
         if matches:
             await save_upcoming_matches(matches)
@@ -1068,9 +1064,10 @@ async def _bg_analyze() -> None:
                 # OddsPapi v4: fixtures de hoy (corners/bookings del día)
                 + [_fetch_fixtures_for_date(_today)]
                 + [_fetch_fixtures_for_date(_today, to_date=_week_end)]
-                # The Odds API: baloncesto (NBA + Euroleague)
+                # The Odds API: baloncesto (NBA + Euroleague + ACB playoffs)
                 + [_fetch_basketball_odds("basketball_nba"),
-                   _fetch_basketball_odds("basketball_euroleague")]
+                   _fetch_basketball_odds("basketball_euroleague"),
+                   _fetch_basketball_odds("basketball_spain_acb")]
                 # The Odds API: torneos de tenis activos
                 + [_fetch_tennis_odds(sk, "prefetch") for sk in _tennis_sks]
             )

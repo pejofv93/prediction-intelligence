@@ -197,10 +197,19 @@ async def collect_rg_upcoming_as_fallback(tour: str = "atp") -> list[dict]:
 
     tour: 'atp' o 'wta'
     """
+    from collectors.tennis_collector import _fetch_oddsapiio_h2h_odds, _norm_name
+
     t_id = _RG_ATP_ID if tour == "atp" else _RG_WTA_ID
     season_map = _RG_ATP_SEASONS if tour == "atp" else _RG_WTA_SEASONS
     season_id = list(season_map.values())[0]  # más reciente
     league_code = "ATP_FRENCH_OPEN" if tour == "atp" else "WTA_FRENCH_OPEN"
+
+    # Pre-fetch odds h2h en bulk (1 sola request) para embeber en cada partido
+    try:
+        odds_by_pair = await _fetch_oddsapiio_h2h_odds()
+    except Exception:
+        logger.debug("sofascore_tennis: oddsapiio bulk fetch falló — sin odds embebidas")
+        odds_by_pair = {}
 
     result: list[dict] = []
     for page in range(3):
@@ -220,12 +229,16 @@ async def collect_rg_upcoming_as_fallback(tour: str = "atp") -> list[dict]:
             away_id = str(at.get("id", ""))
             if not home_id or not away_id:
                 continue
-            result.append({
+            home_name = ht.get("name", "")
+            away_name = at.get("name", "")
+            match_doc: dict = {
                 "match_id": f"RG_SF_{e['id']}",
                 "home_team_id": home_id,
                 "away_team_id": away_id,
-                "home_team": ht.get("name", ""),
-                "away_team": at.get("name", ""),
+                "home_team": home_name,
+                "away_team": away_name,
+                "home_team_name": home_name,
+                "away_team_name": away_name,
                 "league": league_code,
                 "sport": "tennis",
                 "surface": "clay",
@@ -233,10 +246,20 @@ async def collect_rg_upcoming_as_fallback(tour: str = "atp") -> list[dict]:
                 "source": "sofascore",
                 "date": match_date,
                 "status": "FINISHED" if status_type == "finished" else "SCHEDULED",
-            })
+            }
+            # Embeber odds si están disponibles (evita fetch HTTP extra en analyze)
+            h_norm = _norm_name(home_name)[:8]
+            a_norm = _norm_name(away_name)[:8]
+            odds_pair = odds_by_pair.get(f"{h_norm}|{a_norm}", {})
+            if odds_pair:
+                match_doc["home_odds"]      = odds_pair["home_odds"]
+                match_doc["away_odds"]      = odds_pair["away_odds"]
+                match_doc["odds_bookmaker"] = odds_pair["bookmaker"]
+            result.append(match_doc)
 
     logger.info(
-        "sofascore_tennis: %d partidos próximos RG %s (season=%d)",
+        "sofascore_tennis: %d partidos próximos RG %s (season=%d, con_odds=%d)",
         len(result), tour.upper(), season_id,
+        sum(1 for m in result if m.get("home_odds")),
     )
     return result
