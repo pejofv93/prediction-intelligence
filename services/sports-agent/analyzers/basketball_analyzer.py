@@ -36,7 +36,8 @@ _CACHE_TTL = timedelta(hours=24)
 _SPORT_KEY_MAP = {
     "NBA":        "basketball_nba",
     "EUROLEAGUE": "basketball_euroleague",
-    "ACB":        "basketball_spain_acb",
+    # ACB: basketball_spain_acb no existe en The Odds API (HTTP 404) ni en odds-api.io
+    # Sin odds no se puede generar señal de value bet — requiere proveedor de pago (Pinnacle, Betfair)
     "NBA_GL":     "basketball_nba",
 }
 

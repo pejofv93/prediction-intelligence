@@ -1064,10 +1064,10 @@ async def _bg_analyze() -> None:
                 # OddsPapi v4: fixtures de hoy (corners/bookings del día)
                 + [_fetch_fixtures_for_date(_today)]
                 + [_fetch_fixtures_for_date(_today, to_date=_week_end)]
-                # The Odds API: baloncesto (NBA + Euroleague + ACB playoffs)
+                # The Odds API: baloncesto (NBA + Euroleague)
+                # ACB excluido: basketball_spain_acb no existe en The Odds API (HTTP 404)
                 + [_fetch_basketball_odds("basketball_nba"),
-                   _fetch_basketball_odds("basketball_euroleague"),
-                   _fetch_basketball_odds("basketball_spain_acb")]
+                   _fetch_basketball_odds("basketball_euroleague")]
                 # The Odds API: torneos de tenis activos
                 + [_fetch_tennis_odds(sk, "prefetch") for sk in _tennis_sks]
             )
