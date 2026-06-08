@@ -561,7 +561,7 @@ def _extract_target_price(question: str) -> float | None:
                 val = float(raw)
                 if '[kK]' in pattern or 'k' in match.group(0).lower():
                     val *= 1000
-                if 50 < val < 1e8:
+                if 0.001 < val < 1e8:
                     return val
             except Exception:
                 continue
@@ -2491,6 +2491,16 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             or bool(_F1_RE.search(_slug.replace("-", " ")))
         )
         _is_individual_match = _is_tennis or _is_ufc or _is_mlb_game or _is_nhl_game or _is_cricket or _is_f1
+        _q_wc = question.lower()
+        _is_wc_group_stage = (
+            not _is_individual_match
+            and ("world cup" in _q_wc or "wc 2026" in _q_wc or "fifa 2026" in _q_wc)
+            and any(kw in _q_wc for kw in (
+                "advance", "qualify", "progress", "group stage", "top of group",
+                "round of 16", "knockout stage", "pass group", "out of group",
+                "advance from", "qualify from", "finish top",
+            ))
+        )
 
         if _is_individual_match:
             _sport_label = (
@@ -2734,6 +2744,15 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                         logger.debug(
                             "analyze_market(%s): Sofascore fetch error: %s", market_id, _sfe,
                         )
+
+        # WC_GROUP_NO_DATA: grupo WC sin datos reales de la selección → skip
+        # Igual que SPORTS_SINGLE_NO_BLOCK en tenis/MLB: sin datos externos = señal falsa.
+        if _is_wc_group_stage and _sports_context is None:
+            logger.info(
+                "analyze_market(%s): WC_GROUP_NO_DATA — mercado WC grupo sin datos selección → skip",
+                market_id,
+            )
+            return None
 
     elif category == "culture":
         # DDG search para mercados de cultura: taquilla, premios, música
