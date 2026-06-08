@@ -350,13 +350,38 @@ async def send_weekly_report() -> JSONResponse:
                 worst_error = worst_pred.get("error_type", "N/A") or "N/A"
 
         # 4. poly_predictions de la semana anterior
-        poly_docs = list(
-            col("poly_predictions")
-            .where(filter=FieldFilter("analyzed_at", ">=", week_start))
-            .where(filter=FieldFilter("analyzed_at", "<", week_end))
-            .stream()
-        )
-        poly_preds = [d.to_dict() for d in poly_docs]
+        poly_preds: list[dict] = []
+        try:
+            poly_docs = list(
+                col("poly_predictions")
+                .where(filter=FieldFilter("analyzed_at", ">=", week_start))
+                .where(filter=FieldFilter("analyzed_at", "<", week_end))
+                .stream()
+            )
+            poly_preds = [d.to_dict() for d in poly_docs]
+        except Exception:
+            logger.warning("send-weekly-report: error en query analyzed_at — usando fallback", exc_info=True)
+
+        # Fallback: si la query por rango devuelve vacío, cargar las últimas 200 y filtrar en Python
+        if not poly_preds:
+            try:
+                _fb_all = [d.to_dict() for d in col("poly_predictions").limit(200).stream()]
+                for _p in _fb_all:
+                    _aat = _p.get("analyzed_at")
+                    if _aat is None:
+                        continue
+                    if hasattr(_aat, "tzinfo") and _aat.tzinfo is None:
+                        _aat = _aat.replace(tzinfo=timezone.utc)
+                    if week_start <= _aat < week_end:
+                        poly_preds.append(_p)
+                if poly_preds:
+                    logger.info(
+                        "send-weekly-report: poly fallback encontró %d docs en %s",
+                        len(poly_preds), prev_week,
+                    )
+            except Exception:
+                logger.warning("send-weekly-report: error en poly fallback", exc_info=True)
+
         poly_total = len(poly_preds)
         poly_alerts = sum(1 for p in poly_preds if p.get("alerted") is True)
         poly_avg_edge = (
@@ -391,12 +416,25 @@ async def send_weekly_report() -> JSONResponse:
             logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
             shadow_metrics = {}
 
+        # Sports: si accuracy_log está vacío, calcular desde week_preds directamente
+        _sp_total = int(log.get("predictions_total", 0))
+        _sp_correct = int(log.get("predictions_correct", 0))
+        _sp_acc = float(log.get("accuracy", 0.0))
+        if _sp_total == 0 and week_preds:
+            _sp_total = len(week_preds)
+            _sp_correct = sum(1 for p in week_preds if p.get("correct") is True)
+            _sp_acc = _sp_correct / _sp_total if _sp_total > 0 else 0.0
+            logger.info(
+                "send-weekly-report: accuracy_log vacío para %s — usando %d preds directas",
+                prev_week, _sp_total,
+            )
+
         # Construir week_stats
         week_stats = {
             "week": prev_week,
-            "predictions_total": int(log.get("predictions_total", 0)),
-            "predictions_correct": int(log.get("predictions_correct", 0)),
-            "accuracy": float(log.get("accuracy", 0.0)),
+            "predictions_total": _sp_total,
+            "predictions_correct": _sp_correct,
+            "accuracy": _sp_acc,
             "prev_week_accuracy": log.get("prev_week_accuracy"),
             "accuracy_by_league": log.get("accuracy_by_league", {}),
             "best_match": best_match,
