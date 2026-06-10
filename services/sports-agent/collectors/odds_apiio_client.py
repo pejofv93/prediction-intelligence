@@ -234,8 +234,9 @@ _ODDS_MAP_LOCK = asyncio.Lock()
 # y se sirven con Poisson sintético cuando faltan odds reales.
 _PRIORITY_LEAGUES_FOR_ODDS: frozenset[str] = frozenset({
     "PD", "SA", "BL1", "PL", "FL1", "CL", "EL", "ECL", "TU1",
+    "WC", "WC26",  # Mundial 2026 — ligas de selecciones sin Poisson → necesitan odds reales
 })
-_MAX_ODDS_PREFETCH: int = 50   # 50 IDs / 10 por batch = 5 requests /odds/multi
+_MAX_ODDS_PREFETCH: int = 75   # 75 IDs / 10 por batch = 8 requests /odds/multi (dentro de 100 req/h)
 
 
 def _cache_ttl(entry: dict) -> timedelta:
@@ -635,7 +636,21 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
                 outcomes.append({"name": "Under", "price": under, "point": line or 2.5})
 
     elif norm == "spreads":
-        if isinstance(mkt_data, list):
+        if isinstance(mkt_data, dict):
+            # odds-api.io dict format: {"home":"1.90","away":"1.90","handicap":"-0.5"}
+            h = _to_float(mkt_data.get("home") or mkt_data.get("1"))
+            a = _to_float(mkt_data.get("away") or mkt_data.get("2"))
+            raw_pt = mkt_data.get("handicap") or mkt_data.get("line") or mkt_data.get("point")
+            try:
+                point = float(raw_pt) if raw_pt is not None else None
+            except (TypeError, ValueError):
+                point = None
+            if h and h > 1:
+                outcomes.append({"name": home_team, "price": h, "point": point})
+            if a and a > 1:
+                away_pt = (-point if point is not None else None)
+                outcomes.append({"name": "Away", "price": a, "point": away_pt})
+        elif isinstance(mkt_data, list):
             for o in mkt_data:
                 name = o.get("name") or o.get("team") or ""
                 price = _to_float(o.get("price") or o.get("odds"))
@@ -647,6 +662,15 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
         if isinstance(mkt_data, dict):
             yes = _to_float(mkt_data.get("yes") or mkt_data.get("Yes"))
             no = _to_float(mkt_data.get("no") or mkt_data.get("No"))
+            if yes and yes > 1:
+                outcomes.append({"name": "Yes", "price": yes})
+            if no and no > 1:
+                outcomes.append({"name": "No", "price": no})
+        elif isinstance(mkt_data, list) and mkt_data:
+            # odds-api.io list format: [{"yes":"1.72","no":"2.00"}]
+            o = mkt_data[0]
+            yes = _to_float(o.get("yes") or o.get("Yes"))
+            no = _to_float(o.get("no") or o.get("No"))
             if yes and yes > 1:
                 outcomes.append({"name": "Yes", "price": yes})
             if no and no > 1:
@@ -920,7 +944,7 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
     """
     global _ODDS_MAP_PREFETCHED_AT
 
-    _PREFETCH_PER_LEAGUE = 5  # eventos por liga → 9 ligas × 5 = máx 45 IDs
+    _PREFETCH_PER_LEAGUE = 5  # eventos por liga → 11 ligas × 5 = máx 55 IDs (cap 75)
 
     def _commence_key(ev: dict) -> str:
         for field in ("commenceTime", "commence_time", "startTime", "start_time", "date", "kickoff"):
