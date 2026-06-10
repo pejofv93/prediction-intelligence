@@ -1866,7 +1866,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # Ligas donde Poisson puede faltar: se permite continuar con ELO o form como proxy.
     # Copa/BSA: datos históricos insuficientes en fase de grupos.
     # CL/EL/ECL: ELO DB puede no cubrir equipos — pero cuotas siempre disponibles.
-    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM", "CL", "EL", "ECL", "WC26"}
+    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM", "CL", "EL", "ECL", "WC26", "WC"}
 
     # POISSON_GUARD: bloquear SOLO si no hay ningún modelo disponible.
     # Regla: si poisson_home_win existe → pasar siempre (elo=-1 no bloquea).

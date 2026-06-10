@@ -99,6 +99,9 @@ _LEAGUE_KEYWORDS: dict[str, list[str]] = {
     "ATP_BARCELONA":   ["barcelona-open", "conde-de-godo", "barcelona open"],
     "WC26":            ["fifa-world-cup", "world-cup-2026", "world cup 2026",
                         "world cup", "fifa world cup"],
+    # "WC" = mismo torneo, código que devuelve football-data.org
+    "WC":              ["fifa-world-cup", "world-cup-2026", "world cup 2026",
+                        "world cup", "fifa world cup"],
 }
 
 # Sport category → odds-api.io top-level sport slug (descubierto via /sports)
@@ -111,7 +114,7 @@ _SPORT_FALLBACK_SLUGS: dict[str, list[str]] = {
 
 # Ligas que son fútbol / baloncesto / tenis (para decidir qué sport slug buscar)
 _FOOTBALL_LEAGUES = {"PL","PD","BL1","SA","FL1",
-                     "CL","EL","ECL","TU1","ARG","CLI","BSA","CSUD","CAM","WC26"}
+                     "CL","EL","ECL","TU1","ARG","CLI","BSA","CSUD","CAM","WC26","WC"}
 _BASKETBALL_LEAGUES = {"NBA","EUROLEAGUE","ACB"}
 _TENNIS_LEAGUES = {"ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN",
                    "ATP_MADRID","ATP_ROME","ATP_BARCELONA",
