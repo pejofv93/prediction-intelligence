@@ -127,6 +127,8 @@ _ODDS_SPORT_MAP: dict[str, str] = {
     # ── Fútbol masculino internacional (selecciones) ───────────────────────────
     # Competiciones de clubes por confederación
     "CSUD": "soccer_conmebol_sudamericana",
+    # Mundial 2026 (empieza 11 jun 2026 — liga guardada como WC26 en Firestore)
+    "WC26": "soccer_fifa_world_cup",
     # Competiciones de selecciones — Europa
     "NL":  "soccer_uefa_nations_league",
     "WCQ": "soccer_fifa_world_cup_qualification_europe",
@@ -1849,7 +1851,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # Ligas donde Poisson puede faltar: se permite continuar con ELO o form como proxy.
     # Copa/BSA: datos históricos insuficientes en fase de grupos.
     # CL/EL/ECL: ELO DB puede no cubrir equipos — pero cuotas siempre disponibles.
-    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM", "CL", "EL", "ECL"}
+    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM", "CL", "EL", "ECL", "WC26"}
 
     # POISSON_GUARD: bloquear SOLO si no hay ningún modelo disponible.
     # Regla: si poisson_home_win existe → pasar siempre (elo=-1 no bloquea).

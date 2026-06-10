@@ -82,7 +82,7 @@ async def enrich_match(match: dict) -> dict:
     loop = asyncio.get_event_loop()
 
     # Ligas europeas donde los team_ids de la competición pueden diferir de los domésticos
-    _INTL_LEAGUES = {"CL", "EL", "ECL", "EC", "WC", "NL", "WCQ"}
+    _INTL_LEAGUES = {"CL", "EL", "ECL", "EC", "WC", "WC26", "NL", "WCQ"}
 
     def _get(collection: str, doc_id: str):
         if not doc_id:
