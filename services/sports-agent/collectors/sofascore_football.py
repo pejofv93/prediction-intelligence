@@ -121,44 +121,70 @@ async def _fetch_team_xg_and_form(sf_team_id: int, max_xg_matches: int = 5) -> d
     Últimos ~20 eventos de un equipo:
       - Form score ponderado (20 partidos, W=3 D=1 L=0)
       - xG medio real de los primeros max_xg_matches con hasXg=True
+      - Corners medios reales (avg_corners_for, avg_corners_against)
+        extraídos de los mismos llamadas a fetch_event_statistics (sin coste extra)
+        más hasta 5 llamadas adicionales a partidos sin xG para ampliar la muestra.
     """
     events = await fetch_team_events(sf_team_id, page=0)
     if not events:
         return {}
 
-    # --- xG real (requiere call por partido) ---
     xg_for_list: list[float] = []
     xg_against_list: list[float] = []
-    xg_calls = 0
+    corners_for_list: list[int] = []
+    corners_against_list: list[int] = []
+    stat_calls = 0
+    _MAX_STAT_CALLS = 8  # cap total por equipo (xG + corners sin xG)
+    _MAX_CORNERS_EXTRA = 5  # llamadas extra para corners en partidos sin xG
 
     for e in events:
-        if xg_calls >= max_xg_matches:
+        if stat_calls >= _MAX_STAT_CALLS:
             break
-        if not e.get("hasXg"):
+        if (e.get("status") or {}).get("type") != "finished":
             continue
         event_id = e.get("id")
         if not event_id:
             continue
+
+        want_xg = e.get("hasXg") and len(xg_for_list) < max_xg_matches
+        want_corners_extra = (
+            not e.get("hasXg")
+            and len(corners_for_list) < _MAX_CORNERS_EXTRA
+        )
+
+        if not want_xg and not want_corners_extra:
+            continue
+
         try:
             stats_data = await fetch_event_statistics(event_id)
+            stat_calls += 1
+            is_home = (e.get("homeTeam") or {}).get("id") == sf_team_id
+
             for group in stats_data.get("statistics", []):
                 if group.get("period") != "ALL":
                     continue
                 for item in group.get("groups", []):
                     for stat in item.get("statisticsItems", []):
-                        if stat.get("name", "").lower() in ("expected goals", "xg", "xgoals"):
+                        name = stat.get("name", "").lower()
+                        if want_xg and name in ("expected goals", "xg", "xgoals"):
                             try:
                                 h_val = float(stat.get("home") or 0)
                                 a_val = float(stat.get("away") or 0)
-                                is_home = (e.get("homeTeam") or {}).get("id") == sf_team_id
                                 xg_for_list.append(h_val if is_home else a_val)
                                 xg_against_list.append(a_val if is_home else h_val)
                             except (TypeError, ValueError):
                                 pass
-            xg_calls += 1
+                        if name in ("corner kicks", "corners"):
+                            try:
+                                h_val = int(stat.get("home") or 0)
+                                a_val = int(stat.get("away") or 0)
+                                corners_for_list.append(h_val if is_home else a_val)
+                                corners_against_list.append(a_val if is_home else h_val)
+                            except (TypeError, ValueError):
+                                pass
             await asyncio.sleep(0.15)
         except Exception:
-            logger.debug("sofascore_football: xG event %d error", event_id, exc_info=True)
+            logger.debug("sofascore_football: stats event %d error", event_id, exc_info=True)
 
     # --- Form score de 20 partidos ---
     wins = losses = draws = 0
@@ -189,6 +215,12 @@ async def _fetch_team_xg_and_form(sf_team_id: int, max_xg_matches: int = 5) -> d
             "sf_xg_for": round(sum(xg_for_list) / len(xg_for_list), 3),
             "sf_xg_against": round(sum(xg_against_list) / len(xg_against_list), 3),
             "sf_xg_matches": len(xg_for_list),
+        })
+    if corners_for_list:
+        result.update({
+            "avg_corners_for": round(sum(corners_for_list) / len(corners_for_list), 2),
+            "avg_corners_against": round(sum(corners_against_list) / len(corners_against_list), 2),
+            "corners_matches": len(corners_for_list),
         })
 
     return result

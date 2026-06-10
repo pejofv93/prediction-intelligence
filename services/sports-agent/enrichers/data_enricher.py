@@ -177,6 +177,12 @@ async def enrich_match(match: dict) -> dict:
     home_streak = home_stats.get("streak", {"type": "draw", "count": 0})
     away_streak = away_stats.get("streak", {"type": "draw", "count": 0})
 
+    # Corners reales desde Sofascore (None si aún no recopilados → proxy xG en engine)
+    home_avg_corners_for = home_stats.get("avg_corners_for")
+    home_avg_corners_against = home_stats.get("avg_corners_against")
+    away_avg_corners_for = away_stats.get("avg_corners_for")
+    away_avg_corners_against = away_stats.get("avg_corners_against")
+
     # --- 2b. Fatiga: días desde el último partido ---
     _match_date_ref: datetime | None = None
     try:
@@ -383,6 +389,10 @@ async def enrich_match(match: dict) -> dict:
         "home_elo": home_elo,
         "away_elo": away_elo,
         # Campos todos los deportes
+        "home_avg_corners_for": home_avg_corners_for,
+        "home_avg_corners_against": home_avg_corners_against,
+        "away_avg_corners_for": away_avg_corners_for,
+        "away_avg_corners_against": away_avg_corners_against,
         "home_form_score": home_form_score,
         "away_form_score": away_form_score,
         "h2h_advantage": h2h_advantage,

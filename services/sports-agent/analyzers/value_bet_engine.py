@@ -995,17 +995,32 @@ def _calculate_btts_prob(enriched_match: dict) -> dict | None:
 
 def _calculate_corners_prob(enriched_match: dict, line: float) -> dict | None:
     """
-    Estimación P(corners) usando xG como proxy.
-    Modelo: exp_corners = 5.5 + (home_xg + away_xg) * 2.5
-    Sin stats dedicadas de corners — Poisson sobre xG escalado.
+    Estimación Poisson de corners totales.
+    Prioridad: stats reales Sofascore (avg_corners_for/against) → proxy xG.
     """
     from scipy.stats import poisson as _poisson
-    home_xg = enriched_match.get("home_xg")
-    away_xg = enriched_match.get("away_xg")
-    if home_xg is None or away_xg is None:
-        return None
     try:
-        expected_corners = 5.5 + (float(home_xg) + float(away_xg)) * 2.5
+        h_cn_for = enriched_match.get("home_avg_corners_for")
+        a_cn_for = enriched_match.get("away_avg_corners_for")
+        h_cn_ag  = enriched_match.get("home_avg_corners_against")
+        a_cn_ag  = enriched_match.get("away_avg_corners_against")
+
+        if h_cn_for is not None and a_cn_for is not None:
+            # Modelo ofensivo + defensivo promediados para robustez
+            offensive = float(h_cn_for) + float(a_cn_for)
+            if h_cn_ag is not None and a_cn_ag is not None:
+                defensive = float(h_cn_ag) + float(a_cn_ag)
+                expected_corners = (offensive + defensive) / 2.0
+            else:
+                expected_corners = offensive
+        else:
+            # Fallback: proxy xG
+            home_xg = enriched_match.get("home_xg")
+            away_xg = enriched_match.get("away_xg")
+            if home_xg is None or away_xg is None:
+                return None
+            expected_corners = 5.5 + (float(home_xg) + float(away_xg)) * 2.5
+
         expected_corners = max(6.0, min(14.0, expected_corners))
         floor_line = int(line)
         prob_under_or_equal = sum(_poisson.pmf(k, expected_corners) for k in range(floor_line + 1))

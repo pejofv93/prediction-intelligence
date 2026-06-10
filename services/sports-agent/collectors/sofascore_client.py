@@ -17,19 +17,51 @@ IDs de torneos confirmados:
   Bundesliga        id=35    season_2425=61643  (verificar)
 """
 import asyncio
-import json as _json
 import logging
-import urllib.request
+import random
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 _BASE = "https://api.sofascore.com/api/v1"
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:119.0) Gecko/20100101 Firefox/119.0",
-    "Accept": "application/json",
-    "Referer": "https://www.sofascore.com/",
-}
-_TIMEOUT = 12
+_TIMEOUT = 15
+
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+]
+
+
+def _browser_headers(ua: str) -> dict:
+    is_chrome = "Chrome" in ua
+    return {
+        "User-Agent": ua,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Origin": "https://www.sofascore.com",
+        "Referer": "https://www.sofascore.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        **(
+            {
+                "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not=A?Brand";v="99"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            }
+            if is_chrome
+            else {}
+        ),
+        "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
 
 # Torneos y temporadas conocidas {año_fin_o_clave: season_id}
 TOURNAMENTS: dict[str, dict] = {
@@ -74,14 +106,35 @@ LEAGUE_CODE_TO_TOURNAMENT: dict[str, str] = {
 }
 
 
-def _get(url: str) -> dict | None:
-    try:
-        req = urllib.request.Request(url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
-            return _json.loads(r.read().decode())
-    except Exception as e:
-        logger.debug("sofascore._get(%s): %s", url[-70:], e)
-        return None
+async def _get(url: str, retries: int = 3) -> dict | None:
+    ua = random.choice(_USER_AGENTS)
+    for attempt in range(retries):
+        try:
+            async with httpx.AsyncClient(
+                headers=_browser_headers(ua),
+                timeout=_TIMEOUT,
+                follow_redirects=True,
+            ) as client:
+                r = await client.get(url)
+                if r.status_code == 200:
+                    return r.json()
+                if r.status_code in (403, 429):
+                    wait = 3 + attempt * 5
+                    logger.warning(
+                        "sofascore %d en %s (intento %d/%d) — retry en %ds",
+                        r.status_code, url[-60:], attempt + 1, retries, wait,
+                    )
+                    if attempt < retries - 1:
+                        ua = random.choice(_USER_AGENTS)
+                        await asyncio.sleep(wait)
+                    continue
+                logger.debug("sofascore._get(%s): HTTP %d", url[-60:], r.status_code)
+                return None
+        except Exception as e:
+            logger.debug("sofascore._get(%s): %s", url[-60:], e)
+            if attempt < retries - 1:
+                await asyncio.sleep(2 + attempt * 2)
+    return None
 
 
 async def fetch_tournament_events(
@@ -91,34 +144,30 @@ async def fetch_tournament_events(
     direction: str = "last",
 ) -> list[dict]:
     """Una página de eventos de un torneo. direction='last' → terminados, 'next' → próximos."""
-    loop = asyncio.get_event_loop()
     url = f"{_BASE}/unique-tournament/{tournament_id}/season/{season_id}/events/{direction}/{page}"
-    data = await loop.run_in_executor(None, _get, url)
+    data = await _get(url)
     return (data or {}).get("events", [])
 
 
 async def fetch_tournament_standings(tournament_id: int, season_id: int) -> list[dict]:
     """Tabla de clasificación de un torneo. Devuelve rows del primer grupo."""
-    loop = asyncio.get_event_loop()
     url = f"{_BASE}/unique-tournament/{tournament_id}/season/{season_id}/standings/total"
-    data = await loop.run_in_executor(None, _get, url)
+    data = await _get(url)
     standings = (data or {}).get("standings", [])
     return standings[0].get("rows", []) if standings else []
 
 
 async def fetch_team_events(sf_team_id: int, page: int = 0) -> list[dict]:
     """Últimos ~20 eventos de un equipo (football/basketball). 404 para tenistas."""
-    loop = asyncio.get_event_loop()
     url = f"{_BASE}/team/{sf_team_id}/events/last/{page}"
-    data = await loop.run_in_executor(None, _get, url)
+    data = await _get(url)
     return (data or {}).get("events", [])
 
 
 async def fetch_event_statistics(event_id: int) -> dict:
     """Estadísticas de un partido concreto (xG, shots, aces, etc.)."""
-    loop = asyncio.get_event_loop()
     url = f"{_BASE}/event/{event_id}/statistics"
-    data = await loop.run_in_executor(None, _get, url)
+    data = await _get(url)
     return data or {}
 
 
