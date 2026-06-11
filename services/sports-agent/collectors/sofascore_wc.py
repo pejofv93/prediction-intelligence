@@ -56,6 +56,130 @@ _XG_SOURCE_SEASONS = [
 _WC_TEAM_MAP: dict[str, int] = {}
 _WC_TEAM_MAP_LOADED = False
 
+# ---------------------------------------------------------------------------
+# ELO inicial desde ranking FIFA junio 2026
+# Clave: nombre exacto en The Odds API (se convierte a wc_{name.lower().replace(' ','_')})
+# Valor: puntos FIFA junio 2026 — escala directamente compatible con DEFAULT_ELO=1500
+# ---------------------------------------------------------------------------
+_WC26_FIFA_ELO: dict[str, float] = {
+    # UEFA (16 plazas)
+    "Spain":                  1875.0,
+    "France":                 1871.0,
+    "England":                1828.0,
+    "Portugal":               1768.0,
+    "Netherlands":            1754.0,
+    "Belgium":                1742.0,
+    "Germany":                1736.0,
+    "Croatia":                1715.0,
+    "Switzerland":            1650.0,
+    "Denmark":                1619.0,
+    "Turkey":                 1606.0,
+    "Austria":                1552.0,
+    "Scotland":               1503.0,
+    "Serbia":                 1502.0,
+    "Czechia":                1490.0,
+    "Bosnia and Herzegovina": 1475.0,
+    "Slovakia":               1474.0,
+    "Albania":                1452.0,
+    # CONMEBOL (6 plazas)
+    "Argentina":              1877.0,
+    "Brazil":                 1766.0,
+    "Colombia":               1698.0,
+    "Uruguay":                1673.0,
+    "Ecuador":                1599.0,
+    "Venezuela":              1469.0,
+    "Paraguay":               1505.0,
+    "Bolivia":                1358.0,
+    "Chile":                  1455.0,
+    # CONCACAF (6 plazas + 3 anfitrones auto)
+    "Mexico":                 1687.0,
+    "USA":                    1671.0,
+    "Canada":                 1559.0,
+    "Panama":                 1539.0,
+    "Costa Rica":             1443.0,
+    "Honduras":               1415.0,
+    "Haiti":                  1350.0,
+    "Curaçao":                1355.0,
+    "Jamaica":                1365.0,
+    "Trinidad and Tobago":    1340.0,
+    # AFC (8 plazas)
+    "Japan":                  1662.0,
+    "Iran":                   1620.0,
+    "Korea Republic":         1592.0,
+    "Australia":              1579.0,
+    "Uzbekistan":             1547.0,
+    "Qatar":                  1430.0,
+    "Iraq":                   1425.0,
+    "Saudi Arabia":           1410.0,
+    "Jordan":                 1390.0,
+    "Indonesia":              1280.0,
+    # CAF (9 plazas)
+    "Morocco":                1755.0,
+    "Senegal":                1684.0,
+    "Algeria":                1571.0,
+    "Nigeria":                1571.0,
+    "Egypt":                  1562.0,
+    "Ivory Coast":            1541.0,
+    "Mali":                   1530.0,
+    "Cameroon":               1481.0,
+    "Tunisia":                1476.0,
+    "DR Congo":               1474.0,
+    "South Africa":           1415.0,
+    "Tanzania":               1370.0,
+    # OFC (1 plaza)
+    "New Zealand":            1345.0,
+}
+
+
+async def init_wc26_national_elos() -> int:
+    """
+    Escribe ELO inicial (puntos FIFA junio 2026) en Firestore team_elo para las
+    selecciones del WC 2026. Solo sobreescribe si el equipo tiene ELO default
+    (1500.0) o si ya fue inicializado con fifa_init (actualización de ranking).
+    Devuelve número de equipos escritos.
+    """
+    from datetime import datetime, timezone
+    import asyncio
+
+    now = datetime.now(timezone.utc)
+    initialized = 0
+    loop = asyncio.get_event_loop()
+
+    for odds_name, elo_val in _WC26_FIFA_ELO.items():
+        team_id = f"wc_{odds_name.lower().replace(' ', '_')}"
+        try:
+            doc_ref = col("team_elo").document(team_id)
+            existing = await loop.run_in_executor(None, doc_ref.get)
+
+            if existing.exists:
+                data = existing.to_dict() or {}
+                current = float(data.get("elo", 1500.0))
+                source = data.get("source", "")
+                # Conservar ELO si ya tiene historial real de partidos
+                if abs(current - 1500.0) >= 1.0 and source not in ("fifa_init", ""):
+                    logger.debug(
+                        "init_wc26_elos: %s tiene ELO real %.0f (source=%s) — conservando",
+                        team_id, current, source,
+                    )
+                    continue
+
+            doc_ref.set({
+                "team_id":    team_id,
+                "team_name":  odds_name,
+                "elo":        elo_val,
+                "source":     "fifa_init",
+                "updated_at": now,
+                "elo_history": [],
+            })
+            initialized += 1
+            logger.debug("init_wc26_elos: %s → %.0f", team_id, elo_val)
+
+        except Exception:
+            logger.warning("init_wc26_elos: error en %s", team_id, exc_info=True)
+
+    logger.info("init_wc26_elos: %d selecciones WC 2026 inicializadas con ELO FIFA", initialized)
+    return initialized
+
 
 async def _discover_wc26_season_id() -> int:
     """

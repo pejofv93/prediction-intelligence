@@ -707,6 +707,13 @@ async def _collect_wc2026() -> None:
     Colecta partidos WC 2026 vía Sofascore (primario) o The Odds API (fallback).
     No bloquea el pipeline si ambas fuentes fallan.
     """
+    # Inicializar ELO FIFA para todas las selecciones WC 2026 (idempotente)
+    try:
+        from collectors.sofascore_wc import init_wc26_national_elos
+        await init_wc26_national_elos()
+    except Exception:
+        logger.warning("collect.wc2026: init ELO FIFA falló (no crítico)", exc_info=True)
+
     try:
         from collectors.sofascore_wc import run_wc2026_collection
         from collectors.firestore_writer import save_upcoming_matches
