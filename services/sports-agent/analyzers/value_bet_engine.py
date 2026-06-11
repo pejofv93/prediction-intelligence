@@ -2164,7 +2164,10 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # Si _synthetic_poisson=True (sin xG/posesión real) Y además form=50.0 (sin datos de forma),
     # la confianza del ensemble es artificialmente alta (std≈0 → conf≈1.0).
     # Cap a 0.60 para forzar bloqueo en el threshold 0.65 — idéntico a basketball_analyzer.
-    if enriched_match.get("_synthetic_poisson", False):
+    # WC26/WC: exento — los equipos nacionales nunca tienen historial en football-data.org;
+    # usar Poisson sintético + form default ES el flujo esperado, no un degradado temporal.
+    # La divergencia extrema (germany vs curaçao) la filtra el bloque siguiente.
+    if enriched_match.get("_synthetic_poisson", False) and league not in {"WC26", "WC"}:
         _fh = float(enriched_match.get("home_form_score", 50.0))
         _fa = float(enriched_match.get("away_form_score", 50.0))
         if abs(_fh - 50.0) < 0.5 and abs(_fa - 50.0) < 0.5:
