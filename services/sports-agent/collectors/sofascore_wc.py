@@ -106,6 +106,7 @@ _WC26_FIFA_ELO: dict[str, float] = {
     "Japan":                  1662.0,
     "Iran":                   1620.0,
     "Korea Republic":         1592.0,
+    "South Korea":            1592.0,  # alias The Odds API
     "Australia":              1579.0,
     "Uzbekistan":             1547.0,
     "Qatar":                  1430.0,
@@ -120,14 +121,21 @@ _WC26_FIFA_ELO: dict[str, float] = {
     "Nigeria":                1571.0,
     "Egypt":                  1562.0,
     "Ivory Coast":            1541.0,
+    "Cote dIvoire":           1541.0,  # alias sin apóstrofo (Sofascore / FIFA)
     "Mali":                   1530.0,
     "Cameroon":               1481.0,
     "Tunisia":                1476.0,
     "DR Congo":               1474.0,
+    "Congo DR":               1474.0,  # alias FIFA
     "South Africa":           1415.0,
     "Tanzania":               1370.0,
     # OFC (1 plaza)
     "New Zealand":            1345.0,
+    # CONCACAF aliases
+    "United States":          1671.0,  # alias de "USA"
+    # UEFA aliases
+    "Czech Republic":         1490.0,  # alias de "Czechia"
+    "Bosnia & Herzegovina":   1475.0,  # alias de "Bosnia and Herzegovina"
 }
 
 
