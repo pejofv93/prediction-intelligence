@@ -2444,8 +2444,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         return []
 
     # --- 6. Umbrales de intensidad basados en EV (FIX 2 + EV) ---
-    # CL/EL/ECL: umbrales relajados (eliminatorias con mayor varianza, team_stats por nombre)
-    _is_intl_cup = league in {"CL", "EL", "ECL"}
+    # CL/EL/ECL/WC/WC26: umbrales relajados (eliminatorias o torneo mundial, team_stats por nombre)
+    _is_intl_cup = league in {"CL", "EL", "ECL", "WC", "WC26"}
     _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
     _is_moderada  = best_ev > 0.12 and best_confidence > (0.65 if _is_intl_cup else 0.70) and best_odds < 6.00
     _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
@@ -2487,7 +2487,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         best_confidence = round(max(0.0, best_confidence * 0.9), 4)
         _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
         _is_moderada  = best_ev > 0.12 and best_confidence > 0.65 and best_odds < 6.00
-        _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < 4.00
+        _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
         if not (_is_fuerte or _is_moderada or _is_detectada):
             return []
         _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
