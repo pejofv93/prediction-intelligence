@@ -31,6 +31,7 @@ from collectors.sofascore_client import (
     fetch_team_events,
     fetch_tournament_events,
     fetch_tournament_standings,
+    fetch_tournament_seasons,
     fetch_event_statistics,
     normalize_name,
 )
@@ -56,6 +57,39 @@ _WC_TEAM_MAP: dict[str, int] = {}
 _WC_TEAM_MAP_LOADED = False
 
 
+async def _discover_wc26_season_id() -> int:
+    """
+    Intenta descubrir el season_id activo para WC 2026 via /unique-tournament/16/seasons.
+    Devuelve el ID de la temporada más reciente (mayor ID). Fallback: 58210.
+    """
+    try:
+        seasons = await fetch_tournament_seasons(WC26_TOURNAMENT_ID)
+        if seasons:
+            def _year_val(s: dict) -> int:
+                raw = str(s.get("year") or "0")
+                # "2025/2026" → 2026, "2026" → 2026, 2026 → 2026
+                part = raw.split("/")[-1].strip()
+                try:
+                    return int(part)
+                except ValueError:
+                    return 0
+
+            for s in seasons:
+                if _year_val(s) >= 2026:
+                    sid = int(s.get("id", 0))
+                    if sid and sid != WC26_SEASON_ID:
+                        logger.info("sofascore_wc: season autodiscovered → %d (antes %d)", sid, WC26_SEASON_ID)
+                    return sid if sid else WC26_SEASON_ID
+            # ninguno con year>=2026, usar el de mayor ID
+            by_id = sorted(seasons, key=lambda s: int(s.get("id", 0) or 0), reverse=True)
+            sid = int(by_id[0].get("id", WC26_SEASON_ID) or WC26_SEASON_ID)
+            logger.info("sofascore_wc: season por mayor ID → %d", sid)
+            return sid
+    except Exception:
+        logger.debug("sofascore_wc: fallo autodiscovery de season", exc_info=True)
+    return WC26_SEASON_ID
+
+
 async def _load_wc26_team_map() -> dict[str, int]:
     """
     Extrae {nombre_normalizado: sf_team_id} de los grupos del WC 2026.
@@ -66,7 +100,8 @@ async def _load_wc26_team_map() -> dict[str, int]:
         return _WC_TEAM_MAP
 
     try:
-        rows = await fetch_tournament_standings(WC26_TOURNAMENT_ID, WC26_SEASON_ID)
+        season_id = await _discover_wc26_season_id()
+        rows = await fetch_tournament_standings(WC26_TOURNAMENT_ID, season_id)
         for row in rows:
             team = row.get("team") or {}
             sf_id = team.get("id")
@@ -103,10 +138,11 @@ async def collect_wc2026_matches() -> list[dict]:
     Páginas 0-4 = ~80 eventos (48 grupos + 32 KO).
     Formato compatible con upcoming_matches en Firestore.
     """
+    season_id = await _discover_wc26_season_id()
     result: list[dict] = []
     for page in range(5):
         events = await fetch_tournament_events(
-            WC26_TOURNAMENT_ID, WC26_SEASON_ID, page=page, direction="next"
+            WC26_TOURNAMENT_ID, season_id, page=page, direction="next"
         )
         if not events:
             break

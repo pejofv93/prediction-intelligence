@@ -157,6 +157,13 @@ async def fetch_tournament_standings(tournament_id: int, season_id: int) -> list
     return standings[0].get("rows", []) if standings else []
 
 
+async def fetch_tournament_seasons(tournament_id: int) -> list[dict]:
+    """Lista de temporadas de un torneo. Útil para descubrir el season_id activo."""
+    url = f"{_BASE}/unique-tournament/{tournament_id}/seasons"
+    data = await _get(url)
+    return (data or {}).get("seasons", [])
+
+
 async def fetch_team_events(sf_team_id: int, page: int = 0) -> list[dict]:
     """Últimos ~20 eventos de un equipo (football/basketball). 404 para tenistas."""
     url = f"{_BASE}/team/{sf_team_id}/events/last/{page}"

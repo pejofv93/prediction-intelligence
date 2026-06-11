@@ -704,9 +704,8 @@ async def _collect_football() -> None:
 
 async def _collect_wc2026() -> None:
     """
-    Colecta partidos y stats de selecciones para el Mundial 2026 vía Sofascore.
-    TTL implícito: corre cada 6h junto con el collect principal.
-    No bloquea el pipeline si falla — los datos WC son opcionales.
+    Colecta partidos WC 2026 vía Sofascore (primario) o The Odds API (fallback).
+    No bloquea el pipeline si ambas fuentes fallan.
     """
     try:
         from collectors.sofascore_wc import run_wc2026_collection
@@ -715,9 +714,91 @@ async def _collect_wc2026() -> None:
         wc_matches = await run_wc2026_collection()
         if wc_matches:
             await save_upcoming_matches(wc_matches)
-            logger.info("collect.wc2026: %d partidos WC 2026 guardados", len(wc_matches))
+            logger.info("collect.wc2026: %d partidos WC 2026 guardados (sofascore)", len(wc_matches))
+            return
+        logger.warning("collect.wc2026: sofascore devolvió 0 partidos — intentando fallback Odds API")
     except Exception:
-        logger.warning("collect.wc2026: falló (no crítico)", exc_info=True)
+        logger.warning("collect.wc2026: sofascore falló — intentando fallback Odds API", exc_info=True)
+
+    # Fallback: The Odds API soccer_fifa_world_cup
+    try:
+        wc_matches = await _collect_wc2026_from_odds_api()
+        if wc_matches:
+            from collectors.firestore_writer import save_upcoming_matches
+            await save_upcoming_matches(wc_matches)
+            logger.info("collect.wc2026: %d partidos WC 2026 guardados (odds-api fallback)", len(wc_matches))
+        else:
+            logger.warning("collect.wc2026: odds-api fallback también devolvió 0 partidos")
+    except Exception:
+        logger.warning("collect.wc2026: fallback Odds API falló (no crítico)", exc_info=True)
+
+
+async def _collect_wc2026_from_odds_api() -> list[dict]:
+    """
+    Construye upcoming_matches WC26 desde The Odds API /events?sport=soccer_fifa_world_cup.
+    Produce stubs mínimos compatibles con save_upcoming_matches — sin team_stats, solo fixture.
+    """
+    import httpx
+    from datetime import datetime, timezone, timedelta
+
+    api_key = None
+    try:
+        from shared.config import ODDS_API_KEY
+        api_key = ODDS_API_KEY
+    except Exception:
+        pass
+    if not api_key:
+        import os
+        api_key = os.environ.get("ODDS_API_KEY") or os.environ.get("THE_ODDS_API_KEY")
+    if not api_key:
+        logger.warning("collect.wc2026_odds: sin ODDS_API_KEY")
+        return []
+
+    now = datetime.now(timezone.utc)
+    from_dt = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_dt = (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup/events",
+            params={"apiKey": api_key, "commenceTimeFrom": from_dt, "commenceTimeTo": to_dt},
+        )
+
+    if r.status_code != 200:
+        logger.warning("collect.wc2026_odds: HTTP %d — %s", r.status_code, r.text[:200])
+        return []
+
+    events = r.json() if isinstance(r.json(), list) else []
+    matches: list[dict] = []
+    for ev in events:
+        home = ev.get("home_team") or ""
+        away = ev.get("away_team") or ""
+        ev_id = ev.get("id") or ""
+        commence = ev.get("commence_time") or ""
+        if not home or not away or not ev_id:
+            continue
+        match_date = ""
+        if commence:
+            try:
+                dt = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+                match_date = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                match_date = commence[:16]
+        matches.append({
+            "match_id": f"WC26_OA_{ev_id}",
+            "home_team": home,
+            "away_team": away,
+            "home_team_id": f"wc_{home.lower().replace(' ', '_')}",
+            "away_team_id": f"wc_{away.lower().replace(' ', '_')}",
+            "league": "WC26",
+            "sport": "football",
+            "source": "odds_api",
+            "match_date": match_date,
+            "status": "SCHEDULED",
+        })
+
+    logger.info("collect.wc2026_odds: %d partidos WC desde Odds API", len(matches))
+    return matches
 
 
 async def _collect_standings() -> None:
