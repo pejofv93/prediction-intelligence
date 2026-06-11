@@ -20,7 +20,21 @@ from shared.config import MIN_MATCHES_TO_FIT, SUPPORTED_FOOTBALL_LEAGUES
 from shared.firestore_client import col
 
 from enrichers.poisson_model import fit_attack_defense, predict_match_probs, predict_match_probs_from_xg
-from enrichers.elo_rating import elo_win_probability, get_team_elo
+from enrichers.elo_rating import elo_win_probability, get_team_elo, expected_score, HOME_ADVANTAGE, DEFAULT_ELO
+
+
+def _resolve_elo(team_id, team_name: str = "") -> float:
+    """
+    Lee ELO de team_elo/{team_id}. Para selecciones WC26 con ID sf_XXXX,
+    hace fallback a team_elo/wc_{name} donde init_wc26_national_elos guarda los ELO FIFA.
+    """
+    elo = get_team_elo(team_id)
+    if elo == DEFAULT_ELO and isinstance(team_id, str) and team_id.startswith("sf_") and team_name:
+        wc_id = f"wc_{team_name.lower().replace(' ', '_')}"
+        wc_elo = get_team_elo(wc_id)
+        if wc_elo != DEFAULT_ELO:
+            return wc_elo
+    return elo
 
 logger = logging.getLogger(__name__)
 
@@ -357,11 +371,13 @@ async def enrich_match(match: dict) -> dict:
             )
             data_quality = "partial"
 
-        # ELO
+        # ELO — para selecciones WC26 sf_XXXX hace fallback a wc_name en Firestore
         try:
-            elo_home_win_prob = elo_win_probability(home_id, away_id)
-            home_elo = get_team_elo(home_id)
-            away_elo = get_team_elo(away_id)
+            home_name = match.get("home_team", match.get("home_team_name", ""))
+            away_name = match.get("away_team", match.get("away_team_name", ""))
+            home_elo = _resolve_elo(home_id, home_name)
+            away_elo = _resolve_elo(away_id, away_name)
+            elo_home_win_prob = round(expected_score(home_elo + HOME_ADVANTAGE, away_elo), 4)
         except Exception:
             logger.error(
                 "enrich_match(%s): error en ELO", match_id, exc_info=True
