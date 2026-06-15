@@ -775,7 +775,13 @@ def parse_double_chance_event(event: dict) -> dict | None:
 
 
 def parse_spreads_event(event: dict) -> list[dict]:
-    """Devuelve lista de {line, home_odds, away_odds, bookmaker}."""
+    """Devuelve lista de {line, home_odds, away_odds, bookmaker}.
+
+    The Odds API codifica los spreads con signo opuesto por equipo:
+    home outcome pt=-1.0, away outcome pt=+1.0 para el mismo handicap.
+    Normalizamos la clave al punto del equipo local (siempre negativo o 0)
+    para que ambos outcomes del mismo handicap queden agrupados juntos.
+    """
     home_team = event.get("home_team", "")
     collected: dict[float, dict] = {}
     for bk in event.get("bookmakers", []):
@@ -791,7 +797,8 @@ def parse_spreads_event(event: dict) -> list[dict]:
                 nm = o.get("name", "")
                 # Determinar si es home o away por nombre de equipo
                 is_home = home_team[:5].lower() in nm.lower() if home_team else (pt < 0)
-                key = round(pt, 1)
+                # Normalizar clave al punto home: home siempre negativo, away cambia signo
+                key = round(pt if is_home else -pt, 1)
                 if key not in collected:
                     collected[key] = {"line": key, "bookmaker": bk.get("key", "bet365")}
                 if is_home:
