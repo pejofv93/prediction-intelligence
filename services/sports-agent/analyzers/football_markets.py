@@ -1171,54 +1171,54 @@ async def generate_football_extra_signals(
                 await _send_telegram_alert(_build_alert_payload(best_ah, enriched_match))
             signals_out.append(best_ah)
 
-    # ── TOTALS 3.5 ────────────────────────────────────────────────────────────
-    t35 = calc_totals_n(home_xg, away_xg, 3.5)
-    if t35:
+    # ── TOTALS 2.5 (línea principal — The Odds API la provee para WC26 y ligas EU) ──
+    # FIX11: cambiado de 3.5 a 2.5 — The Odds API solo publica línea 2.5 en markets=totals.
+    # Orden de fuentes: TOA primario (funciona en WC26), OddsPapi secundario, AF terciario.
+    t25 = calc_totals_n(home_xg, away_xg, 2.5)
+    if t25:
         from analyzers.value_bet_engine import _parse_totals_event
-        # OddsPapi primario; The Odds API fallback; API-Football tercer fallback.
-        # Misma cadena de 3 fuentes que AH — garantiza cuotas en WC26 y ligas sin evento TOA.
-        _op_t35   = _parse_oddspapi_totals(op_ev, line=3.5) if op_ev else None
-        _t35_toa  = _parse_totals_event(event, line=3.5) if event else None
-        _af_t35   = None
-        if _af_odds and not _op_t35 and not _t35_toa:
+        _t25_toa  = _parse_totals_event(event, line=2.5) if event else None
+        _op_t25   = _parse_oddspapi_totals(op_ev, line=2.5) if op_ev and not _t25_toa else None
+        _af_t25   = None
+        if _af_odds and not _t25_toa and not _op_t25:
             from collectors.apifootball_odds import parse_goals_ou as _af_parse_ou
-            _af_t35 = _af_parse_ou(_af_odds, 3.5)
-        t35_odds = _op_t35 or _t35_toa or _af_t35
+            _af_t25 = _af_parse_ou(_af_odds, 2.5)
+        t25_odds = _t25_toa or _op_t25 or _af_t25
         logger.info(
-            "football_markets(%s): T3.5 — op=%s toa=%s af=%s (xg=%.2f+%.2f=%.2f over=%.3f under=%.3f)",
-            match_id, bool(_op_t35), bool(_t35_toa), bool(_af_t35),
-            home_xg, away_xg, home_xg + away_xg, t35["over"], t35["under"],
+            "football_markets(%s): T2.5 — toa=%s op=%s af=%s (xg=%.2f+%.2f=%.2f over=%.3f under=%.3f)",
+            match_id, bool(_t25_toa), bool(_op_t25), bool(_af_t25),
+            home_xg, away_xg, home_xg + away_xg, t25["over"], t25["under"],
         )
-        if t35_odds:
-            _t35_candidates: list[dict] = []
-            for sel, prob, odds_key in [("Over 3.5",  t35["over"],  "over_odds"),
-                                         ("Under 3.5", t35["under"], "under_odds")]:
-                odds = t35_odds.get(odds_key, 0)
+        if t25_odds:
+            _t25_candidates: list[dict] = []
+            for sel, prob, odds_key in [("Over 2.5",  t25["over"],  "over_odds"),
+                                         ("Under 2.5", t25["under"], "under_odds")]:
+                odds = t25_odds.get(odds_key, 0)
                 if odds <= 1:
                     continue
-                factors = {"expected_total": t35["expected_total"],
+                factors = {"expected_total": t25["expected_total"],
                            "xg_home": round(home_xg, 3),
                            "xg_away": round(away_xg, 3)}
                 pred = _make_prediction(
-                    {**base, "bookmaker": t35_odds.get("bookmaker", "pinnacle"),
-                     "line": 3.5},
-                    "totals_3.5", sel, odds, prob, factors,
+                    {**base, "bookmaker": t25_odds.get("bookmaker", "pinnacle"),
+                     "line": 2.5},
+                    "totals_2.5", sel, odds, prob, factors,
                     match_date, weights_version
                 )
                 if pred:
-                    tag = sel.lower().replace(" ", "_").replace(".", "")
-                    doc_id = f"{match_id}_t35_{tag}"
+                    tag = "over" if "Over" in sel else "under"
+                    doc_id = f"{match_id}_t25_{tag}"
                     pred["match_id"] = doc_id
-                    _t35_candidates.append(pred)
-            if _t35_candidates:
-                best_t35 = max(_t35_candidates, key=lambda p: p["edge"] * p["confidence"])
+                    _t25_candidates.append(pred)
+            if _t25_candidates:
+                best_t25 = max(_t25_candidates, key=lambda p: p["edge"] * p["confidence"])
                 try:
-                    _batch.set(col("predictions").document(best_t35["match_id"]), best_t35)
+                    _batch.set(col("predictions").document(best_t25["match_id"]), best_t25)
                 except Exception:
-                    logger.error("football_markets: error guardando %s", best_t35["match_id"], exc_info=True)
-                if best_t35["edge"] > SPORTS_ALERT_EDGE:
-                    await _send_telegram_alert(_build_alert_payload(best_t35, enriched_match))
-                signals_out.append(best_t35)
+                    logger.error("football_markets: error guardando %s", best_t25["match_id"], exc_info=True)
+                if best_t25["edge"] > SPORTS_ALERT_EDGE:
+                    await _send_telegram_alert(_build_alert_payload(best_t25, enriched_match))
+                signals_out.append(best_t25)
 
     # ── DRAW NO BET ───────────────────────────────────────────────────────────
     if hw is not None and aw is not None:

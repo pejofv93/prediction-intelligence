@@ -833,7 +833,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
         url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
         try:
-            markets_param = "h2h,spreads,totals"
+            markets_param = "h2h,spreads,totals,btts"
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
