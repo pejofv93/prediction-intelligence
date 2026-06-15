@@ -1844,6 +1844,60 @@ async def _fetch_external_context(home_team: str, away_team: str, match_date_str
         return {"confidence_adj": 1.0, "notes": []}
 
 
+async def _alt_football_signals_only(
+    enriched_match: dict,
+    odds_data: dict | None,
+    league: str,
+    sport: str,
+    match_id: str,
+    home_team: str,
+    away_team: str,
+    match_date,
+    weights_version: int,
+) -> list[dict]:
+    """
+    Genera señales solo de mercados alternativos (BTTS/O-U/corners) cuando el h2h
+    no es aplicable (guard Poisson/form bajo, h2h inválido por motivos de mercado).
+    Prueba: 1) oddsapiio all_markets, 2) caché de liga para football_extra_signals.
+    """
+    results: list[dict] = []
+    sport_key = _ODDS_SPORT_MAP.get(league, "")
+    if sport_key not in _FOOTBALL_SPORT_KEYS:
+        return results
+
+    if odds_data:
+        all_mkt = odds_data.get("all_markets", {})
+        if all_mkt:
+            try:
+                extra = await _generate_oddsapiio_extra_signals(
+                    enriched_match, all_mkt, match_id,
+                    home_team, away_team, league, sport, match_date, weights_version,
+                )
+                results.extend(extra)
+            except Exception:
+                logger.error(
+                    "_alt_football_signals_only(%s): error oddsapiio extra", match_id, exc_info=True
+                )
+
+    try:
+        from analyzers.football_markets import generate_football_extra_signals
+        cached = _LEAGUE_ODDS_CACHE.get(sport_key)
+        cached_events = cached[1] if cached else []
+        if cached_events:
+            extra2 = await generate_football_extra_signals(
+                enriched_match, cached_events,
+                home_team, away_team,
+                league, match_id, match_date, weights_version,
+            )
+            results.extend(extra2)
+    except Exception:
+        logger.error(
+            "_alt_football_signals_only(%s): error football_markets extra", match_id, exc_info=True
+        )
+
+    return results
+
+
 async def generate_signal(enriched_match: dict) -> list[dict]:
     """
     Pipeline completo de generacion de senal para un partido enriquecido.
@@ -2363,10 +2417,15 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     )
     if _sel_form < 0.25 and _sel_poisson < 0.20:
         logger.info(
-            "generate_signal(%s): descartado — form=%.2f y poisson=%.2f del equipo seleccionado [%s | %s]",
+            "generate_signal(%s): h2h descartado — form=%.2f y poisson=%.2f del equipo seleccionado "
+            "[%s | %s] — intentando mercados alt",
             match_id, _sel_form, _sel_poisson, team_to_back, league,
         )
-        return []
+        # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
+        return await _alt_football_signals_only(
+            enriched_match, odds_data, league, sport, match_id,
+            str(home_team), str(away_team), match_date, weights_version,
+        )
 
     # EV alto en cuotas altas no compensa cuando la probabilidad propia del modelo es baja.
     # Caso típico: Genoa @4.50 vs Milan — EV puede ser 20%+ pero Poisson 0.38 indica
@@ -2374,11 +2433,15 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     _is_real_poisson_sel = not enriched_match.get("_synthetic_poisson", False)
     if _is_real_poisson_sel and _sel_poisson < 0.35:
         logger.info(
-            "generate_signal(%s): descartado — poisson=%.2f < 0.35 (prob propia demasiado baja) "
-            "[%s | %s]",
+            "generate_signal(%s): h2h descartado — poisson=%.2f < 0.35 (prob propia demasiado baja) "
+            "[%s | %s] — intentando mercados alt",
             match_id, _sel_poisson, team_to_back, league,
         )
-        return []
+        # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
+        return await _alt_football_signals_only(
+            enriched_match, odds_data, league, sport, match_id,
+            str(home_team), str(away_team), match_date, weights_version,
+        )
     if _sel_poisson < 0.40 and _sel_form < 0.45:
         _conf_before_low = best_confidence
         best_confidence = round(best_confidence * 0.85, 4)
