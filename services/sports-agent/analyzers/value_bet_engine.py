@@ -2100,6 +2100,31 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 enriched_match, match_id, str(home_team), str(away_team),
                 league, sport, match_date, weights_version, result_home, result_away,
             )
+        # FIX 2: sin cuotas h2h pero los mercados alternativos (BTTS/O-U/corners)
+        # no dependen de quién gana — intentar generar señales desde la caché de liga.
+        _sport_key_noh2h = _ODDS_SPORT_MAP.get(league, "")
+        if _sport_key_noh2h in _FOOTBALL_SPORT_KEYS:
+            _alt_noh2h: list[dict] = []
+            try:
+                from analyzers.football_markets import generate_football_extra_signals
+                _cl_noh2h = _LEAGUE_ODDS_CACHE.get(_sport_key_noh2h)
+                _ce_noh2h = _cl_noh2h[1] if _cl_noh2h else []
+                if _ce_noh2h:
+                    _alt_noh2h = await generate_football_extra_signals(
+                        enriched_match, _ce_noh2h,
+                        str(home_team), str(away_team),
+                        league, match_id, match_date, weights_version,
+                    )
+            except Exception:
+                logger.error(
+                    "generate_signal(%s): error en alt markets (sin cuotas h2h)", match_id, exc_info=True
+                )
+            if _alt_noh2h:
+                logger.info(
+                    "generate_signal(%s): sin cuotas h2h, %d señales alt generadas (%s vs %s | %s)",
+                    match_id, len(_alt_noh2h), home_team, away_team, league,
+                )
+                return _alt_noh2h
         logger.warning(
             "generate_signal(%s): sin cuotas reales de bookmaker — partido descartado (%s vs %s | %s)",
             match_id, home_team, away_team, league,
