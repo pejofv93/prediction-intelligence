@@ -442,6 +442,20 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
 
     # Renormalizar pesos sobre señales activas (ELO y/o H2H pueden estar ausentes)
     raw_weights = {k: weights.get(k, 0.25) for k in signals}
+
+    # FORM_ELO_CONFLICT: cuando form y ELO divergen >0.40, reducir peso de form al 30%.
+    # Form reciente inflada por victorias contra rivales débiles no debe generar señales
+    # contra rivales fuertes — ELO es más robusto porque refleja calidad real del equipo.
+    _FORM_ELO_CONFLICT_THRESHOLD = 0.40
+    if "elo" in signals and "form" in signals:
+        _form_elo_diff = abs(signals["form"] - signals["elo"])
+        if _form_elo_diff > _FORM_ELO_CONFLICT_THRESHOLD:
+            raw_weights["form"] = raw_weights.get("form", 0.25) * 0.30
+            logger.debug(
+                "ensemble_probability: FORM_ELO_CONFLICT form=%.3f elo=%.3f diff=%.3f "
+                "→ peso form reducido 70%% (team=%s)",
+                signals["form"], signals["elo"], _form_elo_diff, team,
+            )
     total_w = sum(raw_weights.values())
     norm_weights = (
         {k: v / total_w for k, v in raw_weights.items()}
@@ -2159,6 +2173,27 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         best_signals = result_away["signals"]
         best_odds = away_odds
         team_to_back = str(away_team)
+
+    # --- 5a-prev. RISING_ODDS_BLOCK ---
+    # Cuota del equipo apostado subiendo >20% = el bookmaker tiene info negativa
+    # (lesión, alineación débil, etc.). Una cuota en alza infla el edge aritméticamente
+    # sin que haya valor real — no generar señal.
+    # Cuota BAJANDO: SMART_MONEY (dinero entrando) → señal válida, no bloquear.
+    _RISING_ODDS_THRESHOLD = 0.20
+    _ttb_dir = "home" if team_to_back == str(home_team) else "away"
+    _om_pct6  = odds_movement.get("pct_change_6h", 0.0)
+    _om_pct24 = odds_movement.get("pct_change_24h", 0.0)
+    _om_dir   = odds_movement.get("direction")
+    # pct positivo = cuota subió; direction = hacia quién fue el dinero (opuesto al equipo con cuota alta)
+    # Si direction != equipo apostado → las odds del equipo apostado están subiendo → bloquear
+    _max_rising = max(_om_pct6, _om_pct24)
+    if _max_rising > _RISING_ODDS_THRESHOLD and _om_dir is not None and _om_dir != _ttb_dir:
+        logger.info(
+            "generate_signal(%s): RISING_ODDS_BLOCK — cuota de %s subió %.1f%% "
+            "(bookmaker tiene info negativa) — descartado [%s vs %s | %s]",
+            match_id, team_to_back, _max_rising * 100, home_team, away_team, league,
+        )
+        return []
 
     # --- 5a. Cap de confianza para Poisson sintético con forma en default ---
     # Si _synthetic_poisson=True (sin xG/posesión real) Y además form=50.0 (sin datos de forma),
