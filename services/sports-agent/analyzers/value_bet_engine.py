@@ -271,6 +271,13 @@ _THE_ODDS_API_LOCK = asyncio.Lock()
 # NO bloquea hits de cache de Firestore (solo bloquea nuevas llamadas HTTP).
 _THE_ODDS_API_EXHAUSTED: bool = False
 
+# Sport keys verificados como inexistentes en The Odds API → skip permanente, 0 HTTP requests.
+# Diferente de 404 temporal (liga sin partidos hoy): ese se reintenta a las 4h.
+# Añadir aquí cuando un sport_key devuelve 404 sistemáticamente, no de forma temporal.
+_THE_ODDS_API_NO_COVERAGE: frozenset[str] = frozenset({
+    "basketball_spain_acb",  # ACB — no disponible en The Odds API, 404 permanente verificado
+})
+
 # Timeout para llamadas HTTP a API externa
 _HTTP_TIMEOUT = 15.0
 
@@ -776,6 +783,11 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
     """
     global _THE_ODDS_API_EXHAUSTED
 
+    # --- 0. Blocklist permanente (sin HTTP, sin cache, O(1)) ---
+    if sport_key in _THE_ODDS_API_NO_COVERAGE:
+        logger.debug("_get_league_events: %s — sin cobertura en The Odds API (blocklist)", sport_key)
+        return []
+
     # --- 1. Cache en memoria ---
     cached = _LEAGUE_ODDS_CACHE.get(sport_key)
     if cached is not None:
@@ -849,10 +861,10 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 quota.track_monthly("the_odds_api", remaining=0)
                 return None
             if resp.status_code == 404:
-                # 404 = liga no activa ahora (p.ej. lunes sin partidos). NO es error global.
-                # Caché vacío con TTL 30 min (no 8h) para reintentar en el siguiente analyze.
-                logger.info("fetch_bookmaker_odds(%s): The Odds API — liga %s sin eventos activos (404)", match_id, sport_key)
-                _LEAGUE_ODDS_CACHE[sport_key] = (now - (_LEAGUE_CACHE_TTL - timedelta(minutes=30)), [])
+                # 404 temporal = liga sin partidos hoy (p.ej. lunes). Reintento en 4h.
+                # 404 permanente = sport_key no existe → añadir a _THE_ODDS_API_NO_COVERAGE.
+                logger.info("fetch_bookmaker_odds(%s): The Odds API — %s sin eventos (404), cache 4h", match_id, sport_key)
+                _LEAGUE_ODDS_CACHE[sport_key] = (now - (_LEAGUE_CACHE_TTL - timedelta(hours=4)), [])
                 return []
             if resp.status_code == 422:
                 # 422 = mercado no disponible en este plan. NO es cuota agotada (eso sería 429).

@@ -216,6 +216,132 @@ async def run_fdco_collect() -> StreamingResponse:
     return StreamingResponse(_stream_job(_bg_fdco_collect, "fdco-collect"), media_type="text/plain")
 
 
+@app.get("/api/oddsapiio-coverage", dependencies=[Depends(verify_token)])
+async def api_oddsapiio_coverage() -> dict:
+    """
+    Diagnóstico de cobertura de odds-api.io para baloncesto y tenis.
+    Prueba los sport slugs disponibles, lista eventos por deporte y verifica
+    qué mercados devuelve /odds/multi para un evento de muestra.
+    Requiere X-Cloud-Token.
+    """
+    import httpx as _hx
+    from shared.config import ODDSAPIIO_KEY as _key
+
+    _BASE = "https://api.odds-api.io/v3"
+    out: dict = {"key_configured": bool(_key), "sports": {}, "basketball": {}, "tennis": {}}
+
+    if not _key:
+        out["error"] = "ODDSAPIIO_KEY no configurada en este entorno"
+        return out
+
+    async with _hx.AsyncClient(timeout=20.0) as _cli:
+
+        # ── 1. Catálogo de deportes (sin auth) ─────────────────────────────────
+        try:
+            r = await _cli.get(f"{_BASE}/sports")
+            if r.status_code == 200:
+                raw = r.json()
+                sports = raw if isinstance(raw, list) else raw.get("data", raw.get("sports", []))
+                out["sports"] = {
+                    "count": len(sports),
+                    "slugs": [s.get("slug") or s.get("key") or s.get("id") for s in sports],
+                }
+            else:
+                out["sports"] = {"error": f"HTTP {r.status_code}", "body": r.text[:200]}
+        except Exception as _e:
+            out["sports"] = {"error": str(_e)}
+
+        # ── 2. Baloncesto — probar slugs conocidos ──────────────────────────────
+        for _slug in ("basketball", "nba", "basketball_nba", "usa-nba"):
+            try:
+                r = await _cli.get(f"{_BASE}/events", params={"apiKey": _key, "sport": _slug})
+                if r.status_code == 429:
+                    out["basketball"][_slug] = {"status": "429_rate_limit"}
+                    break
+                if r.status_code != 200:
+                    out["basketball"][_slug] = {"status": f"HTTP {r.status_code}", "body": r.text[:150]}
+                    continue
+                raw = r.json()
+                events = raw if isinstance(raw, list) else raw.get("data", raw.get("events", []))
+                leagues_seen = list({
+                    str((ev.get("league") or {}).get("name") or
+                        ev.get("competitionName") or ev.get("tournament") or
+                        ev.get("sport_title") or "?")
+                    for ev in events[:30]
+                })
+                out["basketball"][_slug] = {
+                    "status": "ok",
+                    "event_count": len(events),
+                    "leagues": sorted(leagues_seen)[:15],
+                    "sample_event_fields": list(events[0].keys()) if events else [],
+                }
+                # Si encontramos eventos, pedir odds de muestra y salir del loop
+                if events:
+                    _eid = str(events[0].get("id") or events[0].get("eventId") or "")
+                    if _eid:
+                        r2 = await _cli.get(f"{_BASE}/odds/multi", params={
+                            "apiKey": _key,
+                            "eventIds": _eid,
+                            "bookmakers": "Bet365,Unibet",
+                            "markets": "h2h,totals,spreads,btts",
+                        })
+                        if r2.status_code == 200:
+                            raw2 = r2.json()
+                            items2 = raw2 if isinstance(raw2, list) else raw2.get("data", raw2.get("odds", []))
+                            out["basketball"]["odds_sample"] = {
+                                "event_id": _eid,
+                                "status": "ok",
+                                "items": len(items2),
+                                "markets_found": list({
+                                    mkt.get("name") or mkt.get("key") or mkt.get("type")
+                                    for item in items2
+                                    for bkm in (item.get("bookmakers") or {}).values()
+                                        if isinstance((item.get("bookmakers") or {}), dict)
+                                    for mkt in (bkm if isinstance(bkm, list) else [bkm])
+                                    if isinstance(mkt, dict)
+                                }) if items2 else [],
+                                "raw_sample": items2[:1] if items2 else raw2,
+                            }
+                        else:
+                            out["basketball"]["odds_sample"] = {
+                                "status": f"HTTP {r2.status_code}", "body": r2.text[:300]
+                            }
+                    break
+            except Exception as _e:
+                out["basketball"][_slug] = {"error": str(_e)}
+
+        # ── 3. Tenis — probar slugs conocidos ──────────────────────────────────
+        for _slug in ("tennis", "tennis_atp", "tennis-atp", "atp"):
+            try:
+                r = await _cli.get(f"{_BASE}/events", params={"apiKey": _key, "sport": _slug})
+                if r.status_code == 429:
+                    out["tennis"][_slug] = {"status": "429_rate_limit"}
+                    break
+                if r.status_code != 200:
+                    out["tennis"][_slug] = {"status": f"HTTP {r.status_code}", "body": r.text[:150]}
+                    continue
+                raw = r.json()
+                events = raw if isinstance(raw, list) else raw.get("data", raw.get("events", []))
+                leagues_seen = list({
+                    str((ev.get("league") or {}).get("name") or
+                        ev.get("competitionName") or ev.get("tournament") or
+                        ev.get("sport_title") or "?")
+                    for ev in events[:30]
+                })
+                out["tennis"][_slug] = {
+                    "status": "ok",
+                    "event_count": len(events),
+                    "leagues": sorted(leagues_seen)[:15],
+                    "sample_event_fields": list(events[0].keys()) if events else [],
+                }
+                if events:
+                    break
+            except Exception as _e:
+                out["tennis"][_slug] = {"error": str(_e)}
+
+    return out
+
+
 @app.post("/clear-odds-cache", dependencies=[Depends(verify_token)])
 async def clear_odds_cache() -> dict:
     """
