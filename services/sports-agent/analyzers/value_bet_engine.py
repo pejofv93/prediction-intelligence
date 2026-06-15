@@ -47,6 +47,11 @@ _FILTER_PARAMS_CACHE: dict = {}
 _FILTER_PARAMS_CACHE_TS: float = 0.0
 _FILTER_PARAMS_TTL: float = 1800.0  # 30 min
 
+# Umbral de confianza para mercados alternativos (BTTS, O/U, corners, tarjetas, AH).
+# SPORTS_MIN_CONFIDENCE (0.75) está calibrado para 1X2; los mercados binarios tienen
+# cuotas naturalmente más altas (~2.0) y necesitan un umbral menor.
+_ALT_MARKET_MIN_CONF: float = 0.60
+
 
 def _get_filter_params() -> dict:
     """Lee parámetros dinámicos de filtros desde Firestore con caché 30min."""
@@ -1142,15 +1147,15 @@ async def _generate_oddsapiio_extra_signals(
             if yes_odds > 1.05:
                 edge = calculate_edge(btts_probs["btts_prob"], yes_odds)
                 ev_btts = calculate_ev(btts_probs["btts_prob"], yes_odds)
-                conf = round(min(1.0, max(0.0, btts_probs["btts_prob"] + 0.1)), 4)
+                conf = round(min(0.99, max(0.0, btts_probs["btts_prob"])), 4)
                 logger.info(
                     "EXTRA_MARKETS_BTTS(%s): btts_prob=%.3f yes_odds=%.2f "
                     "edge=%.4f ev=%.4f(min_ev=%.3f) conf=%.3f(min=%.3f) → %s",
                     match_id, btts_probs["btts_prob"], yes_odds,
-                    edge, ev_btts, SPORTS_MIN_EDGE, conf, SPORTS_MIN_CONFIDENCE,
-                    "OK" if ev_btts > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE else "SKIP",
+                    edge, ev_btts, SPORTS_MIN_EDGE, conf, _ALT_MARKET_MIN_CONF,
+                    "OK" if ev_btts > SPORTS_MIN_EDGE and conf >= _ALT_MARKET_MIN_CONF else "SKIP",
                 )
-                if ev_btts > SPORTS_MIN_EDGE and conf > SPORTS_MIN_CONFIDENCE:
+                if ev_btts > SPORTS_MIN_EDGE and conf >= _ALT_MARKET_MIN_CONF:
                     doc_id = f"{match_id}_btts"
                     pred = {
                         "match_id": doc_id, "home_team": home_team, "away_team": away_team,
@@ -1214,13 +1219,13 @@ async def _generate_oddsapiio_extra_signals(
                 logger.info("EXTRA_MARKETS_OU(%s): SKIP — ningún lado supera min_ev=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
-                sel_conf = round(abs(sel_p - 0.5) * 2, 4)
+                sel_conf = round(min(0.99, sel_p), 4)
                 logger.info(
                     "EXTRA_MARKETS_OU(%s): sel=%s sel_p=%.3f ev=%.4f conf=%.3f(min=%.3f) → %s",
-                    match_id, sel, sel_p, sel_ev, sel_conf, SPORTS_MIN_CONFIDENCE,
-                    "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP",
+                    match_id, sel, sel_p, sel_ev, sel_conf, _ALT_MARKET_MIN_CONF,
+                    "OK" if sel_conf >= _ALT_MARKET_MIN_CONF else "SKIP",
                 )
-                if sel_conf > SPORTS_MIN_CONFIDENCE:
+                if sel_conf >= _ALT_MARKET_MIN_CONF:
                     doc_id = f"{match_id}_ou25_oaio"
                     pred = {
                         "match_id": doc_id, "home_team": home_team, "away_team": away_team,
@@ -1285,13 +1290,13 @@ async def _generate_oddsapiio_extra_signals(
                 logger.info("EXTRA_MARKETS_AH(%s): SKIP — ningún lado supera min_ev=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
-                sel_conf = round(min(1.0, sel_p), 4)
+                sel_conf = round(min(0.99, sel_p), 4)
                 logger.info(
                     "EXTRA_MARKETS_AH(%s): sel=%s sel_p=%.3f ev=%.4f conf=%.3f(min=%.3f) → %s",
-                    match_id, sel, sel_p, sel_ev_ah, sel_conf, SPORTS_MIN_CONFIDENCE,
-                    "OK" if sel_conf > SPORTS_MIN_CONFIDENCE else "SKIP",
+                    match_id, sel, sel_p, sel_ev_ah, sel_conf, _ALT_MARKET_MIN_CONF,
+                    "OK" if sel_conf >= _ALT_MARKET_MIN_CONF else "SKIP",
                 )
-                if sel_conf > SPORTS_MIN_CONFIDENCE:
+                if sel_conf >= _ALT_MARKET_MIN_CONF:
                     doc_id = f"{match_id}_ah05"
                     pred = {
                         "match_id": doc_id, "home_team": home_team, "away_team": away_team,
@@ -1424,8 +1429,8 @@ async def _generate_oddsapiio_extra_signals(
                 ht_sel = None
                 logger.info("EXTRA_MARKETS_HT(%s): SKIP — ningún lado supera min_ev=%.2f", match_id, _HT_MIN_EV)
             if ht_sel:
-                ht_conf = round(abs(ht_sp - 0.5) * 2, 4)
-                if ht_conf > SPORTS_MIN_CONFIDENCE:
+                ht_conf = round(min(0.99, ht_sp), 4)
+                if ht_conf >= _ALT_MARKET_MIN_CONF:
                     doc_id = f"{match_id}_ht{str(ht_line).replace('.', '')}"
                     pred = {
                         "match_id": doc_id, "home_team": home_team, "away_team": away_team,
@@ -1487,8 +1492,8 @@ async def _generate_oddsapiio_extra_signals(
                 cn_sel = None
                 logger.info("EXTRA_MARKETS_CORNERS(%s): SKIP — ningún lado supera min_ev=%.2f", match_id, _CORNERS_MIN_EV)
             if cn_sel:
-                cn_conf = round(abs(cn_sp - 0.5) * 2, 4)
-                if cn_conf > SPORTS_MIN_CONFIDENCE:
+                cn_conf = round(min(0.99, cn_sp), 4)
+                if cn_conf >= _ALT_MARKET_MIN_CONF:
                     doc_id = f"{match_id}_cn{str(cn_line).replace('.', '')}"
                     pred = {
                         "match_id": doc_id, "home_team": home_team, "away_team": away_team,
@@ -2654,9 +2659,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     sel = None
 
                 if sel:
-                    sel_confidence = max(0.0, 1.0 - abs(over_p - 0.5) * 2) if sel == "Over" else max(0.0, 1.0 - abs(under_p - 0.5) * 2)
-                    sel_confidence = round(max(0.0, min(0.99, sel_confidence)), 4)
-                    if sel_confidence > SPORTS_MIN_CONFIDENCE:
+                    sel_confidence = round(min(0.99, sel_prob), 4)
+                    if sel_confidence >= _ALT_MARKET_MIN_CONF:
                         sel_kelly = kelly_criterion(sel_ev_t, sel_odds)
                         totals_pred = {
                             "match_id": f"{match_id}_totals",
