@@ -128,7 +128,8 @@ async def save_upcoming_matches(matches: list[dict]) -> None:
         for extra_key in (
             "surface", "tournament", "h2h_advantage", "source",
             # Basketball / NBA Playoffs
-            "espn_odds", "home_seed", "away_seed", "playoff", "series_title",
+            "espn_odds", "home_seed", "away_seed", "playoff",
+            "series_title", "series_wins_home", "series_wins_away",
         ):
             v = m.get(extra_key)
             if v is not None:

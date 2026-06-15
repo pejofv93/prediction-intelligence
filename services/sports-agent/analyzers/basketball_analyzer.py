@@ -403,6 +403,58 @@ async def _fetch_nba_injury_context(home_name: str, away_name: str) -> dict:
         return {"home_adj": 1.0, "away_adj": 1.0, "notes": []}
 
 
+def _parse_series_state(game: dict, home_name: str, away_name: str) -> dict | None:
+    """
+    Extrae el estado actual de la serie de playoffs.
+    Devuelve {"home_wins": int, "away_wins": int} o None si no hay datos.
+
+    Fuentes en orden de prioridad:
+    1. series_wins_home / series_wins_away  (campos directos del collector)
+    2. series_title string: "Boston leads 3-1", "Series tied 2-2", "OKC wins 4-1"
+    """
+    import re as _re
+
+    # 1. Campos directos
+    h_w = game.get("series_wins_home")
+    a_w = game.get("series_wins_away")
+    if h_w is not None and a_w is not None:
+        try:
+            return {"home_wins": int(h_w), "away_wins": int(a_w)}
+        except (TypeError, ValueError):
+            pass
+
+    # 2. Parsear series_title
+    title = str(game.get("series_title", "")).lower().strip()
+    if not title:
+        return None
+
+    score_m = _re.search(r'(\d+)-(\d+)', title)
+    if not score_m:
+        return None
+    w1, w2 = int(score_m.group(1)), int(score_m.group(2))
+
+    # Empate: los dos tienen el mismo número de victorias
+    if "tied" in title or "empatada" in title:
+        return {"home_wins": w1, "away_wins": w2}
+
+    # Buscar el equipo líder antes del score
+    leader_m = _re.search(r'^(.+?)\s+(?:leads?|wins?|lidera)\s+\d+-\d+', title)
+    if leader_m:
+        leader_text = leader_m.group(1).strip()
+        home_lower = _normalize(home_name)
+        # Comprobar si alguna palabra significativa del líder coincide con el equipo local
+        leader_words = [w for w in leader_text.split() if len(w) >= 4]
+        home_words   = [w for w in home_lower.split()   if len(w) >= 4]
+        leader_is_home = any(lw in home_words or lw in home_lower for lw in leader_words)
+        return (
+            {"home_wins": w1, "away_wins": w2}
+            if leader_is_home
+            else {"home_wins": w2, "away_wins": w1}
+        )
+
+    return None
+
+
 async def generate_basketball_signals(game: dict, weights_version: int = 0) -> list[dict]:
     match_id  = str(game.get("match_id", ""))
     home_name = game.get("home_team_name", game.get("home_team", ""))
@@ -513,6 +565,42 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         )
     # Actualizar rats con p_home ajustada
     rats = {**rats, "p_home_win": p_home}
+
+    # --- PLAYOFF_SERIES_ADJUSTMENT ---
+    # En una serie al mejor de 7, el equipo que va ganando tiene momentum real:
+    # sus stats generales de temporada subestiman su ventaja psicológica y táctica.
+    # El equipo que va perdiendo (0-2, 0-3) tiene probabilidad real menor de lo que
+    # indican sus ratings, ya que el rival ha encontrado la clave táctica.
+    _is_playoff_series = (
+        game.get("playoff") is True
+        or any(kw in str(game.get("series_title", "")).lower()
+               for kw in ("round", "finals", "playoffs", "semifinal", "conference"))
+    )
+    if _is_playoff_series:
+        _series = _parse_series_state(game, home_name, away_name)
+        if _series is not None:
+            _hw = _series["home_wins"]
+            _aw = _series["away_wins"]
+            _series_diff = _hw - _aw  # positivo = home lleva ventaja
+            _p_series_before = rats["p_home_win"]
+
+            if abs(_series_diff) == 2:
+                # 2-0: equipo dominante suma +6pp; perdedor −6pp
+                _adj = 0.06 * (1 if _series_diff > 0 else -1)
+                rats = {**rats, "p_home_win": round(min(0.99, max(0.01, _p_series_before + _adj)), 4)}
+            elif abs(_series_diff) >= 3:
+                # 3-0, 3-1: dominio mayor → +4pp por cada victoria de ventaja, capped a ±16pp
+                _adj = min(0.16, 0.04 * abs(_series_diff)) * (1 if _series_diff > 0 else -1)
+                rats = {**rats, "p_home_win": round(min(0.99, max(0.01, _p_series_before + _adj)), 4)}
+            # 1-0 o 0-1: ventaja mínima, sin ajuste (dentro del margen normal)
+
+            if abs(_series_diff) >= 2:
+                logger.info(
+                    "basketball_analyzer(%s): PLAYOFF_SERIES_ADJUSTMENT home=%d away=%d "
+                    "→ p_home %.3f→%.3f [%s vs %s | %s]",
+                    match_id, _hw, _aw, _p_series_before, rats["p_home_win"],
+                    home_name, away_name, league,
+                )
 
     # --- NBA injury search via Tavily ---
     injury_ctx = await _fetch_nba_injury_context(home_name, away_name)

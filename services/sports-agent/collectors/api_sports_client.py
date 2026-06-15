@@ -246,6 +246,31 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
                             "total": _o.get("overUnder"),      # e.g. 218.5
                         }
                         break
+                # Estado de serie playoffs (ESPN expone competition.series con wins por equipo)
+                series_wins_home = series_wins_away = None
+                series_title = ""
+                _series_data = comp.get("series")
+                if _series_data:
+                    series_title = _series_data.get("summary", "")
+                    _series_comps = _series_data.get("competitors", [])
+                    if len(_series_comps) >= 2:
+                        # ESPN ordena competitors: mismo orden que competition.competitors (home primero)
+                        _home_comp = next(
+                            (sc for sc in _series_comps
+                             if str(sc.get("id", "")) == str(home_team.get("id", ""))), None
+                        )
+                        _away_comp = next(
+                            (sc for sc in _series_comps
+                             if str(sc.get("id", "")) == str(away_team.get("id", ""))), None
+                        )
+                        try:
+                            if _home_comp:
+                                series_wins_home = int(_home_comp.get("wins", 0))
+                            if _away_comp:
+                                series_wins_away = int(_away_comp.get("wins", 0))
+                        except (TypeError, ValueError):
+                            series_wins_home = series_wins_away = None
+                _is_playoff = bool(_series_data) or bool(_extract_seed(home)) or bool(_extract_seed(away))
                 games.append({
                     "match_id": str(event.get("id") or comp.get("id") or ""),
                     "date": comp.get("date", event.get("date", "")),
@@ -255,6 +280,10 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
                     "away_team_name": away_team.get("displayName", away_team.get("name", "")),
                     "home_seed": _extract_seed(home),
                     "away_seed": _extract_seed(away),
+                    "playoff": _is_playoff,
+                    "series_wins_home": series_wins_home,
+                    "series_wins_away": series_wins_away,
+                    "series_title": series_title,
                     "goals_home": None,
                     "goals_away": None,
                     "league": "NBA",
