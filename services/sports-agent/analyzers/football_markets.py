@@ -992,6 +992,7 @@ async def generate_football_extra_signals(
     if btts_odds:
         btts_probs = calc_btts(home_xg, away_xg)
         if btts_probs:
+            _btts_candidates: list[dict] = []
             for sel, prob, odds_key in [("Sí", btts_probs["yes"], "yes_odds"),
                                          ("No", btts_probs["no"],  "no_odds")]:
                 odds = btts_odds.get(odds_key, 0)
@@ -1008,13 +1009,16 @@ async def generate_football_extra_signals(
                 if pred:
                     doc_id = f"{match_id}_btts_{sel.lower().replace(' ','_')}"
                     pred["match_id"] = doc_id
-                    try:
-                        _batch.set(col("predictions").document(doc_id), pred)
-                    except Exception:
-                        logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
-                    if pred["edge"] > SPORTS_ALERT_EDGE:
-                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
-                    signals_out.append(pred)
+                    _btts_candidates.append(pred)
+            if _btts_candidates:
+                best_btts = max(_btts_candidates, key=lambda p: p["edge"] * p["confidence"])
+                try:
+                    _batch.set(col("predictions").document(best_btts["match_id"]), best_btts)
+                except Exception:
+                    logger.error("football_markets: error guardando %s", best_btts["match_id"], exc_info=True)
+                if best_btts["edge"] > SPORTS_ALERT_EDGE:
+                    await _send_telegram_alert(_build_alert_payload(best_btts, enriched_match))
+                signals_out.append(best_btts)
 
     # ── DOUBLE CHANCE ─────────────────────────────────────────────────────────
     if hw is not None and d is not None and aw is not None:
@@ -1064,6 +1068,7 @@ async def generate_football_extra_signals(
     )
     if spread_lines:
         ah_probs = calc_asian_handicap(home_xg, away_xg)
+        _ah_candidates: list[dict] = []
         for spread in spread_lines:
             line = spread.get("home_line", spread.get("line", 0))
             try:
@@ -1106,13 +1111,21 @@ async def generate_football_extra_signals(
                 tag = str(line_f).replace("-", "m").replace(".", "_").replace("+", "p")
                 doc_id = f"{match_id}_ah_{tag}"
                 pred["match_id"] = doc_id
-                try:
-                    _batch.set(col("predictions").document(doc_id), pred)
-                except Exception:
-                    logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
-                if pred["edge"] > SPORTS_ALERT_EDGE:
-                    await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
-                signals_out.append(pred)
+                _ah_candidates.append(pred)
+        if _ah_candidates:
+            best_ah = max(_ah_candidates, key=lambda p: p["edge"] * p["confidence"])
+            logger.info(
+                "football_markets(%s): AH %d candidatos → mejor: %s (edge=%.3f conf=%.2f)",
+                match_id, len(_ah_candidates), best_ah["selection"],
+                best_ah["edge"], best_ah["confidence"],
+            )
+            try:
+                _batch.set(col("predictions").document(best_ah["match_id"]), best_ah)
+            except Exception:
+                logger.error("football_markets: error guardando %s", best_ah["match_id"], exc_info=True)
+            if best_ah["edge"] > SPORTS_ALERT_EDGE:
+                await _send_telegram_alert(_build_alert_payload(best_ah, enriched_match))
+            signals_out.append(best_ah)
 
     # ── TOTALS 3.5 ────────────────────────────────────────────────────────────
     t35 = calc_totals_n(home_xg, away_xg, 3.5)
@@ -1130,6 +1143,7 @@ async def generate_football_extra_signals(
             home_xg, away_xg, home_xg + away_xg, t35["over"], t35["under"],
         )
         if t35_odds:
+            _t35_candidates: list[dict] = []
             for sel, prob, odds_key in [("Over 3.5",  t35["over"],  "over_odds"),
                                          ("Under 3.5", t35["under"], "under_odds")]:
                 odds = t35_odds.get(odds_key, 0)
@@ -1148,13 +1162,16 @@ async def generate_football_extra_signals(
                     tag = sel.lower().replace(" ", "_").replace(".", "")
                     doc_id = f"{match_id}_t35_{tag}"
                     pred["match_id"] = doc_id
-                    try:
-                        _batch.set(col("predictions").document(doc_id), pred)
-                    except Exception:
-                        logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
-                    if pred["edge"] > SPORTS_ALERT_EDGE:
-                        await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
-                    signals_out.append(pred)
+                    _t35_candidates.append(pred)
+            if _t35_candidates:
+                best_t35 = max(_t35_candidates, key=lambda p: p["edge"] * p["confidence"])
+                try:
+                    _batch.set(col("predictions").document(best_t35["match_id"]), best_t35)
+                except Exception:
+                    logger.error("football_markets: error guardando %s", best_t35["match_id"], exc_info=True)
+                if best_t35["edge"] > SPORTS_ALERT_EDGE:
+                    await _send_telegram_alert(_build_alert_payload(best_t35, enriched_match))
+                signals_out.append(best_t35)
 
     # ── DRAW NO BET ───────────────────────────────────────────────────────────
     if hw is not None and aw is not None:
@@ -1258,6 +1275,7 @@ async def generate_football_extra_signals(
         alt_odds = parse_alternate_totals_event(event, line)
         if not alt_odds:
             continue
+        _tN_candidates: list[dict] = []
         for sel, prob, odds_key in [
             (f"Over {line}",  tN["over"],  "over_odds"),
             (f"Under {line}", tN["under"], "under_odds"),
@@ -1276,14 +1294,17 @@ async def generate_football_extra_signals(
                 tag = "over" if "Over" in sel else "under"
                 doc_id = f"{match_id}_{market_key.replace('.','_')}_{tag}"
                 pred["match_id"] = doc_id
-                try: _batch.set(col("predictions").document(doc_id), pred)
-                except Exception: logger.error("football_markets: error guardando %s", doc_id, exc_info=True)
-                if pred["edge"] > SPORTS_ALERT_EDGE:
-                    payload = _build_alert_payload(pred, enriched_match)
-                    payload["market_emoji"] = "📊"
-                    payload["intensity"]    = _intensity(pred["edge"])
-                    await _send_telegram_alert(payload)
-                signals_out.append(pred)
+                _tN_candidates.append(pred)
+        if _tN_candidates:
+            best_tN = max(_tN_candidates, key=lambda p: p["edge"] * p["confidence"])
+            try: _batch.set(col("predictions").document(best_tN["match_id"]), best_tN)
+            except Exception: logger.error("football_markets: error guardando %s", best_tN["match_id"], exc_info=True)
+            if best_tN["edge"] > SPORTS_ALERT_EDGE:
+                payload = _build_alert_payload(best_tN, enriched_match)
+                payload["market_emoji"] = "📊"
+                payload["intensity"]    = _intensity(best_tN["edge"])
+                await _send_telegram_alert(payload)
+            signals_out.append(best_tN)
 
     # ── HT TOTALS 0.5 y 1.5 ──────────────────────────────────────────────────
     for line, market_key in ((0.5, "ht_totals_0.5"), (1.5, "ht_totals_1.5")):
