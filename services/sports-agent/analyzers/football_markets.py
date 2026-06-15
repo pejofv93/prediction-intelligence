@@ -908,6 +908,25 @@ async def generate_football_extra_signals(
             event = ev
             break
 
+    if event:
+        _ev_bkm_keys = [bk.get("key", "") for bk in event.get("bookmakers", [])]
+        _ev_mkt_keys: set[str] = set()
+        for _bk in event.get("bookmakers", []):
+            for _mkt in _bk.get("markets", []):
+                _ev_mkt_keys.add(_mkt.get("key", ""))
+        logger.info(
+            "football_markets(%s): evento The Odds API encontrado (%s vs %s) — "
+            "bookmakers=%s markets=%s",
+            match_id, event.get("home_team", "?"), event.get("away_team", "?"),
+            _ev_bkm_keys, sorted(_ev_mkt_keys),
+        )
+    else:
+        logger.info(
+            "football_markets(%s): evento NO encontrado en %d cached_events The Odds API "
+            "para %s vs %s",
+            match_id, len(cached_events), home_team, away_team,
+        )
+
     base = {
         "match_id": match_id,
         "home_team": home_team,
@@ -956,9 +975,13 @@ async def generate_football_extra_signals(
     if _af_odds:
         from collectors.apifootball_odds import parse_btts as _af_parse_btts
         _af_btts = _af_parse_btts(_af_odds)
-    btts_odds = ((_parse_oddspapi_btts(op_btts_ev) if op_btts_ev else None)
-                 or (parse_btts_event(event) if event else None)
-                 or _af_btts)
+    _btts_op = _parse_oddspapi_btts(op_btts_ev) if op_btts_ev else None
+    _btts_toa = parse_btts_event(event) if event else None
+    logger.info(
+        "football_markets(%s): BTTS — op=%s toa=%s af=%s",
+        match_id, bool(_btts_op), bool(_btts_toa), bool(_af_btts),
+    )
+    btts_odds = _btts_op or _btts_toa or _af_btts
     if btts_odds:
         btts_probs = calc_btts(home_xg, away_xg)
         if btts_probs:
@@ -1028,6 +1051,10 @@ async def generate_football_extra_signals(
         from collectors.apifootball_odds import parse_asian_handicap as _af_parse_ah
         _af_ah_lines = _af_parse_ah(_af_odds)
     spread_lines = op_ah_lines or the_odds_ah or _af_ah_lines
+    logger.info(
+        "football_markets(%s): AH — op=%d toa=%d af=%d total=%d",
+        match_id, len(op_ah_lines), len(the_odds_ah), len(_af_ah_lines), len(spread_lines),
+    )
     if spread_lines:
         ah_probs = calc_asian_handicap(home_xg, away_xg)
         for spread in spread_lines:
@@ -1077,7 +1104,13 @@ async def generate_football_extra_signals(
         if _af_odds:
             from collectors.apifootball_odds import parse_goals_ou as _af_parse_ou
             _af_t35 = _af_parse_ou(_af_odds, 3.5)
-        t35_odds = (_parse_totals_event(event, line=3.5) if event else None) or _af_t35
+        _t35_toa = _parse_totals_event(event, line=3.5) if event else None
+        t35_odds = _t35_toa or _af_t35
+        logger.info(
+            "football_markets(%s): T3.5 — toa=%s af=%s (xg=%.2f+%.2f=%.2f over=%.3f under=%.3f)",
+            match_id, bool(_t35_toa), bool(_af_t35),
+            home_xg, away_xg, home_xg + away_xg, t35["over"], t35["under"],
+        )
         if t35_odds:
             for sel, prob, odds_key in [("Over 3.5",  t35["over"],  "over_odds"),
                                          ("Under 3.5", t35["under"], "under_odds")]:

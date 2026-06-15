@@ -220,12 +220,17 @@ _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
     "soccer_france_d1_feminine",            # W_D1F ⚠️ verify key
     "soccer_spain_primera_division_w",      # W_LIGA_F ⚠️ verify key
 
+    # ── Torneos internacionales con mercados alternativos activos ────────────
+    # Poisson 1X2 usa ELO sintético (exento en _POISSON_EXEMPT_LEAGUES).
+    # BTTS/OU/AH sí son fiables: cuotas reales de bookmaker + Poisson λ desde ELO.
+    "soccer_fifa_world_cup",                # WC26 / WC — activo Jun-Jul 2026
+
     # EXCLUIDOS intencionalmente (Poisson no fiable — selecciones nacionales,
     # rotación de plantillas, partidos únicos sin historial de equipo estable):
     # soccer_uefa_nations_league, soccer_fifa_world_cup_qualification_europe,
     # soccer_conmebol_world_cup_qualification, soccer_concacaf_world_cup_qualification,
     # soccer_conmebol_copa_america, soccer_uefa_european_championship,
-    # soccer_fifa_world_cup, soccer_international,
+    # soccer_international,
     # soccer_uefa_womens_euro, soccer_fifa_womens_world_cup,
     # soccer_uefa_womens_champions_league, soccer_uefa_womens_nations_league
 })
@@ -1957,12 +1962,17 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     "generate_signal(%s): %s vs %s [%s] — Poisson sintético desde ELO elo=%.3f",
                     match_id, home_team, away_team, league, elo_p,
                 )
+                # xG sintético desde ELO: share proporcional a prob, total=2.5 goles (media WC)
+                _syn_total = 2.5
+                _syn_share_h = 0.35 + 0.55 * elo_p  # [0.35, 0.90] para elo_p ∈ [0, 1]
                 enriched_match = {
                     **enriched_match,
                     "poisson_home_win": elo_p,
                     "poisson_draw":     max(0.0, 1.0 - elo_p - (1.0 - elo_p) * 0.6),
                     "poisson_away_win": (1.0 - elo_p) * 0.6,
                     "_synthetic_poisson": True,
+                    "home_xg": round(_syn_total * _syn_share_h, 3),
+                    "away_xg": round(_syn_total * (1.0 - _syn_share_h), 3),
                 }
             else:
                 # ELO también ausente — usar form como proxy si no es el default 50/50
@@ -1982,12 +1992,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     "home=%.1f away=%.1f → p_home=%.3f",
                     match_id, home_team, away_team, league, home_form, away_form, form_p,
                 )
+                _syn_total = 2.5
+                _syn_share_h = 0.35 + 0.55 * form_p
                 enriched_match = {
                     **enriched_match,
                     "poisson_home_win": form_p,
                     "poisson_draw":     max(0.0, 1.0 - form_p - (1.0 - form_p) * 0.6),
                     "poisson_away_win": (1.0 - form_p) * 0.6,
                     "_synthetic_poisson": True,
+                    "home_xg": round(_syn_total * _syn_share_h, 3),
+                    "away_xg": round(_syn_total * (1.0 - _syn_share_h), 3),
                 }
         else:
             logger.warning(
@@ -2803,34 +2817,45 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # --- Señales BTTS, OU 2.5, AH -0.5 desde odds-api.io all_markets ---
     if sport_key in _FOOTBALL_SPORT_KEYS:
         _odds_src = odds_data.get("source") if odds_data else None
-        if _odds_src != "oddsapiio":
-            logger.info(
-                "EXTRA_MARKETS_SKIP(%s): source=%s (solo oddsapiio tiene all_markets) "
-                "— BTTS/OU/AH no disponibles para este partido",
-                match_id, _odds_src,
-            )
-        elif odds_data:
+        _all_mkt: dict = {}
+        if _odds_src == "oddsapiio" and odds_data:
             _all_mkt = odds_data.get("all_markets", {})
             logger.info(
                 "EXTRA_MARKETS_CHECK(%s): source=oddsapiio all_markets_keys=%s",
                 match_id, list(_all_mkt.keys()),
             )
+        else:
+            # Cuotas desde Firestore/The Odds API: buscar en caché en memoria de oddsapiio
+            _oaio_cached = _ODDSAPIIO_CACHE.get(league)
+            if _oaio_cached:
+                _, _oaio_evs, _oaio_err = _oaio_cached
+                if not _oaio_err:
+                    for _oaio_ev in _oaio_evs:
+                        if (_teams_match(str(home_team), _oaio_ev.get("home_team", "")) and
+                                _teams_match(str(away_team), _oaio_ev.get("away_team", ""))):
+                            _all_mkt = _oaio_ev.get("markets", {})
+                            logger.info(
+                                "EXTRA_MARKETS_CACHE_LOOKUP(%s): source=%s → "
+                                "encontrado en _ODDSAPIIO_CACHE[%s], all_markets_keys=%s",
+                                match_id, _odds_src, league, list(_all_mkt.keys()),
+                            )
+                            break
             if not _all_mkt:
                 logger.info(
-                    "EXTRA_MARKETS_SKIP(%s): all_markets vacío — "
-                    "odds-api.io no devolvió BTTS/OU/AH para este partido",
-                    match_id,
+                    "EXTRA_MARKETS_SKIP(%s): source=%s, no en _ODDSAPIIO_CACHE[%s] "
+                    "— BTTS/OU/AH no disponibles",
+                    match_id, _odds_src, league,
                 )
-            else:
-                try:
-                    extra_oaio = await _generate_oddsapiio_extra_signals(
-                        enriched_match, _all_mkt, match_id,
-                        str(home_team), str(away_team),
-                        league, sport, match_date, weights_version,
-                    )
-                    results.extend(extra_oaio)
-                except Exception:
-                    logger.error("generate_signal(%s): error en oddsapiio extra signals", match_id, exc_info=True)
+        if _all_mkt:
+            try:
+                extra_oaio = await _generate_oddsapiio_extra_signals(
+                    enriched_match, _all_mkt, match_id,
+                    str(home_team), str(away_team),
+                    league, sport, match_date, weights_version,
+                )
+                results.extend(extra_oaio)
+            except Exception:
+                logger.error("generate_signal(%s): error en oddsapiio extra signals", match_id, exc_info=True)
 
     # --- Señales extra de fútbol (BTTS, Double Chance, AH, Totals 3.5) ---
     if sport_key in _FOOTBALL_SPORT_KEYS:
