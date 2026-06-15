@@ -63,13 +63,15 @@ MARKET_DEFS_BINARY: dict[str, tuple[str, str]] = {
 
 # Mapeo liga interna → tournamentId OddsPapi (verificado)
 _TOURNAMENT_IDS: dict[str, int] = {
-    "PD":  8,    # La Liga
-    "PL":  1,    # Premier League
-    "BL1": 4,    # Bundesliga
-    "SA":  5,    # Serie A
-    "FL1": 2,    # Ligue 1
-    "CL":  7,    # Champions League
-    "EL":  6,    # Europa League
+    "PD":   8,    # La Liga
+    "PL":   1,    # Premier League
+    "BL1":  4,    # Bundesliga
+    "SA":   5,    # Serie A
+    "FL1":  2,    # Ligue 1
+    "CL":   7,    # Champions League
+    "EL":   6,    # Europa League
+    "ECL":  480,  # Conference League
+    "WC26": 77,   # FIFA World Cup 2026
 }
 
 # Cache de fixtures v4 (TTL 24h, clave = fecha)
