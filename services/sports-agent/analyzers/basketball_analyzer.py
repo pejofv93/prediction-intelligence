@@ -243,22 +243,49 @@ def _get_moneyline_odds(event: dict) -> dict | None:
 
 
 def _get_spread_odds(event: dict) -> dict | None:
+    """
+    Extrae la línea de spread del evento The Odds API.
+    The Odds API codifica spreads con signo opuesto por equipo:
+      home outcome pt=-1.5, away outcome pt=+1.5 para el mismo handicap.
+    Normalizamos home_line al punto del local (mismo patrón que football_markets FIX6).
+    """
     home_team = event.get("home_team", "")
+    collected: dict[float, dict] = {}
     for bk in event.get("bookmakers", []):
         for mkt in bk.get("markets", []):
             if mkt.get("key") != "spreads":
                 continue
             for o in mkt.get("outcomes", []):
                 nm = o.get("name", "")
-                if _normalize(nm)[:6] != _normalize(home_team)[:6]:
-                    continue
                 try:
                     pt = float(o.get("point", 0))
                 except (TypeError, ValueError):
                     continue
                 pr = float(o.get("price", 0))
-                return {"home_line": pt, "home_odds": pr,
-                        "bookmaker": bk.get("key", "bet365")}
+                if pr <= 1:
+                    continue
+                is_home = _normalize(nm)[:6] == _normalize(home_team)[:6]
+                # Normalizar clave al punto home (negativo si home da puntos)
+                key = round(pt if is_home else -pt, 1)
+                if key not in collected:
+                    collected[key] = {"bookmaker": bk.get("key", "bet365")}
+                if is_home:
+                    collected[key]["home_line"] = pt
+                    collected[key]["home_odds"] = pr
+                else:
+                    collected[key]["away_line"] = pt
+                    collected[key]["away_odds"] = pr
+    # Preferir línea con ambos lados; fallback a solo home
+    for key in sorted(collected.keys()):
+        entry = collected[key]
+        if "home_odds" in entry and "away_odds" in entry:
+            entry.setdefault("home_line", key)
+            return entry
+    for key in sorted(collected.keys()):
+        entry = collected[key]
+        if "home_odds" in entry:
+            entry.setdefault("home_line", key)
+            return entry
     return None
 
 
