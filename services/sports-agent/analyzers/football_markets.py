@@ -445,6 +445,50 @@ def _parse_oddspapi_ah(event: dict) -> list[dict]:
     return lines
 
 
+def _parse_oddspapi_totals(event: dict, line: float = 3.5) -> dict | None:
+    """
+    Extrae odds Over/Under de un evento OddsPapi para la línea indicada.
+    Soporta dos formatos de respuesta de OddsPapi v4:
+      Formato 1: {"totals": [{"line": 3.5, "over": 1.85, "under": 2.10}]}
+      Formato 2: {"over_3_5": 1.85, "under_3_5": 2.10}  (guiones → underscores)
+    """
+    odds = event.get("odds", event.get("markets", event))
+
+    # Formato 1: lista de líneas
+    totals_data = odds.get("totals", odds.get("total_goals", []))
+    if isinstance(totals_data, list):
+        for entry in totals_data:
+            try:
+                entry_line = float(entry.get("line", entry.get("total", 0)))
+            except (TypeError, ValueError):
+                continue
+            if abs(entry_line - line) < 0.01:
+                try:
+                    ov = float(entry.get("over", entry.get("over_odds", 0)))
+                    un = float(entry.get("under", entry.get("under_odds", 0)))
+                    if ov > 1 and un > 1:
+                        return {"over_odds": ov, "under_odds": un, "line": entry_line,
+                                "bookmaker": "oddspapi"}
+                except (TypeError, ValueError):
+                    continue
+
+    # Formato 2: claves planas "over_X_Y" / "under_X_Y"
+    line_key = str(line).replace(".", "_")
+    for over_k in (f"over_{line_key}", f"over_{line_key}_goals", f"total_over_{line_key}"):
+        for under_k in (f"under_{line_key}", f"under_{line_key}_goals", f"total_under_{line_key}"):
+            if over_k in odds and under_k in odds:
+                try:
+                    ov = float(odds[over_k])
+                    un = float(odds[under_k])
+                    if ov > 1 and un > 1:
+                        return {"over_odds": ov, "under_odds": un, "line": line,
+                                "bookmaker": "oddspapi"}
+                except (TypeError, ValueError):
+                    continue
+
+    return None
+
+
 # ── Probabilidades ────────────────────────────────────────────────────────────
 
 def calc_btts(home_xg: float, away_xg: float) -> dict | None:
@@ -1131,15 +1175,18 @@ async def generate_football_extra_signals(
     t35 = calc_totals_n(home_xg, away_xg, 3.5)
     if t35:
         from analyzers.value_bet_engine import _parse_totals_event
-        _af_t35 = None
-        if _af_odds:
+        # OddsPapi primario; The Odds API fallback; API-Football tercer fallback.
+        # Misma cadena de 3 fuentes que AH — garantiza cuotas en WC26 y ligas sin evento TOA.
+        _op_t35   = _parse_oddspapi_totals(op_ev, line=3.5) if op_ev else None
+        _t35_toa  = _parse_totals_event(event, line=3.5) if event else None
+        _af_t35   = None
+        if _af_odds and not _op_t35 and not _t35_toa:
             from collectors.apifootball_odds import parse_goals_ou as _af_parse_ou
             _af_t35 = _af_parse_ou(_af_odds, 3.5)
-        _t35_toa = _parse_totals_event(event, line=3.5) if event else None
-        t35_odds = _t35_toa or _af_t35
+        t35_odds = _op_t35 or _t35_toa or _af_t35
         logger.info(
-            "football_markets(%s): T3.5 — toa=%s af=%s (xg=%.2f+%.2f=%.2f over=%.3f under=%.3f)",
-            match_id, bool(_t35_toa), bool(_af_t35),
+            "football_markets(%s): T3.5 — op=%s toa=%s af=%s (xg=%.2f+%.2f=%.2f over=%.3f under=%.3f)",
+            match_id, bool(_op_t35), bool(_t35_toa), bool(_af_t35),
             home_xg, away_xg, home_xg + away_xg, t35["over"], t35["under"],
         )
         if t35_odds:
