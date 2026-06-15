@@ -125,7 +125,13 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
             logger.warning("corners_bookings: OddsPapi HTTP %d", resp.status_code)
             return []
 
-        quota.track_monthly("oddspapi")
+        # Leer remaining desde las cabeceras para tracking preciso de cuota
+        _remaining = (
+            resp.headers.get("x-requests-remaining-month")
+            or resp.headers.get("x-monthly-remaining")
+            or resp.headers.get("x-remaining")
+        )
+        quota.track_monthly("oddspapi", remaining=int(_remaining) if _remaining and _remaining.isdigit() else None)
         data = resp.json()
         fixtures = data if isinstance(data, list) else data.get("data", [])
         if not isinstance(fixtures, list):
@@ -133,8 +139,8 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
 
         _FIXTURES_CACHE[cache_key] = (now, fixtures)
         logger.info(
-            "corners_bookings: %d fixtures cargados (%s → %s)",
-            len(fixtures), target_date.isoformat(), end_date.isoformat(),
+            "corners_bookings: %d fixtures cargados (%s → %s) oddspapi_remaining=%s",
+            len(fixtures), target_date.isoformat(), end_date.isoformat(), _remaining,
         )
         return fixtures
 
@@ -720,9 +726,16 @@ async def generate_corners_signals(
     has_fdco = bool(home_stats and away_stats)
 
     # ── Fuente A: OddsPapi (corners/bookings 1X2 + mercados binarios) ─────────
-    if fixture_data is None:
+    # Guard 48h: no llamar a OddsPapi por partidos >2 días en el futuro ni ligas sin soporte.
+    _days_ahead = (match_date - date.today()).days if isinstance(match_date, date) else 0
+    _in_tournament = league in _TOURNAMENT_IDS
+    if fixture_data is None and _days_ahead <= 2 and _in_tournament:
         fixtures = await _fetch_fixtures_for_date(match_date)
         fixture_data = _find_fixture(fixtures, home_team, away_team)
+    elif not _in_tournament:
+        logger.debug("corners_bookings(%s %s): liga %s no en _TOURNAMENT_IDS — saltando OddsPapi", home_team, away_team, league)
+    elif _days_ahead > 2:
+        logger.debug("corners_bookings(%s %s): partido a %d días — saltando OddsPapi", home_team, away_team, _days_ahead)
 
     if fixture_data:
         # Log mercados binarios disponibles en el fixture

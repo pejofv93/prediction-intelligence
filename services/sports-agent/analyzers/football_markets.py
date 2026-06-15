@@ -991,19 +991,18 @@ async def generate_football_extra_signals(
     signals_out: list[dict] = []
     xg_factor = round(min(home_xg, away_xg) / max(home_xg, away_xg, 0.1), 4)
 
-    # OddsPapi: una sola llamada por liga (todos los mercados) — reutiliza la caché si ya existe
-    op_league_events = await _fetch_oddspapi_league(league)
-    op_ev = _oddspapi_find_event(op_league_events, home_team, away_team) if op_league_events else None
-    op_btts_ev = op_ev
-    op_ah_ev   = op_ev
+    # OddsPapi /v4/odds: DESACTIVADO — no provee BTTS/AH/Totals en el plan actual
+    # (documentado en docstring de get_oddspapi_h2h_odds). Eliminar estas llamadas
+    # ahorraba ~3-5 calls/analyze que agotaban el límite mensual de 250.
+    # Las señales BTTS/AH/T2.5 llegan ahora desde The Odds API (markets=btts,spreads,totals).
+    op_ev      = None
+    op_btts_ev = None
+    op_ah_ev   = None
 
-    # Fallback: API-Football cuando OddsPapi no está disponible.
-    # Se activa aunque exista un evento The Odds API en caché, porque ese caché
-    # puede ser h2h-only (anterior al fix de markets=btts,spreads,...) y no tener
-    # los mercados alternativos que buscamos.
-    # La cadena `or` por mercado garantiza que AF solo se usa si la fuente primaria devolvió None.
+    # Fallback: API-Football solo si The Odds API tampoco tiene el evento.
+    # Con btts añadido al markets_param TOA ya cubre BTTS/AH/T2.5 para WC26 y ligas EU.
     _af_odds: dict | None = None
-    if not op_ev:
+    if not event:
         try:
             from collectors.apifootball_odds import get_match_odds as _get_af_odds
             from datetime import date as _date_t
