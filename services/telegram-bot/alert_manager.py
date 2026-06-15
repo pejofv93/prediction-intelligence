@@ -573,6 +573,16 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
             if abs(pct_change) <= _ODDS_CHANGE_THRESHOLD:
                 continue
 
+            # RISING_ODDS_BLOCK: cuota subiendo >20% = bookmaker tiene info negativa
+            # (misma lógica que generate_signal en value_bet_engine.py)
+            if pct_change > 0.20:
+                logger.info(
+                    "check_pending_odds_changes(%s): RISING_ODDS_BLOCK — cuota subió %.1f%% "
+                    "→ señal descartada (bookmaker info negativa)",
+                    match_id, pct_change * 100,
+                )
+                continue
+
             market = pred.get("market_type", "h2h")
             alert_key = f"{match_id}_{market}_{current_odds:.2f}"
 
