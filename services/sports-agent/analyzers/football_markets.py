@@ -126,6 +126,9 @@ _ODDSPAPI_LEAGUE_MAP = {
     # Sudamérica
     "ARG":  "PrimeraDivision",
     "CSUD": "CopaSudamericana",
+    # Internacional
+    "WC26": "FIFAWorldCup",    # Mundial 2026 — activo desde 11 jun 2026
+    "WC":   "FIFAWorldCup",
 }
 
 # Mapeo league code → OddsPapi v4 tournamentId (verificados en api.oddspapi.io)
@@ -140,6 +143,8 @@ _ODDSPAPI_TOURNAMENT_IDS: dict[str, int] = {
     "ECL": 480,  # Conference League
     "TU1": 203,  # Süper Lig
     "ARG": 128,  # Primera División Argentina
+    "WC26": 77,  # FIFA World Cup 2026 — ⚠️ verificar en api.oddspapi.io
+    "WC":   77,  # FIFA World Cup (alias)
 }
 
 
