@@ -1075,7 +1075,18 @@ async def generate_football_extra_signals(
                 prob = 1.0 - prob  # AH positivo = away cubre
                 sel = f"{away_team} {line_f:+.1f}"
             if odds <= 1:
+                logger.info(
+                    "football_markets(%s): AH line=%.1f sel=%s odds=%.2f SKIP (odds<=1)",
+                    match_id, line_f, sel, odds,
+                )
                 continue
+            edge = round(prob - 1.0 / odds, 4) if odds > 1 else 0.0
+            logger.info(
+                "football_markets(%s): AH line=%.1f sel=%s prob=%.3f odds=%.2f "
+                "edge=%.4f (min=%.3f) → %s",
+                match_id, line_f, sel, prob, odds, edge, SPORTS_MIN_EDGE,
+                "OK" if edge > SPORTS_MIN_EDGE else "SKIP",
+            )
             factors = {"xg_home": round(home_xg, 3),
                        "xg_away": round(away_xg, 3),
                        "ah_line": round(line_f, 1)}
