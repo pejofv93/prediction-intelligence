@@ -404,6 +404,99 @@ async def test_nba() -> dict:
     }
 
 
+@app.get("/test-betfair", dependencies=[Depends(verify_token)])
+async def test_betfair() -> dict:
+    """
+    Diagnóstico Betfair Exchange: login + primer evento de fútbol de hoy + MATCH_ODDS + liquidez.
+    Requiere BETFAIR_USERNAME, BETFAIR_PASSWORD, BETFAIR_APP_KEY en env vars.
+    """
+    from datetime import date as _date
+    from clients.betfair_client import BetfairClient
+
+    client = BetfairClient()
+
+    if not client._app_key:
+        return {"ok": False, "error": "BETFAIR_APP_KEY no configurada en env vars"}
+
+    # 1. Login
+    try:
+        await client._login()
+    except Exception as e:
+        return {"ok": False, "step": "login", "error": str(e)}
+
+    # 2. Listar primeros eventos de fútbol de hoy
+    today = _date.today()
+    try:
+        events = await client._call("listEvents", {
+            "filter": {
+                "eventTypeIds": ["1"],
+                "marketStartTime": {
+                    "from": f"{today}T00:00:00Z",
+                    "to":   f"{today}T23:59:59Z",
+                },
+            }
+        }) or []
+    except Exception as e:
+        return {"ok": False, "step": "listEvents", "error": str(e)}
+
+    if not events:
+        return {"ok": True, "login": "OK", "events_today": 0, "note": "Sin eventos de fútbol hoy en Betfair"}
+
+    # Tomar el primer evento
+    first = events[0]["event"]
+    event_id   = first["id"]
+    event_name = first.get("name", "")
+
+    # 3. Mercado MATCH_ODDS
+    try:
+        market = await client.get_match_odds_market(event_id)
+    except Exception as e:
+        return {"ok": False, "step": "listMarketCatalogue", "event": event_name, "error": str(e)}
+
+    if not market:
+        return {
+            "ok": True, "login": "OK",
+            "events_today": len(events),
+            "first_event": event_name,
+            "match_odds": None,
+            "note": "Evento encontrado pero sin mercado MATCH_ODDS",
+        }
+
+    # 4. Precios + liquidez
+    try:
+        runners_book = await client.get_market_book(market["marketId"])
+    except Exception as e:
+        return {"ok": False, "step": "listMarketBook", "error": str(e)}
+
+    runner_names = {r["selectionId"]: r["runnerName"] for r in market["runners"]}
+    runners_out = []
+    for runner in runners_book:
+        liquid, metrics = client.is_liquid(runner)
+        ex = runner.get("ex", {})
+        runners_out.append({
+            "name":             runner_names.get(runner["selectionId"], str(runner["selectionId"])),
+            "status":           runner.get("status"),
+            "liquid":           liquid,
+            "best_back":        metrics["best_back"],
+            "best_lay":         metrics["best_lay"],
+            "total_back_size":  metrics["total_back_size"],
+            "spread_pct":       metrics["spread_pct"],
+            "available_to_back": ex.get("availableToBack", [])[:3],
+            "available_to_lay":  ex.get("availableToLay",  [])[:1],
+        })
+
+    return {
+        "ok":           True,
+        "login":        "OK",
+        "events_today": len(events),
+        "event_name":   event_name,
+        "event_id":     event_id,
+        "market_id":    market["marketId"],
+        "runners":      runners_out,
+        "events_sample": [e["event"]["name"] for e in events[:5]],
+    }
+
+
 @app.get("/test-tennis", dependencies=[Depends(verify_token)])
 async def test_tennis() -> dict:
     """
