@@ -55,7 +55,7 @@ class BetfairClient:
                 headers={
                     "Accept":        "application/json",
                     "Content-Type":  "application/x-www-form-urlencoded",
-                    "X-Application": self._app_key,
+                    "X-Application": "1",  # SSO login siempre "1"; la App Key real va en Exchange calls
                 },
                 timeout=15.0,
             )
