@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 _SSO_URL = "https://identitysso.betfair.es/api"
 _API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+
 _MIN_BACK_SIZE = 100.0   # €  — sum of top-3 back sizes per runner
 _MAX_SPREAD_PCT = 0.05   # 5% relative spread: (best_lay - best_back) / best_back
 
@@ -56,6 +62,7 @@ class BetfairClient:
                     "Accept":        "application/json",
                     "Content-Type":  "application/x-www-form-urlencoded",
                     "X-Application": "1",  # SSO login siempre "1"; la App Key real va en Exchange calls
+                    "User-Agent":    _UA,
                 },
                 timeout=15.0,
             )
@@ -76,9 +83,10 @@ class BetfairClient:
             resp = await client.post(
                 f"{_SSO_URL}/keepAlive",
                 headers={
-                    "Accept":         "application/json",
-                    "X-Application":  self._app_key,
+                    "Accept":           "application/json",
+                    "X-Application":    self._app_key,
                     "X-Authentication": self._session_token,
+                    "User-Agent":       _UA,
                 },
                 timeout=10.0,
             )
@@ -113,6 +121,7 @@ class BetfairClient:
                     "Content-Type":     "application/json",
                     "X-Application":    self._app_key,
                     "X-Authentication": token,
+                    "User-Agent":       _UA,
                 },
                 timeout=15.0,
             )
