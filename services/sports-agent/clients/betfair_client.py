@@ -1,6 +1,20 @@
 """
 Betfair Exchange client — Delayed App Key (1.0-DELAY).
 
+ESTADO (2026-06-19): DESACTIVADO — Betfair bloquea IPs de datacenter GCP en su WAF
+antifraude. El login a identitysso.betfair.es devuelve 403 desde Cloud Run
+independientemente de User-Agent o headers. El mismo login funciona desde IP
+residencial (verificado con scripts/get_betfair_appkey.py).
+
+Credenciales válidas y configuradas en Cloud Run:
+  BETFAIR_USERNAME = pejofeve@hotmail.com
+  BETFAIR_PASSWORD = configurada
+  BETFAIR_APP_KEY  = configurada (Delayed App Key 1.0-DELAY obtenida)
+
+Para reactivar: necesita proxy residencial de pago (e.g. Bright Data, Oxylabs).
+Sin proxy, no es viable desde ningún proveedor cloud (GCP, AWS, Railway).
+Código conservado íntegro para activación futura.
+
 Delayed Key limitations:
   - EX_BEST_OFFERS only (top 3 back/lay per runner, ~1s delay)
   - No totalMatched, no EX_ALL_OFFERS

@@ -407,11 +407,26 @@ async def test_nba() -> dict:
 @app.get("/test-betfair", dependencies=[Depends(verify_token)])
 async def test_betfair() -> dict:
     """
-    Diagnóstico Betfair Exchange: login + primer evento de fútbol de hoy + MATCH_ODDS + liquidez.
-    Requiere BETFAIR_USERNAME, BETFAIR_PASSWORD, BETFAIR_APP_KEY en env vars.
+    DESACTIVADO — Betfair bloquea IPs de datacenter GCP con 403 en su WAF antifraude.
+    El login solo funciona desde IP residencial. Código conservado para proxy futuro.
+    Cuenta: pejofeve@hotmail.com · App Key: BETFAIR_APP_KEY configurada en Cloud Run.
+    Para reactivar: añadir proxy residencial de pago (Bright Data / Oxylabs) al cliente.
     """
-    from datetime import date as _date
-    from clients.betfair_client import BetfairClient
+    return {
+        "ok": False,
+        "disabled": True,
+        "reason": (
+            "Betfair bloquea IPs de datacenter GCP en su WAF antifraude. "
+            "403 Forbidden en identitysso.betfair.es/api/login independientemente de headers/User-Agent. "
+            "Login verificado funcional desde IP residencial (scripts/get_betfair_appkey.py). "
+            "Cuenta activa: pejofeve@hotmail.com. BETFAIR_APP_KEY configurada en Cloud Run. "
+            "Reactivar cuando se disponga de proxy residencial de pago."
+        ),
+    }
+
+    # -- código desactivado — conservado para reactivación con proxy --
+    from datetime import date as _date  # noqa: F811, E402
+    from clients.betfair_client import BetfairClient  # noqa: F811, E402
 
     client = BetfairClient()
 
