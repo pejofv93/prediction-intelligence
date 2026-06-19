@@ -616,19 +616,46 @@ def _normalize_team(name: str) -> str:
     return " ".join(words)
 
 
+# Aliases de selecciones nacionales con nombres divergentes entre fuentes
+_COUNTRY_ALIASES: dict[str, str] = {
+    "turkiye": "turkey",
+    "ivory coast": "cote divoire",
+    "cote divoire": "ivory coast",
+    "czechia": "czech republic",
+    "czech republic": "czechia",
+    "cape verde": "cabo verde",
+    "cabo verde": "cape verde",
+    "north macedonia": "macedonia",
+    "macedonia": "north macedonia",
+    "bosnia herzegovina": "bosnia",
+    "bosniaherzegovina": "bosnia",
+    "north korea": "korea dpr",
+    "korea dpr": "north korea",
+    "south korea": "korea republic",
+    "korea republic": "south korea",
+    "dr congo": "congo",
+    "usa": "united states",
+    "united states": "usa",
+}
+
+
 def _teams_match(our_name: str, api_name: str) -> bool:
     """
-    True si los nombres de equipo son el mismo club.
+    True si los nombres de equipo son el mismo club o selección.
     Estrategias en orden:
     1. Coincidencia exacta tras normalizar
-    2. Uno contiene al otro (min 5 chars)
-    3. Primera palabra significativa coincide en ambos (cubre Athletic Club / Athletic Bilbao)
+    2. Alias de selecciones nacionales (Turkey/Turkiye, etc.)
+    3. Uno contiene al otro (min 5 chars)
+    4. Primera palabra significativa coincide en ambos (cubre Athletic Club / Athletic Bilbao)
     """
     a = _normalize_team(our_name)
     b = _normalize_team(api_name)
     if not a or not b:
         return False
     if a == b:
+        return True
+    # Alias de selecciones nacionales (nombres divergentes entre football-data.org y odds-api.io)
+    if _COUNTRY_ALIASES.get(a) == b or _COUNTRY_ALIASES.get(b) == a:
         return True
     if len(a) >= 5 and a in b:
         return True
