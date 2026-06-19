@@ -523,13 +523,23 @@ async def fetch_bookmaker_odds(
             if fetched_at and hasattr(fetched_at, "tzinfo") and fetched_at.tzinfo is None:
                 fetched_at = fetched_at.replace(tzinfo=timezone.utc)
             if fetched_at and (now - fetched_at) < cache_ttl:
-                return {
+                cached_result = {
                     "bookmaker": data.get("bookmaker", "bet365"),
                     "home_odds": float(data.get("home_odds", 2.0)),
                     "draw_odds": float(data.get("draw_odds", 3.2)),
                     "away_odds": float(data.get("away_odds", 3.5)),
                     "opening_home_odds": float(data.get("opening_home_odds", data.get("home_odds", 2.0))),
                 }
+                # Restaurar source y all_markets para que EXTRA_MARKETS genere AH/BTTS
+                if data.get("source"):
+                    cached_result["source"] = data["source"]
+                if data.get("all_markets"):
+                    cached_result["all_markets"] = data["all_markets"]
+                    logger.info(
+                        "fetch_bookmaker_odds(%s): cache Firestore HIT source=%s all_markets_keys=%s",
+                        match_id, data.get("source", "?"), list(data["all_markets"].keys()),
+                    )
+                return cached_result
     except Exception:
         logger.error("fetch_bookmaker_odds(%s): error leyendo odds_cache", match_id, exc_info=True)
 
@@ -540,7 +550,11 @@ async def fetch_bookmaker_odds(
             if _ODDSAPIIO_KEY:
                 oaio = await _fetch_oddsapiio(match_id, home_team, away_team, league, now)
                 if oaio:
-                    return {**oaio, "source": "oddsapiio"}
+                    result = {**oaio, "source": "oddsapiio"}
+                    # Persistir en odds_cache con source+all_markets para que cache hits
+                    # también generen AH/BTTS en runs posteriores (fix mercados alternativos)
+                    await _save_odds_cache(match_id, result, now)
+                    return result
         except Exception:
             logger.error("fetch_bookmaker_odds(%s): error en odds-api.io", match_id, exc_info=True)
 
@@ -1595,6 +1609,13 @@ async def _save_odds_cache(match_id: str, odds: dict, now: datetime) -> None:
         doc_ref = col("odds_cache").document(match_id)
         existing = doc_ref.get()
 
+        # Campos extra: source y all_markets para que el cache hit también genere AH/BTTS
+        _extra: dict = {}
+        if odds.get("source"):
+            _extra["source"] = odds["source"]
+        if odds.get("all_markets"):
+            _extra["all_markets"] = odds["all_markets"]
+
         if existing.exists:
             # Actualizar cuotas actuales — NO tocar opening_*
             doc_ref.update({
@@ -1603,6 +1624,7 @@ async def _save_odds_cache(match_id: str, odds: dict, now: datetime) -> None:
                 "away_odds": odds["away_odds"],
                 "bookmaker": odds["bookmaker"],
                 "fetched_at": now,
+                **_extra,
             })
         else:
             # Primera vez — guardar opening_* y actuales
@@ -1617,6 +1639,7 @@ async def _save_odds_cache(match_id: str, odds: dict, now: datetime) -> None:
                 "bookmaker": odds["bookmaker"],
                 "first_fetched_at": now,
                 "fetched_at": now,
+                **_extra,
             })
     except Exception:
         logger.error("_save_odds_cache(%s): error guardando en Firestore", match_id, exc_info=True)
