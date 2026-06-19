@@ -811,11 +811,14 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                     fs_fetched = fs_fetched.replace(tzinfo=timezone.utc)
                 if (now - fs_fetched) < _LEAGUE_CACHE_TTL:
                     events = fs_data.get("events", [])
-                    _LEAGUE_ODDS_CACHE[sport_key] = (fs_fetched, events)
-                    age_min = round((now - fs_fetched).total_seconds() / 60)
-                    logger.info("The Odds API: caché Firestore '%s' — %d eventos (edad %d min)",
-                                sport_key, len(events), age_min)
-                    return events
+                    # No cargar en memoria si está vacío — mejor no contaminar la RAM
+                    if events:
+                        _LEAGUE_ODDS_CACHE[sport_key] = (fs_fetched, events)
+                        age_min = round((now - fs_fetched).total_seconds() / 60)
+                        logger.info("The Odds API: caché Firestore '%s' — %d eventos (edad %d min)",
+                                    sport_key, len(events), age_min)
+                        return events
+                    # Firestore vacío → caer al HTTP call (no cargar 0 en RAM)
     except Exception:
         logger.warning("fetch_bookmaker_odds(%s): error leyendo cache Firestore para '%s'", match_id, sport_key, exc_info=True)
 
@@ -888,15 +891,18 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                         sport_key, len(events), remaining or "?")
 
             # Actualizar cache en memoria y en Firestore
-            _LEAGUE_ODDS_CACHE[sport_key] = (now, events)
-            try:
-                col("league_odds_cache").document(sport_key + "_v4").set({
-                    "sport_key": sport_key,
-                    "fetched_at": now,
-                    "events": events,
-                })
-            except Exception:
-                logger.warning("fetch_bookmaker_odds(%s): error guardando cache Firestore para '%s'", match_id, sport_key, exc_info=True)
+            # Si la respuesta es vacía, usar TTL corto (1h) para reintentar pronto
+            _cache_ts = now if events else (now - (_LEAGUE_CACHE_TTL - timedelta(hours=1)))
+            _LEAGUE_ODDS_CACHE[sport_key] = (_cache_ts, events)
+            if events:  # no sobreescribir con lista vacía — envenenarías la caché 24h
+                try:
+                    col("league_odds_cache").document(sport_key + "_v4").set({
+                        "sport_key": sport_key,
+                        "fetched_at": now,
+                        "events": events,
+                    })
+                except Exception:
+                    logger.warning("fetch_bookmaker_odds(%s): error guardando cache Firestore para '%s'", match_id, sport_key, exc_info=True)
 
             return events
 
