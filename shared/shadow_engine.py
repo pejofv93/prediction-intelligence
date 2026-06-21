@@ -340,6 +340,9 @@ def calculate_metrics(trades: list = None) -> dict:
                 "roi": round(s_pnl / s_stake, 4) if s_stake > 0 else 0.0,
                 "win_rate": round(len(s_wins) / len(src_trades), 4) if src_trades else 0.0,
                 "n": len(src_trades),
+                "pnl": round(s_pnl, 4),
+                "stake": round(s_stake, 4),
+                "wins": len(s_wins),
             }
 
         # Win rate
@@ -444,6 +447,13 @@ def calculate_metrics(trades: list = None) -> dict:
             "roi_total": roi_total,
             "roi_sports": by_source["sports"]["roi"],
             "roi_poly": by_source["polymarket"]["roi"],
+            # Desglose por subsistema (sports vs polymarket) para reportes
+            "win_rate_sports": by_source["sports"]["win_rate"],
+            "win_rate_poly": by_source["polymarket"]["win_rate"],
+            "n_sports": by_source["sports"]["n"],
+            "n_poly": by_source["polymarket"]["n"],
+            "pnl_sports": by_source["sports"]["pnl"],
+            "pnl_poly": by_source["polymarket"]["pnl"],
             "roi_last20": roi_last20,
             "last_20_win_rate": last_20_win_rate,
             "avg_edge": avg_edge,
@@ -472,6 +482,12 @@ def calculate_metrics(trades: list = None) -> dict:
             "roi_total": 0.0,
             "roi_sports": 0.0,
             "roi_poly": 0.0,
+            "win_rate_sports": 0.0,
+            "win_rate_poly": 0.0,
+            "n_sports": 0,
+            "n_poly": 0,
+            "pnl_sports": 0.0,
+            "pnl_poly": 0.0,
             "roi_last20": 0.0,
             "last_20_win_rate": 0.0,
             "avg_edge": 0.0,

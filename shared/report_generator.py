@@ -94,12 +94,23 @@ def generate_weekly_report(
     roi_total = float(week_stats.get("roi_total", 0.0))
     win_rate = float(week_stats.get("win_rate", 0.0))
     closed_trades = int(week_stats.get("closed_trades", 0))
+    # Desglose sports vs polymarket (bankroll compartido, P&L separado por source)
+    roi_poly_bk = float(week_stats.get("roi_poly", 0.0))
+    wr_sports_bk = float(week_stats.get("win_rate_sports", 0.0))
+    wr_poly_bk = float(week_stats.get("win_rate_poly", 0.0))
+    n_sports_bk = int(week_stats.get("n_sports", 0))
+    n_poly_bk = int(week_stats.get("n_poly", 0))
+    pnl_sports_bk = float(week_stats.get("pnl_sports", 0.0))
+    pnl_poly_bk = float(week_stats.get("pnl_poly", 0.0))
+
+    pending = int(week_stats.get("predictions_pending", 0))
+    pending_note = f" (+{pending} pendientes)" if pending > 0 else ""
 
     lines: list[str] = [
         f"📊 REPORTE SEMANAL — Semana {week}",
         "",
         "⚽ SPORTS:",
-        f"Señales: {total} | ✅ {correct} | ❌ {failed}",
+        f"Resueltas: {total} | ✅ {correct} | ❌ {failed}{pending_note}",
         f"Win rate: {accuracy:.0%} | ROI: {roi_sports:+.1%}",
     ]
 
@@ -132,7 +143,11 @@ def generate_weekly_report(
         lines += [
             "",
             "💰 Bankroll virtual:",
-            f"Saldo: {bankroll_current:.2f}u | ROI total: {roi_total:+.1%} | Win rate: {win_rate:.0%}",
+            f"Saldo: {bankroll_current:.2f}u | Win rate global: {win_rate:.0%}",
+            f"P&L: ⚽ Sports {pnl_sports_bk:+.2f}u | 🔮 Polymarket {pnl_poly_bk:+.2f}u",
+            f"📈 ROI total: {roi_total:+.1%}",
+            f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports_bk:.0%}, {n_sports_bk} señales)",
+            f"  🔮 Polymarket: {roi_poly_bk:+.1%} (win rate {wr_poly_bk:.0%}, {n_poly_bk} señales)",
         ]
 
     return "\n".join(lines)

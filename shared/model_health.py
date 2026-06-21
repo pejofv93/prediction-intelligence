@@ -223,6 +223,14 @@ def format_daily_report(
     win_rate = float(shadow_metrics.get("win_rate") or 0.0)
     closed_trades = int(shadow_metrics.get("closed_trades") or 0)
     roi_sports = float(shadow_metrics.get("roi_sports") or 0.0)
+    # Desglose sports vs polymarket (mismo P&L, separado por source en shadow_trades)
+    roi_poly = float(shadow_metrics.get("roi_poly") or 0.0)
+    wr_sports = float(shadow_metrics.get("win_rate_sports") or 0.0)
+    wr_poly = float(shadow_metrics.get("win_rate_poly") or 0.0)
+    n_sports = int(shadow_metrics.get("n_sports") or 0)
+    n_poly = int(shadow_metrics.get("n_poly") or 0)
+    pnl_sports = float(shadow_metrics.get("pnl_sports") or 0.0)
+    pnl_poly = float(shadow_metrics.get("pnl_poly") or 0.0)
 
     # Estado del modelo basado en win rate real (no en pesos internos)
     if closed_trades < 10:
@@ -268,11 +276,14 @@ def format_daily_report(
 
     lines.append("")
 
-    # P&L simulado con Kelly
+    # P&L simulado con Kelly — desglose de aportación por subsistema
     pnl_simulated = round((bankroll - 50.0), 2)
     pnl_sign = "+" if pnl_simulated >= 0 else ""
     lines.append(f"💰 Bankroll virtual: {bankroll:.2f}€ ({pnl_sign}{pnl_simulated:.2f}€ P&L)")
-    lines.append(f"📈 ROI total: {roi_total:+.1%} | ROI sports: {roi_sports:+.1%}")
+    lines.append(f"  ⚽ Sports: {pnl_sports:+.2f}€ | 🔮 Polymarket: {pnl_poly:+.2f}€")
+    lines.append(f"📈 ROI total: {roi_total:+.1%}")
+    lines.append(f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports:.0%}, {n_sports} señales)")
+    lines.append(f"  🔮 Polymarket: {roi_poly:+.1%} (win rate {wr_poly:.0%}, {n_poly} señales)")
 
     if avg_clv != 0.0:
         lines.append(f"📐 CLV medio: {avg_clv:+.1%}")

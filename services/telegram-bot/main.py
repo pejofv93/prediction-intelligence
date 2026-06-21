@@ -416,25 +416,31 @@ async def send_weekly_report() -> JSONResponse:
             logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
             shadow_metrics = {}
 
-        # Sports: si accuracy_log está vacío, calcular desde week_preds directamente
+        # Sports: si accuracy_log está vacío, calcular desde week_preds directamente.
+        # IMPORTANTE: solo contar predicciones RESUELTAS (correct != None).
+        # Las pendientes (correct=None) son partidos futuros — no son fallos.
         _sp_total = int(log.get("predictions_total", 0))
         _sp_correct = int(log.get("predictions_correct", 0))
         _sp_acc = float(log.get("accuracy", 0.0))
         if _sp_total == 0 and week_preds:
-            _sp_total = len(week_preds)
-            _sp_correct = sum(1 for p in week_preds if p.get("correct") is True)
+            _resolved = [p for p in week_preds if p.get("correct") is not None]
+            _sp_total = len(_resolved)
+            _sp_correct = sum(1 for p in _resolved if p.get("correct") is True)
             _sp_acc = _sp_correct / _sp_total if _sp_total > 0 else 0.0
+            _pending = len(week_preds) - len(_resolved)
             logger.info(
-                "send-weekly-report: accuracy_log vacío para %s — usando %d preds directas",
-                prev_week, _sp_total,
+                "send-weekly-report: accuracy_log vacío para %s — %d resueltas / %d pendientes",
+                prev_week, _sp_total, _pending,
             )
 
         # Construir week_stats
+        _pending_count = sum(1 for p in week_preds if p.get("correct") is None)
         week_stats = {
             "week": prev_week,
             "predictions_total": _sp_total,
             "predictions_correct": _sp_correct,
             "accuracy": _sp_acc,
+            "predictions_pending": _pending_count,
             "prev_week_accuracy": log.get("prev_week_accuracy"),
             "accuracy_by_league": log.get("accuracy_by_league", {}),
             "best_match": best_match,
@@ -455,7 +461,14 @@ async def send_weekly_report() -> JSONResponse:
             "bankroll_current": shadow_metrics.get("current_bankroll", 50.0),
             "roi_total": shadow_metrics.get("roi_total", 0.0),
             "roi_sports": shadow_metrics.get("roi_sports", 0.0),
+            "roi_poly": shadow_metrics.get("roi_poly", 0.0),
             "win_rate": shadow_metrics.get("win_rate", 0.0),
+            "win_rate_sports": shadow_metrics.get("win_rate_sports", 0.0),
+            "win_rate_poly": shadow_metrics.get("win_rate_poly", 0.0),
+            "n_sports": shadow_metrics.get("n_sports", 0),
+            "n_poly": shadow_metrics.get("n_poly", 0),
+            "pnl_sports": shadow_metrics.get("pnl_sports", 0.0),
+            "pnl_poly": shadow_metrics.get("pnl_poly", 0.0),
             "closed_trades": shadow_metrics.get("closed_trades", 0),
             "streak": shadow_metrics.get("streak", 0),
         }
