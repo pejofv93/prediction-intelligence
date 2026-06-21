@@ -1414,8 +1414,21 @@ async def _bg_analyze() -> None:
             sorted(_leagues_all), sorted(_leagues_extra), sorted(_leagues_skip),
         )
 
+        from shared.match_timing import signal_is_too_late, kickoff_label
+        _skipped_started = 0
+
         for doc in docs:
             enriched = doc.to_dict()
+            # TIMING_GUARD: no analizar partidos ya empezados o demasiado próximos al
+            # inicio (status puede seguir SCHEDULED si el collect no se ha refrescado).
+            if signal_is_too_late(enriched.get("match_date") or enriched.get("date")):
+                _skipped_started += 1
+                logger.info(
+                    "analyze: TIMING_GUARD descarta %s (%s vs %s) — inicio %s ya pasado/demasiado próximo",
+                    enriched.get("match_id"), enriched.get("home_team"), enriched.get("away_team"),
+                    kickoff_label(enriched.get("match_date") or enriched.get("date")),
+                )
+                continue
             # FIX1: generate_signal y mercados auxiliares son exclusivos de fútbol.
             # NBA/basketball pasan por generate_basketball_signals() — procesarlos aquí
             # también causaba doble-análisis con ensemble inflado (Timberwolves EV+106%).
@@ -1493,6 +1506,13 @@ async def _bg_analyze() -> None:
             _tennis_no_stats = 0
             for tdoc in tennis_docs:
                 match = tdoc.to_dict()
+                if signal_is_too_late(match.get("match_date") or match.get("date")):
+                    _skipped_started += 1
+                    logger.info(
+                        "analyze: TIMING_GUARD descarta tenis %s — inicio %s ya pasado/demasiado próximo",
+                        match.get("match_id"), kickoff_label(match.get("match_date") or match.get("date")),
+                    )
+                    continue
                 try:
                     sigs = await generate_tennis_signals(match, weights_version)
                     if sigs:
@@ -1519,6 +1539,13 @@ async def _bg_analyze() -> None:
             logger.info("analyze: %d partidos de baloncesto (48h) a analizar", len(bball_docs))
             for bdoc in bball_docs:
                 game = bdoc.to_dict()
+                if signal_is_too_late(game.get("match_date") or game.get("date")):
+                    _skipped_started += 1
+                    logger.info(
+                        "analyze: TIMING_GUARD descarta baloncesto %s — inicio %s ya pasado/demasiado próximo",
+                        game.get("match_id"), kickoff_label(game.get("match_date") or game.get("date")),
+                    )
+                    continue
                 try:
                     sigs = await generate_basketball_signals(game, weights_version)
                     signals_generated += len(sigs)
@@ -1548,8 +1575,9 @@ async def _bg_analyze() -> None:
             logger.warning("analyze[diag]: error leyendo oaio cache — %s", _diag_e)
 
         logger.info(
-            "analyze: %d senales generadas de %d enriquecidos en %.1fs",
-            signals_generated, len(docs), elapsed,
+            "analyze: %d senales generadas de %d enriquecidos en %.1fs "
+            "(%d partidos descartados por TIMING_GUARD: ya empezados/demasiado próximos)",
+            signals_generated, len(docs), elapsed, _skipped_started,
         )
 
         # Arbitrage detection — corre al final de cada analyze en background

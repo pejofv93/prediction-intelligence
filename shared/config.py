@@ -41,6 +41,13 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"  # compatible con openai SDK
 SPORTS_MIN_EDGE = 0.08
 SPORTS_MIN_CONFIDENCE = 0.65
 SPORTS_ALERT_EDGE = 0.08
+
+# Timing guard — descartar señales de partidos ya empezados o demasiado próximos.
+# Si faltan menos de N minutos para el inicio (o ya empezó) → no emitir/enviar la señal.
+# Configurable por env. 0 = solo descartar partidos ya empezados.
+SIGNAL_MIN_MINUTES_BEFORE_KICKOFF = int(
+    os.environ.get("SIGNAL_MIN_MINUTES_BEFORE_KICKOFF", "20")
+)
 BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral menor
 POLY_MIN_EDGE = 0.08
 POLY_MIN_CONFIDENCE = 0.65

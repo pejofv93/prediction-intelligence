@@ -648,6 +648,18 @@ async def send_sports_alert(prediction: dict) -> bool:
     edge = float(prediction.get("edge") or 0)
     key = _alert_key(prediction, edge)
 
+    # TIMING_GUARD: no enviar alertas de partidos ya empezados o demasiado próximos
+    # al inicio (defensa en profundidad: la generación ya filtra, pero una predicción
+    # antigua reenviada por otra ruta no debe colarse).
+    from shared.match_timing import signal_is_too_late, kickoff_label
+    if signal_is_too_late(prediction.get("match_date")):
+        logger.info(
+            "send_sports_alert: TIMING_GUARD descarta %s vs %s — inicio %s ya pasado/demasiado próximo",
+            prediction.get("home_team", "?"), prediction.get("away_team", "?"),
+            kickoff_label(prediction.get("match_date")),
+        )
+        return False
+
     # Dedup atómico: pre-escribe antes de enviar
     if not _claim_alert_slot(key, "sports"):
         return False
