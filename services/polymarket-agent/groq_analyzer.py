@@ -402,16 +402,72 @@ _ASSET_DETECT: list = [
 ]
 
 
-# Detecta si la pregunta implica alcanzar un precio al ALZA (reach/hit/above/exceed…)
-# o a la BAJA (drop/fall/below…). Usado para el floor ALREADY_EXCEEDED.
-_UPWARD_PRICE_RE = re.compile(
-    r'\b(reach|hit|exceed|surpass|cross|above|break|top|close above|rise to|climb to|touch)\b',
+# Dirección canónica del target de precio (UP=subida / DOWN=bajada).
+# Prioridad: marcador explícito (LOW)/(HIGH) > verbos NO ambiguos > signo de pct_needed.
+#
+# hit/touch se EXCLUYEN de la inferencia por verbos: son ambiguos (sirven tanto para
+# "hit a HIGH" como para "hit a LOW"). Polymarket marca la dirección real con (LOW)/(HIGH)
+# en el título — ese marcador manda. Si no hay marcador ni verbo claro, el signo de
+# pct_needed = (target/current - 1) decide (negativo=bajada, positivo=subida).
+_LOW_MARKER_RE  = re.compile(r'\(\s*low\s*\)', re.I)
+_HIGH_MARKER_RE = re.compile(r'\(\s*high\s*\)', re.I)
+# Verbos direccionales NO ambiguos (sin hit/touch)
+_UNAMBIGUOUS_UP_RE = re.compile(
+    r'\b(reach|exceed|surpass|cross|above|break|top|close above|rise to|climb to)\b',
     re.I,
 )
-_DOWNWARD_PRICE_RE = re.compile(
+_UNAMBIGUOUS_DOWN_RE = re.compile(
     r'\b(fall|drop|dip|below|decline|crash|sink|close below|go below|fall to|drop to|dip to)\b',
     re.I,
 )
+
+
+def _price_target_direction(question: str, pct_needed: float | None) -> str | None:
+    """
+    Dirección canónica de un target de precio: "UP" (subida) o "DOWN" (bajada).
+
+    Prioridad:
+      1. Marcador explícito (LOW)→DOWN / (HIGH)→UP (manda sobre todo lo demás).
+      2. Verbo NO ambiguo (reach/exceed/above… = UP; fall/drop/dip/below… = DOWN).
+         hit/touch quedan fuera por ambiguos.
+      3. Signo de pct_needed (negativo=DOWN, positivo=UP) como último recurso.
+    Devuelve None si no se puede determinar.
+    """
+    if _LOW_MARKER_RE.search(question):
+        return "DOWN"
+    if _HIGH_MARKER_RE.search(question):
+        return "UP"
+    up = bool(_UNAMBIGUOUS_UP_RE.search(question))
+    down = bool(_UNAMBIGUOUS_DOWN_RE.search(question))
+    if up and not down:
+        return "UP"
+    if down and not up:
+        return "DOWN"
+    if pct_needed is not None:
+        if pct_needed < 0:
+            return "DOWN"
+        if pct_needed > 0:
+            return "UP"
+    return None
+
+
+def _price_target_already_achieved(
+    direction: str | None, current_price: float, target_price: float
+) -> bool:
+    """
+    True si el target de precio YA está cumplido, según su dirección canónica:
+      - UP   (HIGH/reach): cumplido si current > target (ya superó el máximo).
+      - DOWN (LOW/dip):    cumplido si current < target (ya tocó el mínimo).
+    Cualquier otra combinación (o dirección desconocida) → False.
+
+    Clave del fix: un target LOW con current > target NO está cumplido (bajar al
+    mínimo sigue pendiente y es DIFÍCIL) → no debe disparar el floor del 90%.
+    """
+    if direction == "UP":
+        return current_price > target_price
+    if direction == "DOWN":
+        return current_price < target_price
+    return False
 
 
 def _is_groq_quota_exhausted() -> bool:
@@ -2806,6 +2862,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     _price_ctx = _detect_price_market(question)
     _current_price: float | None = None
     _pct_needed: float | None = None
+    _price_dir: str | None = None   # dirección canónica del target: "UP" / "DOWN"
     if _price_ctx:
         _p_asset, _p_cg_id, _p_target = _price_ctx
         # 1. ctc_price del enricher — primera opción, sin coste de red
@@ -2832,6 +2889,11 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             return None
         if _current_price and _current_price > 0:
             _pct_needed = (_p_target / _current_price - 1) * 100
+            _price_dir = _price_target_direction(question, _pct_needed)
+            logger.debug(
+                "analyze_market(%s): PRICE_DIR=%s asset=%s target=$%.2f current=$%.2f pct_needed=%.1f%%",
+                market_id, _price_dir, _p_asset, _p_target, _current_price, _pct_needed,
+            )
             if abs(_pct_needed) > 100:
                 logger.info(
                     "analyze_market(%s): PRICE_UNREACHABLE — %s target=$%.0f current=$%.2f "
@@ -3444,42 +3506,46 @@ async def analyze_market(enriched_market: dict) -> dict | None:
             _price_floor_applied = True
             _price_floor_value = _finalist_floor_value
 
-    # ALREADY_EXCEEDED: precio actual ya superó el target → prob mínima 90%
-    # Aplica cuando current_price > target Y la pregunta implica alcanzar un precio al alza
-    # ("reach", "hit", "above", "exceed"...). NO aplica a mercados de bajada ("drop to $X").
-    if (
-        _price_ctx
+    # ALREADY_ACHIEVED: el target ya está cumplido → prob mínima 90%.
+    # Direccional — usa la dirección canónica (_price_dir), NO los verbos ambiguos:
+    #   - Target UP (HIGH/reach): cumplido si current > target (ya superó el máximo).
+    #   - Target DOWN (LOW/dip):  cumplido si current < target (ya tocó el mínimo).
+    # Para un target LOW con current > target el evento (BAJAR al mínimo) está SIN cumplir
+    # y es DIFÍCIL → NO se aplica el floor del 90% (bug histórico: lo trataba como alcanzado).
+    _already_achieved = (
+        _price_ctx is not None
         and _pct_needed is not None
         and _current_price is not None
-        and _current_price > _price_ctx[2]  # current > target
-        and _UPWARD_PRICE_RE.search(question)
-        and not _DOWNWARD_PRICE_RE.search(question)
-    ):
-        _exceeded_floor = 0.90
-        if real_prob < _exceeded_floor:
+        and _price_target_already_achieved(_price_dir, _current_price, _price_ctx[2])
+    )
+    if _already_achieved:
+        _achieved_floor = 0.90
+        _dir_word = "superado (HIGH)" if _price_dir == "UP" else "tocado (LOW)"
+        _cmp = ">" if _price_dir == "UP" else "<"
+        if real_prob < _achieved_floor:
             _old_rp_exc = real_prob
-            real_prob = _exceeded_floor
+            real_prob = _achieved_floor
             edge = round(real_prob - price_yes, 4)
             _price_floor_applied = True
-            _price_floor_value = _exceeded_floor
+            _price_floor_value = _achieved_floor
             _exc_note = (
-                f"⚠️ Target ya superado: {_price_ctx[0]} cotiza "
-                f"${_current_price:,.2f} > target ${_price_ctx[2]:,.0f} "
-                f"→ prob_min={_exceeded_floor:.0%}"
+                f"⚠️ Target ya {_dir_word}: {_price_ctx[0]} cotiza "
+                f"${_current_price:,.2f} {_cmp} target ${_price_ctx[2]:,.0f} "
+                f"→ prob_min={_achieved_floor:.0%}"
             )
             reasoning = f"{_exc_note}\n{reasoning}" if reasoning else _exc_note
             logger.info(
-                "analyze_market(%s): ALREADY_EXCEEDED %.3f→%.3f "
-                "asset=%s current=$%.2f target=$%.0f",
-                market_id, _old_rp_exc, real_prob,
-                _price_ctx[0], _current_price, _price_ctx[2],
+                "analyze_market(%s): ALREADY_ACHIEVED(%s) %.3f→%.3f "
+                "asset=%s current=$%.2f %s target=$%.0f",
+                market_id, _price_dir, _old_rp_exc, real_prob,
+                _price_ctx[0], _current_price, _cmp, _price_ctx[2],
             )
         if recommendation == "BUY_NO":
             recommendation = "PASS"
             logger.info(
-                "analyze_market(%s): ALREADY_EXCEEDED BUY_NO→PASS "
-                "(current=$%.2f > target=$%.0f)",
-                market_id, _current_price, _price_ctx[2],
+                "analyze_market(%s): ALREADY_ACHIEVED(%s) BUY_NO→PASS "
+                "(current=$%.2f %s target=$%.0f)",
+                market_id, _price_dir, _current_price, _cmp, _price_ctx[2],
             )
         if edge >= POLY_MIN_EDGE:
             recommendation = "BUY_YES"
