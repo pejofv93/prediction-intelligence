@@ -25,6 +25,12 @@ _BASE_THRESHOLDS = {
 }
 _MIN_OUTCOMES_FOR_LEARNED = 20
 
+# Filtro anti-longshot para BUY_YES: el modelo tiene sesgo optimista y compra YES
+# en eventos que el mercado considera improbables (mp_yes bajo), que casi nunca ocurren.
+# Backtest histórico: BUY_YES con mp_yes < 0.40 → 1 acierto / 31 fallos.
+# Solo afecta a BUY_YES; BUY_NO no se toca. Configurable aquí para ajustar sin tocar lógica.
+_BUY_YES_MIN_MP_YES = 0.40
+
 
 def _load_learned_thresholds() -> dict:
     """
@@ -208,6 +214,19 @@ async def check_and_alert(analysis: dict) -> bool:
             analysis.get("market_id"), confidence, effective_min_conf, direction,
         )
         return False
+
+    # Filtro anti-longshot BUY_YES: no comprar YES en eventos que el mercado considera
+    # improbables (mp_yes bajo). Sesgo optimista del modelo — backtest: 1/31 en longshots.
+    # No afecta a BUY_NO.
+    if direction == "BUY_YES":
+        mp_yes = float(analysis.get("market_price_yes", 0.5))
+        if mp_yes < _BUY_YES_MIN_MP_YES:
+            logger.info(
+                "check_and_alert(%s): SKIP_LONGSHOT BUY_YES mp_yes=%.3f < %.3f — omitida "
+                "(anti-longshot: modelo optimista en evento improbable)",
+                analysis.get("market_id"), mp_yes, _BUY_YES_MIN_MP_YES,
+            )
+            return False
 
     market_id = str(analysis.get("market_id") or "")
     if not market_id:
