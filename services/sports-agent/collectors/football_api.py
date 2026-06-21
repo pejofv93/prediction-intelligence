@@ -90,10 +90,18 @@ def _parse_match(m: dict) -> dict | None:
 
 
 async def get_upcoming_matches(days: int = 7) -> list[dict]:
-    """GET /matches?dateFrom=today&dateTo=today+days. Filtra por SUPPORTED_LEAGUES."""
+    """GET /matches?dateFrom=today&dateTo=today+days. Filtra por SUPPORTED_LEAGUES.
+
+    DEDUP WC: "WC" (FIFA World Cup) se EXCLUYE de la colección de PREDICCIONES. El Mundial 2026
+    se predice exclusivamente vía _collect_wc2026() (Sofascore/Odds API → league="WC26"), evitando
+    que cada partido entre dos veces (WC vs WC26). football-data WC sigue activo para RESOLUCIÓN
+    de resultados (get_finished_matches, get_wc26_result_by_teams, get_match_result) — NO se toca.
+    """
     today = datetime.now(timezone.utc).date()
     date_to = today + timedelta(days=days)
-    leagues = ",".join(SUPPORTED_FOOTBALL_LEAGUES.keys())
+    # Predicciones: todas las ligas soportadas EXCEPTO WC (fuente única = WC26 vía _collect_wc2026)
+    pred_leagues = [k for k in SUPPORTED_FOOTBALL_LEAGUES.keys() if k != "WC"]
+    leagues = ",".join(pred_leagues)
 
     data = await _request(
         f"/matches?dateFrom={today}&dateTo={date_to}&competitions={leagues}"
@@ -102,12 +110,27 @@ async def get_upcoming_matches(days: int = 7) -> list[dict]:
         return []
 
     matches = []
+    skipped_wc = 0
     for m in data.get("matches", []):
         parsed = _parse_match(m)
-        if parsed:
-            matches.append(parsed)
+        if not parsed:
+            continue
+        # Defensa en profundidad: aunque WC no se pide en la query, descartamos cualquier
+        # partido WC que la API devuelva igualmente (la predicción del Mundial es solo WC26).
+        if parsed.get("league") == "WC":
+            skipped_wc += 1
+            continue
+        matches.append(parsed)
 
-    logger.info("get_upcoming_matches: %d partidos en los proximos %d dias", len(matches), days)
+    if skipped_wc:
+        logger.info(
+            "get_upcoming_matches: %d partidos WC omitidos (dedup → se colectan solo vía WC26)",
+            skipped_wc,
+        )
+    logger.info(
+        "get_upcoming_matches: %d partidos en los proximos %d dias (WC excluido, fuente única WC26)",
+        len(matches), days,
+    )
     return matches
 
 
@@ -230,6 +253,59 @@ async def get_finished_matches(days_back: int = 30) -> list[dict]:
         len(all_matches), days_back,
     )
     return all_matches
+
+
+async def get_wc26_result_by_teams(
+    home_team: str, away_team: str, match_date_str: str
+) -> str | None:
+    """
+    Busca resultado WC26 en football-data.org por nombres de equipo + fecha.
+    GET /competitions/WC/matches?dateFrom=date&dateTo=date&status=FINISHED
+    Devuelve "HOME_WIN" | "AWAY_WIN" | "DRAW" | None.
+
+    Usado por learning_engine como fallback para WC26_OA_* / WC26_SF_* IDs
+    que no son numéricos y no pueden resolverse con get_match_result().
+    """
+    import unicodedata
+
+    def _n(s: str) -> str:
+        return (
+            unicodedata.normalize("NFD", str(s).strip().lower())
+            .encode("ascii", "ignore")
+            .decode()
+        )
+
+    date_str = str(match_date_str)[:10]  # YYYY-MM-DD
+    data = await _request(
+        f"/competitions/WC/matches?dateFrom={date_str}&dateTo={date_str}&status=FINISHED"
+    )
+    if not data:
+        return None
+
+    home_n = _n(home_team)
+    away_n = _n(away_team)
+
+    for m in data.get("matches", []):
+        parsed = _parse_match(m)
+        if not parsed:
+            continue
+        if parsed["goals_home"] is None or parsed["goals_away"] is None:
+            continue
+        if _n(parsed.get("home_team_name", "")) == home_n and _n(parsed.get("away_team_name", "")) == away_n:
+            gh = parsed["goals_home"]
+            ga = parsed["goals_away"]
+            if gh > ga:
+                return "HOME_WIN"
+            elif ga > gh:
+                return "AWAY_WIN"
+            else:
+                return "DRAW"
+
+    logger.debug(
+        "get_wc26_result_by_teams: no encontrado — %s vs %s en %s",
+        home_team, away_team, date_str,
+    )
+    return None
 
 
 async def get_match_result(match_id: str) -> dict | None:

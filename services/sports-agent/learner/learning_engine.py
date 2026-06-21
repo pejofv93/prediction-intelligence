@@ -311,6 +311,162 @@ def calculate_accuracy(predictions: list[dict]) -> float:
     return round(correct_count / len(evaluated), 4)
 
 
+def _dedup_pending(pending: list[dict]) -> tuple[list[dict], dict[str, list[dict]]]:
+    """
+    Deduplication de predicciones pendientes (BUG 2: dos señales por mismo partido).
+
+    Agrupa por (home_norm, away_norm, date_day, market_type).
+    Dentro de cada grupo con >1 predicciones:
+      - Prioridad: ID numérico > WC26_SF_* > WC26_OA_* > cualquier otro
+      - El primero (mayor prioridad) es el "primario" para actualizar pesos
+      - Los demás son duplicados → se actualizarán en Firestore con el mismo
+        result/correct/error_type pero NO contribuyen al weight update
+
+    Returns:
+        unique: una predicción por grupo (para weight update)
+        dup_map: {primary_firestore_doc_id: [duplicate_predictions]}
+    """
+    from collections import defaultdict
+
+    def _match_key(p: dict) -> tuple:
+        home_n = _norm(p.get("home_team", ""))
+        away_n = _norm(p.get("away_team", ""))
+        date_d = str(p.get("match_date", ""))[:10]
+        mkt = p.get("market_type") or "h2h"
+        return (home_n, away_n, date_d, mkt)
+
+    def _id_priority(p: dict) -> int:
+        mid = str(p.get("match_id", ""))
+        if mid and mid[0].isdigit():
+            return 0   # ID numérico football-data.org — más resoluble
+        if mid.startswith("WC26_SF_"):
+            return 1   # Sofascore ID
+        if mid.startswith("WC26_OA_"):
+            return 2   # Odds API hash — menos resoluble
+        return 3
+
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for p in pending:
+        groups[_match_key(p)].append(p)
+
+    unique: list[dict] = []
+    dup_map: dict[str, list[dict]] = {}
+
+    for key, preds in groups.items():
+        if len(preds) == 1:
+            unique.append(preds[0])
+            continue
+        preds_sorted = sorted(preds, key=_id_priority)
+        primary = preds_sorted[0]
+        duplicates = preds_sorted[1:]
+        unique.append(primary)
+        primary_id = str(primary.get("_firestore_doc_id") or primary.get("match_id") or "")
+        if primary_id and duplicates:
+            dup_map[primary_id] = duplicates
+
+    if dup_map:
+        total_dups = sum(len(v) for v in dup_map.values())
+        logger.info(
+            "_dedup_pending: %d grupos con duplicados, %d predicciones excluidas de weight update",
+            len(dup_map), total_dups,
+        )
+    return unique, dup_map
+
+
+async def _resolve_wc26_extra(prediction: dict) -> str | None:
+    """
+    Resolución alternativa para WC26_OA_* y WC26_SF_* que check_result no puede manejar
+    (IDs no numéricos → get_match_result() los ignora).
+
+    Intenta en orden:
+    1. Predicción hermana en Firestore (mismo home+away+fecha, result ya resuelto)
+    2. match_results en Firestore, búsqueda por nombre de equipo
+    3. football_api WC endpoint por equipos + fecha (football-data.org)
+
+    Solo se llama para predicciones WC26_* cuyo partido ya debería haber terminado.
+    """
+    home_team = str(prediction.get("home_team") or "")
+    away_team = str(prediction.get("away_team") or "")
+    match_date = prediction.get("match_date")
+
+    if not home_team or not away_team or not match_date:
+        return None
+
+    date_str = str(match_date)[:10]  # YYYY-MM-DD
+    home_n = _norm(home_team)
+    away_n = _norm(away_team)
+    _WINNER_MAP = {"H": "HOME_WIN", "A": "AWAY_WIN", "D": "DRAW"}
+
+    # 1. Predicción hermana ya resuelta (mismo home+away+fecha, result != None)
+    try:
+        sibling_docs = list(
+            col("predictions")
+            .where(filter=FieldFilter("home_team", "==", home_team))
+            .limit(20)
+            .stream()
+        )
+        for doc in sibling_docs:
+            data = doc.to_dict()
+            result = data.get("result")
+            if not result or result in (None, "expired"):
+                continue
+            if (
+                _norm(data.get("away_team", "")) == away_n
+                and str(data.get("match_date", ""))[:10] == date_str
+            ):
+                logger.info(
+                    "_resolve_wc26_extra: hermana encontrada en predictions — %s vs %s → %s",
+                    home_team, away_team, result,
+                )
+                return result
+    except Exception:
+        logger.warning("_resolve_wc26_extra: error en búsqueda de hermana", exc_info=True)
+
+    # 2. match_results por nombre de equipo
+    try:
+        mr_docs = list(
+            col("match_results")
+            .where(filter=FieldFilter("home_team", "==", home_team))
+            .limit(20)
+            .stream()
+        )
+        for doc in mr_docs:
+            data = doc.to_dict()
+            if (
+                _norm(data.get("away_team", "")) == away_n
+                and str(data.get("match_date", ""))[:10] == date_str
+            ):
+                winner = data.get("winner")
+                mapped = _WINNER_MAP.get(winner)
+                if mapped:
+                    logger.info(
+                        "_resolve_wc26_extra: match_results — %s vs %s → %s",
+                        home_team, away_team, mapped,
+                    )
+                    return mapped
+    except Exception:
+        logger.warning("_resolve_wc26_extra: error en búsqueda match_results", exc_info=True)
+
+    # 3. football-data.org WC endpoint por equipos + fecha
+    try:
+        from collectors.football_api import get_wc26_result_by_teams
+        result = await get_wc26_result_by_teams(home_team, away_team, date_str)
+        if result:
+            logger.info(
+                "_resolve_wc26_extra: football_api WC — %s vs %s → %s",
+                home_team, away_team, result,
+            )
+            return result
+    except Exception:
+        logger.warning("_resolve_wc26_extra: error en football_api WC", exc_info=True)
+
+    logger.debug(
+        "_resolve_wc26_extra: sin resultado para %s vs %s (%s)",
+        home_team, away_team, date_str,
+    )
+    return None
+
+
 def _get_week_label(dt: datetime) -> str:
     """Devuelve etiqueta de semana ISO: ej. '2025-W14'."""
     iso_cal = dt.isocalendar()
@@ -346,7 +502,11 @@ async def run_daily_learning() -> None:
         logger.info("run_daily_learning: sin predicciones pendientes")
         return
 
-    logger.info("run_daily_learning: procesando %d predicciones", len(pending))
+    logger.info("run_daily_learning: %d predicciones pendientes antes de dedup", len(pending))
+
+    # Deduplicar por (home, away, fecha, mercado) — BUG 2: dos señales por mismo partido
+    pending, _dup_map = _dedup_pending(pending)
+    logger.info("run_daily_learning: procesando %d predicciones únicas", len(pending))
 
     # --- 2. Cargar pesos actuales ---
     _prev_conf_data: dict = {}
@@ -380,15 +540,41 @@ async def run_daily_learning() -> None:
 
     # 3a. Paralelizar todas las llamadas check_result (I/O bound → asyncio.gather)
     _match_ids = [str(p.get("match_id", "")) for p in pending]
-    _raw_results = await asyncio.gather(
+    _raw_results = list(await asyncio.gather(
         *[check_result(mid) for mid in _match_ids],
         return_exceptions=True,
-    )
+    ))
     logger.info(
         "run_daily_learning: check_result paralelo completado — %d/%d con resultado",
         sum(1 for r in _raw_results if r is not None and not isinstance(r, Exception)),
         len(_raw_results),
     )
+
+    # BUG 1: second-pass para WC26_OA_* / WC26_SF_* IDs no numéricos que check_result ignoró.
+    # Solo se intenta para predicciones sin resultado cuyo partido ya debería estar terminado.
+    _wc26_indices = [
+        i for i, (p, r) in enumerate(zip(pending, _raw_results))
+        if (r is None or isinstance(r, Exception))
+        and str(p.get("match_id", "")).startswith("WC26_")
+    ]
+    if _wc26_indices:
+        logger.info(
+            "run_daily_learning: %d predicciones WC26 sin resultado — intentando resolución extra",
+            len(_wc26_indices),
+        )
+        _wc26_extra = await asyncio.gather(
+            *[_resolve_wc26_extra(pending[i]) for i in _wc26_indices],
+            return_exceptions=True,
+        )
+        resolved_extra = 0
+        for idx, extra_r in zip(_wc26_indices, _wc26_extra):
+            if isinstance(extra_r, str):
+                _raw_results[idx] = extra_r
+                resolved_extra += 1
+        logger.info(
+            "run_daily_learning: WC26 extra-resolution — %d/%d resueltos",
+            resolved_extra, len(_wc26_indices),
+        )
 
     groq_predictions_count = 0  # contador de predicciones groq_ai procesadas hoy
 
@@ -500,6 +686,39 @@ async def run_daily_learning() -> None:
             logger.error(
                 "run_daily_learning: error procesando prediccion %s", match_id, exc_info=True
             )
+
+    # --- 3c. Propagar result/correct/error_type a predicciones duplicadas (BUG 2) ---
+    # Los duplicados fueron excluidos del weight update pero deben recibir el resultado
+    # en Firestore para no quedar atascados eternamente en pending.
+    if _dup_map:
+        _primary_results: dict[str, dict] = {
+            str(p.get("_firestore_doc_id") or p.get("match_id") or ""): p
+            for p in processed_predictions
+        }
+        propagated = 0
+        for primary_id, dups in _dup_map.items():
+            primary_proc = _primary_results.get(primary_id)
+            if not primary_proc:
+                continue
+            payload = {
+                "result":     primary_proc["result"],
+                "correct":    primary_proc["correct"],
+                "error_type": primary_proc["error_type"],
+                "_resolved_from_duplicate": primary_id,
+            }
+            for dup in dups:
+                dup_doc_id = str(dup.get("_firestore_doc_id") or dup.get("match_id") or "")
+                if not dup_doc_id:
+                    continue
+                try:
+                    col("predictions").document(dup_doc_id).update(payload)
+                    propagated += 1
+                except Exception:
+                    logger.warning(
+                        "run_daily_learning: error propagando resultado a duplicado %s", dup_doc_id, exc_info=True
+                    )
+        if propagated:
+            logger.info("run_daily_learning: resultado propagado a %d predicciones duplicadas", propagated)
 
     # --- 4. Actualizar ELOs ---
     if finished_matches_for_elo:
