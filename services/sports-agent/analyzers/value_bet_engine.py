@@ -52,6 +52,14 @@ _FILTER_PARAMS_TTL: float = 1800.0  # 30 min
 # cuotas naturalmente más altas (~2.0) y necesitan un umbral menor.
 _ALT_MARKET_MIN_CONF: float = 0.60
 
+# Filtro de divergencia modelo-mercado para señales 1X2 — espejo de _BUY_YES_MIN_MP_YES
+# en polymarket-agent. El discriminador de rentabilidad NO es el edge, es la divergencia:
+# cuando el modelo se separa mucho de la probabilidad implícita (1/odds), el edge está
+# inflado (underdogs tipo Túnez, Escocia, Haiti) y la señal pierde. Backtest: las dos
+# peores bandas (0.10-0.15 y 0.15+) suman -27.5u. 0.10 conservador, no sobreajustado a
+# la banda rentable pequeña — mismo criterio prudente que en Polymarket.
+_MAX_DIVERGENCE: float = 0.10
+
 
 def _get_filter_params() -> dict:
     """Lee parámetros dinámicos de filtros desde Firestore con caché 30min."""
@@ -2719,6 +2727,22 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # FIX-CONF100: cap estricto — multiplicadores acumulados (motivación + descanso)
     # pueden superar 1.0 (ej: 1.05 × 1.05 = 1.1025). Confianza nunca puede superar 99%.
     best_confidence = min(best_confidence, 0.99)
+
+    # --- Guard de divergencia modelo-mercado (espejo de _BUY_YES_MIN_MP_YES en Polymarket) ---
+    # Divergencia = prob del modelo - prob implícita (1/odds). Calculada explícitamente sobre
+    # best_prob/best_odds (NO best_edge, que lleva descuento ×0.80). Si el modelo se separa del
+    # mercado más de _MAX_DIVERGENCE, el edge está inflado (underdog) → no emitir la señal.
+    _implied = (1.0 / best_odds) if best_odds > 1.0 else 1.0
+    _divergence = best_prob - _implied
+    if _divergence > _MAX_DIVERGENCE:
+        logger.info(
+            "generate_signal(%s): SKIP_HIGH_DIVERGENCE %s @ %.2f | "
+            "calculated_prob=%.3f implícita=%.3f divergencia=%.3f > %.2f — omitida "
+            "(edge inflado de underdog)",
+            match_id, team_to_back, best_odds,
+            best_prob, _implied, _divergence, _MAX_DIVERGENCE,
+        )
+        return []
 
     kelly = kelly_criterion(best_ev, best_odds)
     results: list[dict] = []
