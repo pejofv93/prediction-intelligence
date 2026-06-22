@@ -31,6 +31,13 @@ _MIN_OUTCOMES_FOR_LEARNED = 20
 # Solo afecta a BUY_YES; BUY_NO no se toca. Configurable aquí para ajustar sin tocar lógica.
 _BUY_YES_MIN_MP_YES = 0.40
 
+# Filtro espejo anti-favorito-extremo para BUY_NO: el modelo apuesta NO contra
+# favoritos casi seguros (mp_yes alto), que normalmente ganan → dinero muerto.
+# Análisis histórico: BUY_NO con mp_yes >= 0.85 → 0 aciertos / 9 (-100%, 0 ganadoras
+# sacrificadas). Las BUY_NO buenas (divergencia alta) están todas en mp_yes < 0.75.
+# Conservador en 0.85 (no 0.80, que ya costaría 2 ganadoras). Solo afecta a BUY_NO.
+_BUY_NO_MAX_MP_YES = 0.85
+
 
 def _load_learned_thresholds() -> dict:
     """
@@ -225,6 +232,18 @@ async def check_and_alert(analysis: dict) -> bool:
                 "check_and_alert(%s): SKIP_LONGSHOT BUY_YES mp_yes=%.3f < %.3f — omitida "
                 "(anti-longshot: modelo optimista en evento improbable)",
                 analysis.get("market_id"), mp_yes, _BUY_YES_MIN_MP_YES,
+            )
+            return False
+
+    # Filtro espejo anti-favorito-extremo BUY_NO: no apostar NO contra favoritos casi
+    # seguros (mp_yes alto). Histórico: mp_yes >= 0.85 → 0/9 (dinero muerto). No afecta a BUY_YES.
+    if direction == "BUY_NO":
+        mp_yes = float(analysis.get("market_price_yes", 0.5))
+        if mp_yes >= _BUY_NO_MAX_MP_YES:
+            logger.info(
+                "check_and_alert(%s): SKIP_FADE_STRONG_FAVORITE BUY_NO mp_yes=%.3f >= %.3f — omitida "
+                "(anti-favorito-extremo: NO contra favorito casi seguro)",
+                analysis.get("market_id"), mp_yes, _BUY_NO_MAX_MP_YES,
             )
             return False
 
