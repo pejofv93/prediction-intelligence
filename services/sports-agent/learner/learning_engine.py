@@ -92,15 +92,39 @@ def _norm(s: str) -> str:
     )
 
 
+# Sports cuyas predicciones expiradas siguen siendo graduables (fuente con histórico):
+# basket (ESPN/Sofascore/Euroleague) y tenis. Fútbol expirado NO se reintenta.
+_REGRADABLE_EXPIRED_SPORTS = {"basketball", "nba", "tennis"}
+# Ventana máxima para reintentar expiradas — evita refetch infinito de partidos
+# demasiado viejos para estar en el histórico de la fuente.
+_EXPIRED_REGRADE_MAX_AGE = timedelta(days=60)
+
+
 async def fetch_pending_results() -> list[dict]:
     """
     Busca predicciones en Firestore donde:
-    - result == None (aun sin evaluar)
+    - result == None (aun sin evaluar), o
+    - result == "expired" pero el sport es graduable (basket/tenis): el sweeper de
+      48h (_cleanup_stale_predictions) las marcó expired antes de que existiera su
+      grader; las fuentes de basket/tenis tienen histórico → recuperables.
     - match_date < now - 24h (el partido ya debio jugarse)
     Devuelve lista de predicciones pendientes de evaluar.
     """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=24)
+    expired_floor = now - _EXPIRED_REGRADE_MAX_AGE
+
+    def _parse_md(match_date):
+        if match_date is None:
+            return None
+        if isinstance(match_date, str):
+            try:
+                match_date = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
+            match_date = match_date.replace(tzinfo=timezone.utc)
+        return match_date
 
     try:
         # Query equality en result — el filtro de match_date se aplica en Python
@@ -112,25 +136,34 @@ async def fetch_pending_results() -> list[dict]:
             # Preservar el doc ID de Firestore para garantizar que el update posterior
             # use el ID correcto aunque el campo match_id almacenado difiera
             data["_firestore_doc_id"] = doc.id
-            match_date = data.get("match_date")
-
-            if match_date is None:
+            md = _parse_md(data.get("match_date"))
+            if md is None:
                 continue
-
-            # Parsear string ISO si Firestore lo devuelve como str en lugar de timestamp
-            if isinstance(match_date, str):
-                try:
-                    match_date = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
-                except ValueError:
-                    logger.warning("fetch_pending_results: match_date no parseable: %s", match_date)
-                    continue
-
-            # Normalizar timezone si es naive
-            if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
-                match_date = match_date.replace(tzinfo=timezone.utc)
-
-            if match_date < cutoff:
+            if md < cutoff:
                 pending.append(data)
+
+        # Segundo query: expiradas de sports graduables (basket/tenis) dentro de ventana.
+        try:
+            exp_docs = (
+                col("predictions")
+                .where(filter=FieldFilter("result", "==", "expired"))
+                .stream()
+            )
+            regraded = 0
+            for doc in exp_docs:
+                data = doc.to_dict()
+                if str(data.get("sport", "")).lower() not in _REGRADABLE_EXPIRED_SPORTS:
+                    continue
+                data["_firestore_doc_id"] = doc.id
+                md = _parse_md(data.get("match_date"))
+                if md is None or md >= cutoff or md < expired_floor:
+                    continue
+                pending.append(data)
+                regraded += 1
+            if regraded:
+                logger.info("fetch_pending_results: %d expiradas basket/tenis re-encoladas", regraded)
+        except Exception:
+            logger.warning("fetch_pending_results: error leyendo expiradas regraduables", exc_info=True)
 
         logger.info("fetch_pending_results: %d predicciones pendientes", len(pending))
         return pending
