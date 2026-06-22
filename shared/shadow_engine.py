@@ -38,6 +38,25 @@ def _calc_pnl(result: str, virtual_stake: float, odds: float) -> Optional[float]
     return None
 
 
+def _poly_decimal_odds(selection: str, market_price_yes: float) -> float:
+    """
+    Cuota decimal de la apuesta REALMENTE tomada en un mercado Polymarket.
+
+    market_price_yes es siempre el precio del lado YES.
+      BUY_YES → compras YES a mp_yes      → cuota 1/mp_yes
+      BUY_NO  → compras NO a (1-mp_yes)    → cuota 1/(1-mp_yes)
+
+    Antes se usaba 1/mp_yes para AMBAS direcciones, infravalorando el pago de
+    los aciertos BUY_NO (un NO longshot que paga 5-6× se registraba como calderilla).
+    """
+    sel = (selection or "").upper().strip()
+    if not (0.0 < market_price_yes < 1.0):
+        return 2.0
+    if sel in ("BUY_NO", "NO"):
+        return round(1.0 / (1.0 - market_price_yes), 2)
+    return round(1.0 / market_price_yes, 2)
+
+
 def _calc_bankroll_after() -> float:
     """Recalcula bankroll desde 50.0 sumando todos los pnl de trades cerrados."""
     try:
@@ -131,7 +150,8 @@ async def retroactive_eval(db=None) -> dict:
                 kelly = min(0.25, max(0.01, edge / 2))
                 virtual_stake = _calc_virtual_stake(kelly)
                 market_price_yes = float(p.get("market_price_yes") or 0.5)
-                odds = round(1 / market_price_yes, 2) if market_price_yes > 0 else 2.0
+                recommendation = str(p.get("recommendation") or "YES")
+                odds = _poly_decimal_odds(recommendation, market_price_yes)
 
                 trade_id = str(uuid.uuid4())
                 question = str(p.get("question") or "")
@@ -196,7 +216,7 @@ async def track_new_signal(signal: dict, source: str) -> str:
             market = question[:100]
             selection = str(signal.get("recommendation") or "YES")
             market_price_yes = float(signal.get("market_price_yes") or 0.5)
-            odds = round(1 / market_price_yes, 2) if market_price_yes > 0 else 2.0
+            odds = _poly_decimal_odds(selection, market_price_yes)
             edge = float(signal.get("edge") or 0.0)
             confidence = float(signal.get("confidence") or 0.0)
             kelly = min(0.25, max(0.01, edge / 2))
@@ -288,7 +308,19 @@ async def update_trade_result(trade_id: str, result: str, odds_final: float = No
 
         data = doc.to_dict()
         virtual_stake = float(data.get("virtual_stake") or _MIN_STAKE)
-        effective_odds = odds_final if odds_final is not None else float(data.get("odds") or 2.0)
+
+        # Cuota efectiva del lado realmente apostado.
+        # Para Polymarket la dirección importa: BUY_NO paga a 1/(1-mp_yes), no a 1/mp_yes.
+        if odds_final is not None:
+            effective_odds = odds_final
+        elif data.get("source") == "polymarket":
+            mp_yes = (data.get("signal_data") or {}).get("market_price_yes")
+            if mp_yes is not None:
+                effective_odds = _poly_decimal_odds(data.get("selection"), float(mp_yes))
+            else:
+                effective_odds = float(data.get("odds") or 2.0)
+        else:
+            effective_odds = float(data.get("odds") or 2.0)
 
         pnl = _calc_pnl(result, virtual_stake, effective_odds)
         bankroll = _calc_bankroll_after()
