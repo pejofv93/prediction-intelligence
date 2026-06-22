@@ -385,6 +385,119 @@ async def _fetch_euroleague_history() -> list[dict]:
     return result
 
 
+# ── Grading de resultados (h2h/moneyline) ─────────────────────────────────────
+# Cache en proceso: evita refetchear la misma fuente por cada predicción del run diario.
+_BK_FINISHED_CACHE: dict[str, list[dict]] = {}
+
+
+def _norm_team(s: str) -> str:
+    import re
+    import unicodedata
+    n = unicodedata.normalize("NFD", (s or "").lower().strip()).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9 ]", "", n).strip()
+
+
+async def _fetch_nba_finished_espn(date_str: str) -> list[dict]:
+    """
+    Partidos NBA TERMINADOS (state='post') con marcador, vía ESPN scoreboard.
+    get_nba_games_espn descarta los 'post' y no trae score, así que esta función
+    aparte es la que sirve para grading. Cache por fecha.
+    """
+    espn_date = str(date_str).replace("-", "")[:8]
+    cache_key = f"nba_{espn_date}"
+    if cache_key in _BK_FINISHED_CACHE:
+        return _BK_FINISHED_CACHE[cache_key]
+    loop = asyncio.get_event_loop()
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+        f"?dates={espn_date}"
+    )
+    data = await loop.run_in_executor(None, _http_get, url)
+    out: list[dict] = []
+    for event in (data or {}).get("events", []):
+        for comp in event.get("competitions", []):
+            state = comp.get("status", {}).get("type", {}).get("state", "pre")
+            if state != "post":
+                continue
+            competitors = comp.get("competitors", [])
+            home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+            away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+            try:
+                hs = float(home.get("score"))
+                as_ = float(away.get("score"))
+            except (TypeError, ValueError):
+                continue
+            ht = home.get("team", {})
+            at = away.get("team", {})
+            out.append({
+                "home_team_name": ht.get("displayName", ht.get("name", "")),
+                "away_team_name": at.get("displayName", at.get("name", "")),
+                "goals_home": hs,
+                "goals_away": as_,
+                "match_date": (comp.get("date") or event.get("date") or "")[:10],
+            })
+    _BK_FINISHED_CACHE[cache_key] = out
+    return out
+
+
+async def _basket_finished_for_league(league: str, date_str: str) -> list[dict]:
+    """Histórico terminado (nombres + marcador + fecha) según la liga."""
+    lg = (league or "").upper()
+    if lg == "NBA":
+        # Ventana de 3 días: la fecha ESPN (US) puede diferir de la commence_time UTC.
+        try:
+            base = datetime.fromisoformat(str(date_str)[:10])
+        except ValueError:
+            base = datetime.now(timezone.utc)
+        out: list[dict] = []
+        for off in (-1, 0, 1):
+            out.extend(await _fetch_nba_finished_espn((base + timedelta(days=off)).date().isoformat()))
+        return out
+    if lg == "ACB":
+        if "acb_hist" not in _BK_FINISHED_CACHE:
+            _BK_FINISHED_CACHE["acb_hist"] = await _fetch_acb_history_sofascore(pages=4)
+        return _BK_FINISHED_CACHE["acb_hist"]
+    if lg in ("EUROLEAGUE", "EUR"):
+        if "eur_hist" not in _BK_FINISHED_CACHE:
+            _BK_FINISHED_CACHE["eur_hist"] = await _fetch_euroleague_history()
+        return _BK_FINISHED_CACHE["eur_hist"]
+    return []
+
+
+async def get_basketball_result_by_teams(league: str, home_team: str, away_team: str,
+                                         date_str: str) -> str | None:
+    """
+    Resultado h2h/moneyline de un partido de basket terminado: 'HOME_WIN' | 'AWAY_WIN' | None.
+    Casa por nombres normalizados + fecha contra el histórico de la fuente del league
+    (NBA→ESPN, ACB→Sofascore, EUR→Euroleague). NO grada totales/spread (requieren marcador
+    final, fase posterior). Mismo patrón que football_api.get_wc26_result_by_teams.
+    """
+    date10 = str(date_str)[:10]
+    try:
+        finished = await _basket_finished_for_league(league, date10)
+    except Exception:
+        logger.warning("get_basketball_result_by_teams: error fetch %s", league, exc_info=True)
+        return None
+    hn, an = _norm_team(home_team), _norm_team(away_team)
+    for f in finished:
+        fdate = str(f.get("match_date", ""))[:10]
+        if fdate and date10 and fdate != date10:
+            continue
+        hs, as_ = f.get("goals_home"), f.get("goals_away")
+        if hs is None or as_ is None or hs == as_:
+            continue
+        fh, fa = _norm_team(f.get("home_team_name", "")), _norm_team(f.get("away_team_name", ""))
+        if fh == hn and fa == an:
+            return "HOME_WIN" if hs > as_ else "AWAY_WIN"
+        if fh == an and fa == hn:  # orientación invertida entre fuentes
+            return "AWAY_WIN" if hs > as_ else "HOME_WIN"
+    logger.debug(
+        "get_basketball_result_by_teams: sin resultado %s vs %s (%s, %s)",
+        home_team, away_team, date10, league,
+    )
+    return None
+
+
 async def collect_basketball_team_stats(games: list[dict]) -> None:
     """
     Para cada equipo en la lista de partidos, recopila sus últimos partidos

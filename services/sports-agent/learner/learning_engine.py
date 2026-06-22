@@ -198,22 +198,25 @@ def evaluate_prediction(prediction: dict, actual_result: str) -> dict:
 
     Devuelve {"correct": bool, "error_type": str | None}
     """
-    team_to_back = _norm(prediction.get("team_to_back", ""))
+    # Fútbol usa team_to_back; tenis/basket usan selection (nombre del equipo/jugador).
+    # team_to_back tiene prioridad → no cambia la graduación de fútbol existente.
+    backed = _norm(prediction.get("team_to_back") or prediction.get("selection") or "")
     home_team = _norm(prediction.get("home_team", ""))
     away_team = _norm(prediction.get("away_team", ""))
     home_id = str(prediction.get("home_team_id", "")).strip()
     away_id = str(prediction.get("away_team_id", "")).strip()
 
-    # Determinar si la prediccion fue correcta (comparación normalizada)
-    if team_to_back == home_team or team_to_back == home_id:
+    # Determinar si la prediccion fue correcta (comparación normalizada).
+    # Basket no tiene empate → actual_result solo es HOME_WIN/AWAY_WIN.
+    if backed == home_team or backed == home_id:
         correct = (actual_result == "HOME_WIN")
-    elif team_to_back == away_team or team_to_back == away_id:
+    elif backed == away_team or backed == away_id:
         correct = (actual_result == "AWAY_WIN")
     else:
         # No se puede determinar — considerar incorrecto
         logger.warning(
-            "evaluate_prediction: team_to_back '%s' no coincide con home/away '%s'/'%s'",
-            team_to_back, home_team, away_team,
+            "evaluate_prediction: backed '%s' no coincide con home/away '%s'/'%s'",
+            backed, home_team, away_team,
         )
         correct = False
 
@@ -467,6 +470,79 @@ async def _resolve_wc26_extra(prediction: dict) -> str | None:
     return None
 
 
+async def _resolve_basket_extra(prediction: dict) -> str | None:
+    """
+    Resolución de basket (h2h/moneyline) que check_result no maneja: sus match_id
+    (ESPN numérico, ACB_SF_*, EUR_*) no son resolubles por football_api.
+    Solo h2h — totals/spread necesitan marcador final (fase posterior).
+
+    Intenta en orden (mismo patrón que _resolve_wc26_extra):
+    1. Predicción hermana ya resuelta (mismo home+away+fecha, result != None)
+    2. Fuente de resultados del league (NBA→ESPN, ACB→Sofascore, EUR→Euroleague)
+    Devuelve 'HOME_WIN' | 'AWAY_WIN' | None.
+    """
+    market = prediction.get("market_type") or "h2h"
+    if market != "h2h":
+        return None
+
+    home_team = str(prediction.get("home_team") or "")
+    away_team = str(prediction.get("away_team") or "")
+    league = str(prediction.get("league") or "")
+    match_date = prediction.get("match_date")
+    if not home_team or not away_team or not match_date:
+        return None
+
+    date_str = str(match_date)[:10]
+    home_n = _norm(home_team)
+    away_n = _norm(away_team)
+
+    # 1. Predicción hermana ya resuelta (mismo home+away+fecha) — evita refetch.
+    try:
+        sibling_docs = list(
+            col("predictions")
+            .where(filter=FieldFilter("home_team", "==", home_team))
+            .limit(20)
+            .stream()
+        )
+        for doc in sibling_docs:
+            data = doc.to_dict()
+            result = data.get("result")
+            if not result or result in (None, "expired"):
+                continue
+            if result not in ("HOME_WIN", "AWAY_WIN"):
+                continue  # solo resultados de ganador válidos para h2h
+            if (
+                _norm(data.get("away_team", "")) == away_n
+                and str(data.get("match_date", ""))[:10] == date_str
+            ):
+                logger.info(
+                    "_resolve_basket_extra: hermana resuelta — %s vs %s → %s",
+                    home_team, away_team, result,
+                )
+                return result
+    except Exception:
+        logger.warning("_resolve_basket_extra: error buscando hermana", exc_info=True)
+
+    # 2. Fuente de resultados del league.
+    try:
+        from collectors.basketball_collector import get_basketball_result_by_teams
+        result = await get_basketball_result_by_teams(league, home_team, away_team, date_str)
+        if result:
+            logger.info(
+                "_resolve_basket_extra: %s — %s vs %s → %s",
+                league, home_team, away_team, result,
+            )
+            return result
+    except Exception:
+        logger.warning("_resolve_basket_extra: error consultando fuente basket", exc_info=True)
+
+    logger.debug(
+        "_resolve_basket_extra: sin resultado para %s vs %s (%s, %s)",
+        home_team, away_team, date_str, league,
+    )
+    return None
+
+
 def _get_week_label(dt: datetime) -> str:
     """Devuelve etiqueta de semana ISO: ej. '2025-W14'."""
     iso_cal = dt.isocalendar()
@@ -574,6 +650,36 @@ async def run_daily_learning() -> None:
         logger.info(
             "run_daily_learning: WC26 extra-resolution — %d/%d resueltos",
             resolved_extra, len(_wc26_indices),
+        )
+
+    # Second-pass basket: tenis/basket no los resuelve check_result (solo fútbol).
+    # Resolvemos basket h2h por nombres+fecha contra la fuente del league.
+    _basket_indices = [
+        i for i, (p, r) in enumerate(zip(pending, _raw_results))
+        if (r is None or isinstance(r, Exception))
+        and (
+            str(p.get("sport", "")).lower() in ("basketball", "nba")
+            or str(p.get("league", "")).upper() in ("NBA", "ACB", "EUROLEAGUE")
+        )
+        and (p.get("market_type") or "h2h") == "h2h"
+    ]
+    if _basket_indices:
+        logger.info(
+            "run_daily_learning: %d predicciones basket h2h sin resultado — resolución extra",
+            len(_basket_indices),
+        )
+        _basket_extra = await asyncio.gather(
+            *[_resolve_basket_extra(pending[i]) for i in _basket_indices],
+            return_exceptions=True,
+        )
+        resolved_basket = 0
+        for idx, extra_r in zip(_basket_indices, _basket_extra):
+            if isinstance(extra_r, str):
+                _raw_results[idx] = extra_r
+                resolved_basket += 1
+        logger.info(
+            "run_daily_learning: basket extra-resolution — %d/%d resueltos",
+            resolved_basket, len(_basket_indices),
         )
 
     groq_predictions_count = 0  # contador de predicciones groq_ai procesadas hoy
