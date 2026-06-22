@@ -21,8 +21,8 @@ import numpy as np
 
 from shared.config import (
     BASKETBALL_HOME_ADV_NBA, BASKETBALL_HOME_ADV_EURO, BASKETBALL_SPREAD_SIGMA,
-    ODDS_API_KEY, SPORTS_ALERT_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE,
-    BASKETBALL_MIN_EDGE, TAVILY_API_KEY,
+    ODDS_API_KEY, SPORTS_ALERT_EDGE, SPORTS_MAX_DIVERGENCE, SPORTS_MIN_CONFIDENCE,
+    SPORTS_MIN_EDGE, BASKETBALL_MIN_EDGE, TAVILY_API_KEY,
 )
 from shared.firestore_client import col
 
@@ -801,6 +801,25 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                     home_name, away_name,
                 )
                 ml = None
+            # Guard de divergencia ABSOLUTA (espejo exacto del de fútbol/tenis): si el modelo
+            # se separa de la implícita más de SPORTS_MAX_DIVERGENCE en cualquiera de los dos
+            # lados, el edge está inflado (favorito sobreconfiado tipo Valencia ACB, o underdog
+            # sobreestimado). El ratio ×2.5 de arriba NO captura esto (Valencia 0.90 vs 0.50 =
+            # ratio 1.8 pasa, pero divergencia 0.40 ≫ 0.10). Solo h2h, NO spread/totals.
+            if ml is not None:
+                _div_home = _p_home_chk - _impl_home
+                _div_away = _p_away_chk - _impl_away
+                _div_max = max(_div_home, _div_away)
+                if _div_max > SPORTS_MAX_DIVERGENCE:
+                    logger.info(
+                        "basketball_analyzer(%s): SKIP_HIGH_DIVERGENCE moneyline | "
+                        "p_home=%.3f impl_home=%.3f (div=%.3f) p_away=%.3f impl_away=%.3f "
+                        "(div=%.3f) max_div=%.3f > %.2f — descartada [%s vs %s]",
+                        match_id, _p_home_chk, _impl_home, _div_home,
+                        _p_away_chk, _impl_away, _div_away, _div_max,
+                        SPORTS_MAX_DIVERGENCE, home_name, away_name,
+                    )
+                    ml = None
         if ml:
             _league_min_edge = _LEAGUE_MIN_EDGE.get(league, BASKETBALL_MIN_EDGE)
             for team, prob, odds, tag, team_seed, opp_seed in [

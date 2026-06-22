@@ -42,6 +42,15 @@ SPORTS_MIN_EDGE = 0.08
 SPORTS_MIN_CONFIDENCE = 0.65
 SPORTS_ALERT_EDGE = 0.08
 
+# Filtro de divergencia modelo-mercado (h2h/moneyline) — único valor para los 3 deportes.
+# Divergencia = prob del modelo - prob implícita (1/odds). Cuando el modelo se separa del
+# mercado más de este umbral, el edge está inflado (underdog sobreestimado tipo McDonald,
+# Virtanen; o favorito sobreconfiado tipo Valencia ACB) y la señal pierde. Espejo de
+# _BUY_YES_MIN_MP_YES en Polymarket. 0.10 conservador, no sobreajustado a la banda rentable.
+# Alcance: SOLO h2h/moneyline. NO aplicar a spread/totales/hándicap (allí la divergencia
+# mide otra cosa y sobre-filtraría edges legítimos).
+SPORTS_MAX_DIVERGENCE = 0.10
+
 # Timing guard — descartar señales de partidos ya empezados o demasiado próximos.
 # Si faltan menos de N minutos para el inicio (o ya empezó) → no emitir/enviar la señal.
 # Configurable por env. 0 = solo descartar partidos ya empezados.

@@ -22,6 +22,7 @@ from shared.config import (
     LEAGUE_MIN_EDGE,
     ODDS_API_KEY,
     SPORTS_ALERT_EDGE,
+    SPORTS_MAX_DIVERGENCE,
     SPORTS_MIN_CONFIDENCE,
     SPORTS_MIN_EDGE,
     TAVILY_API_KEY,
@@ -58,7 +59,8 @@ _ALT_MARKET_MIN_CONF: float = 0.60
 # inflado (underdogs tipo Túnez, Escocia, Haiti) y la señal pierde. Backtest: las dos
 # peores bandas (0.10-0.15 y 0.15+) suman -27.5u. 0.10 conservador, no sobreajustado a
 # la banda rentable pequeña — mismo criterio prudente que en Polymarket.
-_MAX_DIVERGENCE: float = 0.10
+# Valor único en shared.config.SPORTS_MAX_DIVERGENCE (compartido con tenis y baloncesto).
+_MAX_DIVERGENCE: float = SPORTS_MAX_DIVERGENCE
 
 
 def _get_filter_params() -> dict:
