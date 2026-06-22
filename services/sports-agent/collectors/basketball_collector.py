@@ -440,6 +440,37 @@ async def _fetch_nba_finished_espn(date_str: str) -> list[dict]:
     return out
 
 
+async def _tsdb_result_by_event_id(match_id: str) -> str | None:
+    """
+    Resuelve un partido ACB de TheSportsDB por su event id embebido en el match_id
+    (ej: 'ACB_2318194_ml_away' → idEvent 2318194). lookupevent.php devuelve el
+    marcador final aunque eventspastleague (free tier) solo dé el último partido.
+    Devuelve 'HOME_WIN' | 'AWAY_WIN' | None.
+    """
+    import re
+    m = re.match(r"^ACB_(\d+)", str(match_id or ""))
+    if not m:
+        return None
+    eid = m.group(1)
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(
+        None, _http_get,
+        f"https://www.thesportsdb.com/api/v1/json/3/lookupevent.php?id={eid}",
+    )
+    evs = (data or {}).get("events") or []
+    if not evs:
+        return None
+    e = evs[0]
+    try:
+        hs = int(e.get("intHomeScore"))
+        as_ = int(e.get("intAwayScore"))
+    except (TypeError, ValueError):
+        return None
+    if hs == as_:
+        return None
+    return "HOME_WIN" if hs > as_ else "AWAY_WIN"
+
+
 async def _basket_finished_for_league(league: str, date_str: str) -> list[dict]:
     """Histórico terminado (nombres + marcador + fecha) según la liga."""
     lg = (league or "").upper()
@@ -454,8 +485,9 @@ async def _basket_finished_for_league(league: str, date_str: str) -> list[dict]:
             out.extend(await _fetch_nba_finished_espn((base + timedelta(days=off)).date().isoformat()))
         return out
     if lg == "ACB":
+        # pages=8 (~160 partidos) para cubrir playoffs además de regular season.
         if "acb_hist" not in _BK_FINISHED_CACHE:
-            _BK_FINISHED_CACHE["acb_hist"] = await _fetch_acb_history_sofascore(pages=4)
+            _BK_FINISHED_CACHE["acb_hist"] = await _fetch_acb_history_sofascore(pages=8)
         return _BK_FINISHED_CACHE["acb_hist"]
     if lg in ("EUROLEAGUE", "EUR"):
         if "eur_hist" not in _BK_FINISHED_CACHE:
@@ -465,13 +497,26 @@ async def _basket_finished_for_league(league: str, date_str: str) -> list[dict]:
 
 
 async def get_basketball_result_by_teams(league: str, home_team: str, away_team: str,
-                                         date_str: str) -> str | None:
+                                         date_str: str, match_id: str | None = None) -> str | None:
     """
     Resultado h2h/moneyline de un partido de basket terminado: 'HOME_WIN' | 'AWAY_WIN' | None.
-    Casa por nombres normalizados + fecha contra el histórico de la fuente del league
-    (NBA→ESPN, ACB→Sofascore, EUR→Euroleague). NO grada totales/spread (requieren marcador
-    final, fase posterior). Mismo patrón que football_api.get_wc26_result_by_teams.
+    Estrategia:
+      1. ACB con id TheSportsDB embebido (ACB_<id>_*) → lookupevent por id (robusto).
+      2. Casa por nombres normalizados + fecha contra el histórico de la fuente del league
+         (NBA→ESPN, ACB→Sofascore, EUR→Euroleague).
+    NO grada totales/spread (requieren marcador final, fase posterior).
+    Mismo patrón que football_api.get_wc26_result_by_teams.
     """
+    lg = (league or "").upper()
+    # 1. ACB por id TheSportsDB (los nombres difieren entre fuentes → id es más fiable).
+    if lg == "ACB" and match_id:
+        try:
+            res = await _tsdb_result_by_event_id(match_id)
+            if res:
+                return res
+        except Exception:
+            logger.warning("get_basketball_result_by_teams: error lookupevent ACB %s", match_id, exc_info=True)
+
     date10 = str(date_str)[:10]
     try:
         finished = await _basket_finished_for_league(league, date10)

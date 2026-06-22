@@ -556,10 +556,13 @@ async def _resolve_basket_extra(prediction: dict) -> str | None:
     except Exception:
         logger.warning("_resolve_basket_extra: error buscando hermana", exc_info=True)
 
-    # 2. Fuente de resultados del league.
+    # 2. Fuente de resultados del league (pasa match_id para resolución ACB por id TheSportsDB).
     try:
         from collectors.basketball_collector import get_basketball_result_by_teams
-        result = await get_basketball_result_by_teams(league, home_team, away_team, date_str)
+        result = await get_basketball_result_by_teams(
+            league, home_team, away_team, date_str,
+            match_id=str(prediction.get("match_id") or ""),
+        )
         if result:
             logger.info(
                 "_resolve_basket_extra: %s — %s vs %s → %s",
