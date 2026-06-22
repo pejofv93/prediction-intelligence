@@ -33,7 +33,15 @@ _ODDSAPIIO_ODDS_CACHE: dict[str, tuple[datetime, list]] = {}
 _CACHE_TTL = timedelta(hours=24)
 _ODDS_ONLY_MIN_EDGE = 0.03        # umbral relajado: sin stats de RapidAPI
 _ODDS_ONLY_MIN_CONFIDENCE = 0.55  # confianza base odds-only
-_ODDS_REGRESSION_WEIGHT = 0.80    # 80% mercado + 20% media → corrige sesgo favorito
+# w=1.0 → prob justa (margin-stripped) DIRECTA, sin regresión hacia 0.5.
+# El antiguo 0.80 (= 0.80·fair + 0.20·0.5) fabricaba edge fantasma en underdogs:
+# el término +0.10 empujaba la prob del underdog por encima de su precio implícito.
+# Con w=1.0 la prob justa nunca bate al precio con margen → odds-only no inventa
+# ventaja donde no la hay. (Histórico fútbol banda cuota>5: WR 4.2%, ROI -73.8%.)
+_ODDS_REGRESSION_WEIGHT = 1.0
+# Red de seguridad: descartar longshots extremos en odds-only (sin stats no hay
+# edge real ahí, solo line-shopping espurio). Justificado por fútbol cuota>5 = -74% ROI.
+_ODDS_ONLY_MAX_ODDS = 4.0
 
 # Sport keys de The Odds API para tenis
 # Claves específicas mejoran precisión; genéricas (ATP/WTA/ITF) actúan de fallback.
@@ -274,9 +282,13 @@ def _get_totals_odds(event: dict, line: float = 2.5) -> dict | None:
 
 def _prob_from_market_odds(avg_p1_odds: float, avg_p2_odds: float) -> tuple[float, float, dict]:
     """
-    Probabilidad justa (sin margen) con regresión al 20% hacia la media.
-    Justificación: el mercado sobreestima sistemáticamente a favoritos en tenis
-    (documentado en Grand Slams, especialmente clay). Regresión 80/20 es conservadora.
+    Probabilidad justa (margin-stripped) DIRECTA, sin regresión hacia 0.5.
+    El antiguo término (1-w)·0.5 inflaba sistemáticamente a los underdogs y
+    fabricaba un edge fantasma: la prob justa sin margen NUNCA debe superar al
+    precio CON margen, así que cualquier "ventaja" extraída solo de las cuotas
+    era artificial. Validado con el histórico de fútbol (banda cuota>5: WR 4.2%,
+    ROI -73.8%) y las 9 señales de tenis vivas (todas underdogs, edge fantasma).
+    Con _ODDS_REGRESSION_WEIGHT=1.0 → model_p1 = fair_p1.
     Devuelve (model_prob_p1, confidence, signals_dict).
     """
     if avg_p1_odds <= 1.0 or avg_p2_odds <= 1.0:
@@ -469,12 +481,21 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
             (p1_name,  _prob1,          _bh["p1_odds"], f"{match_id}_h2h_p1_oo"),
             (p2_name, 1.0 - _prob1,     _bh["p2_odds"], f"{match_id}_h2h_p2_oo"),
         ]:
+            # Red de seguridad longshot: sin stats, los extremos no tienen edge real
+            # (solo line-shopping espurio). Fútbol cuota>5: WR 4.2%, ROI -73.8%.
+            if _best_odds > _ODDS_ONLY_MAX_ODDS:
+                logger.info(
+                    "tennis_analyzer(%s): SKIP_LONGSHOT_CAP %s @ %.2f > %.1f — descartada "
+                    "(odds-only no apuesta longshots extremos)",
+                    match_id, _sel, _best_odds, _ODDS_ONLY_MAX_ODDS,
+                )
+                continue
             _edge = round(_prob - 1.0 / _best_odds, 4)
             if _edge < _ODDS_ONLY_MIN_EDGE or _conf < _ODDS_ONLY_MIN_CONFIDENCE:
                 continue
-            # Guard de divergencia (h2h) — espejo del de fútbol. La regresión 80/20 hacia
-            # 0.5 de _prob_from_market_odds infla la prob del underdog (McDonald, Virtanen);
-            # si la divergencia vs la implícita supera el umbral, el edge es espurio.
+            # Guard de divergencia (h2h) — espejo del de fútbol. Backstop residual: con
+            # w=1.0 ya no se fabrica edge fantasma, pero mantenemos el cap de divergencia
+            # por si el line-shopping (best vs avg) genera un gap espurio en algún caso.
             _div_oo = _prob - 1.0 / _best_odds if _best_odds > 1.0 else 1.0
             if _div_oo > SPORTS_MAX_DIVERGENCE:
                 logger.info(
