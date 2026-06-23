@@ -51,6 +51,17 @@ SPORTS_ALERT_EDGE = 0.08
 # mide otra cosa y sobre-filtraría edges legítimos).
 SPORTS_MAX_DIVERGENCE = 0.10
 
+# Frontera favorito/underdog para el filtro de divergencia DIRECCIONAL.
+# El guard de divergencia solo debe bloquear cuando el lado apostado es UNDERDOG
+# (cuota >= esta frontera). En FAVORITOS claros (cuota < 1.80, implícita > ~0.556)
+# una divergencia alta es esperable — el modelo solo está más convencido que el
+# mercado — y NO indica el edge inflado de longshot que el filtro persigue.
+# Sin este condicional el filtro era direction-blind: cortaba favoritos buenos
+# (fútbol: WR cortados 53% ≈ WR conservados 56%) además de underdogs malos.
+# Frontera 1.80 = punto P&L-óptimo en la muestra de fútbol (150 resueltas); la parte
+# robusta es "recuperar favoritos claros <1.80, seguir cortando >=1.80", no el número.
+SPORTS_DIVERGENCE_UNDERDOG_ODDS = 1.80
+
 # Timing guard — descartar señales de partidos ya empezados o demasiado próximos.
 # Si faltan menos de N minutos para el inicio (o ya empezó) → no emitir/enviar la señal.
 # Configurable por env. 0 = solo descartar partidos ya empezados.

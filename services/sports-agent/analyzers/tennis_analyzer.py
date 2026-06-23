@@ -19,8 +19,8 @@ import httpx
 import numpy as np
 
 from shared.config import (
-    ODDS_API_KEY, ODDSAPIIO_KEY, SPORTS_ALERT_EDGE, SPORTS_MAX_DIVERGENCE,
-    SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE, TENNIS_WEIGHTS,
+    ODDS_API_KEY, ODDSAPIIO_KEY, SPORTS_ALERT_EDGE, SPORTS_DIVERGENCE_UNDERDOG_ODDS,
+    SPORTS_MAX_DIVERGENCE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE, TENNIS_WEIGHTS,
 )
 from shared.firestore_client import col
 
@@ -369,16 +369,19 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
     edge = round(prob - 1.0 / odds, 4) if odds > 1 else 0.0
     if edge <= SPORTS_MIN_EDGE or conf <= SPORTS_MIN_CONFIDENCE:
         return None
-    # Guard de divergencia modelo-mercado — SOLO h2h (espejo exacto del de fútbol).
+    # Guard de divergencia modelo-mercado DIRECCIONAL — SOLO h2h (espejo del de fútbol).
+    # Solo bloquea si el lado es UNDERDOG (cuota >= frontera); favoritos claros exentos.
     # NO aplicar a set_handicap/total_sets/total_games/game_handicap: allí la divergencia
     # mide otra cosa (cobertura, over/under) y sobre-filtraría edges legítimos.
     if market == "h2h" and odds > 1.0:
         _divergence = prob - 1.0 / odds
-        if _divergence > SPORTS_MAX_DIVERGENCE:
+        if odds >= SPORTS_DIVERGENCE_UNDERDOG_ODDS and _divergence > SPORTS_MAX_DIVERGENCE:
             logger.info(
-                "tennis_analyzer: SKIP_HIGH_DIVERGENCE %s @ %.2f | calculated_prob=%.3f "
-                "implícita=%.3f divergencia=%.3f > %.2f — omitida (edge inflado de underdog)",
+                "tennis_analyzer: SKIP_HIGH_DIVERGENCE [underdog] %s @ %.2f | calculated_prob=%.3f "
+                "implícita=%.3f divergencia=%.3f > %.2f — omitida (edge inflado de underdog; "
+                "favoritos <%.2f exentos)",
                 selection, odds, prob, 1.0 / odds, _divergence, SPORTS_MAX_DIVERGENCE,
+                SPORTS_DIVERGENCE_UNDERDOG_ODDS,
             )
             return None
     return {
@@ -493,15 +496,18 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
             _edge = round(_prob - 1.0 / _best_odds, 4)
             if _edge < _ODDS_ONLY_MIN_EDGE or _conf < _ODDS_ONLY_MIN_CONFIDENCE:
                 continue
-            # Guard de divergencia (h2h) — espejo del de fútbol. Backstop residual: con
-            # w=1.0 ya no se fabrica edge fantasma, pero mantenemos el cap de divergencia
-            # por si el line-shopping (best vs avg) genera un gap espurio en algún caso.
+            # Guard de divergencia DIRECCIONAL (h2h) — espejo del de fútbol. Solo bloquea
+            # underdogs (cuota >= frontera); favoritos claros exentos. Backstop residual:
+            # con w=1.0 ya no se fabrica edge fantasma, pero mantenemos el cap por si el
+            # line-shopping (best vs avg) genera un gap espurio en algún caso.
             _div_oo = _prob - 1.0 / _best_odds if _best_odds > 1.0 else 1.0
-            if _div_oo > SPORTS_MAX_DIVERGENCE:
+            if _best_odds >= SPORTS_DIVERGENCE_UNDERDOG_ODDS and _div_oo > SPORTS_MAX_DIVERGENCE:
                 logger.info(
-                    "tennis_analyzer(%s): SKIP_HIGH_DIVERGENCE %s @ %.2f | calculated_prob=%.3f "
-                    "implícita=%.3f divergencia=%.3f > %.2f — omitida (regresión 80/20 infla underdog)",
+                    "tennis_analyzer(%s): SKIP_HIGH_DIVERGENCE [underdog] %s @ %.2f | calculated_prob=%.3f "
+                    "implícita=%.3f divergencia=%.3f > %.2f — omitida (regresión 80/20 infla underdog; "
+                    "favoritos <%.2f exentos)",
                     match_id, _sel, _best_odds, _prob, 1.0 / _best_odds, _div_oo, SPORTS_MAX_DIVERGENCE,
+                    SPORTS_DIVERGENCE_UNDERDOG_ODDS,
                 )
                 continue
             _pred_oo = {

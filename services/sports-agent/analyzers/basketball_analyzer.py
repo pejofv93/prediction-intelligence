@@ -21,7 +21,8 @@ import numpy as np
 
 from shared.config import (
     BASKETBALL_HOME_ADV_NBA, BASKETBALL_HOME_ADV_EURO, BASKETBALL_SPREAD_SIGMA,
-    ODDS_API_KEY, SPORTS_ALERT_EDGE, SPORTS_MAX_DIVERGENCE, SPORTS_MIN_CONFIDENCE,
+    ODDS_API_KEY, SPORTS_ALERT_EDGE, SPORTS_DIVERGENCE_UNDERDOG_ODDS,
+    SPORTS_MAX_DIVERGENCE, SPORTS_MIN_CONFIDENCE,
     SPORTS_MIN_EDGE, BASKETBALL_MIN_EDGE, TAVILY_API_KEY,
 )
 from shared.firestore_client import col
@@ -801,25 +802,11 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                     home_name, away_name,
                 )
                 ml = None
-            # Guard de divergencia ABSOLUTA (espejo exacto del de fútbol/tenis): si el modelo
-            # se separa de la implícita más de SPORTS_MAX_DIVERGENCE en cualquiera de los dos
-            # lados, el edge está inflado (favorito sobreconfiado tipo Valencia ACB, o underdog
-            # sobreestimado). El ratio ×2.5 de arriba NO captura esto (Valencia 0.90 vs 0.50 =
-            # ratio 1.8 pasa, pero divergencia 0.40 ≫ 0.10). Solo h2h, NO spread/totals.
-            if ml is not None:
-                _div_home = _p_home_chk - _impl_home
-                _div_away = _p_away_chk - _impl_away
-                _div_max = max(_div_home, _div_away)
-                if _div_max > SPORTS_MAX_DIVERGENCE:
-                    logger.info(
-                        "basketball_analyzer(%s): SKIP_HIGH_DIVERGENCE moneyline | "
-                        "p_home=%.3f impl_home=%.3f (div=%.3f) p_away=%.3f impl_away=%.3f "
-                        "(div=%.3f) max_div=%.3f > %.2f — descartada [%s vs %s]",
-                        match_id, _p_home_chk, _impl_home, _div_home,
-                        _p_away_chk, _impl_away, _div_away, _div_max,
-                        SPORTS_MAX_DIVERGENCE, home_name, away_name,
-                    )
-                    ml = None
+            # NOTA: el guard de divergencia ABSOLUTA (0.10) ya NO se evalúa aquí pre-bucle.
+            # Antes hacía max(div_home, div_away) y mataba el partido entero si CUALQUIER
+            # lado divergía — direction-blind doble: cortaba favoritos sobreconfiados (que
+            # ganan igual, ver fútbol) y además el lado que ni se iba a apostar. Ahora el
+            # check es DIRECCIONAL y per-lado dentro del bucle (solo underdogs, cuota>=frontera).
         if ml:
             _league_min_edge = _LEAGUE_MIN_EDGE.get(league, BASKETBALL_MIN_EDGE)
             for team, prob, odds, tag, team_seed, opp_seed in [
@@ -848,6 +835,21 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                         "basketball_analyzer(%s): NBA_UNDERDOG_EXTREME: %s descartado "
                         "(odds=%.2f > 4.00, win_prob=%.1f%%) [%s vs %s]",
                         match_id, team, odds, prob * 100, home_name, away_name,
+                    )
+                    continue
+                # Guard de divergencia DIRECCIONAL per-lado (espejo de fútbol/tenis): solo
+                # bloquea si el lado apostado es UNDERDOG (odds >= frontera) y el modelo se
+                # separa de la implícita > SPORTS_MAX_DIVERGENCE. Favoritos claros exentos
+                # (la divergencia alta ahí es esperable, no edge inflado de longshot).
+                _impl_sel = 1.0 / odds if odds > 1.0 else 1.0
+                _div_sel = prob - _impl_sel
+                if odds >= SPORTS_DIVERGENCE_UNDERDOG_ODDS and _div_sel > SPORTS_MAX_DIVERGENCE:
+                    logger.info(
+                        "basketball_analyzer(%s): SKIP_HIGH_DIVERGENCE [underdog] %s @ %.2f | "
+                        "calculated_prob=%.3f implícita=%.3f divergencia=%.3f > %.2f — descartada "
+                        "(edge inflado de underdog; favoritos <%.2f exentos) [%s vs %s]",
+                        match_id, team, odds, prob, _impl_sel, _div_sel, SPORTS_MAX_DIVERGENCE,
+                        SPORTS_DIVERGENCE_UNDERDOG_ODDS, home_name, away_name,
                     )
                     continue
                 # Descuento elite: rival con seed ≤2 → bookmakers más eficientes, −20% edge

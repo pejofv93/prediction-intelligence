@@ -22,6 +22,7 @@ from shared.config import (
     LEAGUE_MIN_EDGE,
     ODDS_API_KEY,
     SPORTS_ALERT_EDGE,
+    SPORTS_DIVERGENCE_UNDERDOG_ODDS,
     SPORTS_MAX_DIVERGENCE,
     SPORTS_MIN_CONFIDENCE,
     SPORTS_MIN_EDGE,
@@ -61,6 +62,8 @@ _ALT_MARKET_MIN_CONF: float = 0.60
 # la banda rentable pequeña — mismo criterio prudente que en Polymarket.
 # Valor único en shared.config.SPORTS_MAX_DIVERGENCE (compartido con tenis y baloncesto).
 _MAX_DIVERGENCE: float = SPORTS_MAX_DIVERGENCE
+# Frontera favorito/underdog para condicionar el guard (ver shared.config).
+_DIVERGENCE_UNDERDOG_ODDS: float = SPORTS_DIVERGENCE_UNDERDOG_ODDS
 
 
 def _get_filter_params() -> dict:
@@ -2730,19 +2733,24 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # pueden superar 1.0 (ej: 1.05 × 1.05 = 1.1025). Confianza nunca puede superar 99%.
     best_confidence = min(best_confidence, 0.99)
 
-    # --- Guard de divergencia modelo-mercado (espejo de _BUY_YES_MIN_MP_YES en Polymarket) ---
+    # --- Guard de divergencia modelo-mercado DIRECCIONAL (espejo de Polymarket) ---
     # Divergencia = prob del modelo - prob implícita (1/odds). Calculada explícitamente sobre
-    # best_prob/best_odds (NO best_edge, que lleva descuento ×0.80). Si el modelo se separa del
-    # mercado más de _MAX_DIVERGENCE, el edge está inflado (underdog) → no emitir la señal.
+    # best_prob/best_odds (NO best_edge, que lleva descuento ×0.80).
+    # SOLO bloquea cuando el lado apostado es UNDERDOG (cuota >= _DIVERGENCE_UNDERDOG_ODDS):
+    # ahí una divergencia alta indica edge inflado de longshot. En FAVORITOS claros (cuota
+    # < frontera) la divergencia alta es esperable (el modelo solo está más convencido que el
+    # mercado) y NO debe auto-cortar — el guard era direction-blind y tiraba favoritos buenos
+    # (WR cortados 53% ≈ WR conservados 56% en la muestra de fútbol).
     _implied = (1.0 / best_odds) if best_odds > 1.0 else 1.0
     _divergence = best_prob - _implied
-    if _divergence > _MAX_DIVERGENCE:
+    _is_underdog = best_odds >= _DIVERGENCE_UNDERDOG_ODDS
+    if _is_underdog and _divergence > _MAX_DIVERGENCE:
         logger.info(
-            "generate_signal(%s): SKIP_HIGH_DIVERGENCE %s @ %.2f | "
+            "generate_signal(%s): SKIP_HIGH_DIVERGENCE [underdog] %s @ %.2f | "
             "calculated_prob=%.3f implícita=%.3f divergencia=%.3f > %.2f — omitida "
-            "(edge inflado de underdog)",
+            "(edge inflado de underdog; favoritos <%.2f exentos)",
             match_id, team_to_back, best_odds,
-            best_prob, _implied, _divergence, _MAX_DIVERGENCE,
+            best_prob, _implied, _divergence, _MAX_DIVERGENCE, _DIVERGENCE_UNDERDOG_ODDS,
         )
         return []
 
