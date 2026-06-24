@@ -667,6 +667,14 @@ def _teams_match(our_name: str, api_name: str) -> bool:
         return False
     if a == b:
         return True
+    # Mismos tokens en distinto orden: "dr congo" vs "congo dr", "korea south" vs
+    # "south korea". Las fuentes de cuotas (odds-api.io) a veces invierten el orden de
+    # las palabras de la selección. Comparar como conjunto de palabras lo resuelve sin
+    # depender de un alias por cada permutación. Igualdad estricta de sets → 0 falsos
+    # positivos (dos equipos distintos no comparten exactamente el mismo conjunto de palabras).
+    _ta, _tb = set(a.split()), set(b.split())
+    if len(_ta) > 1 and _ta == _tb:
+        return True
     # Alias de selecciones nacionales (nombres divergentes entre football-data.org y odds-api.io)
     if _COUNTRY_ALIASES.get(a) == b or _COUNTRY_ALIASES.get(b) == a:
         return True
@@ -2307,13 +2315,23 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         _prob_home = result_home["prob"]
         _prob_away = result_away["prob"]
 
-    # BUG1-FIX: guardia de divergencia extrema — si prob > 2.5× la probabilidad
-    # implícita del bookmaker, el modelo diverge de forma imposible (e.g. PSG +176% EV).
+    # Guardia de divergencia extrema DIRECCIONAL — si prob > 2.5× la implícita del
+    # bookmaker, ESE lado es un underdog con edge imposible (e.g. PSG +176% EV).
+    # Matemáticamente sólo un underdog puede superar el ratio (un favorito a 1.49 tiene
+    # implícita 0.67 → 2.5× = 1.68 > 1, inalcanzable); se exige odds>=_DIVERGENCE_UNDERDOG_ODDS
+    # por claridad y coherencia con el filtro SKIP_HIGH_DIVERGENCE.
+    # ANTES (direction-blind): si CUALQUIER lado divergía → return [] descartaba el PARTIDO
+    # entero, tirando también al favorito legítimo del otro lado (Croacia cayó por la
+    # divergencia de Panamá). AHORA: el lado underdog que diverge se marca inelegible y se
+    # excluye de la selección; el favorito del otro lado se sigue evaluando con normalidad.
     _impl_home = 1.0 / home_odds if home_odds > 1.0 else 1.0
     _impl_away = 1.0 / away_odds if away_odds > 1.0 else 1.0
-    if _prob_home > _impl_home * 2.5 or _prob_away > _impl_away * 2.5:
+    _div_home = home_odds >= _DIVERGENCE_UNDERDOG_ODDS and _prob_home > _impl_home * 2.5
+    _div_away = away_odds >= _DIVERGENCE_UNDERDOG_ODDS and _prob_away > _impl_away * 2.5
+    if _div_home and _div_away:
+        # Ambos lados imposibles → datos rotos, descartar partido entero
         logger.warning(
-            "generate_signal(%s): divergencia extrema modelo/mercado — descartado "
+            "generate_signal(%s): divergencia extrema en AMBOS lados — descartado "
             "(p_home=%.2f impl=%.2f ratio=%.1fx | p_away=%.2f impl=%.2f ratio=%.1fx) [%s vs %s | %s]",
             match_id,
             _prob_home, _impl_home, _prob_home / max(_impl_home, 0.01),
@@ -2321,6 +2339,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             home_team, away_team, league,
         )
         return []
+    if _div_home or _div_away:
+        logger.info(
+            "generate_signal(%s): divergencia extrema DIRECCIONAL — excluido lado underdog %s "
+            "(p_home=%.2f impl=%.2f ratio=%.1fx | p_away=%.2f impl=%.2f ratio=%.1fx); "
+            "favorito del otro lado sigue evaluándose [%s vs %s | %s]",
+            match_id, home_team if _div_home else away_team,
+            _prob_home, _impl_home, _prob_home / max(_impl_home, 0.01),
+            _prob_away, _impl_away, _prob_away / max(_impl_away, 0.01),
+            home_team, away_team, league,
+        )
 
     edge_home = calculate_edge(_prob_home, home_odds)
     edge_away = calculate_edge(_prob_away, away_odds)
@@ -2335,8 +2363,15 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         "(Poisson)" if _is_real_poisson else "(ensemble)",
     )
 
-    # --- 5. Seleccionar el lado con mayor EV ---
-    if ev_home >= ev_away:
+    # --- 5. Seleccionar el lado con mayor EV (excluyendo el lado underdog marcado con
+    #        divergencia extrema arriba: _div_home / _div_away) ---
+    if _div_away:
+        _pick_home = True       # away underdog inflado → forzar home (favorito)
+    elif _div_home:
+        _pick_home = False      # home underdog inflado → forzar away (favorito)
+    else:
+        _pick_home = ev_home >= ev_away
+    if _pick_home:
         best_edge = edge_home
         best_ev = ev_home
         best_prob = _prob_home
