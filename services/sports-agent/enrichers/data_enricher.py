@@ -377,7 +377,11 @@ async def enrich_match(match: dict) -> dict:
             away_name = match.get("away_team", match.get("away_team_name", ""))
             home_elo = _resolve_elo(home_id, home_name)
             away_elo = _resolve_elo(away_id, away_name)
-            elo_home_win_prob = round(expected_score(home_elo + HOME_ADVANTAGE, away_elo), 4)
+            # Mundial 2026 se juega en sede NEUTRAL → sin ventaja de localía: sumar +100 ELO
+            # al "local" infla un edge de localía que no existe. Los clasificatorios (WCQ) y
+            # Nations League (NL) SÍ son local/visitante → mantienen HOME_ADVANTAGE.
+            _home_adv = 0 if league in {"WC", "WC26"} else HOME_ADVANTAGE
+            elo_home_win_prob = round(expected_score(home_elo + _home_adv, away_elo), 4)
         except Exception:
             logger.error(
                 "enrich_match(%s): error en ELO", match_id, exc_info=True

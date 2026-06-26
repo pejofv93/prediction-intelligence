@@ -454,14 +454,26 @@ def ensemble_probability(enriched_match: dict, weights: dict, team: str = "home"
     form_home_cal = 0.5 + _FORM_SHRINK * (float(home_form) / 100.0 - 0.5)
     form_away_cal = 0.5 + _FORM_SHRINK * (float(away_form) / 100.0 - 0.5)
 
+    # form_score == 0 = sin historial reciente (típico en selecciones sin partidos
+    # registrados): es AUSENCIA de dato, no una señal pesimista. Excluirla del ensemble
+    # igual que se excluye el ELO default — si entra como 0.20 infla la dispersión y hunde
+    # la confianza artificialmente (1-std). General a todas las ligas: en domésticas el
+    # form==0.0 exacto casi nunca ocurre, así que no las afecta.
+    home_form_sufficient = float(home_form) != 0.0
+    away_form_sufficient = float(away_form) != 0.0
+
     if team == "home":
-        signals = {"poisson": poisson_home_s, "form": form_home_cal}
+        signals = {"poisson": poisson_home_s}
+        if home_form_sufficient:
+            signals["form"] = form_home_cal
         if elo_sufficient:
             signals["elo"] = elo_home_s
         if h2h_sufficient:
             signals["h2h"] = (float(h2h_adv) + 1.0) / 2.0
     else:  # away
-        signals = {"poisson": poisson_away_s, "form": form_away_cal}
+        signals = {"poisson": poisson_away_s}
+        if away_form_sufficient:
+            signals["form"] = form_away_cal
         if elo_sufficient:
             signals["elo"] = 1.0 - elo_home_s
         if h2h_sufficient:
