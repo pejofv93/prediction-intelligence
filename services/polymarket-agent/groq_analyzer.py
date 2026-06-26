@@ -2890,7 +2890,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         if _current_price and _current_price > 0:
             _pct_needed = (_p_target / _current_price - 1) * 100
             _price_dir = _price_target_direction(question, _pct_needed)
-            logger.debug(
+            logger.info(
                 "analyze_market(%s): PRICE_DIR=%s asset=%s target=$%.2f current=$%.2f pct_needed=%.1f%%",
                 market_id, _price_dir, _p_asset, _p_target, _current_price, _pct_needed,
             )

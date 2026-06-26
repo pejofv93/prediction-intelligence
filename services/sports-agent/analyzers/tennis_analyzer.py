@@ -510,6 +510,13 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
                     SPORTS_DIVERGENCE_UNDERDOG_ODDS,
                 )
                 continue
+            # Display: el modelo razona sobre p1, pero la alerta debe mostrar la prob del
+            # LADO realmente apostado (_prob ya es prob1 ó 1-prob1). Copia por-señal para
+            # no contaminar la otra predicción (compartían _sigs por referencia) ni mostrar
+            # odds_*_p1 (siempre del local) cuando se apuesta al p2 → lectura cruzada.
+            _sigs_side = {k: v for k, v in _sigs.items()
+                          if k not in ("odds_fair_p1", "odds_model_p1")}
+            _sigs_side["modelo_prob"] = round(_prob, 4)
             _pred_oo = {
                 **_base_oo,
                 "market_type": "h2h",
@@ -520,7 +527,7 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
                 "edge":        _edge,
                 "confidence":  round(_conf, 4),
                 "kelly_fraction": _kc(_edge, _best_odds),
-                "signals": _sigs, "factors": _sigs,
+                "signals": _sigs_side, "factors": _sigs_side,
                 "data_source": "odds_only",
                 "match_date":  match_date,
                 "weights_version": weights_version,
