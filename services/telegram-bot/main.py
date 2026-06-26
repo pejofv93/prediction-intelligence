@@ -390,12 +390,31 @@ async def send_weekly_report() -> JSONResponse:
             else 0.0
         )
 
-        # Accuracy BUY_YES / BUY_NO (solo mercados con resultado conocido)
-        resolved_poly = [p for p in poly_preds if p.get("resolved") is True]
+        # Accuracy BUY_YES / BUY_NO (solo mercados ya resueltos).
+        # Esquema real escrito por polymarket_resolver: result="win"/"loss",
+        # outcome="YES"/"NO", resolved_at=<ts>. NO existe campo booleano "resolved"
+        # ni outcome=="correct" — leerlos daba siempre 0/0 (bug histórico).
+        # Coherencia con "emitido real": el resolver solo resuelve docs alertados
+        # (escribe result únicamente si alerted=True), así que filtrar por result
+        # ya restringe a lo alertado; lo hacemos explícito por robustez. Por eso un
+        # split crudo/alertado por dirección NO aplica aquí: poly_predictions no
+        # tiene población "cruda" resuelta que contrastar (eso vive en shadow_trades,
+        # ya cubierto por las dos líneas de ROI). Este desglose ES el "emitido real".
+        # NOTA: si no hay mercados resueltos en la ventana analyzed_at de la semana,
+        # 0/0 es LEGÍTIMO (resoluciones aún pendientes), no el bug de campos.
+        resolved_poly = [
+            p for p in poly_preds
+            if p.get("result") in ("win", "loss") and p.get("alerted") is True
+        ]
         poly_buy_yes = [p for p in resolved_poly if p.get("recommendation") == "BUY_YES"]
         poly_buy_no = [p for p in resolved_poly if p.get("recommendation") == "BUY_NO"]
-        poly_buy_yes_correct = sum(1 for p in poly_buy_yes if p.get("outcome") == "correct")
-        poly_buy_no_correct = sum(1 for p in poly_buy_no if p.get("outcome") == "correct")
+        poly_buy_yes_correct = sum(1 for p in poly_buy_yes if p.get("result") == "win")
+        poly_buy_no_correct = sum(1 for p in poly_buy_no if p.get("result") == "win")
+        if not resolved_poly:
+            logger.info(
+                "send-weekly-report: 0 mercados poly resueltos en ventana %s "
+                "(BUY_YES/BUY_NO 0/0 legítimo, no bug de conteo)", prev_week,
+            )
 
         # Mejor señal poly (mayor edge entre las alertadas)
         alerted_poly = [p for p in poly_preds if p.get("alerted") is True]
