@@ -244,7 +244,7 @@ def _format_alert_unified(prediction: dict) -> str:
         ctx_str = "; ".join(str(n) for n in ext_ctx[:3])
         msg += f"\n⚠️ Contexto: {ctx_str}"
     if abs(edge) > 0.20:
-        msg += "\n⚠️ Edge alto — win rate histórico en señales fuertes: 17%. Posible sobreestimación del modelo."
+        msg += "\n⚠️ Edge alto — posible sobreestimación del modelo (edge no validado con histórico)."
     msg += "\n\n⚠️ Apuesta responsablemente. No es asesoramiento financiero."
     return msg
 
@@ -416,7 +416,7 @@ def _format_poly_alert(analysis: dict) -> str:
     data_quality_line = "⚠️ Sin datos externos verificables — ancla: precio mercado ±15%\n" if data_quality == "improvised" else ""
 
     high_edge_line = (
-        "⚠️ Edge alto — win rate histórico en señales fuertes: 17%. Posible sobreestimación del modelo.\n"
+        "⚠️ Edge alto — posible sobreestimación del modelo (edge no validado con histórico).\n"
         if abs_edge > 0.20 else ""
     )
 

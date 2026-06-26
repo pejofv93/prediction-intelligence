@@ -647,9 +647,16 @@ async def generate_tennis_signals(match: dict, weights_version: int = 0) -> list
     avg_sets = 2.0 * prob1 ** 2 + 2.0 * (1 - prob1) ** 2 + 3.0 * 2 * prob1 * (1 - prob1)
     if is_bo5:
         avg_sets = sum(k * _bo5_set_prob(k, prob1) for k in range(3, 6))
-    # Games por set: dominante gana 6-2 (~8 games), contested gana 7-6 (~13 games)
-    # Aproximar: 11 + abs(prob1 - 0.5) × (-6) games/set
-    games_per_set = 11.0 - abs(prob1 - 0.5) * 6.0
+    # Games por set: baseline 9.6 = media real games/set ATP (set típico 6-4/6-3);
+    # dominante gana 6-2 (~8 games), contested gana 7-6 (~13 games). La pendiente
+    # −|prob1−0.5|·6 acorta el set cuanto más desigual es el partido.
+    # HIGIENE (2026-06-26): el baseline anterior (11.0) sobreestimaba ~+1.3 games/set
+    # → +3-4 games totales → edge OVER fantasma vs la línea de mercado. No busca
+    # rentabilidad (heurística 2 params no bate Pinnacle, n=1 sin muestra): solo deja
+    # de fabricar edge falso → los totales se auto-suprimen bajo el umbral. Ver memoria
+    # project_tennis_totals_bias. Mejora futura (si hay volumen + grader de totales):
+    # baseline por superficie/tour (arcilla/hierba/WTA) y anclar exp_total_games a la línea.
+    games_per_set = 9.6 - abs(prob1 - 0.5) * 6.0
     exp_total_games = round(avg_sets * games_per_set, 1)
 
     # Líneas más comunes: 20.5 y 22.5 para Bo3
