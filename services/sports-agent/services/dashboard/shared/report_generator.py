@@ -107,11 +107,14 @@ def generate_weekly_report(
             ]
         return "\n".join(lines)
 
+    pending = week_stats.get("predictions_pending", 0)
+    pending_note = f" (+{pending} pendientes)" if pending > 0 else ""
+
     lines = [
         f"📈 REPORTE SEMANAL — Semana {week}",
         "",
         "🏟 Sports Agent:",
-        f"  Predicciones: {total} | Correctas: {correct} | Accuracy: {accuracy:.1%}",
+        f"  Resueltas: {total} | Correctas: {correct} | Accuracy: {accuracy:.1%}{pending_note}",
         f"  Variación vs semana anterior: {delta_str}",
         "",
         "⚙️ Ajustes de pesos aplicados:",

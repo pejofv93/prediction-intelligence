@@ -102,6 +102,10 @@ def generate_weekly_report(
     n_poly_bk = int(week_stats.get("n_poly", 0))
     pnl_sports_bk = float(week_stats.get("pnl_sports", 0.0))
     pnl_poly_bk = float(week_stats.get("pnl_poly", 0.0))
+    # Polymarket "emitido real" (solo señales realmente alertadas) vs ledger crudo
+    roi_poly_alerted_bk = float(week_stats.get("roi_poly_alerted", 0.0))
+    wr_poly_alerted_bk = float(week_stats.get("win_rate_poly_alerted", 0.0))
+    n_poly_alerted_bk = int(week_stats.get("n_poly_alerted", 0))
 
     pending = int(week_stats.get("predictions_pending", 0))
     pending_note = f" (+{pending} pendientes)" if pending > 0 else ""
@@ -147,7 +151,8 @@ def generate_weekly_report(
             f"P&L: ⚽ Sports {pnl_sports_bk:+.2f}u | 🔮 Polymarket {pnl_poly_bk:+.2f}u",
             f"📈 ROI total: {roi_total:+.1%}",
             f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports_bk:.0%}, {n_sports_bk} señales)",
-            f"  🔮 Polymarket: {roi_poly_bk:+.1%} (win rate {wr_poly_bk:.0%}, {n_poly_bk} señales)",
+            f"  🔮 Polymarket — ledger crudo: {roi_poly_bk:+.1%} (win rate {wr_poly_bk:.0%}, {n_poly_bk} señales)",
+            f"  🔮 Polymarket — emitido real (alertado): {roi_poly_alerted_bk:+.1%} (win rate {wr_poly_alerted_bk:.0%}, {n_poly_alerted_bk} señales)",
         ]
 
     return "\n".join(lines)

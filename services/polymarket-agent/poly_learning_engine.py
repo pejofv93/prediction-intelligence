@@ -31,20 +31,56 @@ _MIN_SAMPLE = 5
 # Lectura de datos
 # ---------------------------------------------------------------------------
 
-def _load_resolved_trades() -> list[dict]:
-    """Lee todos los shadow_trades de polymarket con result win/loss."""
+def _alerted_market_ids() -> set:
+    """Set de market_ids REALMENTE alertados (poly_predictions.alerted == True).
+
+    Fuente autoritativa de "qué emite el sistema". El ledger shadow_trades contiene
+    señales legacy nunca alertadas (alerted=False, pre-gating) que rendían muy mal
+    y NO representan la política de emisión real — entrenar los umbrales sobre ellas
+    sesga el ajuste. El join correcto es shadow_trade.signal_id == poly_predictions
+    doc id. Si falla, devuelve None → no se aplica filtro (fallback al ledger crudo).
+    """
     try:
+        docs = (
+            col("poly_predictions")
+            .where(filter=FieldFilter("alerted", "==", True))
+            .stream()
+        )
+        return {d.id for d in docs}
+    except Exception:
+        logger.error("_alerted_market_ids: error leyendo poly_predictions", exc_info=True)
+        return None
+
+
+def _load_resolved_trades() -> list[dict]:
+    """Lee shadow_trades de polymarket con result win/loss, SOLO los realmente
+    alertados (lo que el sistema de verdad emite). Excluye las señales legacy
+    no-alertadas que contaminaban el ajuste de umbrales.
+    """
+    try:
+        alerted_ids = _alerted_market_ids()
         docs = (
             col("shadow_trades")
             .where(filter=FieldFilter("source", "==", "polymarket"))
             .stream()
         )
         trades = []
+        skipped_not_alerted = 0
         for doc in docs:
             d = doc.to_dict()
-            if d.get("result") in ("win", "loss"):
-                trades.append(d)
-        logger.info("_load_resolved_trades: %d trades resueltos", len(trades))
+            if d.get("result") not in ("win", "loss"):
+                continue
+            # Filtro alerted: aprender solo de lo emitido. Si alerted_ids es None
+            # (fallo de lectura) no filtramos, para no quedarnos sin muestra.
+            if alerted_ids is not None and d.get("signal_id") not in alerted_ids:
+                skipped_not_alerted += 1
+                continue
+            trades.append(d)
+        logger.info(
+            "_load_resolved_trades: %d trades resueltos alertados "
+            "(%d no-alertados excluidos del aprendizaje)",
+            len(trades), skipped_not_alerted,
+        )
         return trades
     except Exception:
         logger.error("_load_resolved_trades: error leyendo Firestore", exc_info=True)

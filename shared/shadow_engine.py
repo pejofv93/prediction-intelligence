@@ -340,6 +340,28 @@ async def update_trade_result(trade_id: str, result: str, odds_final: float = No
         logger.error("shadow: error en update_trade_result: %s", e)
 
 
+def _alerted_poly_ids() -> set:
+    """Set de market_ids REALMENTE alertados (poly_predictions.alerted == True).
+
+    Fuente autoritativa de "qué emite el sistema". OJO: el campo
+    shadow_trade.signal_data.alerted es un snapshot tomado en el análisis
+    (antes de decidir la alerta) y queda en False casi siempre — NO es fiable.
+    El join correcto es shadow_trade.signal_id == poly_predictions doc id.
+    Devuelve set vacío si falla (las métricas "alertadas" quedan a 0 sin romper
+    el resto del cálculo).
+    """
+    try:
+        docs = (
+            col("poly_predictions")
+            .where(filter=FieldFilter("alerted", "==", True))
+            .stream()
+        )
+        return {d.id for d in docs}
+    except Exception as e:
+        logger.error("shadow: error cargando alerted poly ids: %s", e)
+        return set()
+
+
 def calculate_metrics(trades: list = None) -> dict:
     """Calcula métricas de rendimiento. Si trades=None, leerlos de Firestore."""
     try:
@@ -365,6 +387,30 @@ def calculate_metrics(trades: list = None) -> dict:
         # ROI por source
         def _roi_for(source: str):
             src_trades = [t for t in closed if t.get("source") == source]
+            s_pnl = sum(float(t.get("pnl_virtual") or 0) for t in src_trades)
+            s_stake = sum(float(t.get("virtual_stake") or _MIN_STAKE) for t in src_trades)
+            s_wins = [t for t in src_trades if t.get("result") == "win"]
+            return {
+                "roi": round(s_pnl / s_stake, 4) if s_stake > 0 else 0.0,
+                "win_rate": round(len(s_wins) / len(src_trades), 4) if src_trades else 0.0,
+                "n": len(src_trades),
+                "pnl": round(s_pnl, 4),
+                "stake": round(s_stake, 4),
+                "wins": len(s_wins),
+            }
+
+        # ROI "emitido real": solo trades de polymarket REALMENTE alertados.
+        # El ledger crudo (_roi_for) incluye señales que el sistema nunca alertó
+        # (alerted=False, legacy pre-gating) y que jamás se apostarían → contaminan
+        # el ROI. Esto separa "lo que el modelo de verdad emite" del ledger completo.
+        _alerted_ids = _alerted_poly_ids()
+
+        def _roi_for_poly_alerted():
+            src_trades = [
+                t for t in closed
+                if t.get("source") == "polymarket"
+                and t.get("signal_id") in _alerted_ids
+            ]
             s_pnl = sum(float(t.get("pnl_virtual") or 0) for t in src_trades)
             s_stake = sum(float(t.get("virtual_stake") or _MIN_STAKE) for t in src_trades)
             s_wins = [t for t in src_trades if t.get("result") == "win"]
@@ -428,6 +474,7 @@ def calculate_metrics(trades: list = None) -> dict:
         by_source = {
             "sports": _roi_for("sports"),
             "polymarket": _roi_for("polymarket"),
+            "polymarket_alerted": _roi_for_poly_alerted(),
         }
 
         # By category
@@ -486,6 +533,12 @@ def calculate_metrics(trades: list = None) -> dict:
             "n_poly": by_source["polymarket"]["n"],
             "pnl_sports": by_source["sports"]["pnl"],
             "pnl_poly": by_source["polymarket"]["pnl"],
+            # Polymarket "emitido real" — solo señales realmente alertadas.
+            # roi_poly arriba es el LEDGER CRUDO (incluye no-alertadas contaminantes).
+            "roi_poly_alerted": by_source["polymarket_alerted"]["roi"],
+            "win_rate_poly_alerted": by_source["polymarket_alerted"]["win_rate"],
+            "n_poly_alerted": by_source["polymarket_alerted"]["n"],
+            "pnl_poly_alerted": by_source["polymarket_alerted"]["pnl"],
             "roi_last20": roi_last20,
             "last_20_win_rate": last_20_win_rate,
             "avg_edge": avg_edge,

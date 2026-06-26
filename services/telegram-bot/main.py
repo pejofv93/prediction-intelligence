@@ -469,6 +469,11 @@ async def send_weekly_report() -> JSONResponse:
             "n_poly": shadow_metrics.get("n_poly", 0),
             "pnl_sports": shadow_metrics.get("pnl_sports", 0.0),
             "pnl_poly": shadow_metrics.get("pnl_poly", 0.0),
+            # Polymarket "emitido real" (solo alertadas) vs ledger crudo (roi_poly arriba)
+            "roi_poly_alerted": shadow_metrics.get("roi_poly_alerted", 0.0),
+            "win_rate_poly_alerted": shadow_metrics.get("win_rate_poly_alerted", 0.0),
+            "n_poly_alerted": shadow_metrics.get("n_poly_alerted", 0),
+            "pnl_poly_alerted": shadow_metrics.get("pnl_poly_alerted", 0.0),
             "closed_trades": shadow_metrics.get("closed_trades", 0),
             "streak": shadow_metrics.get("streak", 0),
         }
