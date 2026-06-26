@@ -212,8 +212,11 @@ async def _find_sport_slug(category: str) -> str | None:
     return None
 
 
-# Slugs a probar en orden para fútbol — "soccer" suele ser el slug real en odds-api.io
-_FOOTBALL_SLUG_CANDIDATES = ["soccer", "football", "soccer_football"]
+# Slugs a probar en orden para fútbol. odds-api.io renombró el slug a "football"
+# (sport=soccer ahora devuelve 400 "Invalid sport slug"); "football" va primero para
+# que el primer candidato acierte y no se gaste un request en el 400 cada ciclo.
+# "soccer" se mantiene como fallback por si la API revirtiera.
+_FOOTBALL_SLUG_CANDIDATES = ["football", "soccer", "soccer_football"]
 
 # Casas de apuestas para /odds/multi — plan free de odds-api.io permite max 2.
 # Bookmakers permitidos en el plan actual: Bet365, Unibet.
@@ -236,7 +239,12 @@ _PRIORITY_LEAGUES_FOR_ODDS: frozenset[str] = frozenset({
     "PD", "SA", "BL1", "PL", "FL1", "CL", "EL", "ECL", "TU1",
     "WC", "WC26",  # Mundial 2026 — ligas de selecciones sin Poisson → necesitan odds reales
 })
-_MAX_ODDS_PREFETCH: int = 75   # 75 IDs / 10 por batch = 8 requests /odds/multi (dentro de 100 req/h)
+# Ventana jugable para el pre-fetch de odds: se piden cuotas de TODOS los partidos de
+# ligas prioritarias cuyo kickoff cae en [ahora, ahora+_PREFETCH_WINDOW]. Sustituye al
+# tope fijo de N-por-liga, que dejaba sin cuotas los match-days con >N partidos (fase de
+# grupos del Mundial, finde con >5 partidos de PL/PD).
+_PREFETCH_WINDOW: timedelta = timedelta(hours=72)
+_MAX_ODDS_PREFETCH: int = 120  # backstop global: 120 IDs / 10 = 12 requests /odds/multi
 
 
 def _cache_ttl(entry: dict) -> timedelta:
@@ -937,14 +945,18 @@ def clear_caches() -> dict:
 async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None:
     """
     Pre-carga odds para ligas prioritarias en _ODDS_MAP_CACHE.
-    Muestreo por liga: _PREFETCH_PER_LEAGUE eventos más próximos por cada liga
-    prioritaria usando su keyword más específico (primero de la lista, incluye país).
-    Esto evita que el orden cronológico global llene la caché con ligas asiáticas
-    que empiezan antes que las ligas EU (BL1/PD/SA/PL juegan a las 14-21h UTC).
+    Selección por VENTANA JUGABLE: por cada liga prioritaria se piden cuotas de TODOS
+    los partidos cuyo kickoff cae en [ahora, ahora+_PREFETCH_WINDOW] (72h), filtrando
+    por su keyword más específico (primero de la lista, incluye país). Sustituye al tope
+    fijo de N-por-liga, que dejaba sin cuotas los match-days con más de N partidos (fase
+    de grupos del Mundial, finde con >5 partidos de PL/PD). Si el kickoff de un evento no
+    se puede parsear, se cae al tope fijo de los _PREFETCH_PER_LEAGUE más próximos para esa
+    liga (para no perder la liga entera).
     """
     global _ODDS_MAP_PREFETCHED_AT
 
-    _PREFETCH_PER_LEAGUE = 5  # eventos por liga → 11 ligas × 5 = máx 55 IDs (cap 75)
+    _PREFETCH_PER_LEAGUE = 5  # fallback: nº de eventos más próximos si kickoff no parseable
+    window_end = now + _PREFETCH_WINDOW
 
     def _commence_key(ev: dict) -> str:
         for field in ("commenceTime", "commence_time", "startTime", "start_time", "date", "kickoff"):
@@ -953,7 +965,18 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
                 return str(v)
         return ""
 
-    # Muestreo por liga con el keyword más específico (primero = incluye país)
+    def _commence_dt(ev: dict) -> datetime | None:
+        """Parsea el kickoff a datetime UTC, o None si falta/no es parseable."""
+        raw = _commence_key(ev)
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+    # Selección por liga con el keyword más específico (primero = incluye país)
     seen_ids: set[str] = set()
     priority_events: list[dict] = []
 
@@ -975,16 +998,28 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
                 key=_commence_key,
             )
         added = 0
+        fallback_added = 0
         for ev in lg_events:
-            if added >= _PREFETCH_PER_LEAGUE:
-                break
             eid = str(ev.get("id") or ev.get("eventId") or "")
-            if eid and eid not in seen_ids:
-                seen_ids.add(eid)
-                priority_events.append(ev)
-                added += 1
+            if not eid or eid in seen_ids:
+                continue
+            kdt = _commence_dt(ev)
+            if kdt is not None:
+                # Ventana jugable: dentro de [ahora, ahora+72h]. Ya empezados o
+                # lejanos (placeholders nocaut a +días) se omiten.
+                if kdt < now or kdt > window_end:
+                    continue
+            else:
+                # Sin fecha parseable → tope fijo de los N más próximos
+                # (lg_events ya viene ordenado por kickoff como string).
+                if fallback_added >= _PREFETCH_PER_LEAGUE:
+                    continue
+                fallback_added += 1
+            seen_ids.add(eid)
+            priority_events.append(ev)
+            added += 1
         if lg_events:
-            logger.info("odds-api.io: pre-fetch %s → %d candidatos → %d añadidos",
+            logger.info("odds-api.io: pre-fetch %s → %d candidatos → %d en ventana 72h",
                         lg, len(lg_events), added)
 
     if not priority_events and all_events:
