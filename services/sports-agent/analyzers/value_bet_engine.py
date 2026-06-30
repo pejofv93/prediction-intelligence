@@ -2375,506 +2375,523 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         "(Poisson)" if _is_real_poisson else "(ensemble)",
     )
 
-    # --- 5. Seleccionar el lado con mayor EV (excluyendo el lado underdog marcado con
-    #        divergencia extrema arriba: _div_home / _div_away) ---
-    if _div_away:
-        _pick_home = True       # away underdog inflado → forzar home (favorito)
-    elif _div_home:
-        _pick_home = False      # home underdog inflado → forzar away (favorito)
-    else:
-        _pick_home = ev_home >= ev_away
-    if _pick_home:
-        best_edge = edge_home
-        best_ev = ev_home
-        best_prob = _prob_home
-        best_confidence = result_home["confidence"]
-        best_signals = result_home["signals"]
-        best_odds = home_odds
-        team_to_back = str(home_team)
-    else:
-        best_edge = edge_away
-        best_ev = ev_away
-        best_prob = _prob_away
-        best_confidence = result_away["confidence"]
-        best_signals = result_away["signals"]
-        best_odds = away_odds
-        team_to_back = str(away_team)
+    # --- 5. Evaluar AMBOS lados y emitir el de mayor EV que pase TODOS los filtros ---
+    # FIX (return [] prematuro): antes se elegia solo el lado de mayor EV bruto; si ese
+    # lado caia en un gate (AWAY gate, divergencia, extremo) el partido entero moria con
+    # `return []` SIN probar el otro lado, y el favorito coherente nunca se evaluaba
+    # (France/England/Spain). Ahora cada lado pasa por los MISMOS filtros (sin tocarlos) y
+    # se emite el mejor superviviente. Los underdogs siguen cayendo en sus gates.
+    results: list[dict] = []
 
-    # --- 5a-prev. RISING_ODDS_BLOCK ---
-    # Cuota del equipo apostado subiendo >20% = el bookmaker tiene info negativa
-    # (lesión, alineación débil, etc.). Una cuota en alza infla el edge aritméticamente
-    # sin que haya valor real — no generar señal.
-    # Cuota BAJANDO: SMART_MONEY (dinero entrando) → señal válida, no bloquear.
-    _RISING_ODDS_THRESHOLD = 0.20
-    _ttb_dir = "home" if team_to_back == str(home_team) else "away"
-    _om_pct6  = odds_movement.get("pct_change_6h", 0.0)
-    _om_pct24 = odds_movement.get("pct_change_24h", 0.0)
-    _om_dir   = odds_movement.get("direction")
-    # pct positivo = cuota subió; direction = hacia quién fue el dinero (opuesto al equipo con cuota alta)
-    # Si direction != equipo apostado → las odds del equipo apostado están subiendo → bloquear
-    _max_rising = max(_om_pct6, _om_pct24)
-    if _max_rising > _RISING_ODDS_THRESHOLD and _om_dir is not None and _om_dir != _ttb_dir:
-        logger.info(
-            "generate_signal(%s): RISING_ODDS_BLOCK — cuota de %s subió %.1f%% "
-            "(bookmaker tiene info negativa) — descartado [%s vs %s | %s]",
-            match_id, team_to_back, _max_rising * 100, home_team, away_team, league,
-        )
-        return []
-
-    # --- 5a. Cap de confianza para Poisson sintético con forma en default ---
-    # Si _synthetic_poisson=True (sin xG/posesión real) Y además form=50.0 (sin datos de forma),
-    # la confianza del ensemble es artificialmente alta (std≈0 → conf≈1.0).
-    # Cap a 0.60 para forzar bloqueo en el threshold 0.65 — idéntico a basketball_analyzer.
-    # WC26/WC: exento — los equipos nacionales nunca tienen historial en football-data.org;
-    # usar Poisson sintético + form default ES el flujo esperado, no un degradado temporal.
-    # La divergencia extrema (germany vs curaçao) la filtra el bloque siguiente.
-    if enriched_match.get("_synthetic_poisson", False) and league not in {"WC26", "WC"}:
-        _fh = float(enriched_match.get("home_form_score", 50.0))
-        _fa = float(enriched_match.get("away_form_score", 50.0))
-        if abs(_fh - 50.0) < 0.5 and abs(_fa - 50.0) < 0.5:
-            if best_confidence > 0.60:
-                logger.info(
-                    "generate_signal(%s): SYNTHETIC_DEFAULT_CAP conf %.2f→0.60 "
-                    "(poisson sintético + form default) [%s vs %s | %s]",
-                    match_id, best_confidence, home_team, away_team, league,
-                )
-                best_confidence = 0.60
-
-    # --- 5b. Filtro underdog extremo: umbral dinámico por liga vs rival top-6 ---
-    rival_team = str(away_team) if team_to_back == str(home_team) else str(home_team)
-    top6_keywords = _TOP6_KEYWORDS.get(league, [])
-    _underdog_dyn = _get_filter_params()["UNDERDOG_EXTREME"]
-    underdog_threshold = _underdog_dyn.get(league, _EXTREME_UNDERDOG_ODDS.get(league, 5.0))
-    if best_odds > underdog_threshold and top6_keywords:
-        rival_lower = rival_team.lower()
-        if any(kw in rival_lower for kw in top6_keywords):
+    async def _eval_side(pick_home: bool) -> dict | None:
+        if pick_home:
+            best_edge = edge_home
+            best_ev = ev_home
+            best_prob = _prob_home
+            best_confidence = result_home["confidence"]
+            best_signals = result_home["signals"]
+            best_odds = home_odds
+            team_to_back = str(home_team)
+        else:
+            best_edge = edge_away
+            best_ev = ev_away
+            best_prob = _prob_away
+            best_confidence = result_away["confidence"]
+            best_signals = result_away["signals"]
+            best_odds = away_odds
+            team_to_back = str(away_team)
+        # --- 5a-prev. RISING_ODDS_BLOCK ---
+        # Cuota del equipo apostado subiendo >20% = el bookmaker tiene info negativa
+        # (lesión, alineación débil, etc.). Una cuota en alza infla el edge aritméticamente
+        # sin que haya valor real — no generar señal.
+        # Cuota BAJANDO: SMART_MONEY (dinero entrando) → señal válida, no bloquear.
+        _RISING_ODDS_THRESHOLD = 0.20
+        _ttb_dir = "home" if team_to_back == str(home_team) else "away"
+        _om_pct6  = odds_movement.get("pct_change_6h", 0.0)
+        _om_pct24 = odds_movement.get("pct_change_24h", 0.0)
+        _om_dir   = odds_movement.get("direction")
+        # pct positivo = cuota subió; direction = hacia quién fue el dinero (opuesto al equipo con cuota alta)
+        # Si direction != equipo apostado → las odds del equipo apostado están subiendo → bloquear
+        _max_rising = max(_om_pct6, _om_pct24)
+        if _max_rising > _RISING_ODDS_THRESHOLD and _om_dir is not None and _om_dir != _ttb_dir:
             logger.info(
-                "generate_signal(%s): señal descartada — underdog extremo (odds=%.2f > %.1f) "
-                "vs rival top-6 '%s' [%s]",
-                match_id, best_odds, underdog_threshold, rival_team, league,
+                "generate_signal(%s): RISING_ODDS_BLOCK — cuota de %s subió %.1f%% "
+                "(bookmaker tiene info negativa) — descartado [%s vs %s | %s]",
+                match_id, team_to_back, _max_rising * 100, home_team, away_team, league,
             )
-            _log_filter_block(
-                "UNDERDOG_EXTREME", match_id, team_to_back, league,
-                str(home_team), str(away_team), best_odds, best_confidence,
-                {"rival_team": rival_team},
-            )
-            return []
+            return None
 
-    # --- 5c. Filtro rival élite (top-3 + posición en tabla) ---
-    # Los bookmakers son más eficientes en partidos con equipos top-3 → descuento del 20% en edge.
-    # Si además el equipo seleccionado está en bottom-6 → señal directamente descartada.
-    top3_keywords = _TOP3_KEYWORDS.get(league, [])
-    rival_lower = rival_team.lower()
-    rival_is_top3 = top3_keywords and any(kw in rival_lower for kw in top3_keywords)
-    if rival_is_top3:
-        # Descuento del 20% por eficiencia del mercado en partidos de élite
-        best_edge = round(best_edge * 0.80, 4)
-        logger.info(
-            "generate_signal(%s): rival top-3 '%s' → edge descontado 20%% → edge=%.3f [%s]",
-            match_id, rival_team, best_edge, league,
+        # --- 5a. Cap de confianza para Poisson sintético con forma en default ---
+        # Si _synthetic_poisson=True (sin xG/posesión real) Y además form=50.0 (sin datos de forma),
+        # la confianza del ensemble es artificialmente alta (std≈0 → conf≈1.0).
+        # Cap a 0.60 para forzar bloqueo en el threshold 0.65 — idéntico a basketball_analyzer.
+        # WC26/WC: exento — los equipos nacionales nunca tienen historial en football-data.org;
+        # usar Poisson sintético + form default ES el flujo esperado, no un degradado temporal.
+        # La divergencia extrema (germany vs curaçao) la filtra el bloque siguiente.
+        if enriched_match.get("_synthetic_poisson", False) and league not in {"WC26", "WC"}:
+            _fh = float(enriched_match.get("home_form_score", 50.0))
+            _fa = float(enriched_match.get("away_form_score", 50.0))
+            if abs(_fh - 50.0) < 0.5 and abs(_fa - 50.0) < 0.5:
+                if best_confidence > 0.60:
+                    logger.info(
+                        "generate_signal(%s): SYNTHETIC_DEFAULT_CAP conf %.2f→0.60 "
+                        "(poisson sintético + form default) [%s vs %s | %s]",
+                        match_id, best_confidence, home_team, away_team, league,
+                    )
+                    best_confidence = 0.60
+
+        # --- 5b. Filtro underdog extremo: umbral dinámico por liga vs rival top-6 ---
+        rival_team = str(away_team) if team_to_back == str(home_team) else str(home_team)
+        top6_keywords = _TOP6_KEYWORDS.get(league, [])
+        _underdog_dyn = _get_filter_params()["UNDERDOG_EXTREME"]
+        underdog_threshold = _underdog_dyn.get(league, _EXTREME_UNDERDOG_ODDS.get(league, 5.0))
+        if best_odds > underdog_threshold and top6_keywords:
+            rival_lower = rival_team.lower()
+            if any(kw in rival_lower for kw in top6_keywords):
+                logger.info(
+                    "generate_signal(%s): señal descartada — underdog extremo (odds=%.2f > %.1f) "
+                    "vs rival top-6 '%s' [%s]",
+                    match_id, best_odds, underdog_threshold, rival_team, league,
+                )
+                _log_filter_block(
+                    "UNDERDOG_EXTREME", match_id, team_to_back, league,
+                    str(home_team), str(away_team), best_odds, best_confidence,
+                    {"rival_team": rival_team},
+                )
+                return None
+
+        # --- 5c. Filtro rival élite (top-3 + posición en tabla) ---
+        # Los bookmakers son más eficientes en partidos con equipos top-3 → descuento del 20% en edge.
+        # Si además el equipo seleccionado está en bottom-6 → señal directamente descartada.
+        top3_keywords = _TOP3_KEYWORDS.get(league, [])
+        rival_lower = rival_team.lower()
+        rival_is_top3 = top3_keywords and any(kw in rival_lower for kw in top3_keywords)
+        if rival_is_top3:
+            # Descuento del 20% por eficiencia del mercado en partidos de élite
+            best_edge = round(best_edge * 0.80, 4)
+            logger.info(
+                "generate_signal(%s): rival top-3 '%s' → edge descontado 20%% → edge=%.3f [%s]",
+                match_id, rival_team, best_edge, league,
+            )
+            # Filtro bottom-6: si el equipo seleccionado está en los últimos 6 puestos → descartar
+            total_teams = _LEAGUE_TOTAL_TEAMS.get(league, 20)
+            bottom6_threshold = total_teams - 5  # posición > (total-5) → bottom 6
+            selected_id = (
+                enriched_match.get("home_team_id") if team_to_back == str(home_team)
+                else enriched_match.get("away_team_id")
+            )
+            selected_pos = _get_table_position(selected_id, league)
+            if selected_pos is not None and selected_pos > bottom6_threshold:
+                logger.info(
+                    "generate_signal(%s): señal descartada — bottom-6 (pos=%d > %d) "
+                    "vs rival top-3 '%s' [%s]",
+                    match_id, selected_pos, bottom6_threshold, rival_team, league,
+                )
+                return None
+
+        # --- 5e. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
+        _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
+        if _lado == "AWAY":
+            # F1: zona muerta dinámica (históricamente 0% acierto en rango 2.5–3.5)
+            _dz = _get_filter_params()["AWAY_DEAD_ZONE"]
+            _dz_min = _dz.get("odds_min", 2.5)
+            _dz_max = _dz.get("odds_max", 3.5)
+            if _dz_min <= best_odds < _dz_max:
+                logger.info(
+                    "generate_signal(%s): AWAY zona muerta descartada (odds=%.2f en [%.2f, %.2f)) [%s vs %s | %s]",
+                    match_id, best_odds, _dz_min, _dz_max, home_team, away_team, league,
+                )
+                _log_filter_block(
+                    "AWAY_DEAD_ZONE", match_id, team_to_back, league,
+                    str(home_team), str(away_team), best_odds, best_confidence,
+                )
+                return None
+            # F2: AWAY en PD con odds > umbral dinámico — 0% accuracy histórico
+            _pd_threshold = _get_filter_params()["AWAY_PD_FILTER"].get("odds_threshold", 2.5)
+            if league == "PD" and best_odds > _pd_threshold:
+                logger.info(
+                    "generate_signal(%s): AWAY underdog descartada en %s (odds=%.2f > %.2f) [%s vs %s]",
+                    match_id, league, best_odds, _pd_threshold, home_team, away_team,
+                )
+                _log_filter_block(
+                    "AWAY_PD_FILTER", match_id, team_to_back, league,
+                    str(home_team), str(away_team), best_odds, best_confidence,
+                )
+                return None
+            # F3: gate final con umbral de confianza dinámico
+            # CL/EL/ECL: cualquier underdog hasta 6.00 con conf>0.65 (torneos eliminatorios)
+            # Resto: solo favorito (<2.5) o underdog extremo (>3.5 + conf>umbral dinámico)
+            _intl_away_leagues = {"CL", "EL", "ECL"}
+            _gate_conf = _get_filter_params()["AWAY_GATE_CONF"].get("conf_threshold", 0.85)
+            if league in _intl_away_leagues:
+                _gate_ok = best_odds < 6.00 and best_confidence > 0.65
+            else:
+                _gate_ok = best_odds < 2.5 or (best_odds > 3.5 and best_confidence > _gate_conf)
+            if not _gate_ok:
+                logger.info(
+                    "generate_signal(%s): AWAY gate descartada "
+                    "(odds=%.2f conf=%.2f < %.2f) [%s vs %s | %s]",
+                    match_id, best_odds, best_confidence, _gate_conf, home_team, away_team, league,
+                )
+                _log_filter_block(
+                    "AWAY_GATE_CONF", match_id, team_to_back, league,
+                    str(home_team), str(away_team), best_odds, best_confidence,
+                )
+                return None
+
+        # --- 5f. Filtros adicionales underdogs (FIX 1) ---
+        if _lado == "AWAY":
+            if best_odds > 6.00:
+                logger.info(
+                    "generate_signal(%s): AWAY extremo descartado (odds=%.2f > 6.00) [%s vs %s | %s]",
+                    match_id, best_odds, home_team, away_team, league,
+                )
+                return None
+            if best_odds > 4.00 and league not in {"CL", "EL", "ECL"}:
+                best_confidence = round(min(best_confidence, 0.70), 4)
+        _sel_form = (
+            enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
+            else enriched_match.get("away_form_score", 50.0)
+        ) / 100.0
+        _sel_poisson = float(
+            (enriched_match.get("poisson_home_win") if team_to_back == str(home_team)
+             else enriched_match.get("poisson_away_win")) or 0.5
         )
-        # Filtro bottom-6: si el equipo seleccionado está en los últimos 6 puestos → descartar
-        total_teams = _LEAGUE_TOTAL_TEAMS.get(league, 20)
-        bottom6_threshold = total_teams - 5  # posición > (total-5) → bottom 6
-        selected_id = (
+        if _sel_form < 0.25 and _sel_poisson < 0.20:
+            logger.info(
+                "generate_signal(%s): h2h descartado — form=%.2f y poisson=%.2f del equipo seleccionado "
+                "[%s | %s] — intentando mercados alt",
+                match_id, _sel_form, _sel_poisson, team_to_back, league,
+            )
+            # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
+            return await _alt_football_signals_only(
+                enriched_match, odds_data, league, sport, match_id,
+                str(home_team), str(away_team), match_date, weights_version,
+            )
+
+        # EV alto en cuotas altas no compensa cuando la probabilidad propia del modelo es baja.
+        # Caso típico: Genoa @4.50 vs Milan — EV puede ser 20%+ pero Poisson 0.38 indica
+        # que el equipo tiene <40% de ganar según el modelo estadístico.
+        _is_real_poisson_sel = not enriched_match.get("_synthetic_poisson", False)
+        if _is_real_poisson_sel and _sel_poisson < 0.35:
+            logger.info(
+                "generate_signal(%s): h2h descartado — poisson=%.2f < 0.35 (prob propia demasiado baja) "
+                "[%s | %s] — intentando mercados alt",
+                match_id, _sel_poisson, team_to_back, league,
+            )
+            # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
+            return await _alt_football_signals_only(
+                enriched_match, odds_data, league, sport, match_id,
+                str(home_team), str(away_team), match_date, weights_version,
+            )
+        if _sel_poisson < 0.40 and _sel_form < 0.45:
+            _conf_before_low = best_confidence
+            best_confidence = round(best_confidence * 0.85, 4)
+            logger.info(
+                "generate_signal(%s): confianza −15%% — poisson=%.2f form=%.2f bajos "
+                "(%.2f→%.2f) [%s | %s]",
+                match_id, _sel_poisson, _sel_form, _conf_before_low, best_confidence,
+                team_to_back, league,
+            )
+
+        # Aplicar ajuste de motivación (puede reducir o aumentar confianza)
+        if _standings_confidence_adj != 1.0:
+            best_confidence = round(best_confidence * _standings_confidence_adj, 4)
+
+        # --- 5g. Contexto situacional: posición en tabla, forma comparada, momentum ---
+        _ctx_penalties: list[str] = []
+        _ctx_factors: dict = {}
+        _conf_before_ctx = best_confidence
+
+        _selected_team_id = (
             enriched_match.get("home_team_id") if team_to_back == str(home_team)
             else enriched_match.get("away_team_id")
         )
-        selected_pos = _get_table_position(selected_id, league)
-        if selected_pos is not None and selected_pos > bottom6_threshold:
-            logger.info(
-                "generate_signal(%s): señal descartada — bottom-6 (pos=%d > %d) "
-                "vs rival top-3 '%s' [%s]",
-                match_id, selected_pos, bottom6_threshold, rival_team, league,
-            )
-            return []
-
-    # --- 5e. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
-    _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
-    if _lado == "AWAY":
-        # F1: zona muerta dinámica (históricamente 0% acierto en rango 2.5–3.5)
-        _dz = _get_filter_params()["AWAY_DEAD_ZONE"]
-        _dz_min = _dz.get("odds_min", 2.5)
-        _dz_max = _dz.get("odds_max", 3.5)
-        if _dz_min <= best_odds < _dz_max:
-            logger.info(
-                "generate_signal(%s): AWAY zona muerta descartada (odds=%.2f en [%.2f, %.2f)) [%s vs %s | %s]",
-                match_id, best_odds, _dz_min, _dz_max, home_team, away_team, league,
-            )
-            _log_filter_block(
-                "AWAY_DEAD_ZONE", match_id, team_to_back, league,
-                str(home_team), str(away_team), best_odds, best_confidence,
-            )
-            return []
-        # F2: AWAY en PD con odds > umbral dinámico — 0% accuracy histórico
-        _pd_threshold = _get_filter_params()["AWAY_PD_FILTER"].get("odds_threshold", 2.5)
-        if league == "PD" and best_odds > _pd_threshold:
-            logger.info(
-                "generate_signal(%s): AWAY underdog descartada en %s (odds=%.2f > %.2f) [%s vs %s]",
-                match_id, league, best_odds, _pd_threshold, home_team, away_team,
-            )
-            _log_filter_block(
-                "AWAY_PD_FILTER", match_id, team_to_back, league,
-                str(home_team), str(away_team), best_odds, best_confidence,
-            )
-            return []
-        # F3: gate final con umbral de confianza dinámico
-        # CL/EL/ECL: cualquier underdog hasta 6.00 con conf>0.65 (torneos eliminatorios)
-        # Resto: solo favorito (<2.5) o underdog extremo (>3.5 + conf>umbral dinámico)
-        _intl_away_leagues = {"CL", "EL", "ECL"}
-        _gate_conf = _get_filter_params()["AWAY_GATE_CONF"].get("conf_threshold", 0.85)
-        if league in _intl_away_leagues:
-            _gate_ok = best_odds < 6.00 and best_confidence > 0.65
-        else:
-            _gate_ok = best_odds < 2.5 or (best_odds > 3.5 and best_confidence > _gate_conf)
-        if not _gate_ok:
-            logger.info(
-                "generate_signal(%s): AWAY gate descartada "
-                "(odds=%.2f conf=%.2f < %.2f) [%s vs %s | %s]",
-                match_id, best_odds, best_confidence, _gate_conf, home_team, away_team, league,
-            )
-            _log_filter_block(
-                "AWAY_GATE_CONF", match_id, team_to_back, league,
-                str(home_team), str(away_team), best_odds, best_confidence,
-            )
-            return []
-
-    # --- 5f. Filtros adicionales underdogs (FIX 1) ---
-    if _lado == "AWAY":
-        if best_odds > 6.00:
-            logger.info(
-                "generate_signal(%s): AWAY extremo descartado (odds=%.2f > 6.00) [%s vs %s | %s]",
-                match_id, best_odds, home_team, away_team, league,
-            )
-            return []
-        if best_odds > 4.00 and league not in {"CL", "EL", "ECL"}:
-            best_confidence = round(min(best_confidence, 0.70), 4)
-    _sel_form = (
-        enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
-        else enriched_match.get("away_form_score", 50.0)
-    ) / 100.0
-    _sel_poisson = float(
-        (enriched_match.get("poisson_home_win") if team_to_back == str(home_team)
-         else enriched_match.get("poisson_away_win")) or 0.5
-    )
-    if _sel_form < 0.25 and _sel_poisson < 0.20:
-        logger.info(
-            "generate_signal(%s): h2h descartado — form=%.2f y poisson=%.2f del equipo seleccionado "
-            "[%s | %s] — intentando mercados alt",
-            match_id, _sel_form, _sel_poisson, team_to_back, league,
-        )
-        # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
-        return await _alt_football_signals_only(
-            enriched_match, odds_data, league, sport, match_id,
-            str(home_team), str(away_team), match_date, weights_version,
+        _rival_team_id = (
+            enriched_match.get("away_team_id") if team_to_back == str(home_team)
+            else enriched_match.get("home_team_id")
         )
 
-    # EV alto en cuotas altas no compensa cuando la probabilidad propia del modelo es baja.
-    # Caso típico: Genoa @4.50 vs Milan — EV puede ser 20%+ pero Poisson 0.38 indica
-    # que el equipo tiene <40% de ganar según el modelo estadístico.
-    _is_real_poisson_sel = not enriched_match.get("_synthetic_poisson", False)
-    if _is_real_poisson_sel and _sel_poisson < 0.35:
-        logger.info(
-            "generate_signal(%s): h2h descartado — poisson=%.2f < 0.35 (prob propia demasiado baja) "
-            "[%s | %s] — intentando mercados alt",
-            match_id, _sel_poisson, team_to_back, league,
+        # i) Posición en tabla: si el rival está mejor clasificado que el equipo seleccionado
+        try:
+            _ctx_sel_pos   = _get_table_position(_selected_team_id, league)
+            _ctx_rival_pos = _get_table_position(_rival_team_id, league)
+            if _ctx_sel_pos is not None and _ctx_rival_pos is not None:
+                _pos_diff = _ctx_sel_pos - _ctx_rival_pos  # positivo = rival está más arriba (número menor)
+                if _pos_diff > 6:
+                    best_confidence = round(best_confidence * 0.80, 4)
+                    _ctx_penalties.append(
+                        f"rival_position_better(rival={_ctx_rival_pos} sel={_ctx_sel_pos} Δ={_pos_diff})(−20%)"
+                    )
+                elif _pos_diff > 3:
+                    best_confidence = round(best_confidence * 0.90, 4)
+                    _ctx_penalties.append(
+                        f"rival_position_better(rival={_ctx_rival_pos} sel={_ctx_sel_pos} Δ={_pos_diff})(−10%)"
+                    )
+        except Exception as _cpe:
+            logger.debug("generate_signal(%s): error posición en tabla — %s", match_id, _cpe)
+
+        # ii) Forma reciente comparada: si el rival tiene forma significativamente mejor
+        _ctx_sel_form_score = float(
+            enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
+            else enriched_match.get("away_form_score", 50.0)
         )
-        # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
-        return await _alt_football_signals_only(
-            enriched_match, odds_data, league, sport, match_id,
-            str(home_team), str(away_team), match_date, weights_version,
+        _ctx_rival_form_score = float(
+            enriched_match.get("away_form_score", 50.0) if team_to_back == str(home_team)
+            else enriched_match.get("home_form_score", 50.0)
         )
-    if _sel_poisson < 0.40 and _sel_form < 0.45:
-        _conf_before_low = best_confidence
-        best_confidence = round(best_confidence * 0.85, 4)
-        logger.info(
-            "generate_signal(%s): confianza −15%% — poisson=%.2f form=%.2f bajos "
-            "(%.2f→%.2f) [%s | %s]",
-            match_id, _sel_poisson, _sel_form, _conf_before_low, best_confidence,
-            team_to_back, league,
+        if _ctx_rival_form_score > _ctx_sel_form_score + 15:
+            best_confidence = round(best_confidence * 0.90, 4)
+            _ctx_penalties.append(
+                f"rival_form>{_ctx_rival_form_score:.0f}_vs_{_ctx_sel_form_score:.0f}(−10%)"
+            )
+        _ctx_factors["rival_form"] = round(_ctx_rival_form_score / 100.0, 4)
+
+        # iii) Momentum: racha del equipo seleccionado y del rival
+        _ctx_sel_streak = (
+            enriched_match.get("home_streak", {}) if team_to_back == str(home_team)
+            else enriched_match.get("away_streak", {})
         )
+        _ctx_rival_streak = (
+            enriched_match.get("away_streak", {}) if team_to_back == str(home_team)
+            else enriched_match.get("home_streak", {})
+        )
+        _ctx_sel_streak_type  = _ctx_sel_streak.get("type", "")    if isinstance(_ctx_sel_streak, dict) else ""
+        _ctx_sel_streak_count = int(_ctx_sel_streak.get("count", 0)) if isinstance(_ctx_sel_streak, dict) else 0
+        _ctx_rival_streak_type  = _ctx_rival_streak.get("type", "")    if isinstance(_ctx_rival_streak, dict) else ""
+        _ctx_rival_streak_count = int(_ctx_rival_streak.get("count", 0)) if isinstance(_ctx_rival_streak, dict) else 0
 
-    # Aplicar ajuste de motivación (puede reducir o aumentar confianza)
-    if _standings_confidence_adj != 1.0:
-        best_confidence = round(best_confidence * _standings_confidence_adj, 4)
+        if _ctx_rival_streak_type == "win" and _ctx_rival_streak_count >= 2:
+            _ctx_factors["rival_momentum"] = _ctx_rival_streak_count
+            _ctx_penalties.append(f"rival_momentum_{_ctx_rival_streak_count}W")
 
-    # --- 5g. Contexto situacional: posición en tabla, forma comparada, momentum ---
-    _ctx_penalties: list[str] = []
-    _ctx_factors: dict = {}
-    _conf_before_ctx = best_confidence
+        if _ctx_sel_streak_type == "loss" and _ctx_sel_streak_count >= 2:
+            best_confidence = round(best_confidence * 0.85, 4)
+            _ctx_factors["bad_streak"] = _ctx_sel_streak_count
+            _ctx_penalties.append(f"bad_streak_{_ctx_sel_streak_count}L(−15%)")
 
-    _selected_team_id = (
-        enriched_match.get("home_team_id") if team_to_back == str(home_team)
-        else enriched_match.get("away_team_id")
-    )
-    _rival_team_id = (
-        enriched_match.get("away_team_id") if team_to_back == str(home_team)
-        else enriched_match.get("home_team_id")
-    )
+        # --- 5h. Ventaja de descanso comparado ---
+        try:
+            _home_days_r = enriched_match.get("home_days_rest")
+            _away_days_r = enriched_match.get("away_days_rest")
+            if _home_days_r is not None and _away_days_r is not None:
+                _sel_days_r   = _home_days_r if team_to_back == str(home_team) else _away_days_r
+                _rival_days_r = _away_days_r if team_to_back == str(home_team) else _home_days_r
+                _rest_delta   = _rival_days_r - _sel_days_r  # positivo = rival descansó más
 
-    # i) Posición en tabla: si el rival está mejor clasificado que el equipo seleccionado
-    try:
-        _ctx_sel_pos   = _get_table_position(_selected_team_id, league)
-        _ctx_rival_pos = _get_table_position(_rival_team_id, league)
-        if _ctx_sel_pos is not None and _ctx_rival_pos is not None:
-            _pos_diff = _ctx_sel_pos - _ctx_rival_pos  # positivo = rival está más arriba (número menor)
-            if _pos_diff > 6:
-                best_confidence = round(best_confidence * 0.80, 4)
-                _ctx_penalties.append(
-                    f"rival_position_better(rival={_ctx_rival_pos} sel={_ctx_sel_pos} Δ={_pos_diff})(−20%)"
+                logger.info(
+                    "REST_ADVANTAGE(%s): home=%dd away=%dd delta=%+dd [%s vs %s | %s]",
+                    match_id, _home_days_r, _away_days_r, _away_days_r - _home_days_r,
+                    home_team, away_team, league,
                 )
-            elif _pos_diff > 3:
-                best_confidence = round(best_confidence * 0.90, 4)
-                _ctx_penalties.append(
-                    f"rival_position_better(rival={_ctx_rival_pos} sel={_ctx_sel_pos} Δ={_pos_diff})(−10%)"
-                )
-    except Exception as _cpe:
-        logger.debug("generate_signal(%s): error posición en tabla — %s", match_id, _cpe)
+                if _rest_delta >= 3:
+                    best_confidence = round(best_confidence * 0.90, 4)
+                    _ctx_penalties.append(f"rival_rest+{_rest_delta}d(−10%)")
+                    _ctx_factors["rest_disadvantage"] = _rest_delta
+                elif _sel_days_r - _rival_days_r >= 3:
+                    best_confidence = round(best_confidence * 1.05, 4)
+                    _ctx_penalties.append(f"sel_rest+{_sel_days_r - _rival_days_r}d(+5%)")
+                    _ctx_factors["rest_advantage"] = _sel_days_r - _rival_days_r
+        except Exception as _re:
+            logger.debug("generate_signal(%s): error REST_ADVANTAGE — %s", match_id, _re)
 
-    # ii) Forma reciente comparada: si el rival tiene forma significativamente mejor
-    _ctx_sel_form_score = float(
-        enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
-        else enriched_match.get("away_form_score", 50.0)
-    )
-    _ctx_rival_form_score = float(
-        enriched_match.get("away_form_score", 50.0) if team_to_back == str(home_team)
-        else enriched_match.get("home_form_score", 50.0)
-    )
-    if _ctx_rival_form_score > _ctx_sel_form_score + 15:
-        best_confidence = round(best_confidence * 0.90, 4)
-        _ctx_penalties.append(
-            f"rival_form>{_ctx_rival_form_score:.0f}_vs_{_ctx_sel_form_score:.0f}(−10%)"
-        )
-    _ctx_factors["rival_form"] = round(_ctx_rival_form_score / 100.0, 4)
-
-    # iii) Momentum: racha del equipo seleccionado y del rival
-    _ctx_sel_streak = (
-        enriched_match.get("home_streak", {}) if team_to_back == str(home_team)
-        else enriched_match.get("away_streak", {})
-    )
-    _ctx_rival_streak = (
-        enriched_match.get("away_streak", {}) if team_to_back == str(home_team)
-        else enriched_match.get("home_streak", {})
-    )
-    _ctx_sel_streak_type  = _ctx_sel_streak.get("type", "")    if isinstance(_ctx_sel_streak, dict) else ""
-    _ctx_sel_streak_count = int(_ctx_sel_streak.get("count", 0)) if isinstance(_ctx_sel_streak, dict) else 0
-    _ctx_rival_streak_type  = _ctx_rival_streak.get("type", "")    if isinstance(_ctx_rival_streak, dict) else ""
-    _ctx_rival_streak_count = int(_ctx_rival_streak.get("count", 0)) if isinstance(_ctx_rival_streak, dict) else 0
-
-    if _ctx_rival_streak_type == "win" and _ctx_rival_streak_count >= 2:
-        _ctx_factors["rival_momentum"] = _ctx_rival_streak_count
-        _ctx_penalties.append(f"rival_momentum_{_ctx_rival_streak_count}W")
-
-    if _ctx_sel_streak_type == "loss" and _ctx_sel_streak_count >= 2:
-        best_confidence = round(best_confidence * 0.85, 4)
-        _ctx_factors["bad_streak"] = _ctx_sel_streak_count
-        _ctx_penalties.append(f"bad_streak_{_ctx_sel_streak_count}L(−15%)")
-
-    # --- 5h. Ventaja de descanso comparado ---
-    try:
-        _home_days_r = enriched_match.get("home_days_rest")
-        _away_days_r = enriched_match.get("away_days_rest")
-        if _home_days_r is not None and _away_days_r is not None:
-            _sel_days_r   = _home_days_r if team_to_back == str(home_team) else _away_days_r
-            _rival_days_r = _away_days_r if team_to_back == str(home_team) else _home_days_r
-            _rest_delta   = _rival_days_r - _sel_days_r  # positivo = rival descansó más
-
+        # Log explicativo si hubo penalizaciones/bonificaciones de contexto
+        if _ctx_penalties:
             logger.info(
-                "REST_ADVANTAGE(%s): home=%dd away=%dd delta=%+dd [%s vs %s | %s]",
-                match_id, _home_days_r, _away_days_r, _away_days_r - _home_days_r,
+                "CONTEXT_PENALTY(%s): conf %.2f→%.2f (%s) [%s vs %s | %s]",
+                match_id, _conf_before_ctx, best_confidence,
+                ", ".join(_ctx_penalties), home_team, away_team, league,
+            )
+
+        # FIX-EDGE0: si best_edge ≤ 0 no hay valor real — descartar ANTES del threshold check.
+        # Causa: discount rival_top3 (×0.80) puede llevar un edge marginal a 0 mientras best_ev
+        # sigue positivo (best_ev no se descuenta en ese paso), dejando pasar la señal.
+        if best_edge <= 0.0:
+            logger.debug(
+                "generate_signal(%s): descartado — edge=%.4f ≤ 0 [%s vs %s | %s]",
+                match_id, best_edge, home_team, away_team, league,
+            )
+            return None
+
+        # --- 6. Umbrales de intensidad basados en EV (FIX 2 + EV) ---
+        # CL/EL/ECL/WC/WC26: umbrales relajados (eliminatorias o torneo mundial, team_stats por nombre)
+        _is_intl_cup = league in {"CL", "EL", "ECL", "WC", "WC26"}
+        _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
+        _is_moderada  = best_ev > 0.12 and best_confidence > (0.65 if _is_intl_cup else 0.70) and best_odds < 6.00
+        _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
+
+        if not (_is_fuerte or _is_moderada or _is_detectada):
+            logger.info(
+                "generate_signal(%s): descartado — no cumple umbral "
+                "(ev=%.1f%% min_ev=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
+                match_id, best_ev * 100, _min_edge * 100, best_confidence * 100, best_odds,
                 home_team, away_team, league,
             )
-            if _rest_delta >= 3:
-                best_confidence = round(best_confidence * 0.90, 4)
-                _ctx_penalties.append(f"rival_rest+{_rest_delta}d(−10%)")
-                _ctx_factors["rest_disadvantage"] = _rest_delta
-            elif _sel_days_r - _rival_days_r >= 3:
-                best_confidence = round(best_confidence * 1.05, 4)
-                _ctx_penalties.append(f"sel_rest+{_sel_days_r - _rival_days_r}d(+5%)")
-                _ctx_factors["rest_advantage"] = _sel_days_r - _rival_days_r
-    except Exception as _re:
-        logger.debug("generate_signal(%s): error REST_ADVANTAGE — %s", match_id, _re)
+            return None
 
-    # Log explicativo si hubo penalizaciones/bonificaciones de contexto
-    if _ctx_penalties:
-        logger.info(
-            "CONTEXT_PENALTY(%s): conf %.2f→%.2f (%s) [%s vs %s | %s]",
-            match_id, _conf_before_ctx, best_confidence,
-            ", ".join(_ctx_penalties), home_team, away_team, league,
-        )
-
-    # FIX-EDGE0: si best_edge ≤ 0 no hay valor real — descartar ANTES del threshold check.
-    # Causa: discount rival_top3 (×0.80) puede llevar un edge marginal a 0 mientras best_ev
-    # sigue positivo (best_ev no se descuenta en ese paso), dejando pasar la señal.
-    if best_edge <= 0.0:
-        logger.debug(
-            "generate_signal(%s): descartado — edge=%.4f ≤ 0 [%s vs %s | %s]",
-            match_id, best_edge, home_team, away_team, league,
-        )
-        return []
-
-    # --- 6. Umbrales de intensidad basados en EV (FIX 2 + EV) ---
-    # CL/EL/ECL/WC/WC26: umbrales relajados (eliminatorias o torneo mundial, team_stats por nombre)
-    _is_intl_cup = league in {"CL", "EL", "ECL", "WC", "WC26"}
-    _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
-    _is_moderada  = best_ev > 0.12 and best_confidence > (0.65 if _is_intl_cup else 0.70) and best_odds < 6.00
-    _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
-
-    if not (_is_fuerte or _is_moderada or _is_detectada):
-        logger.info(
-            "generate_signal(%s): descartado — no cumple umbral "
-            "(ev=%.1f%% min_ev=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
-            match_id, best_ev * 100, _min_edge * 100, best_confidence * 100, best_odds,
-            home_team, away_team, league,
-        )
-        return []
-
-    _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
-
-    # Umbral estricto por competición europea — independiente de data_quality.
-    # CL: mercado muy eficiente, equipos top → EV>15% y conf>75%
-    # EL/ECL: mercado menos eficiente, más edge disponible → EV>10% y conf>68%
-    if league == "CL":
-        if best_ev <= 0.15 or best_confidence <= 0.75:
-            logger.info(
-                "generate_signal(%s): descartado — CL EV=%.3f conf=%.3f "
-                "(requiere EV>0.15 y conf>0.75)",
-                match_id, best_ev, best_confidence,
-            )
-            return []
-    elif league in {"EL", "ECL"}:
-        if best_ev <= 0.10 or best_confidence <= 0.68:
-            logger.info(
-                "generate_signal(%s): descartado — %s EV=%.3f conf=%.3f "
-                "(requiere EV>0.10 y conf>0.68)",
-                match_id, league, best_ev, best_confidence,
-            )
-            return []
-
-    _intl_strict_leagues = {"CL", "EL", "ECL"}
-    # Calidad de datos: si es partial (y no es CL/EL/ECL), reducir confianza 10% y re-evaluar tiers
-    if data_quality == "partial" and league not in _intl_strict_leagues:
-        best_confidence = round(max(0.0, best_confidence * 0.9), 4)
-        _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
-        _is_moderada  = best_ev > 0.12 and best_confidence > 0.65 and best_odds < 6.00
-        _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
-        if not (_is_fuerte or _is_moderada or _is_detectada):
-            return []
         _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
 
-    # --- 7. Contexto externo (lesiones / rotaciones) ---
-    external_ctx = await _fetch_external_context(
-        str(home_team), str(away_team),
-        str(match_date)[:10] if match_date else "",
-    )
-    if external_ctx["confidence_adj"] < 1.0:
-        best_confidence = round(best_confidence * external_ctx["confidence_adj"], 4)
-        if best_confidence <= SPORTS_MIN_CONFIDENCE:
+        # Umbral estricto por competición europea — independiente de data_quality.
+        # CL: mercado muy eficiente, equipos top → EV>15% y conf>75%
+        # EL/ECL: mercado menos eficiente, más edge disponible → EV>10% y conf>68%
+        if league == "CL":
+            if best_ev <= 0.15 or best_confidence <= 0.75:
+                logger.info(
+                    "generate_signal(%s): descartado — CL EV=%.3f conf=%.3f "
+                    "(requiere EV>0.15 y conf>0.75)",
+                    match_id, best_ev, best_confidence,
+                )
+                return None
+        elif league in {"EL", "ECL"}:
+            if best_ev <= 0.10 or best_confidence <= 0.68:
+                logger.info(
+                    "generate_signal(%s): descartado — %s EV=%.3f conf=%.3f "
+                    "(requiere EV>0.10 y conf>0.68)",
+                    match_id, league, best_ev, best_confidence,
+                )
+                return None
+
+        _intl_strict_leagues = {"CL", "EL", "ECL"}
+        # Calidad de datos: si es partial (y no es CL/EL/ECL), reducir confianza 10% y re-evaluar tiers
+        if data_quality == "partial" and league not in _intl_strict_leagues:
+            best_confidence = round(max(0.0, best_confidence * 0.9), 4)
+            _is_fuerte    = best_ev > 0.20 and best_confidence > 0.80 and best_odds < 5.00
+            _is_moderada  = best_ev > 0.12 and best_confidence > 0.65 and best_odds < 6.00
+            _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
+            if not (_is_fuerte or _is_moderada or _is_detectada):
+                return None
+            _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
+
+        # --- 7. Contexto externo (lesiones / rotaciones) ---
+        external_ctx = await _fetch_external_context(
+            str(home_team), str(away_team),
+            str(match_date)[:10] if match_date else "",
+        )
+        if external_ctx["confidence_adj"] < 1.0:
+            best_confidence = round(best_confidence * external_ctx["confidence_adj"], 4)
+            if best_confidence <= SPORTS_MIN_CONFIDENCE:
+                logger.info(
+                    "generate_signal(%s): descartado por contexto externo (conf ajustada a %.3f) — %s",
+                    match_id, best_confidence, external_ctx["notes"],
+                )
+                return None
+
+        # FIX-CONF100: cap estricto — multiplicadores acumulados (motivación + descanso)
+        # pueden superar 1.0 (ej: 1.05 × 1.05 = 1.1025). Confianza nunca puede superar 99%.
+        best_confidence = min(best_confidence, 0.99)
+
+        # --- Guard de divergencia modelo-mercado DIRECCIONAL (espejo de Polymarket) ---
+        # Divergencia = prob del modelo - prob implícita (1/odds). Calculada explícitamente sobre
+        # best_prob/best_odds (NO best_edge, que lleva descuento ×0.80).
+        # SOLO bloquea cuando el lado apostado es UNDERDOG (cuota >= _DIVERGENCE_UNDERDOG_ODDS):
+        # ahí una divergencia alta indica edge inflado de longshot. En FAVORITOS claros (cuota
+        # < frontera) la divergencia alta es esperable (el modelo solo está más convencido que el
+        # mercado) y NO debe auto-cortar — el guard era direction-blind y tiraba favoritos buenos
+        # (WR cortados 53% ≈ WR conservados 56% en la muestra de fútbol).
+        _implied = (1.0 / best_odds) if best_odds > 1.0 else 1.0
+        _divergence = best_prob - _implied
+        _is_underdog = best_odds >= _DIVERGENCE_UNDERDOG_ODDS
+        if _is_underdog and _divergence > _MAX_DIVERGENCE:
             logger.info(
-                "generate_signal(%s): descartado por contexto externo (conf ajustada a %.3f) — %s",
-                match_id, best_confidence, external_ctx["notes"],
+                "generate_signal(%s): SKIP_HIGH_DIVERGENCE [underdog] %s @ %.2f | "
+                "calculated_prob=%.3f implícita=%.3f divergencia=%.3f > %.2f — omitida "
+                "(edge inflado de underdog; favoritos <%.2f exentos)",
+                match_id, team_to_back, best_odds,
+                best_prob, _implied, _divergence, _MAX_DIVERGENCE, _DIVERGENCE_UNDERDOG_ODDS,
             )
-            return []
+            return None
 
-    # FIX-CONF100: cap estricto — multiplicadores acumulados (motivación + descanso)
-    # pueden superar 1.0 (ej: 1.05 × 1.05 = 1.1025). Confianza nunca puede superar 99%.
-    best_confidence = min(best_confidence, 0.99)
+        kelly = kelly_criterion(best_ev, best_odds)
 
-    # --- Guard de divergencia modelo-mercado DIRECCIONAL (espejo de Polymarket) ---
-    # Divergencia = prob del modelo - prob implícita (1/odds). Calculada explícitamente sobre
-    # best_prob/best_odds (NO best_edge, que lleva descuento ×0.80).
-    # SOLO bloquea cuando el lado apostado es UNDERDOG (cuota >= _DIVERGENCE_UNDERDOG_ODDS):
-    # ahí una divergencia alta indica edge inflado de longshot. En FAVORITOS claros (cuota
-    # < frontera) la divergencia alta es esperable (el modelo solo está más convencido que el
-    # mercado) y NO debe auto-cortar — el guard era direction-blind y tiraba favoritos buenos
-    # (WR cortados 53% ≈ WR conservados 56% en la muestra de fútbol).
-    _implied = (1.0 / best_odds) if best_odds > 1.0 else 1.0
-    _divergence = best_prob - _implied
-    _is_underdog = best_odds >= _DIVERGENCE_UNDERDOG_ODDS
-    if _is_underdog and _divergence > _MAX_DIVERGENCE:
-        logger.info(
-            "generate_signal(%s): SKIP_HIGH_DIVERGENCE [underdog] %s @ %.2f | "
-            "calculated_prob=%.3f implícita=%.3f divergencia=%.3f > %.2f — omitida "
-            "(edge inflado de underdog; favoritos <%.2f exentos)",
-            match_id, team_to_back, best_odds,
-            best_prob, _implied, _divergence, _MAX_DIVERGENCE, _DIVERGENCE_UNDERDOG_ODDS,
-        )
-        return []
+        # Construir factors segun data_source
+        if data_source == "statistical_model":
+            factors = dict(best_signals)
+        else:
+            home_form = enriched_match.get("home_form_score", 50.0)
+            away_form = enriched_match.get("away_form_score", 50.0)
+            h2h_adv = enriched_match.get("h2h_advantage", 0.0)
+            factors = {
+                "stats_score": round(
+                    (max(home_form, away_form) / 100.0 * 0.6)
+                    + (abs(h2h_adv) * 0.4), 4
+                ),
+                "groq_estimate": best_prob,
+            }
+        # Añadir factores situacionales (rival_form, rival_momentum, bad_streak)
+        factors.update(_ctx_factors)
 
-    kelly = kelly_criterion(best_ev, best_odds)
-    results: list[dict] = []
-
-    # Construir factors segun data_source
-    if data_source == "statistical_model":
-        factors = dict(best_signals)
-    else:
-        home_form = enriched_match.get("home_form_score", 50.0)
-        away_form = enriched_match.get("away_form_score", 50.0)
-        h2h_adv = enriched_match.get("h2h_advantage", 0.0)
-        factors = {
-            "stats_score": round(
-                (max(home_form, away_form) / 100.0 * 0.6)
-                + (abs(h2h_adv) * 0.4), 4
-            ),
-            "groq_estimate": best_prob,
+        prediction = {
+            "match_id": match_id,
+            "home_team": str(home_team),
+            "away_team": str(away_team),
+            "sport": sport,
+            "league": league,
+            "market_type": "h2h",
+            "data_source": data_source,
+            "match_date": match_date,
+            "team_to_back": team_to_back,
+            "bookmaker": odds_data["bookmaker"],
+            "odds": best_odds,
+            "calculated_prob": best_prob,
+            "edge": best_edge,
+            "ev": round(best_ev, 4),
+            "confidence": best_confidence,
+            "kelly_fraction": kelly,
+            "factors": factors,
+            "signals": best_signals,
+            "elo_sufficient": elo_sufficient,
+            "h2h_sufficient": enriched_match.get("h2h_sufficient", True),
+            "odds_source": odds_data.get("source", "theoddsapi"),
+            "weights_version": weights_version,
+            "created_at": datetime.now(timezone.utc),
+            "result": None,
+            "correct": None,
+            "error_type": None,
+            "external_context": external_ctx["notes"],
+            "odds_movement": odds_movement,
+            "intensity": _signal_intensity,
         }
-    # Añadir factores situacionales (rival_form, rival_momentum, bad_streak)
-    factors.update(_ctx_factors)
 
-    prediction = {
-        "match_id": match_id,
-        "home_team": str(home_team),
-        "away_team": str(away_team),
-        "sport": sport,
-        "league": league,
-        "market_type": "h2h",
-        "data_source": data_source,
-        "match_date": match_date,
-        "team_to_back": team_to_back,
-        "bookmaker": odds_data["bookmaker"],
-        "odds": best_odds,
-        "calculated_prob": best_prob,
-        "edge": best_edge,
-        "ev": round(best_ev, 4),
-        "confidence": best_confidence,
-        "kelly_fraction": kelly,
-        "factors": factors,
-        "signals": best_signals,
-        "elo_sufficient": elo_sufficient,
-        "h2h_sufficient": enriched_match.get("h2h_sufficient", True),
-        "odds_source": odds_data.get("source", "theoddsapi"),
-        "weights_version": weights_version,
-        "created_at": datetime.now(timezone.utc),
-        "result": None,
-        "correct": None,
-        "error_type": None,
-        "external_context": external_ctx["notes"],
-        "odds_movement": odds_movement,
-        "intensity": _signal_intensity,
-    }
 
-    # --- Guardar en Firestore predictions ---
-    try:
-        col("predictions").document(match_id).set(prediction)
-        logger.info(
-            "generate_signal(%s): %s @ %.2f | edge=%.1f%% ev=%.1f%% conf=%.0f%% kelly=%.1f%% | odds_movement=%s",
-            match_id, team_to_back, best_odds,
-            best_edge * 100, best_ev * 100, best_confidence * 100, kelly * 100,
-            odds_movement.get("flag", "NONE"),
-        )
-    except Exception:
-        logger.error("generate_signal(%s): error guardando prediction", match_id, exc_info=True)
+        return prediction
 
-    # --- Alerta Telegram si EV alto ---
-    if best_ev > SPORTS_ALERT_EDGE:
-        actually_sent = await _send_telegram_alert(_build_alert_payload(prediction, enriched_match))
-        if actually_sent:
-            try:
-                col("predictions").document(match_id).update({"alerted": True})
-            except Exception:
-                logger.error("generate_signal(%s): error marcando alerted=True", match_id, exc_info=True)
+    # Orden de lados: excluir el lado underdog marcado con divergencia extrema (igual que
+    # antes — _div_home/_div_away ya lo decidieron arriba); en caso normal, evaluar ambos.
+    if _div_away:
+        _sides_to_try = [True]      # away underdog inflado -> solo favorito home
+    elif _div_home:
+        _sides_to_try = [False]     # home underdog inflado -> solo favorito away
+    else:
+        _sides_to_try = [True, False]
+    _candidates: list[dict] = []
+    for _ph in _sides_to_try:
+        _cand = await _eval_side(_ph)
+        if _cand is not None:
+            _candidates.append(_cand)
+    prediction = max(_candidates, key=lambda p: p["ev"]) if _candidates else None
 
-    results.append(prediction)
+    if prediction is not None:
+        try:
+            col("predictions").document(match_id).set(prediction)
+            logger.info(
+                "generate_signal(%s): %s @ %.2f | edge=%.1f%% ev=%.1f%% conf=%.0f%% kelly=%.1f%% | odds_movement=%s",
+                match_id, prediction["team_to_back"], prediction["odds"],
+                prediction["edge"] * 100, prediction["ev"] * 100,
+                prediction["confidence"] * 100, prediction["kelly_fraction"] * 100,
+                odds_movement.get("flag", "NONE"),
+            )
+        except Exception:
+            logger.error("generate_signal(%s): error guardando prediction", match_id, exc_info=True)
+
+        if prediction["ev"] > SPORTS_ALERT_EDGE:
+            actually_sent = await _send_telegram_alert(_build_alert_payload(prediction, enriched_match))
+            if actually_sent:
+                try:
+                    col("predictions").document(match_id).update({"alerted": True})
+                except Exception:
+                    logger.error("generate_signal(%s): error marcando alerted=True", match_id, exc_info=True)
+
+        results.append(prediction)
 
     # --- Señal de totals (solo fútbol con modelo Poisson) ---
     sport_key = _ODDS_SPORT_MAP.get(league, "")
