@@ -45,6 +45,8 @@ class MatchedSignal:
     profit_per_100: float     # beneficio garantizado con back_stake=100 (neg = pérdida qualifying)
     detected_at: str          # ISO8601 UTC
     expires_at: str           # ISO8601 UTC — se invalida al empezar el partido
+    alerted: bool = False     # True si ya se envió alerta Telegram (dedup)
+    alerted_at: str = ""      # ISO8601 UTC del envío
 
     def to_doc(self) -> dict:
         return asdict(self)

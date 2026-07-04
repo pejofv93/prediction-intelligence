@@ -25,6 +25,7 @@ from shared.firestore_client import col
 
 from .odds_lay import fetch_event_quotes, budget_ok
 from .engine import classify
+from .alerts import should_alert, send_matched_alert
 
 logger = logging.getLogger(__name__)
 
@@ -88,21 +89,41 @@ def _too_close(commence_time: str, now: datetime) -> bool:
     return dt <= now + timedelta(minutes=SIGNAL_MIN_MINUTES_BEFORE_KICKOFF)
 
 
-def _persist(signals: list, now: datetime) -> int:
-    """Escribe señales (idempotente por signal_id) y limpia expiradas. Devuelve nº escritas."""
+def _persist(signals: list, now: datetime) -> tuple[int, list]:
+    """
+    Escribe señales (idempotente por signal_id) preservando el flag `alerted` de
+    ejecuciones previas (dedup), limpia expiradas y devuelve (nº escritas, a_alertar).
+    `a_alertar` = señales que cumplen umbral y NO habían sido alertadas todavía.
+    """
+    now_iso = now.isoformat()
+
+    # Lectura única de la colección: sirve para dedup (alerted previo) y limpieza.
+    existing: dict[str, dict] = {}
+    try:
+        existing = {d.id: (d.to_dict() or {}) for d in col(_COLL).stream()}
+    except Exception:
+        logger.warning("matched.scanner: error leyendo señales existentes", exc_info=True)
+
     written = 0
+    to_alert: list = []
     for sig in signals:
+        prev = existing.get(sig.signal_id)
+        prev_alerted = bool(prev and prev.get("alerted"))
+        doc = sig.to_doc()
+        doc["alerted"] = prev_alerted            # preservar dedup entre escaneos
+        doc["alerted_at"] = (prev or {}).get("alerted_at", "") if prev_alerted else ""
         try:
-            col(_COLL).document(sig.signal_id).set(sig.to_doc())
+            col(_COLL).document(sig.signal_id).set(doc)
             written += 1
+            if not prev_alerted and should_alert(sig):
+                to_alert.append(sig)
         except Exception:
             logger.warning("matched.scanner: error persistiendo %s", sig.signal_id, exc_info=True)
 
-    # Limpieza acotada de expiradas (colección pequeña → filtrado en Python, sin índice)
+    # Limpieza acotada de expiradas (usa la lectura ya hecha, sin índice)
     try:
-        now_iso = now.isoformat()
-        stale = [d.id for d in col(_COLL).stream()
-                 if (d.to_dict() or {}).get("expires_at", "") < now_iso]
+        stale = [doc_id for doc_id, d in existing.items()
+                 if (d.get("expires_at", "") or "") < now_iso]
         for doc_id in stale[:300]:
             col(_COLL).document(doc_id).delete()
         if stale:
@@ -110,7 +131,22 @@ def _persist(signals: list, now: datetime) -> int:
     except Exception:
         logger.warning("matched.scanner: error limpiando expiradas", exc_info=True)
 
-    return written
+    return written, to_alert
+
+
+async def _dispatch_alerts(to_alert: list, now: datetime) -> int:
+    """Envía alertas a Telegram y marca alerted=True en Firestore. Devuelve nº enviadas."""
+    sent = 0
+    for sig in to_alert:
+        if await send_matched_alert(sig):
+            try:
+                col(_COLL).document(sig.signal_id).set(
+                    {"alerted": True, "alerted_at": now.isoformat()}, merge=True)
+            except Exception:
+                logger.warning("matched.scanner: alerta enviada pero no se marcó %s",
+                               sig.signal_id, exc_info=True)
+            sent += 1
+    return sent
 
 
 async def run_matched_scan() -> dict:
@@ -153,7 +189,8 @@ async def run_matched_scan() -> dict:
                 if sig is not None:
                     all_signals.append(sig)
 
-    written = _persist(all_signals, now)
+    written, to_alert = _persist(all_signals, now)
+    alerts_sent = await _dispatch_alerts(to_alert, now)
     n_sure = sum(1 for s in all_signals if s.signal_type == "surebet")
     n_cov = sum(1 for s in all_signals if s.signal_type == "coverage")
 
@@ -165,6 +202,8 @@ async def run_matched_scan() -> dict:
         "coverage": n_cov,
         "skipped_timing": skipped_timing,
         "written": written,
+        "alerts_new": len(to_alert),
+        "alerts_sent": alerts_sent,
     }
     logger.info("matched.scanner: %s", summary)
     return summary

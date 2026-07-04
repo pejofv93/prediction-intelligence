@@ -89,6 +89,13 @@ MATCHED_MAX_KEYS_PER_SCAN = int(os.environ.get("MATCHED_MAX_KEYS_PER_SCAN", "4")
 # Si la API no da last_update → confianza "unknown" (se conserva, no se descarta).
 MATCHED_LAY_FRESH_SEC = int(os.environ.get("MATCHED_LAY_FRESH_SEC", "300"))   # 5 min
 MATCHED_LAY_STALE_SEC = int(os.environ.get("MATCHED_LAY_STALE_SEC", "900"))   # 15 min
+# Umbrales de ALERTA a Telegram (canal General). Persistimos todo, pero solo alertamos:
+#   surebets con rating >= SUREBET_MIN (beneficio garantizado real)
+#   coberturas con peaje mejor que COVERAGE_MIN (pierdes poco → apta para bono)
+# Solo se alertan señales con confianza en MATCHED_ALERT_CONFIDENCE (fiables).
+MATCHED_ALERT_SUREBET_MIN_RATING = float(os.environ.get("MATCHED_ALERT_SUREBET_MIN_RATING", "1.0"))
+MATCHED_ALERT_COVERAGE_MIN_RATING = float(os.environ.get("MATCHED_ALERT_COVERAGE_MIN_RATING", "-1.0"))
+MATCHED_ALERT_CONFIDENCE = os.environ.get("MATCHED_ALERT_CONFIDENCE", "high,medium")
 
 BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral menor
 POLY_MIN_EDGE = 0.08

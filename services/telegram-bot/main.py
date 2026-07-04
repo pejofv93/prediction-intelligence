@@ -147,6 +147,12 @@ async def send_alert(request: Request) -> JSONResponse:
             text = data.get("message", "")
             if text:
                 sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
+        elif alert_type == "matched":
+            # Detector back/lay (surebets + coberturas) → canal General (thread None).
+            # Texto plano (parse_mode=None) para evitar errores de entidades Markdown.
+            text = data.get("text", "")
+            if text:
+                sent = await send_message(text, parse_mode=None, message_thread_id=None)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
     except Exception:
