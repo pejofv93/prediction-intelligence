@@ -44,15 +44,37 @@ interface MatchedSignalsResp {
   fetched_at: string
 }
 
-interface Offer {
+interface BonusPlay {
+  event: string
+  selection: string
+  sport_key: string
+  commence_time: string
+  ref_back_bookmaker: string
+  ref_back_odds: number
+  lay_bookmaker: string
+  lay_odds: number
+  estimated_benefit: number
+  benefit_label: string
+}
+
+interface Bonus {
+  id: string
   bookmaker: string
-  bonus: string
-  amount: number
+  title: string
   type: string
+  amount: number
+  min_odds: number
   requirement: string
-  rating: number
-  status: string
-  advice: string
+  active: boolean
+  verify?: boolean
+  play: BonusPlay | null
+}
+
+interface BonusesResp {
+  bonuses: Bonus[]
+  count: number
+  note: string
+  fetched_at: string
 }
 
 interface Bet {
@@ -397,101 +419,93 @@ function TabSenales() {
   )
 }
 
-// ─── Tab: Ofertas ──────────────────────────────────────────────────────────────
+// ─── Tab: Bonos (reales, con jugada desde señales) ──────────────────────────────
 
-const ratingColors = ['#FF5252', '#FF5252', '#F7931A', '#F7931A', '#00C853', '#00C853']
-
-function TabOfertas() {
-  const [offers, setOffers] = useState<Offer[]>([])
-  const [loading, setLoading] = useState(false)
+function TabBonos() {
+  const [data, setData] = useState<BonusesResp | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [loaded, setLoaded] = useState(false)
 
-  const fetchOffers = async () => {
+  const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const res = await fetch('/api/fetch-offers', { method: 'POST' })
+      const res = await fetch('/api/matched-bonuses')
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      setOffers(await res.json())
-      setLoaded(true)
+      setData(await res.json())
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Error cargando ofertas')
+      setError(err instanceof Error ? err.message : 'Error cargando bonos')
     } finally { setLoading(false) }
-  }
+  }, [])
 
-  const typeColors: Record<string, string> = {
-    welcome: '#9C27B0',
-    reload: '#2196F3',
-    cashback: '#00BCD4',
-    free_bet: '#F7931A',
-  }
+  useEffect(() => { load() }, [load])
+
+  const bonuses = data?.bonuses ?? []
 
   return (
     <div>
-      {!loaded && (
-        <div style={{ textAlign: 'center', padding: '40px 0' }}>
-          <p style={{ color: '#666', marginBottom: 16, fontSize: 14 }}>
-            Busca las mejores ofertas y bonos de casas de apuestas españolas en tiempo real via IA.
-          </p>
-          <button onClick={fetchOffers} disabled={loading} style={{ ...btnPrimary, padding: '12px 32px', fontSize: 15 }}>
-            {loading ? 'Buscando ofertas...' : '🎁 Cargar ofertas actuales'}
-          </button>
-        </div>
-      )}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <span style={{ color: '#888', fontSize: 13 }}>{bonuses.length} bonos</span>
+        <button onClick={load} disabled={loading} style={{ ...btnPrimary, padding: '6px 14px', fontSize: 12 }}>
+          {loading ? '...' : '↻ Actualizar'}
+        </button>
+      </div>
 
-      {loaded && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <span style={{ color: '#888', fontSize: 13 }}>{offers.length} ofertas encontradas</span>
-          <button onClick={fetchOffers} disabled={loading} style={{ ...btnPrimary, padding: '6px 14px', fontSize: 12 }}>
-            {loading ? '...' : '↻ Actualizar'}
-          </button>
-        </div>
-      )}
+      <div style={{ background: '#F7931A11', border: '1px solid #F7931A33', borderRadius: 6, padding: '8px 12px', marginBottom: 16, color: '#F7931A', fontSize: 12 }}>
+        ℹ️ {data?.note ?? 'Bonos mantenidos manualmente; la jugada usa una señal detectada como referencia.'}
+      </div>
 
       {error && <p style={{ color: '#FF5252', fontSize: 13 }}>Error: {error}</p>}
+      {loading && <p style={{ color: '#888', fontSize: 13 }}>Cargando bonos...</p>}
 
-      {offers.map((o, i) => {
-        const typeColor = typeColors[o.type] ?? '#888'
-        const rc = ratingColors[Math.min(Math.max(Math.round(o.rating ?? 0), 0), 5)]
+      {!loading && bonuses.length === 0 && (
+        <p style={{ color: '#666', fontSize: 13, textAlign: 'center', padding: '40px 0' }}>
+          No hay bonos configurados.
+        </p>
+      )}
+
+      {bonuses.map(b => {
+        const p = b.play
         return (
-          <div key={i} style={{ ...card, borderLeft: `3px solid ${typeColor}` }}>
+          <div key={b.id} style={{ ...card, borderLeft: '3px solid #9C27B0' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
               <div>
-                <span style={{ fontWeight: 'bold', fontSize: 15 }}>{o.bookmaker}</span>
-                <span style={{ marginLeft: 8, color: '#888', fontSize: 13 }}>{o.bonus}</span>
+                <span style={{ fontWeight: 'bold', fontSize: 15 }}>{b.bookmaker}</span>
+                <span style={{ marginLeft: 8, color: '#888', fontSize: 13 }}>{b.title}</span>
               </div>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
-                <span style={{ background: typeColor + '22', color: typeColor, border: `1px solid ${typeColor}44`, borderRadius: 4, padding: '2px 8px', fontSize: 11 }}>
-                  {o.type}
-                </span>
-                {o.status === 'activo' && (
-                  <span style={{ background: '#00C85322', color: '#00C853', border: '1px solid #00C85344', borderRadius: 4, padding: '2px 8px', fontSize: 11 }}>
-                    activo
-                  </span>
+                <span style={{ background: '#9C27B022', color: '#9C27B0', border: '1px solid #9C27B044', borderRadius: 4, padding: '2px 8px', fontSize: 11 }}>{b.type}</span>
+                {b.verify && (
+                  <span style={{ background: '#F7931A22', color: '#F7931A', border: '1px solid #F7931A44', borderRadius: 4, padding: '2px 8px', fontSize: 11 }}>verificar importe</span>
                 )}
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
-              <StatBox label="IMPORTE" value={`€${o.amount}`} color="#fff" />
-              <div style={{ background: '#1e1e1e', border: '1px solid #2e2e2e', borderRadius: 6, padding: '6px 12px' }}>
-                <div style={{ color: '#555', fontSize: 10, marginBottom: 2 }}>RATING</div>
-                <div style={{ display: 'flex', gap: 2 }}>
-                  {[1, 2, 3, 4, 5].map(n => (
-                    <div key={n} style={{ width: 8, height: 8, borderRadius: 2, background: n <= (o.rating ?? 0) ? rc : '#333' }} />
-                  ))}
-                </div>
-              </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+              <StatBox label="IMPORTE" value={`€${b.amount}`} />
+              <StatBox label="CUOTA MÍN." value={b.min_odds.toFixed(2)} />
             </div>
 
-            {o.requirement && (
-              <div style={{ color: '#666', fontSize: 12, marginBottom: 6 }}>
-                📋 {o.requirement}
-              </div>
+            {b.requirement && (
+              <div style={{ color: '#666', fontSize: 12, marginBottom: 10 }}>📋 {b.requirement}</div>
             )}
-            {o.advice && (
-              <div style={{ color: '#F7931A', fontSize: 12 }}>
-                💡 {o.advice}
+
+            {p ? (
+              <div style={{ background: '#12121a', border: '1px solid #2a2a3a', borderRadius: 6, padding: '10px 12px' }}>
+                <div style={{ color: '#9C27B0', fontSize: 11, fontWeight: 'bold', marginBottom: 6 }}>JUGADA RECOMENDADA</div>
+                <div style={{ fontSize: 13, color: '#ddd', marginBottom: 4 }}>
+                  {p.event} — <span style={{ color: '#fff', fontWeight: 'bold' }}>{p.selection}</span>
+                  <span style={{ color: '#555', fontSize: 11 }}> · {p.sport_key} · {fmtKickoff(p.commence_time)}</span>
+                </div>
+                <div style={{ fontSize: 12, color: '#aaa', marginBottom: 6 }}>
+                  Back en <b>{b.bookmaker}</b> (ref. {p.ref_back_bookmaker} @{p.ref_back_odds?.toFixed(2)}) ·
+                  Lay Betfair @{p.lay_odds?.toFixed(2)}
+                </div>
+                <StatBox label={p.benefit_label.toUpperCase()} value={`€${p.estimated_benefit.toFixed(2)}`}
+                  color={p.estimated_benefit >= 0 ? '#00C853' : '#FF5252'} />
+              </div>
+            ) : (
+              <div style={{ color: '#666', fontSize: 12, fontStyle: 'italic' }}>
+                Sin señal vigente que encaje con este bono ahora mismo.
               </div>
             )}
           </div>
@@ -643,7 +657,7 @@ function TabTracker({ refreshKey }: { refreshKey: number }) {
 const TABS = [
   { id: 'calc', label: '🧮 Calculadora' },
   { id: 'signals', label: '🎯 Señales' },
-  { id: 'offers', label: '🎁 Ofertas' },
+  { id: 'bonos', label: '🎁 Bonos' },
   { id: 'tracker', label: '📈 Tracker P&L' },
 ]
 
@@ -686,7 +700,7 @@ export default function MatchedBetting() {
 
       {activeTab === 'calc' && <TabCalculadora onBetSaved={handleBetSaved} />}
       {activeTab === 'signals' && <TabSenales />}
-      {activeTab === 'offers' && <TabOfertas />}
+      {activeTab === 'bonos' && <TabBonos />}
       {activeTab === 'tracker' && <TabTracker refreshKey={trackerRefresh} />}
     </div>
   )
