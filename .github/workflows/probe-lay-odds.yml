@@ -1,0 +1,129 @@
+name: probe-lay-odds
+# Sonda de verificación (Fase 1 matched-betting): ¿de dónde sale la cuota LAY?
+#   A) The Odds API  → markets=h2h,h2h_lay regions=eu  ¿betfair_ex_eu devuelve lay?
+#   B) odds-api.io   → bookmakers="Betfair Exchange"    ¿back/lay o 403 en plan free?
+# Solo lectura. No escribe nada. Borrar tras verificar.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      ODDSAPIIO_KEY: ${{ secrets.ODDSAPIIO_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install httpx
+      - name: Probe lay odds
+        run: |
+          python - <<'EOF'
+          import os, json, httpx
+
+          TOA = os.environ.get("ODDS_API_KEY", "")
+          IO  = os.environ.get("ODDSAPIIO_KEY", "")
+          def line(): print("=" * 70)
+
+          # ══════════════════════════════════════════════════════════════════
+          # A) THE ODDS API — h2h_lay / betfair_ex_eu
+          # ══════════════════════════════════════════════════════════════════
+          line(); print("A) THE ODDS API  (key set:", bool(TOA), ")"); line()
+          with httpx.Client(timeout=25.0) as c:
+              r = c.get("https://api.the-odds-api.com/v4/sports",
+                        params={"apiKey": TOA})
+              print("GET /v4/sports ->", r.status_code,
+                    "| remaining:", r.headers.get("x-requests-remaining"))
+              active = []
+              if r.status_code == 200:
+                  for s in r.json():
+                      if s.get("active"):
+                          active.append(s["key"])
+                  print("Active sport keys (%d):" % len(active))
+                  for k in active:
+                      print("   ", k)
+
+              # Candidatos probables activos en julio: tenis (Wimbledon), MLB, MLS...
+              prefer = [k for k in active if any(
+                  t in k for t in ("tennis", "baseball_mlb", "soccer", "basketball_wnba"))]
+              cand = (prefer or active)[:4]
+              print("\nProbing markets=h2h,h2h_lay regions=eu on:", cand)
+
+              for key in cand:
+                  rr = c.get(f"https://api.the-odds-api.com/v4/sports/{key}/odds",
+                             params={"apiKey": TOA, "regions": "eu",
+                                     "markets": "h2h,h2h_lay", "oddsFormat": "decimal"})
+                  print("\n--- %s -> %d | cost=%s remaining=%s" % (
+                      key, rr.status_code,
+                      rr.headers.get("x-requests-last"),
+                      rr.headers.get("x-requests-remaining")))
+                  if rr.status_code != 200:
+                      print("    body:", rr.text[:300]); continue
+                  evs = rr.json()
+                  if not evs:
+                      print("    0 events"); continue
+                  ev = evs[0]
+                  print("    event: %s vs %s" % (ev.get("home_team"), ev.get("away_team")))
+                  found_lay = False
+                  for bk in ev.get("bookmakers", []):
+                      mkeys = [m.get("key") for m in bk.get("markets", [])]
+                      if "h2h_lay" in mkeys or "betfair" in bk.get("key", ""):
+                          print("    bookmaker=%s markets=%s" % (bk.get("key"), mkeys))
+                          for m in bk.get("markets", []):
+                              if m.get("key") in ("h2h", "h2h_lay"):
+                                  print("      %s: %s" % (
+                                      m["key"],
+                                      json.dumps(m.get("outcomes"), default=str)[:220]))
+                              if m.get("key") == "h2h_lay":
+                                  found_lay = True
+                  print("    >>> h2h_lay present:", found_lay)
+                  if found_lay:
+                      break
+
+          # ══════════════════════════════════════════════════════════════════
+          # B) ODDS-API.IO — ¿Betfair Exchange en plan free? ¿back/lay?
+          # ══════════════════════════════════════════════════════════════════
+          line(); print("B) ODDS-API.IO  (key set:", bool(IO), ")"); line()
+          IOBASE = "https://api.odds-api.io/v3"
+          with httpx.Client(timeout=25.0) as c:
+              # bookmakers/catálogo si existe
+              for path in ("/bookmakers", "/bookies"):
+                  rb = c.get(f"{IOBASE}{path}", params={"apiKey": IO})
+                  print(f"GET {path} -> {rb.status_code}", ("(" + rb.text[:120] + ")") if rb.status_code!=200 else "")
+                  if rb.status_code == 200:
+                      break
+
+              # eventos de un deporte activo
+              ev_id = None
+              for slug in ("tennis", "football", "soccer", "basketball"):
+                  re_ = c.get(f"{IOBASE}/events", params={"apiKey": IO, "sport": slug})
+                  print(f"GET /events sport={slug} -> {re_.status_code}")
+                  if re_.status_code == 200:
+                      raw = re_.json()
+                      evs = raw if isinstance(raw, list) else raw.get("data", raw.get("events", []))
+                      if evs:
+                          e0 = evs[0]
+                          ev_id = str(e0.get("id") or e0.get("eventId") or "")
+                          print(f"   {len(evs)} eventos; primer id={ev_id}",
+                                e0.get("homeTeam") or e0.get("home"), "vs",
+                                e0.get("awayTeam") or e0.get("away"))
+                          break
+                  elif re_.status_code == 429:
+                      print("   rate limit:", re_.text[:120]); break
+
+              if ev_id:
+                  # Probar variantes del nombre Betfair Exchange (1 bookmaker/request)
+                  for bm in ("Betfair Exchange", "Betfair", "Betfair Exchange ES",
+                             "Betfair Exchange EU", "Betfair Ex"):
+                      ro = c.get(f"{IOBASE}/odds/multi", params={
+                          "apiKey": IO, "eventIds": ev_id,
+                          "bookmakers": bm, "markets": "h2h"})
+                      tag = "OK" if ro.status_code == 200 else "FAIL"
+                      print(f"\n/odds/multi bookmakers={bm!r} -> {ro.status_code} [{tag}]")
+                      print("   body:", ro.text[:500])
+                      if ro.status_code == 200 and ro.text.strip() not in ("[]", "{}", ""):
+                          break
+          print("\n=== FIN PROBE ===")
+          EOF
