@@ -1,0 +1,16 @@
+name: reset-oddspapi-quota
+# Reset manual de la cuota mensual de OddsPapi (POST /admin/reset-quota/oddspapi).
+# Usar SOLO tras desplegar el fix de robustez 429 (si no, el próximo 429 la vuelve a
+# lockear y se gasta el reset). Dispatch manual desde la pestaña Actions.
+on: workflow_dispatch
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Reset OddsPapi monthly quota
+        run: |
+          curl -s -X POST "${{ secrets.SPORTS_AGENT_URL }}/admin/reset-quota/oddspapi" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 30 --fail --show-error | python3 -m json.tool
