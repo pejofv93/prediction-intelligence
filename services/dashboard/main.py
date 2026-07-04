@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from api import backtest, calculator, odds_finder, poly_stats, polymarket, predictions, shadow, tracker
+from api import backtest, calculator, matched, odds_finder, poly_stats, polymarket, predictions, shadow, tracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -68,6 +68,11 @@ app.include_router(
 )
 app.include_router(
     odds_finder.router,
+    prefix="/api",
+    dependencies=[Depends(verify_credentials)],
+)
+app.include_router(
+    matched.router,
     prefix="/api",
     dependencies=[Depends(verify_credentials)],
 )

@@ -12,20 +12,33 @@ interface CalcResult {
   steps: string[]
 }
 
-interface OddsEntry {
-  bookmaker: string
-  home: number
-  draw?: number
-  away: number
-  is_exchange?: boolean
+interface MatchedSignal {
+  signal_id: string
+  signal_type: string          // "surebet" | "coverage"
+  sport_key: string
+  event_id: string
+  commence_time: string
+  home_team: string
+  away_team: string
+  selection: string
+  back_bookmaker: string
+  back_odds: number
+  lay_bookmaker: string
+  lay_odds: number
+  qualifying_rating: number
+  freebet_snr_rating: number
+  lay_stake_per_100: number
+  liability_per_100: number
+  profit_per_100: number
 }
 
-interface OddsResult {
-  event: string
-  odds: OddsEntry[]
-  best_back: { bookmaker: string; selection?: string; odds: number } | null
-  best_lay: { bookmaker: string; odds: number } | null
-  warning: string
+interface MatchedSignalsResp {
+  signals: MatchedSignal[]
+  count: number
+  surebets: number
+  coverage: number
+  warning?: string
+  error?: string
   fetched_at: string
 }
 
@@ -256,124 +269,117 @@ function TabCalculadora({ onBetSaved }: { onBetSaved: () => void }) {
   )
 }
 
-// ─── Tab: Buscar cuotas ────────────────────────────────────────────────────────
+// ─── Tab: Señales (detector back/lay real) ──────────────────────────────────────
 
-function TabBuscarCuotas() {
-  const [eventName, setEventName] = useState('')
-  const [result, setResult] = useState<OddsResult | null>(null)
-  const [loading, setLoading] = useState(false)
+function fmtKickoff(iso: string): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso
+  return d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
+function SignalCard({ s }: { s: MatchedSignal }) {
+  const isSure = s.signal_type === 'surebet'
+  const accent = isSure ? '#00C853' : '#F7931A'
+  const label = isSure ? 'SUREBET' : 'COBERTURA'
+  const ratingColor = s.qualifying_rating >= 0 ? '#00C853' : '#FF5252'
+  return (
+    <div style={{ ...card, borderLeft: `3px solid ${accent}` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+        <div>
+          <div style={{ fontWeight: 'bold', fontSize: 14 }}>{s.home_team} <span style={{ color: '#555' }}>v</span> {s.away_team}</div>
+          <div style={{ color: '#555', fontSize: 12, marginTop: 2 }}>
+            {s.sport_key} · {fmtKickoff(s.commence_time)}
+          </div>
+        </div>
+        <span style={{ background: accent + '22', color: accent, border: `1px solid ${accent}44`, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 'bold', flexShrink: 0 }}>
+          {label}
+        </span>
+      </div>
+
+      <div style={{ color: '#ccc', fontSize: 13, marginBottom: 10 }}>
+        Apostar a: <span style={{ color: '#fff', fontWeight: 'bold' }}>{s.selection}</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <StatBox label={`BACK · ${s.back_bookmaker}`} value={s.back_odds.toFixed(2)} color="#00C853" />
+        <StatBox label={`LAY · ${s.lay_bookmaker}`} value={s.lay_odds.toFixed(2)} color="#F7931A" />
+        <StatBox label="RATING" value={`${s.qualifying_rating.toFixed(2)}%`} color={ratingColor} />
+        <StatBox label="BENEF./100€" value={`€${s.profit_per_100.toFixed(2)}`} color={ratingColor} />
+        <StatBox label="LAY STAKE/100€" value={`€${s.lay_stake_per_100.toFixed(2)}`} />
+        <StatBox label="RESPONSAB./100€" value={`€${s.liability_per_100.toFixed(2)}`} color="#FF5252" />
+        <StatBox label="EV FREE BET SNR" value={`${s.freebet_snr_rating.toFixed(0)}%`} color="#9C27B0" />
+      </div>
+    </div>
+  )
+}
+
+function TabSenales() {
+  const [filter, setFilter] = useState<'all' | 'surebet' | 'coverage'>('all')
+  const [data, setData] = useState<MatchedSignalsResp | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const handleSearch = async () => {
-    if (!eventName.trim()) return
+  const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const res = await fetch('/api/find-odds', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event: eventName }),
-      })
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}))
-        throw new Error(d.detail || `HTTP ${res.status}`)
-      }
-      setResult(await res.json())
+      const q = filter === 'all' ? '' : `?signal_type=${filter}`
+      const res = await fetch(`/api/matched-signals${q}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setData(await res.json())
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Error buscando cuotas')
+      setError(err instanceof Error ? err.message : 'Error cargando señales')
     } finally { setLoading(false) }
-  }
+  }, [filter])
+
+  useEffect(() => { load() }, [load])
+
+  const signals = data?.signals ?? []
+  const filters: Array<{ id: 'all' | 'surebet' | 'coverage'; label: string }> = [
+    { id: 'all', label: `Todas (${data?.count ?? 0})` },
+    { id: 'surebet', label: `Surebets (${data?.surebets ?? 0})` },
+    { id: 'coverage', label: `Coberturas (${data?.coverage ?? 0})` },
+  ]
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
-        <input
-          type="text"
-          placeholder="ej: Real Madrid vs Barcelona"
-          value={eventName}
-          onChange={e => setEventName(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && handleSearch()}
-          style={{ ...inputStyle, flex: 1, marginTop: 0 }}
-        />
-        <button onClick={handleSearch} disabled={loading} style={{ ...btnPrimary, flexShrink: 0 }}>
-          {loading ? 'Buscando...' : '🔍 Buscar'}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {filters.map(f => (
+            <button
+              key={f.id}
+              onClick={() => setFilter(f.id)}
+              style={{
+                background: filter === f.id ? '#F7931A' : 'transparent',
+                color: filter === f.id ? '#000' : '#888',
+                border: `1px solid ${filter === f.id ? '#F7931A' : '#333'}`,
+                borderRadius: 6, padding: '5px 12px', cursor: 'pointer',
+                fontSize: 12, fontWeight: filter === f.id ? 'bold' : 'normal',
+              }}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <button onClick={load} disabled={loading} style={{ ...btnPrimary, padding: '6px 14px', fontSize: 12 }}>
+          {loading ? '...' : '↻ Actualizar'}
         </button>
       </div>
 
+      <div style={{ background: '#F7931A11', border: '1px solid #F7931A33', borderRadius: 6, padding: '8px 12px', marginBottom: 16, color: '#F7931A', fontSize: 12 }}>
+        ⚠️ {data?.warning ?? 'Lay de Betfair sin liquidez/size — verifica el importe disponible antes de apostar.'}
+      </div>
+
       {error && <p style={{ color: '#FF5252', fontSize: 13 }}>Error: {error}</p>}
+      {loading && <p style={{ color: '#888', fontSize: 13 }}>Cargando señales...</p>}
 
-      {result && (
-        <div>
-          {result.warning && (
-            <div style={{ background: '#F7931A11', border: '1px solid #F7931A33', borderRadius: 6, padding: '8px 12px', marginBottom: 16, color: '#F7931A', fontSize: 12 }}>
-              ⚠️ {result.warning}
-            </div>
-          )}
-
-          {/* Best picks */}
-          {(result.best_back || result.best_lay) && (
-            <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-              {result.best_back && (
-                <div style={{ ...card, flex: 1, minWidth: 160, borderLeft: '3px solid #00C853', marginBottom: 0 }}>
-                  <div style={{ color: '#555', fontSize: 11, marginBottom: 4 }}>MEJOR BACK{result.best_back.selection ? ` — ${result.best_back.selection}` : ''}</div>
-                  <div style={{ fontWeight: 'bold', color: '#00C853', fontSize: 20 }}>{result.best_back.odds}</div>
-                  <div style={{ color: '#888', fontSize: 12 }}>{result.best_back.bookmaker}</div>
-                </div>
-              )}
-              {result.best_lay && (
-                <div style={{ ...card, flex: 1, minWidth: 160, borderLeft: '3px solid #F7931A', marginBottom: 0 }}>
-                  <div style={{ color: '#555', fontSize: 11, marginBottom: 4 }}>MEJOR LAY (Exchange)</div>
-                  <div style={{ fontWeight: 'bold', color: '#F7931A', fontSize: 20 }}>{result.best_lay.odds}</div>
-                  <div style={{ color: '#888', fontSize: 12 }}>{result.best_lay.bookmaker}</div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Odds table */}
-          {result.odds.length > 0 && (() => {
-            const isExchange = (o: OddsEntry) => o.is_exchange === true || o.bookmaker.toLowerCase().includes('betfair')
-            const sorted = [...result.odds].sort((a, b) => (isExchange(b) ? 1 : 0) - (isExchange(a) ? 1 : 0))
-            return (
-              <div style={card}>
-                <div style={{ color: '#444', fontSize: 11, marginBottom: 12, letterSpacing: 0.5 }}>CASAS ESPAÑOLAS</div>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: '1px solid #222' }}>
-                        {['Casa', 'Local', 'Empate', 'Visitante'].map(h => (
-                          <th key={h} style={{ textAlign: 'left', padding: '4px 8px', color: '#555', fontWeight: 'normal' }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sorted.map((o, i) => {
-                        const exchange = isExchange(o)
-                        const rowBg = exchange ? '#1a1208' : 'transparent'
-                        return (
-                          <tr key={i} style={{ borderBottom: '1px solid #1a1a1a', background: rowBg }}>
-                            <td style={{ padding: '8px' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                <span style={{ color: exchange ? '#F7931A' : '#ccc', fontWeight: 'bold' }}>{o.bookmaker}</span>
-                                <span style={{ background: '#0d1f3c', color: '#5b9bd5', border: '1px solid #1a3a6e', borderRadius: 3, padding: '1px 5px', fontSize: 10, lineHeight: 1.4 }}>🇪🇸 España</span>
-                                {exchange && (
-                                  <span style={{ background: '#F7931A22', color: '#F7931A', border: '1px solid #F7931A44', borderRadius: 3, padding: '1px 5px', fontSize: 10, lineHeight: 1.4 }}>EXCHANGE (LAY)</span>
-                                )}
-                              </div>
-                            </td>
-                            <td style={{ padding: '8px', color: '#fff' }}>{o.home?.toFixed(2) ?? '—'}</td>
-                            <td style={{ padding: '8px', color: '#888' }}>{o.draw?.toFixed(2) ?? '—'}</td>
-                            <td style={{ padding: '8px', color: '#fff' }}>{o.away?.toFixed(2) ?? '—'}</td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )
-          })()}
-        </div>
+      {!loading && signals.length === 0 && (
+        <p style={{ color: '#666', fontSize: 13, textAlign: 'center', padding: '40px 0' }}>
+          No hay señales vigentes. El escáner corre a diario; vuelve tras el próximo ciclo.
+        </p>
       )}
+
+      {signals.map(s => <SignalCard key={s.signal_id} s={s} />)}
     </div>
   )
 }
@@ -623,7 +629,7 @@ function TabTracker({ refreshKey }: { refreshKey: number }) {
 
 const TABS = [
   { id: 'calc', label: '🧮 Calculadora' },
-  { id: 'odds', label: '📊 Buscar cuotas' },
+  { id: 'signals', label: '🎯 Señales' },
   { id: 'offers', label: '🎁 Ofertas' },
   { id: 'tracker', label: '📈 Tracker P&L' },
 ]
@@ -666,7 +672,7 @@ export default function MatchedBetting() {
       </div>
 
       {activeTab === 'calc' && <TabCalculadora onBetSaved={handleBetSaved} />}
-      {activeTab === 'odds' && <TabBuscarCuotas />}
+      {activeTab === 'signals' && <TabSenales />}
       {activeTab === 'offers' && <TabOfertas />}
       {activeTab === 'tracker' && <TabTracker refreshKey={trackerRefresh} />}
     </div>
