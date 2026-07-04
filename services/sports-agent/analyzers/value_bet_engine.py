@@ -283,6 +283,13 @@ _THE_ODDS_API_LOCK = asyncio.Lock()
 # Flag de quota agotada — True solo cuando la API devuelve 422 o Firestore confirma agotada.
 # NO bloquea hits de cache de Firestore (solo bloquea nuevas llamadas HTTP).
 _THE_ODDS_API_EXHAUSTED: bool = False
+# Instante en que se latcheó el flag. Necesario para el auto-reset: la cuota mensual de
+# The Odds API se renueva el día 1, pero antes el flag en memoria NO rotaba con el mes y
+# mataba la API hasta el siguiente redeploy (bug: tras el reset solo llegaban señales 1X2,
+# porque el 1X2 tira de odds-api.io). Ver _the_odds_api_blocked() / _mark_the_odds_api_exhausted().
+_THE_ODDS_API_EXHAUSTED_AT: "datetime | None" = None
+# Cada cuánto reintentar tras latchear. Cubre rotación de mes y 401/429 transitorios.
+_THE_ODDS_API_RETRY_TTL = timedelta(hours=6)
 
 # Sport keys verificados como inexistentes en The Odds API → skip permanente, 0 HTTP requests.
 # Diferente de 404 temporal (liga sin partidos hoy): ese se reintenta a las 4h.
@@ -290,6 +297,38 @@ _THE_ODDS_API_EXHAUSTED: bool = False
 _THE_ODDS_API_NO_COVERAGE: frozenset[str] = frozenset({
     "basketball_spain_acb",  # ACB — no disponible en The Odds API, 404 permanente verificado
 })
+
+
+def _mark_the_odds_api_exhausted() -> None:
+    """Latchea el flag de cuota agotada y registra el instante (para el auto-reset por TTL/mes)."""
+    global _THE_ODDS_API_EXHAUSTED, _THE_ODDS_API_EXHAUSTED_AT
+    _THE_ODDS_API_EXHAUSTED = True
+    _THE_ODDS_API_EXHAUSTED_AT = datetime.now(timezone.utc)
+
+
+def _the_odds_api_blocked() -> bool:
+    """
+    True si The Odds API sigue marcada como agotada y no toca reintentar todavía.
+
+    Auto-reset: pasado _THE_ODDS_API_RETRY_TTL, si la cuota mensual (Firestore, cuya clave
+    the_odds_api_monthly_YYYY-MM rota el día 1 de cada mes) vuelve a estar disponible, limpia
+    el flag y permite reintentar. Arregla el bug por el que el flag en memoria se quedaba
+    latcheado entre meses y mataba The Odds API hasta el siguiente redeploy.
+    """
+    global _THE_ODDS_API_EXHAUSTED, _THE_ODDS_API_EXHAUSTED_AT
+    if not _THE_ODDS_API_EXHAUSTED:
+        return False
+    if _THE_ODDS_API_EXHAUSTED_AT is not None:
+        elapsed = datetime.now(timezone.utc) - _THE_ODDS_API_EXHAUSTED_AT
+        if elapsed >= _THE_ODDS_API_RETRY_TTL and quota.can_call_monthly("the_odds_api"):
+            logger.info(
+                "The Odds API: flag de cuota agotada limpiado (TTL %s + cuota mensual disponible) — reintentando",
+                _THE_ODDS_API_RETRY_TTL,
+            )
+            _THE_ODDS_API_EXHAUSTED = False
+            _THE_ODDS_API_EXHAUSTED_AT = None
+            return False
+    return True
 
 # Timeout para llamadas HTTP a API externa
 _HTTP_TIMEOUT = 15.0
@@ -854,9 +893,8 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
     2. Cache en Firestore (persiste entre reinicios Cloud Run) — TTL 8h
     3. The Odds API (HTTP) — solo si cuota disponible y ambos caches expirados
     Devuelve None si no hay cache Y la cuota está agotada.
+    El flag de cuota agotada se gestiona vía _the_odds_api_blocked()/_mark_the_odds_api_exhausted().
     """
-    global _THE_ODDS_API_EXHAUSTED
-
     # --- 0. Blocklist permanente (sin HTTP, sin cache, O(1)) ---
     if sport_key in _THE_ODDS_API_NO_COVERAGE:
         logger.debug("_get_league_events: %s — sin cobertura en The Odds API (blocklist)", sport_key)
@@ -899,12 +937,12 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
     # --- 3. The Odds API (solo si quota disponible) ---
     # Mutex: evita race condition donde N coroutines concurrentes todas pasan can_call=True
     # y todas hacen HTTP request antes de que ninguna llame track_call.
-    if _THE_ODDS_API_EXHAUSTED:
+    if _the_odds_api_blocked():
         return None
 
     async with _THE_ODDS_API_LOCK:
         # Re-check dentro del lock (otro coroutine pudo haberlo agotado mientras esperábamos)
-        if _THE_ODDS_API_EXHAUSTED:
+        if _the_odds_api_blocked():
             return None
 
         # Re-check cache (podría haber sido actualizado por otro coroutine)
@@ -917,7 +955,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
         # Verificar cuota mensual (The Odds API es 500/mes, no diaria)
         if not quota.can_call_monthly("the_odds_api"):
             logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota mensual agotada", match_id)
-            _THE_ODDS_API_EXHAUSTED = True
+            _mark_the_odds_api_exhausted()
             return None
 
         url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
@@ -933,7 +971,7 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
             if resp.status_code == 401:
                 logger.warning("fetch_bookmaker_odds(%s): The Odds API — clave invalida (401)", match_id)
-                _THE_ODDS_API_EXHAUSTED = True
+                _mark_the_odds_api_exhausted()
                 # Marcar también en el quota manager para que all_monthly_exhausted() lo refleje
                 quota.track_monthly("the_odds_api", remaining=0)
                 return None
@@ -951,7 +989,12 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
                 return []
             if resp.status_code == 429:
                 # 429 = cuota real agotada → bloquear todas las ligas
-                _THE_ODDS_API_EXHAUSTED = True
+                _mark_the_odds_api_exhausted()
+                # Sincronizar con el quota manager: sin esto el contador Firestore no refleja
+                # el agotamiento real (el header x-requests-remaining no llega en un 429) y
+                # can_call_monthly seguiría diciendo "disponible", provocando reintentos HTTP
+                # inútiles cada vez que el TTL de _the_odds_api_blocked() vence dentro del mes.
+                quota.track_monthly("the_odds_api", remaining=0)
                 logger.warning("fetch_bookmaker_odds(%s): The Odds API — cuota agotada (429)", match_id)
                 return None
             if resp.status_code != 200:
@@ -2252,7 +2295,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         #      memoria no actualiza el quota manager, por eso se comprueba explícitamente.
         all_sources_down = (
             quota.all_monthly_exhausted(["the_odds_api", "oddspapi"])
-            or (_THE_ODDS_API_EXHAUSTED and quota.all_monthly_exhausted(["oddspapi"]))
+            or (_the_odds_api_blocked() and quota.all_monthly_exhausted(["oddspapi"]))
         )
         if all_sources_down:
             # No crear _synthetic si ya existe predicción plain con odds reales
