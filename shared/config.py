@@ -82,6 +82,13 @@ MATCHED_LAY_ODDS_MAX = float(os.environ.get("MATCHED_LAY_ODDS_MAX", "51.0"))
 # Máx sport_keys por escaneo (backstop de coste: N × 2 créditos de The Odds API).
 # Con budget 200/mes y 2 créditos/key: 4 keys = 8 créditos/scan → ~25 scans/mes (diario holgado).
 MATCHED_MAX_KEYS_PER_SCAN = int(os.environ.get("MATCHED_MAX_KEYS_PER_SCAN", "4"))
+# Staleness del lay (The Odds API no da liquidez/size, sí last_update por mercado):
+#   lay más fresco que FRESH_SEC  → confianza "high"
+#   entre FRESH y STALE           → confianza "medium"
+#   más viejo que STALE_SEC       → DESCARTAR (lay probablemente desactualizado/no ejecutable)
+# Si la API no da last_update → confianza "unknown" (se conserva, no se descarta).
+MATCHED_LAY_FRESH_SEC = int(os.environ.get("MATCHED_LAY_FRESH_SEC", "300"))   # 5 min
+MATCHED_LAY_STALE_SEC = int(os.environ.get("MATCHED_LAY_STALE_SEC", "900"))   # 15 min
 
 BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral menor
 POLY_MIN_EDGE = 0.08

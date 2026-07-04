@@ -18,9 +18,24 @@ from shared.config import (
     MATCHED_LAY_COMMISSION,
     MATCHED_SUREBET_MIN_RATING,
     MATCHED_COVERAGE_MIN_RATING,
+    MATCHED_LAY_FRESH_SEC,
+    MATCHED_LAY_STALE_SEC,
 )
 
 from .models import BackLayQuote, MatchedSignal
+
+
+def _age_seconds(last_update: str, now: datetime) -> int:
+    """Antigüedad en segundos de un last_update ISO8601. -1 si falta o no se parsea."""
+    if not last_update:
+        return -1
+    try:
+        dt = datetime.fromisoformat(last_update.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return -1
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int((now - dt).total_seconds())
 
 
 def _qualifying(back_stake: float, back_odds: float, lay_odds: float, commission: float):
@@ -72,6 +87,20 @@ def classify(
     if back_odds <= 1.0 or lay_odds <= 1.0 or lay_odds <= commission:
         return None
 
+    now = datetime.now(timezone.utc)
+
+    # ── Staleness del lay: descartar lays viejos (probablemente no ejecutables) ──
+    lay_age = _age_seconds(quote.lay_last_update, now)
+    back_age = _age_seconds(quote.back_last_update, now)
+    if lay_age == -1:
+        confidence = "unknown"          # la API no dio last_update → no podemos filtrar
+    elif lay_age <= MATCHED_LAY_FRESH_SEC:
+        confidence = "high"
+    elif lay_age <= MATCHED_LAY_STALE_SEC:
+        confidence = "medium"
+    else:
+        return None                     # lay demasiado viejo → descartar la señal
+
     lay_stake, liability, profit_back, profit_lay, rating = _qualifying(
         100.0, back_odds, lay_odds, commission
     )
@@ -83,8 +112,6 @@ def classify(
         signal_type = "coverage"
     else:
         return None
-
-    now = datetime.now(timezone.utc)
     return MatchedSignal(
         signal_id=_signal_id(sport_key, event_id, quote.selection),
         signal_type=signal_type,
@@ -99,6 +126,9 @@ def classify(
         lay_bookmaker=quote.lay_bookmaker,
         lay_odds=round(lay_odds, 3),
         commission=commission,
+        confidence=confidence,
+        lay_age_seconds=lay_age,
+        back_age_seconds=back_age,
         qualifying_rating=round(rating, 3),
         freebet_snr_rating=round(_freebet_snr_rating(100.0, back_odds, lay_odds, commission), 3),
         lay_stake_per_100=round(lay_stake, 2),

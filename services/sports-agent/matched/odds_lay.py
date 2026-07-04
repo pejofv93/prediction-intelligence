@@ -47,16 +47,20 @@ def budget_ok() -> tuple[bool, str]:
 def _best_backs_and_lays(event: dict) -> dict[str, dict]:
     """
     Agrega por selección: mejor back entre casas NO-exchange + lay de betfair_ex.
-    Devuelve {selection_name: {"back": (book, odds)|None, "lay": (book, odds)|None}}.
+    Cada entrada guarda (book, odds, last_update). last_update se toma del mercado
+    (o de la casa si el mercado no lo trae) para poder medir staleness del lay.
+    Devuelve {selection_name: {"back": tuple|None, "lay": tuple|None}}.
     """
     agg: dict[str, dict] = {}
     for bk in event.get("bookmakers", []):
         bkey = bk.get("key", "")
         is_exchange = bkey.startswith(_LAY_BOOK_PREFIX)
+        bk_lu = bk.get("last_update", "")
         for mkt in bk.get("markets", []):
             mkey = mkt.get("key")
             if mkey not in ("h2h", "h2h_lay"):
                 continue
+            lu = mkt.get("last_update", "") or bk_lu   # mercado > casa como fallback
             for oc in mkt.get("outcomes", []):
                 name = oc.get("name")
                 try:
@@ -70,12 +74,12 @@ def _best_backs_and_lays(event: dict) -> dict[str, dict]:
                 if mkey == "h2h" and not is_exchange:
                     # mejor back entre casas normales (el exchange no cuenta como back)
                     if slot["back"] is None or price > slot["back"][1]:
-                        slot["back"] = (bkey, price)
+                        slot["back"] = (bkey, price, lu)
                 elif mkey == "h2h_lay" and is_exchange:
                     # lay real del exchange; filtrar sentinela (1000.0 = sin lay) y absurdos
                     if 1.01 < price <= MATCHED_LAY_ODDS_MAX:
                         if slot["lay"] is None or price < slot["lay"][1]:
-                            slot["lay"] = (bkey, price)
+                            slot["lay"] = (bkey, price, lu)
     return agg
 
 
@@ -87,8 +91,8 @@ def _quotes_from_event(event: dict) -> list[BackLayQuote]:
             continue
         quotes.append(BackLayQuote(
             selection=name,
-            back_odds=back[1], back_bookmaker=back[0],
-            lay_odds=lay[1], lay_bookmaker=lay[0],
+            back_odds=back[1], back_bookmaker=back[0], back_last_update=back[2],
+            lay_odds=lay[1], lay_bookmaker=lay[0], lay_last_update=lay[2],
         ))
     return quotes
 

@@ -12,6 +12,8 @@ class BackLayQuote:
     back_bookmaker: str       # casa que ofrece ese back
     lay_odds: float           # cuota lay en betfair_ex_eu
     lay_bookmaker: str        # "betfair_ex_eu"
+    lay_last_update: str = "" # ISO8601 del mercado h2h_lay (staleness) — "" si la API no lo da
+    back_last_update: str = ""# ISO8601 del mercado h2h de la casa back
 
 
 @dataclass
@@ -33,6 +35,9 @@ class MatchedSignal:
     lay_bookmaker: str        # "betfair_ex_eu"
     lay_odds: float
     commission: float         # comisión exchange usada en el cálculo
+    confidence: str           # "high" | "medium" | "unknown" — según frescura del lay
+    lay_age_seconds: int      # antigüedad del lay al detectarlo (-1 si sin last_update)
+    back_age_seconds: int     # antigüedad del back (-1 si sin last_update)
     qualifying_rating: float  # % del stake garantizado (negativo = pérdida qualifying)
     freebet_snr_rating: float # % de la free bet convertido a beneficio (EV si fuera bono SNR)
     lay_stake_per_100: float  # lay stake para back_stake=100

@@ -1,0 +1,48 @@
+name: verify-matched
+# Verificación Fase 2 (temporal, borrar al cerrar): dispara /run-matched-scan en Cloud Run
+# y luego lee prod matched_signals de Firestore mostrando confianza y staleness.
+on:
+  workflow_dispatch:
+
+jobs:
+  scan-and-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trigger scan (Cloud Run)
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-matched-scan" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1080 --no-buffer --fail --silent --show-error || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install google-cloud-firestore
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Read matched_signals
+        env:
+          PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: |
+          python - <<'EOF'
+          import os
+          from google.cloud import firestore
+          db = firestore.Client(project="prediction-intelligence")
+          prefix = os.environ.get("PREFIX", "") or "prod"
+          coll = f"{prefix}matched_signals"
+          docs = [d.to_dict() for d in db.collection(coll).stream()]
+          print(f"Coleccion {coll}: {len(docs)} documentos")
+          from collections import Counter
+          print("  por tipo:", dict(Counter(d.get('signal_type') for d in docs)))
+          print("  por confianza:", dict(Counter(d.get('confidence') for d in docs)))
+          docs.sort(key=lambda s: (0 if s.get("signal_type")=="surebet" else 1,
+                                   -float(s.get("qualifying_rating", 0) or 0)))
+          for d in docs[:30]:
+              print(f"  [{d.get('signal_type'):8s}|{str(d.get('confidence')):7s}|"
+                    f"lay {d.get('lay_age_seconds')}s] {d.get('home_team')} v {d.get('away_team')} | "
+                    f"{d.get('selection')}: back {d.get('back_bookmaker')}@{d.get('back_odds')} "
+                    f"lay {d.get('lay_odds')} | rating={d.get('qualifying_rating')}% "
+                    f"profit/100={d.get('profit_per_100')} | alerted={d.get('alerted')}")
+          EOF

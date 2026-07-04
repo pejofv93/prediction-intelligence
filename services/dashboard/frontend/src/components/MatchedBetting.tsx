@@ -25,6 +25,8 @@ interface MatchedSignal {
   back_odds: number
   lay_bookmaker: string
   lay_odds: number
+  confidence: string           // "high" | "medium" | "unknown"
+  lay_age_seconds: number
   qualifying_rating: number
   freebet_snr_rating: number
   lay_stake_per_100: number
@@ -278,11 +280,19 @@ function fmtKickoff(iso: string): string {
   return d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
+const CONF_META: Record<string, { label: string; color: string }> = {
+  high: { label: '● Fiable', color: '#00C853' },
+  medium: { label: '● Media', color: '#F7931A' },
+  unknown: { label: '● Sin dato', color: '#888' },
+}
+
 function SignalCard({ s }: { s: MatchedSignal }) {
   const isSure = s.signal_type === 'surebet'
   const accent = isSure ? '#00C853' : '#F7931A'
   const label = isSure ? 'SUREBET' : 'COBERTURA'
   const ratingColor = s.qualifying_rating >= 0 ? '#00C853' : '#FF5252'
+  const conf = CONF_META[s.confidence] ?? CONF_META.unknown
+  const ageMin = s.lay_age_seconds >= 0 ? `lay ${Math.round(s.lay_age_seconds / 60)} min` : 'lay s/fecha'
   return (
     <div style={{ ...card, borderLeft: `3px solid ${accent}` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
@@ -292,9 +302,12 @@ function SignalCard({ s }: { s: MatchedSignal }) {
             {s.sport_key} · {fmtKickoff(s.commence_time)}
           </div>
         </div>
-        <span style={{ background: accent + '22', color: accent, border: `1px solid ${accent}44`, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 'bold', flexShrink: 0 }}>
-          {label}
-        </span>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+          <span style={{ background: accent + '22', color: accent, border: `1px solid ${accent}44`, borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 'bold' }}>
+            {label}
+          </span>
+          <span title={ageMin} style={{ color: conf.color, fontSize: 11 }}>{conf.label} · {ageMin}</span>
+        </div>
       </div>
 
       <div style={{ color: '#ccc', fontSize: 13, marginBottom: 10 }}>
