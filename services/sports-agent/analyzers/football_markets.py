@@ -109,6 +109,12 @@ _ODDSPAPI_BASE = "https://api.oddspapi.io"
 # Cache por liga — TTL 24h (con guard upcoming_matches)
 _ODDSPAPI_LEAGUE_CACHE: dict[str, tuple[datetime, list]] = {}
 _ODDSPAPI_TTL = timedelta(hours=24)
+
+# ROBUSTEZ 429: backoff corto en memoria en vez de remaining=0 (que lockeaba OddsPapi todo
+# el mes con un único 429 rate-limit — bug 1-jul). El agotamiento mensual real se detecta
+# por cuota (can_call_monthly) tras las 200 que sí reportan uso.
+_ODDSPAPI_BACKOFF = timedelta(minutes=30)
+_ODDSPAPI_BACKOFF_UNTIL: "datetime | None" = None
 _HTTP_TIMEOUT = 15.0
 
 # Mapeo de league code → competition name (usado como filtro de fallback en v4)
@@ -161,8 +167,14 @@ async def _fetch_oddspapi_league(league: str) -> list:
     GET api.oddspapi.io/v4/odds — devuelve eventos con todos los mercados disponibles.
     Filtra por tournamentId cuando está mapeado. Cache TTL 1h por liga.
     """
+    global _ODDSPAPI_BACKOFF_UNTIL
     if not ODDSPAPI_KEY:
         logger.debug("OddsPapi: ODDSPAPI_KEY no configurada — saltando liga %s", league)
+        return []
+
+    _now_bo = datetime.now(timezone.utc)
+    if _ODDSPAPI_BACKOFF_UNTIL is not None and _now_bo < _ODDSPAPI_BACKOFF_UNTIL:
+        logger.debug("OddsPapi: en backoff hasta %s — saltando liga %s", _ODDSPAPI_BACKOFF_UNTIL, league)
         return []
 
     if not quota.can_call_monthly("oddspapi"):
@@ -208,9 +220,10 @@ async def _fetch_oddspapi_league(league: str) -> list:
             _ODDSPAPI_LEAGUE_CACHE[cache_key] = (now, [])
             return []
         if resp.status_code == 429:
-            logger.warning("OddsPapi v4: rate limit (429) — liga %s", league)
-            from shared.api_quota_manager import quota as _quota
-            _quota.track_monthly("oddspapi", remaining=0)
+            # ROBUSTEZ: 429 = rate-limit, NO agotamiento mensual. Backoff corto en vez de
+            # remaining=0 (que lockeaba OddsPapi todo el mes — bug 1-jul).
+            _ODDSPAPI_BACKOFF_UNTIL = now + _ODDSPAPI_BACKOFF
+            logger.warning("OddsPapi v4: 429 (rate-limit) — backoff %s, liga %s", _ODDSPAPI_BACKOFF, league)
             return []
         if resp.status_code != 200:
             logger.warning("OddsPapi v4: HTTP %d para liga %s — body: %.200s",

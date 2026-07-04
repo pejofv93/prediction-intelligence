@@ -170,12 +170,19 @@ class QuotaManager:
             return False
         return True
 
-    def track_monthly(self, api_name: str, remaining: Optional[str | int] = None) -> None:
-        """Registra una llamada mensual. Llamar junto a track_call() para APIs mensuales."""
+    def track_monthly(self, api_name: str, remaining: Optional[str | int] = None, cost: int = 1) -> None:
+        """
+        Registra una llamada mensual. Llamar junto a track_call() para APIs mensuales.
+
+        cost = créditos consumidos por la llamada. The Odds API cobra markets×regiones,
+        no "1 por request" — pasar el coste real evita infravalorar el consumo cuando la
+        API no devuelve header x-requests-remaining (p.ej. en 429). Cuando SÍ hay header,
+        remaining es la fuente de verdad y cost solo afecta al contador interno 'used'.
+        """
         month = _this_month()
         key = f"{api_name}_monthly_{month}"
         doc = self._get_doc(key)
-        doc["used"] = doc.get("used", 0) + 1
+        doc["used"] = doc.get("used", 0) + max(1, int(cost))
         doc["last_call"] = datetime.now(timezone.utc).isoformat()
         doc["month"] = month
         doc["api"] = api_name

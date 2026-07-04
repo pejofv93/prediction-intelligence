@@ -29,6 +29,7 @@ from scipy.stats import poisson as _poisson
 
 from shared.config import ODDSPAPI_KEY, ODDS_API_KEY, SPORTS_MIN_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_ALERT_EDGE
 from shared.api_quota_manager import quota
+from shared import odds_cache
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,13 @@ _THEODDS_CORNERS_CACHE: dict[str, tuple[datetime, list]] = {}
 _THEODDS_CACHE_TTL = timedelta(hours=1)
 _THEODDS_BASE = "https://api.the-odds-api.com/v4/sports"
 
+# ROBUSTEZ 429 OddsPapi: backoff corto en memoria. Un 429 de OddsPapi suele ser rate-limit
+# (por segundo/minuto), NO agotamiento de la cuota mensual (250). Antes se escribía
+# remaining=0 → bloqueaba can_call_monthly TODO el mes con un único 429 espurio (lockout
+# observado el 1-jul). El agotamiento mensual REAL se detecta vía el header en las 200.
+_ODDSPAPI_BACKOFF = timedelta(minutes=30)
+_ODDSPAPI_BACKOFF_UNTIL: "datetime | None" = None
+
 
 # ── Fetch fixtures OddsPapi v4 ─────────────────────────────────────────────────
 
@@ -102,6 +110,11 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
     if cached and (now - cached[0]) < _CACHE_TTL:
         return cached[1]
 
+    global _ODDSPAPI_BACKOFF_UNTIL
+    if _ODDSPAPI_BACKOFF_UNTIL is not None and now < _ODDSPAPI_BACKOFF_UNTIL:
+        logger.debug("corners_bookings: OddsPapi en backoff hasta %s — saltando", _ODDSPAPI_BACKOFF_UNTIL)
+        return []
+
     if not quota.can_call_monthly("oddspapi"):
         logger.warning("corners_bookings: oddspapi cuota mensual agotada, saltando fetch")
         return []
@@ -118,8 +131,10 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
             resp = await client.get(f"{_ODDSPAPI_V4}/fixtures", params=params)
 
         if resp.status_code == 429:
-            logger.warning("corners_bookings: OddsPapi rate limit 429")
-            quota.track_monthly("oddspapi", remaining=0)  # marcar agotada en quota manager
+            # ROBUSTEZ: 429 = rate-limit, NO agotamiento mensual. Backoff corto en vez de
+            # remaining=0 (que lockeaba OddsPapi todo el mes con un único 429 — bug 1-jul).
+            _ODDSPAPI_BACKOFF_UNTIL = now + _ODDSPAPI_BACKOFF
+            logger.warning("corners_bookings: OddsPapi 429 (rate-limit) — backoff %s", _ODDSPAPI_BACKOFF)
             return []
         if resp.status_code != 200:
             logger.warning("corners_bookings: OddsPapi HTTP %d", resp.status_code)
@@ -415,11 +430,21 @@ async def _fetch_corners_theodds(sport_key: str) -> list[dict]:
     cached = _THEODDS_CORNERS_CACHE.get(sport_key)
     if cached and (now - cached[0]) < _THEODDS_CACHE_TTL:
         return cached[1]
+    # FIX B: caché Firestore (TTL 1h) — sobrevive cold starts (min-instances=0).
+    fs = odds_cache.get_events("corners", sport_key, _THEODDS_CACHE_TTL.total_seconds())
+    if fs is not None:
+        _THEODDS_CORNERS_CACHE[sport_key] = (now, fs)
+        return fs
+    # FIX C: gate de cuota — The Odds API cobra créditos; no llamar si está agotada.
+    if not quota.can_call_monthly("the_odds_api"):
+        logger.warning("corners_bookings[theodds]: The Odds API cuota agotada — saltando %s", sport_key)
+        return []
 
+    markets = "alternate_totals_corners"
     params = {
         "apiKey": ODDS_API_KEY,
         "regions": "eu",
-        "markets": "alternate_totals_corners",
+        "markets": markets,
         "oddsFormat": "decimal",
     }
     try:
@@ -437,7 +462,9 @@ async def _fetch_corners_theodds(sport_key: str) -> list[dict]:
             logger.warning("corners_bookings[theodds]: ODDS_API_KEY inválida (401)")
             return []
         if resp.status_code == 429:
-            logger.warning("corners_bookings[theodds]: rate limit 429")
+            # Cuota real agotada → marcar remaining=0 para que el gate corte el resto.
+            quota.track_monthly("the_odds_api", remaining=0)
+            logger.warning("corners_bookings[theodds]: The Odds API 429 (cuota agotada)")
             return []
         if resp.status_code != 200:
             logger.warning(
@@ -448,9 +475,14 @@ async def _fetch_corners_theodds(sport_key: str) -> list[dict]:
         events = resp.json()
         if not isinstance(events, list):
             events = []
+        # FIX C: reportar consumo (header = fuente de verdad; alternate_totals_corners = 1 market).
+        _remaining = resp.headers.get("x-requests-remaining")
+        quota.track_monthly("the_odds_api", remaining=_remaining, cost=len(markets.split(",")))
         _THEODDS_CORNERS_CACHE[sport_key] = (now, events)
+        odds_cache.set_events("corners", sport_key, events)
         logger.info(
-            "corners_bookings[theodds]: %d eventos corners para %s", len(events), sport_key
+            "corners_bookings[theodds]: %d eventos corners para %s (req restantes=%s)",
+            len(events), sport_key, _remaining or "?",
         )
         return events
 

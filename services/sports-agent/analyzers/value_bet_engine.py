@@ -960,7 +960,12 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
         url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
         try:
-            markets_param = "h2h,spreads,totals,btts"
+            # FIX A (consumo): The Odds API cobra CRÉDITOS = markets × regiones. Pedir
+            # h2h,spreads,totals,btts (4) × eu = 4 créditos/llamada agotaba los 500/mes.
+            # The Odds API aquí es SECUNDARIA (fallback tras odds-api.io); su único trabajo
+            # es el h2h de respaldo. BTTS/AH/totals/córners vienen de odds-api.io all_markets
+            # (_generate_oddsapiio_extra_signals). Por eso pedimos solo h2h = 1 crédito.
+            markets_param = "h2h"
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(url, params={
                     "apiKey": ODDS_API_KEY,
@@ -1003,7 +1008,10 @@ async def _get_league_events(sport_key: str, match_id: str, now: datetime) -> li
 
             events = resp.json()
             remaining = resp.headers.get("x-requests-remaining")
-            quota.track_monthly("the_odds_api", remaining=remaining)  # límite es mensual
+            # Coste real = markets × regiones (regions="eu" = 1). Con remaining del header,
+            # ese es la fuente de verdad; cost solo alimenta el contador interno.
+            _credits = len(markets_param.split(",")) * 1
+            quota.track_monthly("the_odds_api", remaining=remaining, cost=_credits)  # límite mensual en créditos
             logger.info("The Odds API: '%s' — %d eventos cargados, %s requests restantes",
                         sport_key, len(events), remaining or "?")
 

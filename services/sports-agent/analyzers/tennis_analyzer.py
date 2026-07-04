@@ -23,6 +23,8 @@ from shared.config import (
     SPORTS_MAX_DIVERGENCE, SPORTS_MIN_CONFIDENCE, SPORTS_MIN_EDGE, TENNIS_WEIGHTS,
 )
 from shared.firestore_client import col
+from shared.api_quota_manager import quota
+from shared import odds_cache
 
 logger = logging.getLogger(__name__)
 
@@ -78,22 +80,44 @@ async def _fetch_tennis_odds(sport_key: str, match_id: str) -> list:
 
     if not ODDS_API_KEY:
         return []
+    # FIX B: caché Firestore persistente — sobrevive cold starts (min-instances=0).
+    fs = odds_cache.get_events("tennis", sport_key, _CACHE_TTL.total_seconds())
+    if fs is not None:
+        _LEAGUE_ODDS_CACHE[sport_key] = (now, fs)
+        return fs
+    # FIX C: gate de cuota. Si The Odds API está agotada, ir directo al fallback odds-api.io.
+    if not quota.can_call_monthly("the_odds_api"):
+        logger.warning("tennis_analyzer: The Odds API cuota agotada — fallback odds-api.io (%s)", sport_key)
+        _LEAGUE_ODDS_CACHE[sport_key] = (now - _CACHE_TTL + timedelta(minutes=15), [])
+        return await _fetch_tennis_odds_oddsapiio()
     url = f"{_THE_ODDS_API_BASE}/{sport_key}/odds"
     try:
+        markets = "h2h,spreads,totals"
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url, params={
                 "apiKey": ODDS_API_KEY,
                 "regions": "eu",
-                "markets": "h2h,spreads,totals",
+                "markets": markets,
                 "oddsFormat": "decimal",
             })
         if resp.status_code == 200:
             events = resp.json()
             remaining = resp.headers.get("x-requests-remaining", "?")
+            # FIX C: reportar consumo (header = fuente de verdad; cost = markets×regiones).
+            quota.track_monthly("the_odds_api",
+                                remaining=(remaining if remaining != "?" else None),
+                                cost=len(markets.split(",")))
             logger.info("tennis_analyzer: The Odds API '%s' — %d eventos, %s req restantes",
                         sport_key, len(events), remaining)
             _LEAGUE_ODDS_CACHE[sport_key] = (now, events)
+            odds_cache.set_events("tennis", sport_key, events)
             return events
+        if resp.status_code == 429:
+            # Cuota real agotada → marcar remaining=0 para que el gate corte el resto.
+            quota.track_monthly("the_odds_api", remaining=0)
+            logger.warning("tennis_analyzer: The Odds API 429 (cuota agotada) %s", sport_key)
+            _LEAGUE_ODDS_CACHE[sport_key] = (now - _CACHE_TTL + timedelta(minutes=15), [])
+            return await _fetch_tennis_odds_oddsapiio()
         logger.warning("tennis_analyzer: The Odds API %s → HTTP %d", sport_key, resp.status_code)
     except Exception:
         logger.error("tennis_analyzer: error fetching odds %s", sport_key, exc_info=True)
