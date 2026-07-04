@@ -1,0 +1,23 @@
+name: matched-scan
+# Escáner matched-betting / surebets (motor back/lay real). Reemplaza al detector roto.
+# Coste: ~4 keys × 2 créditos = 8 créditos The Odds API/scan. El sub-presupuesto
+# the_odds_api_matched (MATCHED_MONTHLY_CREDIT_BUDGET, def 200/mes) corta si se agota.
+# Cadencia conservadora (1×/día) para no competir con el value engine por los 500/mes.
+on:
+  schedule:
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trigger Cloud Run (sync)
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-matched-scan" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1080 \
+            --no-buffer \
+            --fail --silent --show-error

@@ -201,9 +201,29 @@ async def _bg_production_backtest() -> None:
 
 @app.post("/run-arb", dependencies=[Depends(verify_token)])
 async def run_arb() -> JSONResponse:
-    """202 → background: lee cuotas de Firestore, detecta arb, envía alertas Telegram."""
+    """202 → background: lee cuotas de Firestore, detecta arb, envía alertas Telegram.
+    DEPRECADO: detector roto (back-back mal etiquetado). Usar /run-matched-scan."""
     asyncio.create_task(_bg_arb())
     return JSONResponse(status_code=202, content={"status": "accepted", "job": "arb"})
+
+
+@app.post("/run-matched-scan", dependencies=[Depends(verify_token)])
+async def run_matched_scan_endpoint() -> StreamingResponse:
+    """
+    Escáner matched-betting / surebets (motor back/lay real).
+    Síncrono con pings cada 30s; la última línea trae el resumen JSON.
+    Reemplaza a /run-arb (que usaba el detector roto).
+    """
+    return StreamingResponse(_stream_job(_bg_matched_scan, "matched-scan"), media_type="text/plain")
+
+
+async def _bg_matched_scan() -> None:
+    try:
+        from matched.scanner import run_matched_scan
+        summary = await run_matched_scan()
+        logger.info("matched-scan: completado — %s", summary)
+    except Exception as e:
+        logger.error("matched-scan: error — %s", e, exc_info=True)
 
 
 @app.post("/run-fdco-collect", dependencies=[Depends(verify_token)])

@@ -68,6 +68,21 @@ SPORTS_DIVERGENCE_UNDERDOG_ODDS = 1.80
 SIGNAL_MIN_MINUTES_BEFORE_KICKOFF = int(
     os.environ.get("SIGNAL_MIN_MINUTES_BEFORE_KICKOFF", "20")
 )
+# ── Matched betting / surebets (motor back/lay — services/sports-agent/matched) ──
+# Comisión del exchange usada en el cálculo qualifying. Betfair ~2%.
+MATCHED_LAY_COMMISSION = float(os.environ.get("MATCHED_LAY_COMMISSION", "0.02"))
+# rating qualifying (%) >= umbral → SUREBET (beneficio garantizado sin bono).
+MATCHED_SUREBET_MIN_RATING = float(os.environ.get("MATCHED_SUREBET_MIN_RATING", "1.0"))
+# rating qualifying (%) en [COVERAGE_MIN, SUREBET) → COVERAGE (buen qualifying para bono).
+# -2.0 = aceptar pérdidas de hasta 2% del stake (un qualifying "barato" para liberar un bono).
+MATCHED_COVERAGE_MIN_RATING = float(os.environ.get("MATCHED_COVERAGE_MIN_RATING", "-2.0"))
+# Filtro de lay irreal: descartar lay_odds por encima de esto (betfair_ex_eu usa 1000.0
+# como sentinela de "sin lay disponible" para esa selección).
+MATCHED_LAY_ODDS_MAX = float(os.environ.get("MATCHED_LAY_ODDS_MAX", "51.0"))
+# Máx sport_keys por escaneo (backstop de coste: N × 2 créditos de The Odds API).
+# Con budget 200/mes y 2 créditos/key: 4 keys = 8 créditos/scan → ~25 scans/mes (diario holgado).
+MATCHED_MAX_KEYS_PER_SCAN = int(os.environ.get("MATCHED_MAX_KEYS_PER_SCAN", "4"))
+
 BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral menor
 POLY_MIN_EDGE = 0.08
 POLY_MIN_CONFIDENCE = 0.65

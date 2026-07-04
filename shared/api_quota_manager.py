@@ -44,6 +44,7 @@ Uso:
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -63,6 +64,9 @@ _DAILY_LIMITS: dict[str, int] = {
 _MONTHLY_LIMITS: dict[str, int] = {
     "oddsapiio":    72_000, # odds-api.io free: 5000 req/h × 24h × ~15 días activos
     "the_odds_api":    500, # 500/mes — verificado. Header x-requests-remaining fiable.
+    "the_odds_api_matched": int(os.environ.get("MATCHED_MONTHLY_CREDIT_BUDGET", "200")),
+                            # sub-presupuesto del escáner matched dentro de los 500 reales.
+                            # Evita que matched agote la cuota que necesita el value engine.
     "oddspapi":        250, # 250/mes — confirmado. Agotada hasta ~May 1.
     "opticodds":     1_000, # optic-odds.io free: 1000/mes (fallback cuaternario)
 }

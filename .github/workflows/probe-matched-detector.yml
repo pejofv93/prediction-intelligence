@@ -1,0 +1,79 @@
+name: probe-matched-detector
+# Dry-run del detector real sobre datos LIVE (sin desplegar, sin Firestore).
+# Reutiliza matched.odds_lay._quotes_from_event + matched.engine.classify sobre la
+# respuesta real de The Odds API. Demuestra que el motor back/lay encuentra señales.
+# Consumo: ~3 keys × 2 créditos. Borrar tras verificar.
+on:
+  workflow_dispatch:
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      GOOGLE_CLOUD_PROJECT: dry-run
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install httpx
+      - name: Run detector on live odds
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, ".")
+          sys.path.insert(0, os.path.join("services", "sports-agent"))
+          import httpx
+          from matched.odds_lay import _quotes_from_event
+          from matched.engine import classify
+
+          KEY = os.environ["ODDS_API_KEY"]
+          BASE = "https://api.the-odds-api.com/v4/sports"
+
+          with httpx.Client(timeout=25.0) as c:
+              sports = c.get(BASE, params={"apiKey": KEY}).json()
+              GROUPS = {"Tennis": 0, "Soccer": 1, "Basketball": 2, "Baseball": 3}
+              EXCL = ("_winner", "election")
+              cand = sorted(
+                  [(GROUPS[s["group"]], s["key"]) for s in sports
+                   if s.get("active") and s.get("group") in GROUPS
+                   and not any(x in s["key"] for x in EXCL)])
+              keys = [k for _, k in cand][:3]
+              print("Probing keys:", keys)
+
+              total_sure = total_cov = 0
+              for key in keys:
+                  rr = c.get(f"{BASE}/{key}/odds", params={
+                      "apiKey": KEY, "regions": "eu",
+                      "markets": "h2h,h2h_lay", "oddsFormat": "decimal"})
+                  print(f"\n=== {key} -> {rr.status_code} cost={rr.headers.get('x-requests-last')} "
+                        f"remaining={rr.headers.get('x-requests-remaining')} ===")
+                  if rr.status_code != 200:
+                      print("   ", rr.text[:200]); continue
+                  events = rr.json() or []
+                  key_sure = key_cov = 0
+                  for ev in events:
+                      for q in _quotes_from_event(ev):
+                          s = classify(q, sport_key=key, event_id=str(ev.get("id")),
+                                       home_team=ev.get("home_team", ""),
+                                       away_team=ev.get("away_team", ""),
+                                       commence_time=ev.get("commence_time", ""))
+                          if not s:
+                              continue
+                          if s.signal_type == "surebet":
+                              key_sure += 1
+                          else:
+                              key_cov += 1
+                          # imprimir solo las mejores para no inundar
+                          if s.signal_type == "surebet" or s.qualifying_rating > -0.5:
+                              print(f"   [{s.signal_type:8s}] {s.home_team} v {s.away_team} | "
+                                    f"{s.selection}: back {s.back_bookmaker}@{s.back_odds} "
+                                    f"lay {s.lay_odds} | rating={s.qualifying_rating}% "
+                                    f"profit/100={s.profit_per_100} freebetSNR={s.freebet_snr_rating}%")
+                  print(f"   -> {len(events)} eventos c/odds | surebets={key_sure} coverage={key_cov}")
+                  total_sure += key_sure; total_cov += key_cov
+
+              print(f"\n=== TOTAL: surebets={total_sure} coverage={total_cov} ===")
+          EOF
