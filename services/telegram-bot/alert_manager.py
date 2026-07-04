@@ -71,9 +71,10 @@ async def send_message(
     payload = {
         "chat_id": target,
         "text": text,
-        "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
+    if parse_mode:   # omitir la clave si es None/"" — Telegram rechaza parse_mode=null
+        payload["parse_mode"] = parse_mode
     if message_thread_id is not None:
         payload["message_thread_id"] = message_thread_id
 

@@ -206,4 +206,8 @@ async def run_matched_scan() -> dict:
         "alerts_sent": alerts_sent,
     }
     logger.info("matched.scanner: %s", summary)
+    try:
+        col("matched_scan_runs").document("latest").set({**summary, "at": now.isoformat()})
+    except Exception:
+        logger.warning("matched.scanner: no se pudo guardar el resumen de scan", exc_info=True)
     return summary

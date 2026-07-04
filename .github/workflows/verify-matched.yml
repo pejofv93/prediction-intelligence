@@ -32,6 +32,8 @@ jobs:
           db = firestore.Client(project="prediction-intelligence")
           prefix = os.environ.get("PREFIX", "") or "prod"
           coll = f"{prefix}matched_signals"
+          run = db.collection(f"{prefix}matched_scan_runs").document("latest").get()
+          print("SCAN RUN:", run.to_dict() if run.exists else "(sin doc)")
           docs = [d.to_dict() for d in db.collection(coll).stream()]
           print(f"Coleccion {coll}: {len(docs)} documentos")
           from collections import Counter
