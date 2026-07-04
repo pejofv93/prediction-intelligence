@@ -22,6 +22,7 @@ from shared.config import (
     MATCHED_ALERT_SUREBET_MIN_RATING,
     MATCHED_ALERT_COVERAGE_MIN_RATING,
     MATCHED_ALERT_CONFIDENCE,
+    MATCHED_ALERT_MAX_ODDS,
 )
 
 from .models import MatchedSignal
@@ -32,8 +33,11 @@ _ALLOWED_CONFIDENCE = {c.strip() for c in MATCHED_ALERT_CONFIDENCE.split(",") if
 
 
 def should_alert(sig: MatchedSignal) -> bool:
-    """True si la señal cumple umbral y confianza para alertar."""
+    """True si la señal cumple umbral, confianza y rango de cuotas para alertar."""
     if sig.confidence not in _ALLOWED_CONFIDENCE:
+        return False
+    # Longshots: cuota alta → liquidez de exchange ínfima → surebet no ejecutable.
+    if max(sig.back_odds, sig.lay_odds) > MATCHED_ALERT_MAX_ODDS:
         return False
     if sig.signal_type == "surebet":
         return sig.qualifying_rating >= MATCHED_ALERT_SUREBET_MIN_RATING

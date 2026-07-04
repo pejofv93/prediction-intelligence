@@ -96,6 +96,11 @@ MATCHED_LAY_STALE_SEC = int(os.environ.get("MATCHED_LAY_STALE_SEC", "900"))   # 
 MATCHED_ALERT_SUREBET_MIN_RATING = float(os.environ.get("MATCHED_ALERT_SUREBET_MIN_RATING", "1.0"))
 MATCHED_ALERT_COVERAGE_MIN_RATING = float(os.environ.get("MATCHED_ALERT_COVERAGE_MIN_RATING", "-1.0"))
 MATCHED_ALERT_CONFIDENCE = os.environ.get("MATCHED_ALERT_CONFIDENCE", "high,medium")
+# No alertar cuotas altas: en cuotas grandes (longshots) la liquidez del exchange se
+# desploma y el "surebet" es un espejismo (fresco pero no ejecutable a tamaño real).
+# The Odds API no da size → usamos la cuota como proxy. La señal SÍ se persiste (visible
+# en el dashboard), solo NO se alerta si back o lay superan este tope.
+MATCHED_ALERT_MAX_ODDS = float(os.environ.get("MATCHED_ALERT_MAX_ODDS", "7.0"))
 
 BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral menor
 POLY_MIN_EDGE = 0.08
