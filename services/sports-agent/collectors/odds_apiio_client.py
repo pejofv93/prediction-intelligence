@@ -243,8 +243,17 @@ _PRIORITY_LEAGUES_FOR_ODDS: frozenset[str] = frozenset({
 # ligas prioritarias cuyo kickoff cae en [ahora, ahora+_PREFETCH_WINDOW]. Sustituye al
 # tope fijo de N-por-liga, que dejaba sin cuotas los match-days con >N partidos (fase de
 # grupos del Mundial, finde con >5 partidos de PL/PD).
-_PREFETCH_WINDOW: timedelta = timedelta(hours=72)
-_MAX_ODDS_PREFETCH: int = 120  # backstop global: 120 IDs / 10 = 12 requests /odds/multi
+# 7 días = misma ventana con la que trabaja analyze y misma que ya pide /events
+# (commenceTimeTo = now+7d). Con 72h solo se pedían cuotas de ~1/4 de los partidos que
+# analyze evalúa, y el resto quedaba "fuera de ventana de cuotas" sesgando el embudo.
+_PREFETCH_WINDOW: timedelta = timedelta(days=7)
+# Backstop global: 300 IDs / 10 = 30 requests /odds/multi por pre-fetch (1 por analyze,
+# 4 analyze/día → ~3.000 req/mes sobre un presupuesto de 72.000). Subido de 120 al ampliar
+# la ventana a 7 días: con 72h entraban 72 partidos y el cap nunca mordía; con 7 días entran
+# ~246, y al morder el cap el recorte era NO DETERMINISTA (_PRIORITY_LEAGUES_FOR_ODDS es un
+# frozenset y su orden de iteración cambia en cada arranque), dejando ligas enteras sin cuotas
+# de forma aleatoria según la instancia.
+_MAX_ODDS_PREFETCH: int = 300
 
 
 def _cache_ttl(entry: dict) -> timedelta:
@@ -946,7 +955,8 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
     """
     Pre-carga odds para ligas prioritarias en _ODDS_MAP_CACHE.
     Selección por VENTANA JUGABLE: por cada liga prioritaria se piden cuotas de TODOS
-    los partidos cuyo kickoff cae en [ahora, ahora+_PREFETCH_WINDOW] (72h), filtrando
+    los partidos cuyo kickoff cae en [ahora, ahora+_PREFETCH_WINDOW] (7 días, igual que la
+    ventana de /events y de analyze), filtrando
     por su keyword más específico (primero de la lista, incluye país). Sustituye al tope
     fijo de N-por-liga, que dejaba sin cuotas los match-days con más de N partidos (fase
     de grupos del Mundial, finde con >5 partidos de PL/PD). Si el kickoff de un evento no
@@ -1005,8 +1015,8 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
                 continue
             kdt = _commence_dt(ev)
             if kdt is not None:
-                # Ventana jugable: dentro de [ahora, ahora+72h]. Ya empezados o
-                # lejanos (placeholders nocaut a +días) se omiten.
+                # Ventana jugable: dentro de [ahora, ahora+_PREFETCH_WINDOW]. Ya empezados
+                # o lejanos (placeholders de nocaut sin fecha real) se omiten.
                 if kdt < now or kdt > window_end:
                     continue
             else:
@@ -1019,8 +1029,9 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
             priority_events.append(ev)
             added += 1
         if lg_events:
-            logger.info("odds-api.io: pre-fetch %s → %d candidatos → %d en ventana 72h",
-                        lg, len(lg_events), added)
+            logger.info("odds-api.io: pre-fetch %s → %d candidatos → %d en ventana %dh",
+                        lg, len(lg_events), added,
+                        int(_PREFETCH_WINDOW.total_seconds() // 3600))
 
     if not priority_events and all_events:
         _sample_fields = ("id", "league", "competition", "competitionName",

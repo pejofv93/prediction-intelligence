@@ -6,7 +6,7 @@ tienen cuotas, cuántos generan señal y cuántos se cortan y por qué filtro.
 
 Contexto de por qué existe: durante la sequía de agosto-2026 hubo que reconstruir este
 recuento a mano varias veces. Los cuellos son dos y conviene distinguirlos siempre:
-  1. VENTANA DE CUOTAS — odds-api.io pre-carga [ahora, ahora+72h] y The Odds API omite
+  1. VENTANA DE CUOTAS — odds-api.io pre-carga [ahora, ahora+7d] y The Odds API omite
      ligas sin partidos en 48h. Un partido fuera de ventana no es un corte del modelo:
      es que todavía no se le han pedido cuotas.
   2. FILTROS — divergencia, gates AWAY, underdog extremo, umbral de EV. Esos sí son
@@ -31,9 +31,9 @@ sys.path.insert(0, _ROOT)
 from shared.firestore_client import col  # noqa: E402
 
 # Ventanas reales del código de producción (mantener sincronizadas):
-#   collectors/odds_apiio_client.py  _PREFETCH_WINDOW = 72h
+#   collectors/odds_apiio_client.py  _PREFETCH_WINDOW = 7 días
 #   analyzers/value_bet_engine.py    _fetch_the_odds_api guard = 48h
-_ODDSAPIIO_WINDOW_H = 72
+_ODDSAPIIO_WINDOW_H = 168
 _THE_ODDS_API_WINDOW_H = 48
 
 FOOTBALL_LEAGUES = {"PD", "PL", "SA", "BL1", "FL1"}
