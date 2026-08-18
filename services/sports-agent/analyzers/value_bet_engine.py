@@ -2031,6 +2031,12 @@ async def _alt_football_signals_only(
     Genera señales solo de mercados alternativos (BTTS/O-U/corners) cuando el h2h
     no es aplicable (guard Poisson/form bajo, h2h inválido por motivos de mercado).
     Prueba: 1) oddsapiio all_markets, 2) caché de liga para football_extra_signals.
+
+    SIN USO desde el fix del crash de _eval_side (2026-08-18): sus dos llamadas devolvían
+    una lista donde generate_signal esperaba un candidato dict. La cola de generate_signal
+    ya genera exactamente estos mismos mercados, así que aquellas ramas devuelven None.
+    Se conserva por si vuelve a hacer falta una ruta "solo mercados alt"; si no, es candidata
+    a eliminarse.
     """
     results: list[dict] = []
     sport_key = _ODDS_SPORT_MAP.get(league, "")
@@ -2636,14 +2642,12 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         if _sel_form < 0.25 and _sel_poisson < 0.20:
             logger.info(
                 "generate_signal(%s): h2h descartado — form=%.2f y poisson=%.2f del equipo seleccionado "
-                "[%s | %s] — intentando mercados alt",
+                "[%s | %s] — los mercados alt siguen evaluándose",
                 match_id, _sel_form, _sel_poisson, team_to_back, league,
             )
-            # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
-            return await _alt_football_signals_only(
-                enriched_match, odds_data, league, sport, match_id,
-                str(home_team), str(away_team), match_date, weights_version,
-            )
+            # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador, y la cola
+            # de generate_signal ya los genera. _eval_side devuelve UN candidato 1X2 o None.
+            return None
 
         # EV alto en cuotas altas no compensa cuando la probabilidad propia del modelo es baja.
         # Caso típico: Genoa @4.50 vs Milan — EV puede ser 20%+ pero Poisson 0.38 indica
@@ -2652,14 +2656,12 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         if _is_real_poisson_sel and _sel_poisson < 0.35:
             logger.info(
                 "generate_signal(%s): h2h descartado — poisson=%.2f < 0.35 (prob propia demasiado baja) "
-                "[%s | %s] — intentando mercados alt",
+                "[%s | %s] — los mercados alt siguen evaluándose",
                 match_id, _sel_poisson, team_to_back, league,
             )
-            # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador
-            return await _alt_football_signals_only(
-                enriched_match, odds_data, league, sport, match_id,
-                str(home_team), str(away_team), match_date, weights_version,
-            )
+            # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador, y la cola
+            # de generate_signal ya los genera. _eval_side devuelve UN candidato 1X2 o None.
+            return None
         if _sel_poisson < 0.40 and _sel_form < 0.45:
             _conf_before_low = best_confidence
             best_confidence = round(best_confidence * 0.85, 4)
@@ -2942,8 +2944,17 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     _candidates: list[dict] = []
     for _ph in _sides_to_try:
         _cand = await _eval_side(_ph)
-        if _cand is not None:
+        if isinstance(_cand, dict):
             _candidates.append(_cand)
+        elif _cand is not None:
+            # _eval_side devuelve UN candidato o None. Si alguna rama devuelve otra cosa
+            # (p.ej. una lista de señales alt), el max() de abajo revienta y se pierde el
+            # partido entero: descartar y dejar constancia en vez de tumbar el análisis.
+            logger.error(
+                "generate_signal(%s): _eval_side(pick_home=%s) devolvió %s en vez de dict|None "
+                "— candidato ignorado",
+                match_id, _ph, type(_cand).__name__,
+            )
     prediction = max(_candidates, key=lambda p: p["ev"]) if _candidates else None
 
     if prediction is not None:
