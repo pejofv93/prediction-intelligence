@@ -54,6 +54,21 @@ _FILTER_PARAMS_TTL: float = 1800.0  # 30 min
 # cuotas naturalmente más altas (~2.0) y necesitan un umbral menor.
 _ALT_MARKET_MIN_CONF: float = 0.60
 
+# Ligas domésticas que usan ELO como proxy cuando el Poisson aún no se puede ajustar
+# (arranque de temporada: menos de MIN_MATCHES_TO_FIT partidos jugados).
+_ELO_FALLBACK_LEAGUES: set[str] = {"PD", "PL", "SA", "BL1", "FL1"}
+
+# Techo de confianza para señales que van SOLO con ELO (Poisson sintético + forma todavía
+# en el default 50/50). Penaliza sin silenciar: tiene que quedar por encima del gate de
+# emisión (SPORTS_MIN_CONFIDENCE = 0.65) DESPUÉS de la penalización por data_quality
+# "partial" (×0.9), que es el estado en el que llegan estos partidos:
+#     0.75 × 0.9 = 0.675 > 0.65  → puede emitir
+#     techo efectivo 0.675      → nunca alcanza el tier "fuerte" (>0.80)
+# Con un cap de 0.60 (el que se aplica al resto de ligas exentas) el resultado sería
+# 0.54 < 0.65: no un cap, un mute. Según se juegan jornadas el Poisson real vuelve,
+# la forma deja de ser el default y el cap deja de aplicarse solo.
+_ELO_ONLY_CONF_CAP: float = 0.75
+
 # Filtro de divergencia modelo-mercado para señales 1X2 — espejo de _BUY_YES_MIN_MP_YES
 # en polymarket-agent. El discriminador de rentabilidad NO es el edge, es la divergencia:
 # cuando el modelo se separa mucho de la probabilidad implícita (1/odds), el edge está
@@ -2096,7 +2111,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     # Ligas donde Poisson puede faltar: se permite continuar con ELO o form como proxy.
     # Copa/BSA: datos históricos insuficientes en fase de grupos.
     # CL/EL/ECL: ELO DB puede no cubrir equipos — pero cuotas siempre disponibles.
-    _POISSON_EXEMPT_LEAGUES = {"ARG", "CSUD", "CAM", "CL", "EL", "ECL", "WC26", "WC"}
+    # Ligas domésticas: en las primeras jornadas no hay partidos suficientes para ajustar
+    # Poisson (MIN_MATCHES_TO_FIT), pero el ELO viene rodado de la temporada anterior. Sin
+    # esta excepción el guard bloqueaba el 100% del fútbol doméstico cada agosto.
+    # Las señales que salen por esta vía llevan cap de confianza (_ELO_ONLY_CONF_CAP).
+    _POISSON_EXEMPT_LEAGUES = (
+        {"ARG", "CSUD", "CAM", "CL", "EL", "ECL", "WC26", "WC"} | _ELO_FALLBACK_LEAGUES
+    )
 
     # POISSON_GUARD: bloquear SOLO si no hay ningún modelo disponible.
     # Regla: si poisson_home_win existe → pasar siempre (elo=-1 no bloquea).
@@ -2479,17 +2500,21 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         # WC26/WC: exento — los equipos nacionales nunca tienen historial en football-data.org;
         # usar Poisson sintético + form default ES el flujo esperado, no un degradado temporal.
         # La divergencia extrema (germany vs curaçao) la filtra el bloque siguiente.
+        # Ligas domésticas en arranque de temporada: cap más alto (_ELO_ONLY_CONF_CAP) porque
+        # ahí el ELO SÍ es informativo (viene rodado de la campaña anterior) y un cap de 0.60
+        # equivaldría a silenciarlas. Ver la nota de la constante para el cálculo del umbral.
         if enriched_match.get("_synthetic_poisson", False) and league not in {"WC26", "WC"}:
             _fh = float(enriched_match.get("home_form_score", 50.0))
             _fa = float(enriched_match.get("away_form_score", 50.0))
             if abs(_fh - 50.0) < 0.5 and abs(_fa - 50.0) < 0.5:
-                if best_confidence > 0.60:
+                _cap = _ELO_ONLY_CONF_CAP if league in _ELO_FALLBACK_LEAGUES else 0.60
+                if best_confidence > _cap:
                     logger.info(
-                        "generate_signal(%s): SYNTHETIC_DEFAULT_CAP conf %.2f→0.60 "
+                        "generate_signal(%s): SYNTHETIC_DEFAULT_CAP conf %.2f→%.2f "
                         "(poisson sintético + form default) [%s vs %s | %s]",
-                        match_id, best_confidence, home_team, away_team, league,
+                        match_id, best_confidence, _cap, home_team, away_team, league,
                     )
-                    best_confidence = 0.60
+                    best_confidence = _cap
 
         # --- 5b. Filtro underdog extremo: umbral dinámico por liga vs rival top-6 ---
         rival_team = str(away_team) if team_to_back == str(home_team) else str(home_team)

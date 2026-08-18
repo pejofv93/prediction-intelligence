@@ -142,43 +142,31 @@ async def save_upcoming_matches(matches: list[dict]) -> None:
     logger.info("save_upcoming_matches: %d/%d partidos guardados", saved, len(matches))
 
 
-async def save_team_stats(team_id: int, raw_api_matches: list[dict]) -> None:
-    """
-    Procesa raw_api_matches y guarda en Firestore coleccion team_stats.
-    Calcula: last_10, form_score, home_stats, away_stats, streak, xg_per_game.
-    IMPRESCINDIBLE: raw_matches guardado para que Poisson funcione en Session 3.
+# Histórico conservado por equipo. 10 alimentan form/streak; el resto da colchón al
+# Poisson (MIN_MATCHES_TO_FIT=3) durante el arranque de temporada, cuando la API solo
+# devuelve 0-1 partidos de la campaña en curso.
+_RAW_MATCHES_KEEP = 20
 
-    raw_api_matches: lista de partidos normalizados del formato interno:
-      {match_id, date, home_team_id, away_team_id, home_team_name, away_team_name,
-       goals_home, goals_away, league, ...}
-    """
-    if not raw_api_matches:
-        logger.warning("save_team_stats(%d): sin datos de partidos — usando defaults", team_id)
-        # Guardar con datos neutrales y marcar como partial
-        doc = _build_empty_team_stats(team_id)
-        await _firestore_set("team_stats", str(team_id), doc)
-        return
 
-    # Determinar nombre y liga del equipo (del partido mas reciente)
-    team_name = _extract_team_name(team_id, raw_api_matches)
-    league = _extract_league(raw_api_matches)
+def _read_team_stats(team_id: int) -> dict:
+    """Lee el doc actual de team_stats. Devuelve {} si no existe o si Firestore falla."""
+    try:
+        snap = col("team_stats").document(str(team_id)).get()
+        if snap.exists:
+            return snap.to_dict() or {}
+    except Exception:
+        logger.warning("_read_team_stats(%d): error leyendo Firestore", team_id, exc_info=True)
+    return {}
 
-    # Construir lista W/D/L (mas reciente primero)
-    results = build_results_list(raw_api_matches, team_id)
-    last_10 = results[:10]
 
-    # Stats calculadas
-    form_score = calculate_form_score(last_10)
-    home_stats, away_stats = calculate_home_away_split(raw_api_matches, team_id)
-    streak = detect_streak(last_10)
+def stored_raw_match_count(team_id: int) -> int:
+    """Cuántos partidos históricos hay ya guardados para este equipo."""
+    return len(_read_team_stats(team_id).get("raw_matches", []) or [])
 
-    # xG proxy — requiere datos de tiros (rara vez disponibles en free tier)
-    # Preparar matches con goals_scored relativo al equipo para xg_proxy
-    matches_for_xg = _build_xg_matches(team_id, raw_api_matches)
-    xg_per_game = calculate_xg_proxy(matches_for_xg)
 
-    # raw_matches para modelo Poisson — formato exacto requerido por poisson_model.py
-    raw_matches_poisson = [
+def _to_raw_poisson(team_id: int, matches: list[dict]) -> list[dict]:
+    """Normaliza al formato exacto que consume poisson_model.py."""
+    return [
         {
             "match_id": m["match_id"],
             "date": m["date"],
@@ -188,9 +176,84 @@ async def save_team_stats(team_id: int, raw_api_matches: list[dict]) -> None:
             "goals_away": m.get("goals_away") or 0,
             "was_home": m["home_team_id"] == team_id,
         }
-        for m in raw_api_matches
-        if m.get("goals_home") is not None and m.get("goals_away") is not None
+        for m in matches
+        if m.get("match_id")
+        and m.get("goals_home") is not None
+        and m.get("goals_away") is not None
     ]
+
+
+def _merge_raw_matches(stored: list[dict], fresh: list[dict]) -> list[dict]:
+    """
+    Une histórico guardado + partidos nuevos, deduplicando por match_id y ordenando
+    por fecha DESC (más reciente primero, que es lo que asumen build_results_list y
+    detect_streak). Recorta a _RAW_MATCHES_KEEP.
+    """
+    by_id: dict[str, dict] = {}
+    for m in list(stored or []) + list(fresh or []):
+        mid = str(m.get("match_id", ""))
+        if mid:
+            by_id[mid] = m   # el nuevo pisa al viejo si coinciden (resultado corregido)
+    merged = sorted(by_id.values(), key=lambda m: str(m.get("date", "")), reverse=True)
+    return merged[:_RAW_MATCHES_KEEP]
+
+
+async def save_team_stats(team_id: int, raw_api_matches: list[dict]) -> None:
+    """
+    Procesa raw_api_matches y guarda en Firestore coleccion team_stats.
+    Calcula: last_10, form_score, home_stats, away_stats, streak, xg_per_game.
+    IMPRESCINDIBLE: raw_matches guardado para que Poisson funcione en Session 3.
+
+    ACUMULA en vez de reemplazar: el histórico previo se fusiona con lo que llega de la API.
+    En el cambio de temporada football-data.org devuelve 0 partidos terminados y la versión
+    anterior de esta función sobrescribía el doc con defaults vacíos, destruyendo el
+    histórico de todos los equipos y dejando al Poisson sin datos toda la pretemporada.
+
+    raw_api_matches: lista de partidos normalizados del formato interno:
+      {match_id, date, home_team_id, away_team_id, home_team_name, away_team_name,
+       goals_home, goals_away, league, ...}
+    """
+    existing = _read_team_stats(team_id)
+    stored_raw = existing.get("raw_matches", []) or []
+
+    if not raw_api_matches and stored_raw:
+        # La API no trae nada nuevo pero SÍ hay histórico: no tocar el doc.
+        logger.info(
+            "save_team_stats(%d) %s: la API no devuelve partidos — conservando %d en histórico",
+            team_id, existing.get("team_name", ""), len(stored_raw),
+        )
+        return
+
+    if not raw_api_matches and not stored_raw:
+        logger.warning("save_team_stats(%d): sin datos de partidos — usando defaults", team_id)
+        # Guardar con datos neutrales y marcar como partial
+        doc = _build_empty_team_stats(team_id)
+        await _firestore_set("team_stats", str(team_id), doc)
+        return
+
+    raw_matches_poisson = _merge_raw_matches(
+        stored_raw, _to_raw_poisson(team_id, raw_api_matches)
+    )
+
+    # Nombre y liga: los trae la API; si esta tanda no los tiene, conservar los guardados.
+    team_name = _extract_team_name(team_id, raw_api_matches)
+    if team_name == f"Team_{team_id}" and existing.get("team_name"):
+        team_name = existing["team_name"]
+    league = _extract_league(raw_api_matches) or existing.get("league", "")
+
+    # Stats derivadas: se recalculan sobre el histórico FUSIONADO, no solo sobre la
+    # última tanda, para que form/streak/xG no se degraden en el arranque de temporada.
+    results = build_results_list(raw_matches_poisson, team_id)
+    last_10 = results[:10]
+
+    form_score = calculate_form_score(last_10)
+    home_stats, away_stats = calculate_home_away_split(raw_matches_poisson, team_id)
+    streak = detect_streak(last_10)
+
+    # xG proxy — requiere datos de tiros (rara vez disponibles en free tier)
+    # Preparar matches con goals_scored relativo al equipo para xg_proxy
+    matches_for_xg = _build_xg_matches(team_id, raw_matches_poisson)
+    xg_per_game = calculate_xg_proxy(matches_for_xg)
 
     doc = {
         "team_id": team_id,
@@ -209,9 +272,10 @@ async def save_team_stats(team_id: int, raw_api_matches: list[dict]) -> None:
     ok = await _firestore_set("team_stats", str(team_id), doc)
     if ok:
         logger.info(
-            "save_team_stats(%d) %s: form=%.1f streak=%s×%d xg=%.2f",
+            "save_team_stats(%d) %s: form=%.1f streak=%s×%d xg=%.2f raw=%d (+%d nuevos)",
             team_id, team_name, form_score,
             streak["type"], streak["count"], xg_per_game,
+            len(raw_matches_poisson), max(0, len(raw_matches_poisson) - len(stored_raw)),
         )
 
 

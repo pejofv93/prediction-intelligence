@@ -28,6 +28,16 @@ app = FastAPI(title="sports-agent")
 
 CLOUD_RUN_TOKEN = os.environ.get("CLOUD_RUN_TOKEN", "")
 
+# Tope de re-siembras de temporada anterior por ciclo de collect (ver _collect_football).
+# Cada una cuesta una llamada extra a football-data.org = 6,5s de rate-limit. El collect
+# completo ya ronda los 27 min contra un timeout de Cloud Run de 30 min, así que el
+# backfill se reparte entre ciclos en vez de hacerse de golpe.
+_SEASON_BACKFILL_MAX_PER_RUN = int(os.environ.get("SEASON_BACKFILL_MAX_PER_RUN", "10"))
+
+# Límites de la limpieza de upcoming_matches (ver _cleanup_stale_upcoming).
+_STALE_CLEANUP_MAX_DELETES = int(os.environ.get("STALE_CLEANUP_MAX_DELETES", "12000"))
+_FIRESTORE_BATCH_SIZE = 500   # tope duro de operaciones por batch en Firestore
+
 # Timestamps de ultima ejecucion (en memoria — se pierden al reiniciar)
 _status: dict = {"last_collect": None, "last_enrich": None, "last_analyze": None}
 
@@ -636,57 +646,85 @@ async def _cleanup_stale_upcoming() -> int:
     2. SCHEDULED/TIMED con match_date > 48h de antigüedad (partidos ya jugados sin actualizar
        status — ocurre con ligas eliminadas de SUPPORTED_FOOTBALL_LEAGUES como CLI/PPL, y con
        partidos de fases eliminatorias cuyo status no se actualiza al no re-colectarse)
+    3. Estados de odds-api.io (settled/pending/LIVE/IN_PLAY/CANCELLED) con match_date > 48h.
+       No estaban contemplados: el colector de tenis escribe 'settled'/'pending' en minúscula
+       y esos docs no encajaban en ninguna de las dos listas anteriores, así que NUNCA se
+       borraban. Resultado: 26.000 docs acumulados (99% tenis) que analyze recorría en cada
+       ciclo. Con la lista completa, la cola se drena en unos pocos runs.
     Devuelve el número de documentos eliminados.
     """
-    from shared.firestore_client import col
+    from shared.firestore_client import col, get_client
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
-    deleted = 0
 
-    # Paso 1: FINISHED/PAUSED (comportamiento original)
-    try:
-        finished_docs = list(
-            col("upcoming_matches")
-            .where(filter=FieldFilter("status", "in", ["FINISHED", "PAUSED"]))
-            .stream()
-        )
-    except Exception as exc:
-        logger.warning("_cleanup_stale_upcoming: error leyendo FINISHED/PAUSED — %s", exc)
-        finished_docs = []
-
-    # Paso 2: SCHEDULED/TIMED con fecha pasada (stale sin actualizar)
-    try:
-        scheduled_docs = list(
-            col("upcoming_matches")
-            .where(filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"]))
-            .stream()
-        )
-    except Exception as exc:
-        logger.warning("_cleanup_stale_upcoming: error leyendo SCHEDULED — %s", exc)
-        scheduled_docs = []
-
-    all_docs = finished_docs + scheduled_docs
-
-    for doc in all_docs:
-        data = doc.to_dict()
-        match_date = data.get("match_date")
+    def _stale(doc) -> bool:
+        """True si el partido ya pasó el cutoff (docs sin fecha legible se conservan)."""
+        match_date = (doc.to_dict() or {}).get("match_date")
         if not match_date:
-            continue
+            return False
         if isinstance(match_date, str):
             try:
                 from datetime import datetime as _dt
                 match_date = _dt.fromisoformat(match_date.replace("Z", "+00:00"))
             except ValueError:
-                continue
+                return False
         if hasattr(match_date, "tzinfo") and match_date.tzinfo is None:
             match_date = match_date.replace(tzinfo=timezone.utc)
-        if match_date < cutoff:
-            try:
-                doc.reference.delete()
-                deleted += 1
-            except Exception as exc:
-                logger.warning("_cleanup_stale_upcoming: error borrando %s — %s", doc.id, exc)
+        return match_date < cutoff
 
+    # Estados terminales + los programados que se quedaron sin actualizar. Se consultan en
+    # grupos porque el operador `in` de Firestore está limitado a 10 valores.
+    _STATUS_GROUPS = (
+        ["FINISHED", "PAUSED"],                        # football-data.org, terminal
+        ["SCHEDULED", "TIMED"],                        # programados que ya se jugaron
+        ["settled", "pending", "CANCELLED"],           # odds-api.io, terminal/limbo
+        ["LIVE", "IN_PLAY"],                           # en juego que nunca cerró
+    )
+
+    stale_refs = []
+    for group in _STATUS_GROUPS:
+        if len(stale_refs) >= _STALE_CLEANUP_MAX_DELETES:
+            break
+        try:
+            docs = (
+                col("upcoming_matches")
+                .where(filter=FieldFilter("status", "in", group))
+                .stream()
+            )
+            for doc in docs:
+                if _stale(doc):
+                    stale_refs.append(doc.reference)
+                    if len(stale_refs) >= _STALE_CLEANUP_MAX_DELETES:
+                        break
+        except Exception as exc:
+            logger.warning("_cleanup_stale_upcoming: error leyendo %s — %s", group, exc)
+
+    if not stale_refs:
+        return 0
+
+    # Borrado por lotes: uno a uno son ~30ms por doc y con el backlog de tenis (>20k)
+    # se comía el presupuesto entero del collect.
+    client = get_client()
+    deleted = 0
+    for start in range(0, len(stale_refs), _FIRESTORE_BATCH_SIZE):
+        chunk = stale_refs[start:start + _FIRESTORE_BATCH_SIZE]
+        try:
+            batch = client.batch()
+            for ref in chunk:
+                batch.delete(ref)
+            batch.commit()
+            deleted += len(chunk)
+        except Exception as exc:
+            logger.warning(
+                "_cleanup_stale_upcoming: error borrando lote de %d — %s", len(chunk), exc
+            )
+
+    if len(stale_refs) >= _STALE_CLEANUP_MAX_DELETES:
+        logger.info(
+            "_cleanup_stale_upcoming: alcanzado el tope de %d borrados en este ciclo — "
+            "el resto se limpia en los siguientes",
+            _STALE_CLEANUP_MAX_DELETES,
+        )
     return deleted
 
 
@@ -802,8 +840,39 @@ async def _collect_football() -> None:
     Caché TTL 6h: si team_stats o h2h_data tienen menos de 6h → omite llamada API.
     Rate limit: RATE_LIMIT_DELAY=6.5s ya integrado en cada llamada HTTP.
     """
-    from collectors.football_api import get_upcoming_matches, get_team_stats, get_h2h
-    from collectors.firestore_writer import save_upcoming_matches, save_team_stats, save_h2h
+    from collectors.football_api import (
+        current_season_start_year, get_upcoming_matches, get_team_stats, get_h2h,
+    )
+    from collectors.firestore_writer import (
+        save_upcoming_matches, save_team_stats, save_h2h, stored_raw_match_count,
+    )
+    from shared.config import MIN_MATCHES_TO_FIT
+
+    # Re-siembra de histórico al cambiar de temporada: football-data.org acota por defecto a
+    # la campaña en curso, así que en agosto devuelve 0 partidos y el Poisson se queda seco.
+    # Cuando un equipo se queda por debajo del mínimo, se pide explícitamente la temporada
+    # anterior. Es una llamada extra de 6,5s por equipo → con tope por run para no acercarse
+    # al timeout de Cloud Run (1800s); el resto se completa en los siguientes ciclos.
+    _prev_season = current_season_start_year() - 1
+    _backfill_budget = _SEASON_BACKFILL_MAX_PER_RUN
+    _backfilled = 0
+
+    async def _team_history(team_id: int) -> list[dict]:
+        """Partidos de la temporada en curso; si no bastan, re-siembra desde la anterior."""
+        nonlocal _backfill_budget, _backfilled
+        raw = await get_team_stats(team_id)
+        if len(raw) >= MIN_MATCHES_TO_FIT or _backfill_budget <= 0:
+            return raw
+        if stored_raw_match_count(team_id) >= MIN_MATCHES_TO_FIT:
+            return raw   # ya hay histórico guardado; save_team_stats lo fusiona
+        _backfill_budget -= 1
+        _backfilled += 1
+        logger.info(
+            "collect.football: equipo %d sin histórico suficiente (%d) — "
+            "re-sembrando desde temporada %d",
+            team_id, len(raw), _prev_season,
+        )
+        return raw + await get_team_stats(team_id, season=_prev_season)
 
     logger.info("collect.football: obteniendo partidos proximos 7 dias")
     matches = await get_upcoming_matches(days=7)
@@ -838,7 +907,7 @@ async def _collect_football() -> None:
                     logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", home_id)
                     skipped_teams += 1
                 else:
-                    raw_home = await get_team_stats(home_id)
+                    raw_home = await _team_history(home_id)
                     await save_team_stats(home_id, raw_home)
                     for rm in raw_home:
                         mid = rm.get("match_id")
@@ -855,7 +924,7 @@ async def _collect_football() -> None:
                     logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", away_id)
                     skipped_teams += 1
                 else:
-                    raw_away = await get_team_stats(away_id)
+                    raw_away = await _team_history(away_id)
                     await save_team_stats(away_id, raw_away)
                     for rm in raw_away:
                         mid = rm.get("match_id")
@@ -883,8 +952,9 @@ async def _collect_football() -> None:
                 )
 
     logger.info(
-        "collect.football: %d equipos (%d cache), %d H2H (%d cache)",
+        "collect.football: %d equipos (%d cache), %d H2H (%d cache), %d re-sembrados temp %d",
         len(team_ids_seen), skipped_teams, len(h2h_pairs_seen), skipped_h2h,
+        _backfilled, _prev_season,
     )
 
     # Actualizar resultados de partidos terminados (últimos 30 días)

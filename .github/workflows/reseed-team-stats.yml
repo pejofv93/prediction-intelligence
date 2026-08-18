@@ -1,0 +1,48 @@
+name: reseed-team-stats
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Escribir en Firestore? false = dry-run (solo enumera)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      seasons_back:
+        description: 'Temporadas hacia atras a pedir'
+        required: false
+        default: '1'
+
+jobs:
+  reseed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx python-dotenv
+
+      - name: Re-sembrar team_stats
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+        run: |
+          if [ "${{ inputs.confirm }}" = "true" ]; then
+            python scripts/reseed_team_stats.py --confirm --seasons-back ${{ inputs.seasons_back }}
+          else
+            python scripts/reseed_team_stats.py --seasons-back ${{ inputs.seasons_back }}
+          fi

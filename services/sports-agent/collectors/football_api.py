@@ -134,11 +134,31 @@ async def get_upcoming_matches(days: int = 7) -> list[dict]:
     return matches
 
 
-async def get_team_stats(team_id: int, last_n: int = 10) -> list[dict]:
-    """GET /teams/{team_id}/matches?status=FINISHED&limit={last_n}"""
-    data = await _request(
-        f"/teams/{team_id}/matches?status=FINISHED&limit={last_n}"
-    )
+def current_season_start_year(today: datetime | None = None) -> int:
+    """
+    Año de inicio de la temporada europea en curso, en el formato que usa
+    football-data.org (`season=2025` = temporada 2025-26).
+    Agosto-Diciembre → año actual. Enero-Julio → año anterior.
+    """
+    now = today or datetime.now(timezone.utc)
+    return now.year if now.month >= 8 else now.year - 1
+
+
+async def get_team_stats(
+    team_id: int, last_n: int = 10, season: int | None = None
+) -> list[dict]:
+    """
+    GET /teams/{team_id}/matches?status=FINISHED&limit={last_n}[&season={season}]
+
+    Sin `season`, football-data.org acota por defecto a la TEMPORADA EN CURSO: en agosto
+    eso son 0-1 partidos y el modelo Poisson se queda sin datos. Pasar `season` explícito
+    (verificado en el tier gratuito: devuelve la temporada completa) permite re-sembrar el
+    histórico de la campaña anterior en el arranque de la nueva.
+    """
+    query = f"/teams/{team_id}/matches?status=FINISHED&limit={last_n}"
+    if season is not None:
+        query += f"&season={season}"
+    data = await _request(query)
     if not data:
         return []
 
@@ -149,7 +169,10 @@ async def get_team_stats(team_id: int, last_n: int = 10) -> list[dict]:
         if parsed and parsed["goals_home"] is not None and parsed["goals_away"] is not None:
             matches.append(parsed)
 
-    logger.info("get_team_stats(%d): %d partidos terminados", team_id, len(matches))
+    logger.info(
+        "get_team_stats(%d%s): %d partidos terminados",
+        team_id, f", season={season}" if season is not None else "", len(matches),
+    )
     return matches
 
 
