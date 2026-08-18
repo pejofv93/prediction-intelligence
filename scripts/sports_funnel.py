@@ -91,6 +91,15 @@ def main() -> int:
     # entra en 48h — por eso se cuenta por liga, no por partido.
     leagues_toa = {u.get("league") for md, u in matches if md <= toa_end}
 
+    # "Pedible" = el motor puede conseguirle cuotas. Son dos vías, y la segunda es la que
+    # más cubre: si The Odds API tiene la liga activa, cachea su JORNADA ENTERA, no solo los
+    # partidos dentro de la ventana. Contar solo la ventana de 72h infraestima mucho el
+    # denominador (18-ago: 2 por ventana vs 11 realmente evaluados en PD).
+    pedibles = [
+        (md, u) for md, u in matches
+        if md <= oaio_end or u.get("league") in leagues_toa
+    ]
+
     sec("1. VENTANA DE CUOTAS (esto NO es un corte del modelo)")
     print(f"odds-api.io  — pre-fetch {_ODDSAPIIO_WINDOW_H}h (hasta {oaio_end:%Y-%m-%d %H:%M}): "
           f"{len(in_oaio)}/{len(matches)} partidos")
@@ -98,6 +107,8 @@ def main() -> int:
     print(f"The Odds API — guard {_THE_ODDS_API_WINDOW_H}h (hasta {toa_end:%Y-%m-%d %H:%M}): "
           f"ligas activas {sorted(leagues_toa) or '—'}")
     print("   (una liga activa cachea su jornada entera, no solo los partidos en ventana)")
+    print(f"\nCON CUOTAS PEDIBLES (union de ambas vias): {len(pedibles)}/{len(matches)}")
+    print("   por liga:", dict(collections.Counter(u.get("league") for _, u in pedibles)))
 
     # ── Estado de enriquecimiento ────────────────────────────────────────────
     sec("2. ENRIQUECIMIENTO — de dónde sale la probabilidad del modelo")
@@ -167,10 +178,10 @@ def main() -> int:
             estado = "SEÑAL"
         elif mid in bloqueados:
             estado = "cortado: " + ",".join(bloqueados[mid])
-        elif md > oaio_end:
+        elif (md, u) not in pedibles:
             estado = "fuera de ventana de cuotas"
         else:
-            estado = "sin señal (edge/umbral)"
+            estado = "evaluado, sin señal (edge/umbral)"
         print(f"  {u.get('league'):>4} {md:%d-%b %H:%M} "
               f"{str(u.get('home_team'))[:22]:22s} vs {str(u.get('away_team'))[:22]:22s} "
               f"| {origen:<14} | {estado}")
@@ -178,12 +189,16 @@ def main() -> int:
     # ── Resumen ──────────────────────────────────────────────────────────────
     sec("RESUMEN")
     print(f"partidos de liga en ventana {args.days}d : {len(matches)}")
-    print(f"  con cuotas pedibles (72h)            : {len(in_oaio)}")
+    print(f"  con cuotas pedibles                  : {len(pedibles)}")
     print(f"  señales emitidas hoy                 : {len(preds)}")
     print(f"  cortes de filtro hoy                 : {len(blocks)}")
-    if in_oaio:
-        print(f"  tasa de emisión sobre los pedibles   : {len(preds)}/{len(in_oaio)} "
-              f"= {100.0 * len(preds) / len(in_oaio):.1f}%")
+    if pedibles:
+        print(f"  tasa de emisión sobre los pedibles   : {len(preds)}/{len(pedibles)} "
+              f"= {100.0 * len(preds) / len(pedibles):.1f}%")
+    faltan = len(matches) - len(pedibles)
+    if faltan:
+        print(f"\n  OJO: {faltan} partidos siguen fuera de ventana de cuotas — la muestra")
+        print("       aún no es completa. Repetir cuando ese número baje a 0 o casi.")
     return 0
 
 
