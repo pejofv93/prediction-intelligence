@@ -1,0 +1,75 @@
+name: rebuild-elo
+
+# Diagnóstico y reconstrucción del ELO. En CI el cliente oficial de Firestore funciona,
+# así que se usa --transport grpc (en local hay que ir por REST: el proxy TLS del puesto
+# de trabajo bloquea gRPC).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'diagnose = solo medir | rebuild = recomputar'
+        required: true
+        default: 'diagnose'
+        type: choice
+        options: ['diagnose', 'rebuild']
+      confirm:
+        description: 'Escribir en Firestore? false = dry-run'
+        required: true
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+      max_uefa_teams:
+        description: 'Clubes UEFA a sembrar en esta tanda (cuota 100/día)'
+        required: false
+        default: '80'
+      no_uefa:
+        description: 'Saltar la siembra UEFA (solo recomputo)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx
+
+      - name: Diagnóstico de desviación del ELO
+        if: ${{ inputs.mode == 'diagnose' }}
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: python scripts/diagnose_elo_drift.py --transport grpc
+
+      - name: Reconstrucción del ELO
+        if: ${{ inputs.mode == 'rebuild' }}
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          FOOTBALL_RAPID_API_KEY: ${{ secrets.FOOTBALL_RAPID_API_KEY }}
+        run: |
+          ARGS="--transport grpc --max-uefa-teams ${{ inputs.max_uefa_teams }}"
+          if [ "${{ inputs.confirm }}" = "true" ]; then ARGS="$ARGS --confirm"; fi
+          if [ "${{ inputs.no_uefa }}" = "true" ]; then ARGS="$ARGS --no-uefa"; fi
+          python scripts/rebuild_elo.py $ARGS
+
+      - name: Verificación posterior
+        if: ${{ inputs.mode == 'rebuild' && inputs.confirm == 'true' }}
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: python scripts/diagnose_elo_drift.py --transport grpc
