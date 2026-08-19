@@ -185,6 +185,31 @@ async def enrich_match(match: dict) -> dict:
             else:
                 data_quality = "partial"
 
+    # --- 1b. Splits local/visitante ---
+    # team_stats guarda dos bloques {played, won, drawn, lost, goals_for, goals_against}:
+    # "home_stats" = rendimiento del equipo jugando EN CASA, "away_stats" = jugando FUERA.
+    # Estaban calculados y guardados desde siempre, pero nunca llegaban al enriched_match,
+    # así que el motor no podía preguntar lo único que importa en una apuesta a visitante:
+    # ¿este equipo rinde fuera? Se copian en crudo (played/won/drawn/lost/goles) y las
+    # métricas derivadas se calculan en el motor, para poder recalibrarlas sin re-enriquecer.
+    def _clean_split(raw) -> dict:
+        if not isinstance(raw, dict):
+            return {}
+        out: dict = {}
+        for k in ("played", "won", "drawn", "lost", "goals_for", "goals_against"):
+            v = raw.get(k)
+            if v is not None:
+                try:
+                    out[k] = int(v)
+                except (TypeError, ValueError):
+                    continue
+        return out if out.get("played") else {}
+
+    home_home_split = _clean_split(home_stats.get("home_stats"))
+    home_away_split = _clean_split(home_stats.get("away_stats"))
+    away_home_split = _clean_split(away_stats.get("home_stats"))
+    away_away_split = _clean_split(away_stats.get("away_stats"))
+
     # --- 2. Form score y racha ---
     home_form_score = float(home_stats.get("form_score", 50.0))
     away_form_score = float(away_stats.get("form_score", 50.0))
@@ -415,6 +440,11 @@ async def enrich_match(match: dict) -> dict:
         "away_avg_corners_against": away_avg_corners_against,
         "home_form_score": home_form_score,
         "away_form_score": away_form_score,
+        # Splits local/visitante en crudo (ver 1b) — base del gate AWAY_ROAD_FORM
+        "home_home_split": home_home_split,
+        "home_away_split": home_away_split,
+        "away_home_split": away_home_split,
+        "away_away_split": away_away_split,
         "h2h_advantage": h2h_advantage,
         "h2h_sufficient": h2h_sufficient,
         "home_streak": home_streak,
@@ -432,11 +462,13 @@ async def enrich_match(match: dict) -> dict:
     try:
         col("enriched_matches").document(match_id).set(enriched)
         logger.info(
-            "enrich_match(%s) [%s]: quality=%s poisson=%.3f elo=%.3f form=%.1f/%.1f",
+            "enrich_match(%s) [%s]: quality=%s poisson=%.3f elo=%.3f form=%.1f/%.1f "
+            "split_local=%dPJ split_visitante=%dPJ",
             match_id, sport, data_quality,
             poisson_home_win or -1.0,
             elo_home_win_prob or -1.0,
             home_form_score, away_form_score,
+            home_home_split.get("played", 0), away_away_split.get("played", 0),
         )
     except Exception:
         logger.error(

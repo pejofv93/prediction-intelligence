@@ -45,8 +45,14 @@ _FOOTBALL_LEAGUES = set(SUPPORTED_FOOTBALL_LEAGUES.keys())
 _DEFAULT_FILTER_PARAMS: dict = {
     "HIGH_DRAW_PROB":   {"threshold": 0.30},
     "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 4.5, "FL1": 4.5},
-    "AWAY_DEAD_ZONE":   {"odds_min": 2.5, "odds_max": 3.5},
-    "AWAY_GATE_CONF":   {"conf_threshold": 0.85},
+    # Espejo de value_bet_engine._DEFAULT_FILTER_PARAMS — mantener en sincronía.
+    "AWAY_ROAD_FORM": {
+        "min_played":   4,
+        "min_ppg":      1.00,
+        "max_ppg_gap":  0.75,
+        "min_gd":      -1.00,
+        "no_data_conf": 0.70,
+    },
 }
 
 # Límites máximos/mínimos que puede alcanzar cada parámetro por ajuste automático
@@ -54,16 +60,16 @@ _FILTER_PARAM_BOUNDS: dict = {
     "HIGH_DRAW_PROB":   {"threshold": (0.22, 0.40)},
     "UNDERDOG_EXTREME": {"PD": (3.5, 6.0), "SA": (3.5, 6.0), "PL": (3.5, 6.0),
                          "BL1": (3.5, 6.0), "FL1": (3.5, 6.0)},
-    "AWAY_DEAD_ZONE":   {"odds_min": (2.0, 2.8), "odds_max": (3.0, 4.2)},
-    "AWAY_GATE_CONF":   {"conf_threshold": (0.70, 0.95)},
+    "AWAY_ROAD_FORM":   {"min_ppg": (0.70, 1.50), "max_ppg_gap": (0.40, 1.20),
+                         "min_gd": (-1.50, -0.40), "no_data_conf": (0.65, 0.85)},
 }
 
 # Incremento por paso de ajuste
 _FILTER_ADJUSTMENT_STEP: dict = {
     "HIGH_DRAW_PROB":   {"threshold": 0.02},
     "UNDERDOG_EXTREME": {"PD": 0.25, "SA": 0.25, "PL": 0.25, "BL1": 0.25, "FL1": 0.25},
-    "AWAY_DEAD_ZONE":   {"odds_min": 0.10, "odds_max": 0.10},
-    "AWAY_GATE_CONF":   {"conf_threshold": 0.03},
+    "AWAY_ROAD_FORM":   {"min_ppg": 0.05, "max_ppg_gap": 0.05,
+                         "min_gd": 0.05, "no_data_conf": 0.02},
 }
 
 # Mapeo de market_type → bucket canónico para tracking de accuracy por mercado
@@ -1119,32 +1125,28 @@ def _adjust_filter_params(filter_name: str, params: dict, direction: str) -> dic
                 else max(lo, round(cur - step, 2))
             )
 
-    elif filter_name == "AWAY_DEAD_ZONE":
-        step_min = steps.get("odds_min", 0.10)
-        step_max = steps.get("odds_max", 0.10)
-        lo_min, hi_min = bounds.get("odds_min", (2.0, 2.8))
-        lo_max, hi_max = bounds.get("odds_max", (3.0, 4.2))
-        cur_min = params.get("odds_min", 2.5)
-        cur_max = params.get("odds_max", 3.5)
-        if direction == "relax":
-            # Reducir la zona muerta: subir mínimo y bajar máximo
-            new_params["odds_min"] = min(hi_min, round(cur_min + step_min, 2))
-            new_params["odds_max"] = max(lo_max, round(cur_max - step_max, 2))
-        else:
-            # Ampliar la zona muerta: bajar mínimo y subir máximo
-            new_params["odds_min"] = max(lo_min, round(cur_min - step_min, 2))
-            new_params["odds_max"] = min(hi_max, round(cur_max + step_max, 2))
-
-    elif filter_name == "AWAY_GATE_CONF":
-        step = steps.get("conf_threshold", 0.03)
-        lo, hi = bounds.get("conf_threshold", (0.70, 0.95))
-        cur = params.get("conf_threshold", 0.85)
-        # relax → bajar umbral de confianza requerido (permite señales menos seguras)
-        # tighten → subir umbral (exige mayor confianza)
-        new_params["conf_threshold"] = (
-            max(lo, round(cur - step, 3)) if direction == "relax"
-            else min(hi, round(cur + step, 3))
-        )
+    elif filter_name == "AWAY_ROAD_FORM":
+        # relax → exigir menos al visitante (menos ppg, más gap tolerado, peor gd,
+        #          menos confianza sin muestra) → pasan más señales a visitante.
+        # tighten → lo contrario. min_played no se auto-ajusta: cambiar el tamaño de
+        #          muestra mueve señales entre las dos ramas del gate y haría ilegible
+        #          la serie histórica de bloqueos.
+        _sign = -1.0 if direction == "relax" else 1.0
+        for _key, _default in (
+            ("min_ppg", 1.00), ("min_gd", -1.00), ("no_data_conf", 0.70),
+        ):
+            if _key not in params:
+                continue
+            step = steps.get(_key, 0.05)
+            lo, hi = bounds.get(_key, (-99.0, 99.0))
+            new_params[_key] = max(lo, min(hi, round(params[_key] + _sign * step, 3)))
+        if "max_ppg_gap" in params:
+            # max_ppg_gap va al revés: subirlo tolera más ventaja del local (relax).
+            step = steps.get("max_ppg_gap", 0.05)
+            lo, hi = bounds.get("max_ppg_gap", (0.40, 1.20))
+            new_params["max_ppg_gap"] = max(
+                lo, min(hi, round(params["max_ppg_gap"] - _sign * step, 3))
+            )
 
     return new_params
 

@@ -40,8 +40,17 @@ logger = logging.getLogger(__name__)
 _DEFAULT_FILTER_PARAMS: dict = {
     "HIGH_DRAW_PROB":   {"threshold": 0.30},
     "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 4.5, "FL1": 4.5},
-    "AWAY_DEAD_ZONE":   {"odds_min": 2.5, "odds_max": 3.5},
-    "AWAY_GATE_CONF":   {"conf_threshold": 0.85},
+    # Gate único para señales a visitante — sustituye a AWAY_DEAD_ZONE (banda de cuota
+    # 2.5–3.5), AWAY_PD_FILTER (liga única) y AWAY_GATE_CONF (umbral de confianza ciego).
+    # Los tres cortaban por la cuota o por la confianza del propio modelo, nunca por el
+    # dato que decide una apuesta a visitante: cómo rinde ese equipo fuera de casa.
+    "AWAY_ROAD_FORM": {
+        "min_played":   4,      # partidos fuera mínimos para fiarse de la muestra
+        "min_ppg":      1.00,   # puntos/partido fuera mínimos del visitante
+        "max_ppg_gap":  0.75,   # cuánto puede quedar por debajo del local en casa
+        "min_gd":      -1.00,   # diferencia de goles/partido fuera mínima
+        "no_data_conf": 0.70,   # confianza exigida cuando no hay muestra de visitante
+    },
 }
 
 _FILTER_PARAMS_CACHE: dict = {}
@@ -78,6 +87,39 @@ _ELO_ONLY_CONF_CAP: float = 0.75
 _MAX_DIVERGENCE: float = SPORTS_MAX_DIVERGENCE
 # Frontera favorito/underdog para condicionar el guard (ver shared.config).
 _DIVERGENCE_UNDERDOG_ODDS: float = SPORTS_DIVERGENCE_UNDERDOG_ODDS
+
+
+def _split_metrics(split: dict | None) -> dict | None:
+    """
+    Convierte un bloque {played, won, drawn, lost, goals_for, goals_against} de
+    team_stats (ver data_enricher 1b) en métricas comparables:
+      played  — tamaño de muestra
+      ppg     — puntos por partido en ese contexto (0–3)
+      gd      — diferencia de goles por partido
+      win_pct — fracción de victorias
+    Devuelve None si el split falta o no tiene partidos jugados.
+    """
+    if not isinstance(split, dict):
+        return None
+    try:
+        played = int(split.get("played") or 0)
+    except (TypeError, ValueError):
+        return None
+    if played <= 0:
+        return None
+    try:
+        won   = int(split.get("won") or 0)
+        drawn = int(split.get("drawn") or 0)
+        gf    = float(split.get("goals_for") or 0.0)
+        ga    = float(split.get("goals_against") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "played":  played,
+        "ppg":     round((3 * won + drawn) / played, 3),
+        "gd":      round((gf - ga) / played, 3),
+        "win_pct": round(won / played, 3),
+    }
 
 
 def _get_filter_params() -> dict:
@@ -2531,43 +2573,116 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         # rival casaba con una keyword hardcodeada. El contexto de tabla sigue vivo, pero
         # como penalización de confianza en 5g (rival_position_better), no como corte.
 
-        # --- 5e. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
+        # --- 5e. Gate AWAY basado en factores (AWAY_ROAD_FORM) ---
+        # Sustituye a los tres filtros AWAY ciegos anteriores:
+        #   F1 AWAY_DEAD_ZONE  — cortaba toda cuota en [2.5, 3.5)
+        #   F2 AWAY_PD_FILTER  — cortaba todo visitante de LaLiga por encima de 2.5
+        #   F3 AWAY_GATE_CONF  — exigía conf>0.85 fuera de las bandas <2.5 y >3.5
+        # Los tres decidían mirando la cuota (o la confianza del propio modelo, que es
+        # circular: es el modelo el que propone la apuesta). Ninguno miraba el único dato
+        # que distingue a un visitante apostable de uno que no lo es: cómo rinde fuera.
+        #
+        # Criterio nuevo — el visitante tiene que demostrar dos cosas sobre su muestra
+        # de partidos FUERA de casa (splits cableados en data_enricher, paso 1b):
+        #   1) Solvencia absoluta: ppg >= min_ppg (1.00) y gd >= min_gd (-1.00).
+        #      1.00 pt/partido fuera es rendimiento de zona de descenso a domicilio;
+        #      por debajo de eso no se apuesta a que gane, dé la cuota que dé.
+        #      gd -1.00 = encaja un gol neto por partido fuera.
+        #   2) Solvencia relativa: el local no puede sacarle más de max_ppg_gap (0.75
+        #      pt/partido) en su propio campo. 0.75 sobre 8 partidos ≈ dos victorias de
+        #      diferencia: por encima de eso la ventaja de campo no es marginal.
+        # Sin muestra suficiente (< min_played partidos fuera) no hay factores que mirar:
+        # se cae al único criterio disponible, confianza > no_data_conf (0.70). Es más
+        # permisivo que el 0.85 ciego anterior, pero se registra aparte (AWAY_ROAD_NO_DATA)
+        # para poder medir cuánto vale ese tramo por separado.
         _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
+        _ctx_road_factors: dict = {}
         if _lado == "AWAY":
-            # F1: zona muerta dinámica (históricamente 0% acierto en rango 2.5–3.5)
-            _dz = _get_filter_params()["AWAY_DEAD_ZONE"]
-            _dz_min = _dz.get("odds_min", 2.5)
-            _dz_max = _dz.get("odds_max", 3.5)
-            if _dz_min <= best_odds < _dz_max:
+            _arf = _get_filter_params().get(
+                "AWAY_ROAD_FORM", _DEFAULT_FILTER_PARAMS["AWAY_ROAD_FORM"]
+            )
+            _min_played   = int(_arf.get("min_played", 4))
+            _min_ppg      = float(_arf.get("min_ppg", 1.00))
+            _max_ppg_gap  = float(_arf.get("max_ppg_gap", 0.75))
+            _min_gd       = float(_arf.get("min_gd", -1.00))
+            _no_data_conf = float(_arf.get("no_data_conf", 0.70))
+
+            _road = _split_metrics(enriched_match.get("away_away_split"))
+            _host = _split_metrics(enriched_match.get("home_home_split"))
+
+            if _road is None or _road["played"] < _min_played:
+                _road_n = _road["played"] if _road else 0
+                if best_confidence < _no_data_conf:
+                    logger.info(
+                        "generate_signal(%s): AWAY_ROAD_NO_DATA — %d partidos fuera (min %d) "
+                        "y conf=%.2f < %.2f [%s vs %s | %s]",
+                        match_id, _road_n, _min_played, best_confidence, _no_data_conf,
+                        home_team, away_team, league,
+                    )
+                    _log_filter_block(
+                        "AWAY_ROAD_FORM", match_id, team_to_back, league,
+                        str(home_team), str(away_team), best_odds, best_confidence,
+                        {"reason": "no_data", "road_played": _road_n,
+                         "no_data_conf": _no_data_conf},
+                    )
+                    return None
                 logger.info(
-                    "generate_signal(%s): AWAY zona muerta descartada (odds=%.2f en [%.2f, %.2f)) [%s vs %s | %s]",
-                    match_id, best_odds, _dz_min, _dz_max, home_team, away_team, league,
+                    "generate_signal(%s): AWAY sin muestra de visitante (%d partidos) — "
+                    "pasa por conf=%.2f >= %.2f [%s vs %s | %s]",
+                    match_id, _road_n, best_confidence, _no_data_conf,
+                    home_team, away_team, league,
                 )
-                _log_filter_block(
-                    "AWAY_DEAD_ZONE", match_id, team_to_back, league,
-                    str(home_team), str(away_team), best_odds, best_confidence,
-                )
-                return None
-            # F2: (eliminado) AWAY en PD con odds > umbral. Era el único filtro de liga
-            # única del motor, justificado por un "0% accuracy" sobre un puñado de señales.
-            # Si el sesgo AWAY existe, no es exclusivo de LaLiga.
-            # F3: gate final con umbral de confianza dinámico.
-            # Sin excepción por competición: CL/EL/ECL pasaban por una rama propia
-            # (cualquier cuota <6.00 con conf>0.65) que abría el gate justo donde el
-            # mercado es más eficiente. Regla única para todas las ligas.
-            _gate_conf = _get_filter_params()["AWAY_GATE_CONF"].get("conf_threshold", 0.85)
-            _gate_ok = best_odds < 2.5 or (best_odds > 3.5 and best_confidence > _gate_conf)
-            if not _gate_ok:
+            else:
+                _road_reasons: list[str] = []
+                if _road["ppg"] < _min_ppg:
+                    _road_reasons.append(
+                        "ppg_fuera=%.2f<%.2f" % (_road["ppg"], _min_ppg)
+                    )
+                if _road["gd"] < _min_gd:
+                    _road_reasons.append(
+                        "gd_fuera=%.2f<%.2f" % (_road["gd"], _min_gd)
+                    )
+                _ppg_gap = (_host["ppg"] - _road["ppg"]) if _host else None
+                if _ppg_gap is not None and _ppg_gap > _max_ppg_gap:
+                    _road_reasons.append(
+                        "gap_local=%.2f>%.2f (local %.2f vs visitante %.2f)"
+                        % (_ppg_gap, _max_ppg_gap, _host["ppg"], _road["ppg"])
+                    )
+                if _road_reasons:
+                    logger.info(
+                        "generate_signal(%s): AWAY_ROAD_FORM descartada — %s "
+                        "[%s fuera: %dPJ ppg=%.2f gd=%+.2f win=%.0f%%] [%s vs %s | %s]",
+                        match_id, " | ".join(_road_reasons), team_to_back,
+                        _road["played"], _road["ppg"], _road["gd"], _road["win_pct"] * 100,
+                        home_team, away_team, league,
+                    )
+                    _log_filter_block(
+                        "AWAY_ROAD_FORM", match_id, team_to_back, league,
+                        str(home_team), str(away_team), best_odds, best_confidence,
+                        {
+                            "reason": ",".join(r.split("=")[0] for r in _road_reasons),
+                            "road_played": _road["played"],
+                            "road_ppg": _road["ppg"],
+                            "road_gd": _road["gd"],
+                            "road_win_pct": _road["win_pct"],
+                            "host_ppg": _host["ppg"] if _host else None,
+                            "ppg_gap": round(_ppg_gap, 3) if _ppg_gap is not None else None,
+                        },
+                    )
+                    return None
                 logger.info(
-                    "generate_signal(%s): AWAY gate descartada "
-                    "(odds=%.2f conf=%.2f < %.2f) [%s vs %s | %s]",
-                    match_id, best_odds, best_confidence, _gate_conf, home_team, away_team, league,
+                    "AWAY_ROAD_FORM_OK(%s): %s fuera %dPJ ppg=%.2f gd=%+.2f win=%.0f%% | "
+                    "local en casa ppg=%s [%s vs %s | %s]",
+                    match_id, team_to_back, _road["played"], _road["ppg"], _road["gd"],
+                    _road["win_pct"] * 100,
+                    ("%.2f" % _host["ppg"]) if _host else "n/d",
+                    home_team, away_team, league,
                 )
-                _log_filter_block(
-                    "AWAY_GATE_CONF", match_id, team_to_back, league,
-                    str(home_team), str(away_team), best_odds, best_confidence,
-                )
-                return None
+                _ctx_road_factors.update({
+                    "road_ppg": _road["ppg"],
+                    "road_gd": _road["gd"],
+                    "road_win_pct": _road["win_pct"],
+                })
 
         # --- 5f. Filtros adicionales underdogs (FIX 1) ---
         if _lado == "AWAY":
@@ -2626,7 +2741,9 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
 
         # --- 5g. Contexto situacional: posición en tabla, forma comparada, momentum ---
         _ctx_penalties: list[str] = []
-        _ctx_factors: dict = {}
+        # Los factores de rendimiento a domicilio que ha usado el gate 5e viajan con la
+        # señal, para que la alerta y el análisis posterior vean por qué pasó.
+        _ctx_factors: dict = dict(_ctx_road_factors)
         _conf_before_ctx = best_confidence
 
         _selected_team_id = (
