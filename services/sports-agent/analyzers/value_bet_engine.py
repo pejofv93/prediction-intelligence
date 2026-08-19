@@ -426,6 +426,15 @@ _LEAGUE_CACHE_TTL = timedelta(hours=24)
 
 # Cache de odds-api.io en memoria: {league_code: (fetched_at, [events_normalised], is_error)}
 # is_error=True → respuesta vacía/429 → TTL corto para no bloquear reintentos indefinidamente
+# Versión del parser cuyo resultado se guarda en odds_cache. `all_markets` es SALIDA del
+# parser, no dato crudo: al cambiar el parser, los documentos cacheados siguen sirviendo la
+# forma antigua durante todo el TTL (24h) y el arreglo parece no haber surtido efecto.
+# Subir este número al cambiar _parse_market / _extract_markets_summary / _MARKET_ALIASES
+# invalida lo cacheado sin borrar nada: la entrada se trata como miss y se re-normaliza.
+#   1 → parser original (all_markets solo contenía h2h)
+#   2 → alias por nombre legible + campo hdp + líneas múltiples + signo de spreads
+_ODDS_CACHE_PARSER_VERSION: int = 2
+
 _ODDSAPIIO_CACHE: dict[str, tuple[datetime, list, bool]] = {}
 _ODDSAPIIO_CACHE_TTL     = timedelta(hours=24)
 _ODDSAPIIO_CACHE_ERR_TTL = timedelta(minutes=30)
@@ -744,7 +753,14 @@ async def fetch_bookmaker_odds(
             fetched_at = data.get("fetched_at")
             if fetched_at and hasattr(fetched_at, "tzinfo") and fetched_at.tzinfo is None:
                 fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-            if fetched_at and (now - fetched_at) < cache_ttl:
+            _cached_ver = int(data.get("parser_version") or 1)
+            if _cached_ver != _ODDS_CACHE_PARSER_VERSION:
+                logger.info(
+                    "fetch_bookmaker_odds(%s): cache Firestore IGNORADA — parser_version=%d "
+                    "!= %d (se re-normaliza)",
+                    match_id, _cached_ver, _ODDS_CACHE_PARSER_VERSION,
+                )
+            elif fetched_at and (now - fetched_at) < cache_ttl:
                 cached_result = {
                     "bookmaker": data.get("bookmaker", "bet365"),
                     "home_odds": float(data.get("home_odds", 2.0)),
@@ -1894,7 +1910,7 @@ async def _save_odds_cache(match_id: str, odds: dict, now: datetime) -> None:
         existing = doc_ref.get()
 
         # Campos extra: source y all_markets para que el cache hit también genere AH/BTTS
-        _extra: dict = {}
+        _extra: dict = {"parser_version": _ODDS_CACHE_PARSER_VERSION}
         if odds.get("source"):
             _extra["source"] = odds["source"]
         if odds.get("all_markets"):
