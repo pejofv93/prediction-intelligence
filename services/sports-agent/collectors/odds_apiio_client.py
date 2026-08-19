@@ -5,7 +5,9 @@ Cliente para odds-api.io — fuente primaria de cuotas.
 Base URL: https://api.odds-api.io/v3
 Auth: ?apiKey=KEY (query param)
 Rate limit: 100 req/hora (tier gratuito — confirmado por 429 body)
-Monthly limit: no declarado — tracked en QuotaManager como "oddsapiio"
+Monthly limit: 15.000/mes (~500/día del plan free) — tracked en QuotaManager como
+"oddsapiio". El apunte se hace en _get/_get_raw, de modo que cuenta requests HTTP
+reales y no llamadas servidas de caché.
 
 Flujo fútbol (2 pasos, 1 request para TODAS las ligas):
   1. GET /events?sport=soccer         → TODOS los eventos de fútbol (1 request)
@@ -221,6 +223,7 @@ async def _get(path: str, params: dict | None = None) -> dict | list | None:
         return None
     try:
         merged = {**(params or {}), "apiKey": ODDSAPIIO_KEY}
+        quota.track_monthly("oddsapiio")
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(
                 f"{_BASE}{path}",
@@ -393,6 +396,7 @@ async def _get_raw(path: str, params: dict | None = None) -> tuple[int, str, dic
     try:
         merged = {**(params or {}), "apiKey": ODDSAPIIO_KEY}
         url = f"{_BASE}{path}"
+        quota.track_monthly("oddsapiio")
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url, params=merged)
         body = resp.text[:500]
@@ -559,7 +563,7 @@ async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
         items = data if isinstance(data, list) else data.get("data", data.get("odds", []))
         if isinstance(items, list):
             all_results.extend(items)
-        quota.track_monthly("oddsapiio")
+        # (el contador vive en _get/_get_raw: 1 apunte por request HTTP real)
     return all_results
 
 
@@ -1286,8 +1290,6 @@ async def get_league_odds(league: str) -> list[dict]:
             _EVENT_CACHE[league] = {"events": [], "error": True, "cached_at": now}
             return []
 
-        quota.track_monthly("oddsapiio")
-
         # Mismo criterio que el pre-fetch: slug exacto. Antes esto filtraba por keywords
         # sueltas y devolvía 128 "partidos de PD" de los que 115 eran Guatemala, Venezuela,
         # Perú, Chile y LaLiga 2 — que luego se intentaban emparejar por nombre de equipo
@@ -1346,8 +1348,6 @@ async def get_league_odds(league: str) -> list[dict]:
     if not raw_events:
         _EVENT_CACHE[league] = {"events": [], "error": True, "cached_at": now}
         return []
-
-    quota.track_monthly("oddsapiio")
 
     # Baloncesto/tenis: _event_matches_league cae a keywords (los nombres son únicos).
     # Se conserva el comportamiento permisivo previo para las ligas sin keywords

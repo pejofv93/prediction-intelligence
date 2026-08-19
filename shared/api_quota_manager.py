@@ -62,7 +62,12 @@ _DAILY_LIMITS: dict[str, int] = {
 
 # ── Presupuestos mensuales (APIs con límite por mes) ─────────────────────────
 _MONTHLY_LIMITS: dict[str, int] = {
-    "oddsapiio":    72_000, # odds-api.io free: 5000 req/h × 24h × ~15 días activos
+    "oddsapiio":    15_000, # odds-api.io free: ~500/día × 30. El 72.000 anterior salía de
+                            # multiplicar el rate limit por horas ("5000 req/h × 24h × 15
+                            # días"), que es techo de ritmo, no presupuesto: dejaba el gate
+                            # permanentemente abierto y el aviso al 80% nunca podía saltar.
+                            # La API no devuelve cabecera de cuota, así que el contador
+                            # interno es la única señal — de ahí que el número deba ser real.
     "the_odds_api":    500, # 500/mes — verificado. Header x-requests-remaining fiable.
     "the_odds_api_matched": int(os.environ.get("MATCHED_MONTHLY_CREDIT_BUDGET", "200")),
                             # sub-presupuesto del escáner matched dentro de los 500 reales.
