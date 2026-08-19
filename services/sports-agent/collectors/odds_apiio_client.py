@@ -747,11 +747,21 @@ _MARKET_ALIASES: dict[str, str] = {
 }
 
 # Mercados que llegan a all_markets. Un mercado solo se activa cuando existe la vía para
-# GRADUARLO; si no, generaría señales que evaluate_prediction marca fallidas siempre y que
-# contaminan accuracy_by_market y el PnL shadow sin aportar información.
-# corners_ou y ht_totals quedan fuera a propósito — ver _MARKET_ALIASES.
+# GRADUARLO y una guarda que discrimine de verdad; si no, genera ruido que contamina
+# accuracy_by_market y el PnL shadow sin aportar información.
+#
+# FUERA a propósito:
+#   corners_ou, ht_totals  → sin fuente de resultado (harían falta FDCO y score.halfTime)
+#   correct_score          → sí se gradúa, pero NO tiene guarda real. _fair_two_way solo
+#       aplica a mercados de dos vías y el resultado exacto tiene 38 salidas, así que se
+#       quedaba con el viejo corte por ratio de 2,5x. En longshots ese corte no discrimina:
+#       medido en producción 2026-08-19, 22 de 33 señales del run salían por ahí con cuota
+#       mediana 41,0 (hasta 401,0) y EV de hasta +135%, TODAS apiñadas en ratio 2,00-2,35x
+#       justo por debajo del umbral. Edge fantasma de manual.
+#       Para reactivarlo hace falta normalizar las 38 salidas a suma 1 y medir divergencia
+#       sobre esa probabilidad justa — el equivalente multi-vía de _fair_two_way.
 _MARKETS_ENABLED: frozenset[str] = frozenset({
-    "h2h", "btts", "totals", "spreads", "correct_score",
+    "h2h", "btts", "totals", "spreads",
 })
 
 

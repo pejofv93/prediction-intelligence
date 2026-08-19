@@ -83,6 +83,11 @@ _MARKET_BUCKETS: dict[str, str] = {
     "spread":                   "ASIAN_HANDICAP",
     "basketball_h1_spread":     "ASIAN_HANDICAP",
     "double_chance":            "DOUBLE_CHANCE",
+    # Sin bucket propio: se gradúan pero NO entran en accuracy_by_market.
+    # Mejor no medirlos que medirlos en la cesta equivocada.
+    "correct_score":            "CORRECT_SCORE",
+    "ht_goals":                 "HT_GOALS",
+    "corners_ou":               "CORNERS",
 }
 
 
@@ -898,10 +903,19 @@ async def run_daily_learning() -> None:
                 accuracy_by_league[league].append(correct)
 
             # Acumular accuracy por tipo de mercado
-            market_type = prediction.get("market_type") or "h2h"
-            bucket = _MARKET_BUCKETS.get(market_type, "1X2")
+            # OJO con el default: era "1X2", así que CUALQUIER mercado sin mapear caía en
+            # la cesta del 1X2 y envenenaba la única métrica que hoy es fiable. market_type
+            # se guarda a veces en mayúsculas ("CORRECT_SCORE"), de ahí el .lower().
+            # Sin mapeo → cadena vacía → el guard de abajo lo descarta.
+            market_type = str(prediction.get("market_type") or "h2h").lower()
+            bucket = _MARKET_BUCKETS.get(market_type, "")
             if bucket in accuracy_by_market:
                 accuracy_by_market[bucket].append(correct)
+            elif not bucket:
+                logger.debug(
+                    "run_daily_learning: market_type '%s' sin bucket — fuera de accuracy_by_market",
+                    prediction.get("market_type"),
+                )
 
             # Acumular accuracy por bucket de confianza (calibración)
             _conf = float(prediction.get("confidence") or 0.0)
