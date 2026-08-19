@@ -999,7 +999,7 @@ async def _collect_football() -> None:
             logger.info("ELO_UPDATE: +%d partidos de team-level (PD u otras ligas sin tier)", extra)
 
         if elo_matches:
-            await update_all_elos(elo_matches)
+            await update_all_elos(elo_matches, source="collect_football")
             logger.info("ELO_UPDATE: %d partidos procesados en total", len(elo_matches))
         else:
             logger.info("ELO_UPDATE: sin partidos con resultado conocido")

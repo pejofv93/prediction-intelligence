@@ -37,7 +37,7 @@ def update_elo(
     return new_a, new_b
 
 
-def get_team_elo(team_id: int) -> float:
+def get_team_elo(team_id: int | str) -> float:
     """
     Lee ELO actual de Firestore coleccion team_elo.
     Si no existe el documento, devuelve DEFAULT_ELO.
@@ -51,17 +51,17 @@ def get_team_elo(team_id: int) -> float:
         return DEFAULT_ELO
     except Exception:
         logger.error(
-            "get_team_elo(%d): error leyendo Firestore — usando DEFAULT_ELO",
+            "get_team_elo(%s): error leyendo Firestore — usando DEFAULT_ELO",
             team_id, exc_info=True,
         )
         return DEFAULT_ELO
 
 
 async def _save_team_elo(
-    team_id: int,
+    team_id: int | str,
     new_elo: float,
     match: dict,
-    opponent_id: int,
+    opponent_id: int | str,
 ) -> None:
     """
     Persiste el nuevo ELO en Firestore.
@@ -102,17 +102,104 @@ async def _save_team_elo(
 
     except Exception:
         logger.error(
-            "_save_team_elo(%d): error guardando ELO en Firestore",
+            "_save_team_elo(%s): error guardando ELO en Firestore",
             team_id, exc_info=True,
         )
 
 
-async def update_all_elos(finished_matches: list[dict]) -> None:
+LEDGER_COLLECTION = "elo_applied"
+
+
+def _fingerprints(matches: list[dict]) -> dict[int, str]:
+    """{indice → huella} de los partidos que traen datos suficientes."""
+    from collectors.team_identity import match_fingerprint
+    out: dict[int, str] = {}
+    for i, m in enumerate(matches):
+        h, a = m.get("home_team_id"), m.get("away_team_id")
+        if h and a:
+            out[i] = match_fingerprint(m.get("date", ""), h, a)
+    return out
+
+
+async def _already_applied(fps: list[str]) -> set[str]:
+    """Huellas que ya se aplicaron al ELO alguna vez. Lectura en lote (1 RPC por 300)."""
+    from shared.firestore_client import get_client
+    from shared.config import COLLECTION_PREFIX
+    if not fps:
+        return set()
+    seen: set[str] = set()
+    try:
+        client = get_client()
+        loop = asyncio.get_event_loop()
+        for i in range(0, len(fps), 300):
+            refs = [
+                client.collection(f"{COLLECTION_PREFIX}{LEDGER_COLLECTION}").document(fp)
+                for fp in fps[i:i + 300]
+            ]
+            docs = await loop.run_in_executor(None, lambda r=refs: list(client.get_all(r)))
+            seen.update(d.id for d in docs if d.exists)
+    except Exception:
+        # Si el ledger no se puede leer NO se aplica nada: repetir la aplicacion es
+        # justo el fallo que este registro existe para evitar.
+        logger.error(
+            "_already_applied: error leyendo %s — se omite la actualizacion de ELO",
+            LEDGER_COLLECTION, exc_info=True,
+        )
+        return set(fps)
+    return seen
+
+
+async def _mark_applied(entries: dict[str, dict], source: str) -> None:
+    """Registra las huellas aplicadas. Escritura en lotes de 400."""
+    from shared.firestore_client import get_client
+    from shared.config import COLLECTION_PREFIX
+    if not entries:
+        return
+    try:
+        client = get_client()
+        loop = asyncio.get_event_loop()
+        items = list(entries.items())
+        now = datetime.now(timezone.utc)
+
+        def _commit(chunk):
+            batch = client.batch()
+            for fp, meta in chunk:
+                ref = client.collection(
+                    f"{COLLECTION_PREFIX}{LEDGER_COLLECTION}"
+                ).document(fp)
+                batch.set(ref, {**meta, "source": source, "applied_at": now})
+            batch.commit()
+
+        for i in range(0, len(items), 400):
+            await loop.run_in_executor(None, _commit, items[i:i + 400])
+    except Exception:
+        logger.error("_mark_applied: error registrando huellas en %s",
+                     LEDGER_COLLECTION, exc_info=True)
+
+
+async def update_all_elos(
+    finished_matches: list[dict], source: str = "unknown", use_ledger: bool = True
+) -> None:
     """
     Procesa partidos terminados en orden cronologico y actualiza Firestore team_elo.
     Cada partido actualiza el ELO de ambos equipos.
     finished_matches: lista de partidos con home_team_id, away_team_id, result, date.
     result debe ser "HOME_WIN" | "AWAY_WIN" | "DRAW".
+
+    IDEMPOTENTE desde 2026-08-19: cada partido se aplica UNA sola vez. Antes no habia
+    ningun registro de lo ya aplicado y los llamantes le pasaban las mismas listas cada
+    ciclo (get_finished_matches trae 30 dias, team_stats.raw_matches los ultimos 20), asi
+    que un mismo resultado entraba decenas de veces con K=32. El efecto medido sobre la
+    base real: 1.469 entradas de elo_history para 186 partidos distintos (7,9x), amplitud
+    del ELO de 1.045 puntos donde una sola pasada da 261, y el orden de fuerza roto
+    (Valencia por encima de Liverpool). El ELO habia degenerado en un indicador de forma
+    reciente amplificado, duplicando el factor `form` del ensemble.
+
+    La huella es (fecha, local, visitante) con ids canonicos — no el match_id — porque el
+    mismo partido llega con ids distintos segun la fuente (football-data vs allsportsapi2).
+
+    source: quien llama (collect_football, learning, rebuild...) — se guarda en el ledger.
+    use_ledger: solo False para recomputos completos que ya controlan la unicidad.
     """
     if not finished_matches:
         logger.info("update_all_elos: lista vacia, nada que actualizar")
@@ -121,8 +208,26 @@ async def update_all_elos(finished_matches: list[dict]) -> None:
     # Ordenar cronologicamente (mas antiguo primero)
     sorted_matches = sorted(finished_matches, key=lambda m: m.get("date", ""))
 
+    # Filtrar lo ya aplicado ANTES de tocar ningun ELO
+    fps = _fingerprints(sorted_matches)
+    applied_now: dict[str, dict] = {}
+    if use_ledger:
+        seen = await _already_applied(sorted(set(fps.values())))
+        pending_idx = {i for i, fp in fps.items() if fp not in seen}
+        skipped = len(sorted_matches) - len(pending_idx)
+        if skipped:
+            logger.info(
+                "update_all_elos[%s]: %d partidos ya aplicados anteriormente — omitidos",
+                source, skipped,
+            )
+        sorted_matches = [m for i, m in enumerate(sorted_matches) if i in pending_idx]
+        fps = _fingerprints(sorted_matches)
+        if not sorted_matches:
+            logger.info("update_all_elos[%s]: nada nuevo que aplicar", source)
+            return
+
     updated = 0
-    for match in sorted_matches:
+    for idx, match in enumerate(sorted_matches):
         home_id = match.get("home_team_id")
         away_id = match.get("away_team_id")
         result = match.get("result")
@@ -158,9 +263,19 @@ async def update_all_elos(finished_matches: list[dict]) -> None:
             await _save_team_elo(home_id, new_home_base, match, away_id)
             await _save_team_elo(away_id, new_away, match, home_id)
             updated += 1
+            # Registrar la huella SOLO tras persistir ambos ELOs: si algo falla a medias,
+            # el partido queda sin marcar y se reintenta en el siguiente ciclo.
+            _fp = fps.get(idx)
+            if _fp:
+                applied_now[_fp] = {
+                    "home_team_id": str(home_id),
+                    "away_team_id": str(away_id),
+                    "date": str(match.get("date", "")),
+                    "result": result,
+                }
 
             logger.debug(
-                "update_all_elos: %d(%+.0f) vs %d(%+.0f) [%s]",
+                "update_all_elos: %s(%+.0f) vs %s(%+.0f) [%s]",
                 home_id, new_home_base - home_elo_base,
                 away_id, new_away - away_elo_base,
                 score_for_log,
@@ -172,10 +287,16 @@ async def update_all_elos(finished_matches: list[dict]) -> None:
                 home_id, away_id, exc_info=True,
             )
 
-    logger.info("update_all_elos: %d partidos procesados", updated)
+    if use_ledger:
+        await _mark_applied(applied_now, source)
+
+    logger.info(
+        "update_all_elos[%s]: %d partidos aplicados (%d huellas registradas)",
+        source, updated, len(applied_now),
+    )
 
 
-def elo_win_probability(home_id: int, away_id: int) -> float:
+def elo_win_probability(home_id: int | str, away_id: int | str) -> float:
     """
     Devuelve la probabilidad de victoria del equipo local incluyendo HOME_ADVANTAGE.
     Resultado en [0.0, 1.0].
