@@ -57,6 +57,9 @@ def main() -> None:
     ap.add_argument("--account", default=os.environ.get("GCLOUD_ACCOUNT"))
     ap.add_argument("--elo-collection", default="team_elo",
                     help="colección de ELO a auditar (permite comparar contra una copia)")
+    ap.add_argument("--compare-with", default="",
+                    help="otra colección de ELO (p.ej. una copia previa al rebuild): "
+                         "imprime antes/después por equipo y el cambio de orden")
     args = ap.parse_args()
 
     db = get_db(args.transport, args.project, args.prefix, args.account)
@@ -175,6 +178,42 @@ def main() -> None:
     rho = 1 - 6 * d2 / (n * (n ** 2 - 1)) if n > 2 else float("nan")
     print(f"\nSpearman guardado vs 1 pasada: rho={rho:.3f} "
           f"(1.0 = mismo orden de fuerza; por debajo de ~0.9 el ranking está roto)")
+
+    if args.compare_with:
+        compare(db, args.compare_with, args.elo_collection, elos, names)
+
+
+def compare(db, otra_col: str, esta_col: str, elos: list[dict], names: dict) -> None:
+    """Antes/después por equipo entre dos colecciones de ELO, con puesto en el ranking."""
+    otros = db.read_collection(otra_col)
+    antes = {str(e.get("team_id")): float(e.get("elo", DEFAULT_ELO))
+             for e in otros if e.get("team_id") is not None}
+    ahora = {str(e.get("team_id")): float(e.get("elo", DEFAULT_ELO))
+             for e in elos if e.get("team_id") is not None}
+    for e in otros:
+        if e.get("team_id") is not None:
+            names.setdefault(str(e["team_id"]), e.get("team_name", ""))
+
+    def puestos(d):
+        return {t: i + 1 for i, (t, _) in
+                enumerate(sorted(d.items(), key=lambda kv: -kv[1]))}
+
+    p_antes, p_ahora = puestos(antes), puestos(ahora)
+    comunes = [t for t in ahora if t in antes]
+
+    print(f"\n\n=== {otra_col} (antes) vs {esta_col} (ahora) — {len(comunes)} equipos en ambas")
+    print(f"{'equipo':<26}{'antes':>8}{'ahora':>8}{'cambio':>9}"
+          f"{'puesto antes':>14}{'puesto ahora':>14}")
+    print("-" * 79)
+    filas = [t for t in comunes if any(w in norm(names.get(t, "")) for w in _WATCH)]
+    for t in sorted(filas, key=lambda t: -ahora[t]):
+        print(f"{names.get(t, t)[:25]:<26}{antes[t]:>8.0f}{ahora[t]:>8.0f}"
+              f"{ahora[t] - antes[t]:>+9.0f}"
+              f"{p_antes[t]:>10}/{len(antes):<3}{p_ahora[t]:>10}/{len(ahora):<3}")
+
+
+def expected_prob(home_elo: float, away_elo: float) -> float:
+    return expected(home_elo + HOME_ADVANTAGE, away_elo)
 
 
 if __name__ == "__main__":
