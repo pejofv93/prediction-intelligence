@@ -62,6 +62,40 @@ _FILTER_PARAMS_TTL: float = 1800.0  # 30 min
 # cuotas naturalmente más altas (~2.0) y necesitan un umbral menor.
 _ALT_MARKET_MIN_CONF: float = 0.60
 
+# Alertas Telegram de los mercados alternativos (BTTS/totals/AH/correct score).
+# Desactivadas hasta acumular ~30 señales RESUELTAS con las que medir ROI por mercado.
+# Las señales se guardan igual en `predictions` y se ven en el panel: esto solo silencia
+# el móvil, no la generación. Poner a True cuando haya muestra.
+_ALT_MARKETS_ALERT_ENABLED: bool = False
+
+
+def _alt_divergence_blocks(match_id: str, market: str, selection: str,
+                           p_model: float, fair_p: float | None) -> bool:
+    """
+    True si hay que DESCARTAR la selección por divergencia excesiva con el mercado.
+
+    Los mercados alternativos pasaban solo por `ev > SPORTS_MIN_EDGE` y `conf >= 0.60`,
+    donde conf ES la probabilidad del modelo — es decir, circular. La guarda de divergencia
+    que sí discrimina rentabilidad (_MAX_DIVERGENCE) vivía únicamente en la ruta 1X2.
+
+    La referencia es la probabilidad JUSTA vig-removida (fair_*), no 1/cuota: 1/cuota
+    arrastra la vig del mejor precio (~+2,9 pp medido) y subestimaría la divergencia.
+    El pago sigue calculándose con el mejor precio, que es el que se puede cobrar.
+
+    No se usa el corte por cuota (>=1.80) del 1X2: en mercados de dos vías casi todo cotiza
+    cerca de 1.95 y ese umbral no separaría nada.
+    """
+    if fair_p is None:
+        return False
+    divergence = p_model - fair_p
+    if divergence > _MAX_DIVERGENCE:
+        logger.info(
+            "SKIP_DIVERGENCE_%s(%s): %s p_modelo=%.3f fair=%.3f divergencia=%.3f > %.2f",
+            market.upper(), match_id, selection, p_model, fair_p, divergence, _MAX_DIVERGENCE,
+        )
+        return True
+    return False
+
 # Ligas domésticas que usan ELO como proxy cuando el Poisson aún no se puede ajustar
 # (arranque de temporada: menos de MIN_MATCHES_TO_FIT partidos jugados).
 _ELO_FALLBACK_LEAGUES: set[str] = {"PD", "PL", "SA", "BL1", "FL1"}
@@ -1427,7 +1461,10 @@ async def _generate_oddsapiio_extra_signals(
                     edge, ev_btts, SPORTS_MIN_EDGE, conf, _ALT_MARKET_MIN_CONF,
                     "OK" if ev_btts > SPORTS_MIN_EDGE and conf >= _ALT_MARKET_MIN_CONF else "SKIP",
                 )
-                if ev_btts > SPORTS_MIN_EDGE and conf >= _ALT_MARKET_MIN_CONF:
+                if (ev_btts > SPORTS_MIN_EDGE and conf >= _ALT_MARKET_MIN_CONF
+                        and not _alt_divergence_blocks(
+                            match_id, "btts", "Yes",
+                            btts_probs["btts_prob"], btts_mkt.get("fair_yes"))):
                     doc_id = f"{match_id}_btts"
                     pred = {
                         "match_id": doc_id, "home_team": home_team, "away_team": away_team,
@@ -1452,7 +1489,7 @@ async def _generate_oddsapiio_extra_signals(
                                     match_id, yes_odds, edge * 100, ev_btts * 100)
                     except Exception:
                         logger.error("generate_signal(%s): error guardando btts", match_id, exc_info=True)
-                    if ev_btts > SPORTS_ALERT_EDGE:
+                    if _ALT_MARKETS_ALERT_ENABLED and ev_btts > SPORTS_ALERT_EDGE:
                         await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                     results.append(pred)
 
@@ -1490,6 +1527,12 @@ async def _generate_oddsapiio_extra_signals(
                 sel = None
                 logger.info("EXTRA_MARKETS_OU(%s): SKIP — ningún lado supera min_ev=%.3f", match_id, SPORTS_MIN_EDGE)
 
+            if sel:
+                _fair_over = t25.get("fair_over")
+                _fair_sel = (_fair_over if sel == "Over"
+                             else (1.0 - _fair_over) if _fair_over is not None else None)
+                if _alt_divergence_blocks(match_id, "totals", f"{sel} 2.5", sel_p, _fair_sel):
+                    sel = None
             if sel:
                 sel_conf = round(min(0.99, sel_p), 4)
                 logger.info(
@@ -1562,6 +1605,12 @@ async def _generate_oddsapiio_extra_signals(
                 logger.info("EXTRA_MARKETS_AH(%s): SKIP — ningún lado supera min_ev=%.3f", match_id, SPORTS_MIN_EDGE)
 
             if sel:
+                _fair_home = ah_m05.get("fair_home")
+                _fair_sel = (_fair_home if sel == home_team
+                             else (1.0 - _fair_home) if _fair_home is not None else None)
+                if _alt_divergence_blocks(match_id, "ah", str(sel), sel_p, _fair_sel):
+                    sel = None
+            if sel:
                 sel_conf = round(min(0.99, sel_p), 4)
                 logger.info(
                     "EXTRA_MARKETS_AH(%s): sel=%s sel_p=%.3f ev=%.4f conf=%.3f(min=%.3f) → %s",
@@ -1593,7 +1642,7 @@ async def _generate_oddsapiio_extra_signals(
                                     match_id, sel, sel_odds, sel_edge * 100, sel_ev_ah * 100)
                     except Exception:
                         logger.error("generate_signal(%s): error guardando ah05", match_id, exc_info=True)
-                    if sel_ev_ah > SPORTS_ALERT_EDGE:
+                    if _ALT_MARKETS_ALERT_ENABLED and sel_ev_ah > SPORTS_ALERT_EDGE:
                         await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                     results.append(pred)
 
@@ -1665,7 +1714,7 @@ async def _generate_oddsapiio_extra_signals(
                     )
                 except Exception:
                     logger.error("generate_signal(%s): error guardando cs", match_id, exc_info=True)
-                if best_cs_ev > SPORTS_ALERT_EDGE:
+                if _ALT_MARKETS_ALERT_ENABLED and best_cs_ev > SPORTS_ALERT_EDGE:
                     await _send_telegram_alert(_build_alert_payload(pred, enriched_match))
                 results.append(pred)
 

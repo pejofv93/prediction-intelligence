@@ -223,7 +223,95 @@ async def check_result(match_id: str) -> str | None:
         return None
 
 
-def evaluate_prediction(prediction: dict, actual_result: str) -> dict:
+async def check_score(match_id: str) -> tuple[int, int] | None:
+    """
+    Marcador final (goles_local, goles_visitante) o None.
+
+    Existe porque check_result() estrecha el resultado a "HOME_WIN"/"AWAY_WIN"/"DRAW" y
+    tira los goles, de modo que BTTS, totales, hándicap y resultado exacto eran
+    inevaluables aunque el dato estuviera guardado. `match_results` ya persiste
+    goals_home/goals_away (los escribe firestore_writer.update_finished_matches).
+    """
+    base_id = _base_match_id(match_id)
+    try:
+        doc = col("match_results").document(base_id).get()
+        if doc.exists:
+            d = doc.to_dict()
+            gh, ga = d.get("goals_home"), d.get("goals_away")
+            if gh is not None and ga is not None:
+                return int(gh), int(ga)
+    except Exception:
+        logger.warning("check_score(%s): error leyendo match_results", match_id, exc_info=True)
+
+    try:
+        from collectors.football_api import get_match_result
+        result = await get_match_result(base_id)
+        if result:
+            gh, ga = result.get("goals_home"), result.get("goals_away")
+            if gh is not None and ga is not None:
+                return int(gh), int(ga)
+    except Exception:
+        logger.debug("check_score(%s): sin marcador vía API", match_id, exc_info=True)
+    return None
+
+
+# Mercados que se gradúan con el marcador final. El resto sigue por la comparación
+# clásica contra el nombre del equipo (1X2, tenis, baloncesto).
+_SCORE_GRADED_MARKETS: frozenset[str] = frozenset({
+    "btts", "totals", "asian_handicap", "correct_score",
+})
+
+
+def _grade_with_score(prediction: dict, gh: int, ga: int) -> dict | None:
+    """
+    Gradúa un mercado alternativo con el marcador final.
+    Devuelve {"correct": bool|None, "error_type": None} — correct=None significa PUSH
+    (la línea cayó exacta): ni acierto ni fallo, se excluye del ROI.
+    Devuelve None si el mercado no se gradúa por marcador o faltan datos.
+    """
+    market = str(prediction.get("market_type") or "").lower()
+    if market not in _SCORE_GRADED_MARKETS:
+        return None
+    sel = str(prediction.get("selection") or "").strip()
+    total = gh + ga
+
+    if market == "btts":
+        both = gh > 0 and ga > 0
+        yes = sel.lower() in ("yes", "sí", "si", "btts yes", "btts sí", "btts si")
+        return {"correct": both if yes else (not both), "error_type": None}
+
+    if market == "totals":
+        line = prediction.get("line")
+        if line is None:
+            return None
+        line = float(line)
+        if abs(total - line) < 1e-9:          # línea entera clavada → push
+            return {"correct": None, "error_type": None}
+        over = sel.lower().startswith("over")
+        return {"correct": (total > line) if over else (total < line), "error_type": None}
+
+    if market == "asian_handicap":
+        point = prediction.get("line")
+        if point is None:
+            return None
+        point = float(point)
+        # `line` se guarda SIEMPRE en referencia al LOCAL: -0.5 = el local concede medio gol.
+        # Respaldando al local:     margen = (gh - ga) + point
+        # Respaldando al visitante: su hándicap es el opuesto → (ga - gh) - point
+        backed_home = _norm(sel) == _norm(prediction.get("home_team", ""))
+        adj = (gh - ga) + point if backed_home else (ga - gh) - point
+        if abs(adj) < 1e-9:                    # hándicap entero clavado → push
+            return {"correct": None, "error_type": None}
+        return {"correct": adj > 0, "error_type": None}
+
+    if market == "correct_score":
+        return {"correct": sel.replace(" ", "") == f"{gh}-{ga}", "error_type": None}
+
+    return None
+
+
+def evaluate_prediction(prediction: dict, actual_result: str,
+                       score: tuple[int, int] | None = None) -> dict:
     """
     Determina si la prediccion fue correcta y clasifica el error_type si fallo.
 
@@ -234,6 +322,14 @@ def evaluate_prediction(prediction: dict, actual_result: str) -> dict:
 
     Devuelve {"correct": bool, "error_type": str | None}
     """
+    # Mercados alternativos (BTTS, totales, hándicap, resultado exacto) se gradúan con el
+    # marcador, no comparando la selección con el nombre de un equipo. Sin esta rama
+    # "Over 2.5" o "BTTS Sí" nunca casaban con home/away y caían siempre como fallidas.
+    if score is not None:
+        graded = _grade_with_score(prediction, score[0], score[1])
+        if graded is not None:
+            return graded
+
     # Fútbol usa team_to_back; tenis/basket usan selection (nombre del equipo/jugador).
     # team_to_back tiene prioridad → no cambia la graduación de fútbol existente.
     backed = _norm(prediction.get("team_to_back") or prediction.get("selection") or "")
@@ -665,6 +761,25 @@ async def run_daily_learning() -> None:
         len(_raw_results),
     )
 
+    # Marcadores: necesarios para graduar BTTS/totales/hándicap/resultado exacto.
+    # Solo se piden para predicciones de esos mercados — el 1X2 no los usa.
+    _needs_score = [
+        i for i, pr in enumerate(pending)
+        if str(pr.get("market_type") or "").lower() in _SCORE_GRADED_MARKETS
+    ]
+    _scores: list[tuple[int, int] | None] = [None] * len(pending)
+    if _needs_score:
+        _fetched = await asyncio.gather(
+            *[check_score(_match_ids[i]) for i in _needs_score],
+            return_exceptions=True,
+        )
+        for i, sc in zip(_needs_score, _fetched):
+            _scores[i] = sc if isinstance(sc, tuple) else None
+        logger.info(
+            "run_daily_learning: marcadores para mercados alternativos — %d/%d obtenidos",
+            sum(1 for i in _needs_score if _scores[i] is not None), len(_needs_score),
+        )
+
     # BUG 1: second-pass para WC26_OA_* / WC26_SF_* IDs no numéricos que check_result ignoró.
     # Solo se intenta para predicciones sin resultado cuyo partido ya debería estar terminado.
     _wc26_indices = [
@@ -724,7 +839,7 @@ async def run_daily_learning() -> None:
     groq_predictions_count = 0  # contador de predicciones groq_ai procesadas hoy
 
     # 3b. Procesar resultados en orden (weight updates son acumulativos)
-    for prediction, actual_result in zip(pending, _raw_results):
+    for prediction, actual_result, _score in zip(pending, _raw_results, _scores):
         match_id = prediction.get("match_id", "")
         league = prediction.get("league", "")
 
@@ -740,9 +855,24 @@ async def run_daily_learning() -> None:
                 continue
 
             # Evaluar prediccion
-            evaluation = evaluate_prediction(prediction, actual_result)
+            evaluation = evaluate_prediction(prediction, actual_result, score=_score)
             correct = evaluation["correct"]
             error_type = evaluation["error_type"]
+
+            # PUSH (la línea cayó exacta): ni acierto ni fallo. Se marca resuelta pero se
+            # excluye de pesos, accuracy y ROI — contarla como fallo sesgaría las métricas.
+            if correct is None:
+                logger.info(
+                    "run_daily_learning: PUSH %s (%s %s) — excluida de métricas",
+                    match_id, prediction.get("market_type"), prediction.get("selection"),
+                )
+                try:
+                    col("predictions").document(match_id).update(
+                        {"result": actual_result, "correct": None, "push": True}
+                    )
+                except Exception:
+                    logger.warning("run_daily_learning: error marcando push %s", match_id, exc_info=True)
+                continue
 
             # Identificar factor dominante
             factors = prediction.get("factors", {})

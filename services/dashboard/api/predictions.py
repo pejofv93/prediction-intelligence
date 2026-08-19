@@ -46,6 +46,10 @@ async def get_predictions(limit: int = 50) -> list[dict]:
             "team_to_back", "odds", "edge", "confidence", "factors", "signals",
             "result", "correct", "sport", "kelly_fraction",
             "market_type", "selection", "bookmaker", "line",
+            # `ev` es el criterio con el que se emiten los mercados alternativos
+            # (BTTS/totales/AH/CS): sin él se ven en el panel pero no se pueden juzgar.
+            # `push` marca las resueltas en línea exacta, excluidas del ROI.
+            "ev", "push",
             "elo_sufficient", "h2h_sufficient", "data_source",
             "filtered_reason", "created_at",
         }
