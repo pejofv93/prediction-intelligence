@@ -135,7 +135,9 @@ SEED_PROGRESS_DOC = "uefa_seed_progress"
 
 
 def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
-                         objetivo_paginas: int, presupuesto: int) -> tuple[list[dict], dict]:
+                         objetivo_paginas: int, presupuesto: int,
+                         imap: dict | None = None,
+                         prioritarios: set | None = None) -> tuple[list[dict], dict]:
     """
     Historial por club, paginado y reanudable.
 
@@ -143,11 +145,20 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
     pasada. Con 60-90 partidos el ELO ya tiene con qué separar fuerza de forma, que es
     justo lo que no consigue con los 10-14 de football-data.
 
-    `progreso` ({source_id: {"name", "pages"}}) hace la siembra reanudable entre tandas:
-    la cuota son 100 requests/día y cubrir ~250 clubes a 3 páginas son varios días. Se
-    atiende primero a quien menos páginas tiene, y dentro de eso a los clubes que juegan
-    competición europea ahora.
+    `progreso` ({source_id: {"name", "pages", "canonical"}}) hace la siembra reanudable
+    entre tandas: la cuota son 100 requests/día y cubrir ~250 clubes a 3 páginas son varios
+    días.
+
+    Los rivales que aparecen en cada histórico se registran también como candidatos. Es la
+    única vía para llegar a los clubes grandes: el censo de agosto son equipos de previas
+    —Liverpool o el Madrid no entran en CL hasta el sorteo de la fase de liga— pero sus ids
+    de Sofascore sí aparecen como rivales en los partidos de liga de los que ya sembramos.
+
+    Orden de atención: primero quien menos páginas tiene; a igualdad, los clubes sobre los
+    que estamos a punto de apostar (los de `prioritarios`) y los que juegan Europa ahora.
     """
+    imap = imap or {}
+    prioritarios = prioritarios or set()
     out: list[dict] = []
     prog = {str(k): dict(v) for k, v in (progreso or {}).items()}
     for sid, nombre in candidatos.items():
@@ -155,16 +166,26 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
         prog[str(sid)]["name"] = prog[str(sid)].get("name") or nombre
 
     en_competicion = {str(s) for s in candidatos}
-    pendientes = [
-        (int(v.get("pages", 0)), 0 if sid in en_competicion else 1, v.get("name", ""), sid)
-        for sid, v in prog.items() if int(v.get("pages", 0)) < objetivo_paginas
-    ]
-    pendientes.sort()
+
+    def _prioridad(sid: str, v: dict) -> int:
+        if str(v.get("canonical", "")) in prioritarios or sid in en_competicion:
+            return 0
+        return 1
+
+    def _cola() -> list[tuple]:
+        return sorted(
+            (int(v.get("pages", 0)), _prioridad(sid, v), v.get("name", ""), sid)
+            for sid, v in prog.items() if int(v.get("pages", 0)) < objetivo_paginas
+        )
 
     gastados = 0
-    for paginas_hechas, _, nombre, sid in pendientes:
-        if gastados >= presupuesto:
+    atendidos: set[str] = set()
+    while gastados < presupuesto:
+        pendientes = [x for x in _cola() if x[3] not in atendidos]
+        if not pendientes:
             break
+        paginas_hechas, _, nombre, sid = pendientes[0]
+        atendidos.add(sid)
         pagina = paginas_hechas
         try:
             data, headers = _uefa_get(f"/api/team/{sid}/matches/previous/{pagina}", key)
@@ -175,10 +196,18 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
         events = data.get("events", [])
         for e in events:
             m = parse_event(e, "OTHER")
-            if m:
-                torneo = ((e.get("tournament") or {}).get("uniqueTournament") or {})
-                m["tournament"] = torneo.get("name", "")
-                out.append(m)
+            if not m:
+                continue
+            torneo = ((e.get("tournament") or {}).get("uniqueTournament") or {})
+            m["tournament"] = torneo.get("name", "")
+            out.append(m)
+            # Registrar a los dos equipos como candidatos: así el catálogo de clubes
+            # paginables crece solo hasta cubrir las ligas domésticas.
+            for nombre_eq, sid_eq in ((m["home_team"], m["home_source_id"]),
+                                      (m["away_team"], m["away_source_id"])):
+                entrada = prog.setdefault(str(sid_eq), {"name": nombre_eq, "pages": 0})
+                entrada.setdefault("name", nombre_eq)
+                entrada["canonical"] = resolve(nombre_eq, sid_eq, imap)
         prog[str(sid)]["pages"] = pagina + 1
         prog[str(sid)]["name"] = nombre
 
@@ -226,7 +255,11 @@ def fetch_previous_standings(key: str, codigos: list[str]) -> dict[str, list[dic
             filas = grupos[0].get("rows", []) if grupos else []
             out[code] = [
                 {"team_name": (f.get("team") or {}).get("name", ""),
-                 "position": f.get("position")}
+                 "position": f.get("position"),
+                 # El id de Sofascore que viene en la tabla es la vía directa para poder
+                 # paginar el histórico de los clubes grandes: en agosto no están en el
+                 # censo de UEFA (entran en CL con el sorteo de la fase de liga).
+                 "source_id": (f.get("team") or {}).get("id")}
                 for f in filas if (f.get("team") or {}).get("name")
             ]
             print(f"  {code}: clasificación {anterior} → {len(out[code])} equipos")
@@ -301,16 +334,46 @@ def main() -> None:
     uefa_matches: list[dict] = []
     club_hist: list[dict] = []
     clubs: dict[int, str] = {}
+    standings: dict[str, list[dict]] = {}
+    progreso: dict = {}
     if not args.no_uefa:
         key = _api_key()
         leagues = [x.strip().upper() for x in args.leagues.split(",") if x.strip()]
         print("\n   siembra UEFA:")
         uefa_matches, clubs = fetch_uefa_matches(key, leagues)
+
+        # Las clasificaciones van ANTES que el historial: sirven para el ajuste del prior
+        # y, de paso, traen los ids de Sofascore de los clubes grandes, que en agosto no
+        # están en el censo europeo. Así entran ya en la cola de siembra de esta tanda.
+        if not args.no_priors:
+            print("\n   clasificaciones de la temporada pasada (ajuste del prior):")
+            standings = fetch_previous_standings(key, ["PL", "PD", "SA", "BL1", "FL1", "BSA"])
+            de_tablas = {int(f["source_id"]): f["team_name"]
+                         for filas in standings.values() for f in filas if f.get("source_id")}
+            if de_tablas:
+                clubs = {**de_tablas, **clubs}
+                print(f"   +{len(de_tablas)} clubes de las clasificaciones añadidos al censo")
+
         progreso_previo = next(
             (d for d in db.read_collection("api_meta") if d["_id"] == SEED_PROGRESS_DOC), {})
         progreso_previo = {k: v for k, v in progreso_previo.items() if k != "_id"}
+        # Prioridad: clubes sobre los que estamos a punto de apostar
+        prioritarios: set[str] = set()
+        try:
+            for u in db.read_collection("upcoming_matches"):
+                if u.get("sport", "football") != "football":
+                    continue
+                if str(u.get("status", "")).upper() not in ("SCHEDULED", "TIMED"):
+                    continue
+                for k in ("home_team_id", "away_team_id"):
+                    if u.get(k) is not None:
+                        prioritarios.add(str(u[k]))
+        except Exception as e:
+            print(f"   (sin prioridades de upcoming_matches: {type(e).__name__})")
         club_hist, progreso = fetch_club_histories(
-            key, clubs, progreso_previo, args.history_pages, args.history_budget)
+            key, clubs, progreso_previo, args.history_pages, args.history_budget,
+            imap, prioritarios)
+        print(f"   {len(prioritarios)} clubes prioritarios (con partido programado)")
         print(f"   histórico de clubes: {len(club_hist)} partidos brutos")
 
     # ── 1b. Prior de fuerza: de dónde arranca cada club ──────────────────────
@@ -338,11 +401,6 @@ def main() -> None:
 
     priors: dict[str, float] = {}
     if not args.no_priors:
-        standings = {}
-        if not args.no_uefa:
-            print("\n   clasificaciones de la temporada pasada (ajuste del prior):")
-            standings = fetch_previous_standings(
-                key, ["PL", "PD", "SA", "BL1", "FL1", "BSA"])
         priors = build_priors(clubs_info, standings)
 
     def arranque(team_id: str) -> float:
