@@ -39,9 +39,8 @@ logger = logging.getLogger(__name__)
 # ── Dynamic filter params ─────────────────────────────────────────────────────
 _DEFAULT_FILTER_PARAMS: dict = {
     "HIGH_DRAW_PROB":   {"threshold": 0.30},
-    "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 5.0, "FL1": 5.0},
+    "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 4.5, "FL1": 4.5},
     "AWAY_DEAD_ZONE":   {"odds_min": 2.5, "odds_max": 3.5},
-    "AWAY_PD_FILTER":   {"odds_threshold": 2.5},
     "AWAY_GATE_CONF":   {"conf_threshold": 0.85},
 }
 
@@ -1867,32 +1866,15 @@ _TOP6_KEYWORDS: dict[str, list[str]] = {
     "FL1": ["psg", "paris saint-germain", "marseille", "monaco", "lens", "nice"],
 }
 
-# Subconjunto top-3 por liga: los 3 equipos que dominan cada liga.
-# Usados para el filtro rival-élite y el descuento del 20% en el edge calculado.
-_TOP3_KEYWORDS: dict[str, list[str]] = {
-    "PD":  ["real madrid", "barcelona", "atlético", "atletico"],
-    "SA":  ["inter", "napoli", "atalanta"],
-    "PL":  ["manchester city", "arsenal", "liverpool"],
-    "BL1": ["bayern", "leverkusen", "dortmund"],
-    "FL1": ["psg", "paris saint-germain", "marseille"],
-    "CL":  ["real madrid", "barcelona", "manchester city", "arsenal", "liverpool",
-             "bayern", "inter", "atletico", "atlético"],
-    "EL":  [],  # Europa League: demasiada variabilidad de nivel — sin filtro top-3
-    "ECL": [],
-}
-
-# Umbral de cuota por liga: ligas con dominancia extrema usan 4.5, más competitivas 5.0.
+# Umbral de cuota de underdog extremo: 4.5 en todas las ligas.
+# Antes BL1/FL1 llevaban 5.0 "por ser más competitivas" — una distinción sin respaldo
+# empírico que solo añadía superficie de reglas. Valor único, medible desde filter_blocks.
 _EXTREME_UNDERDOG_ODDS: dict[str, float] = {
     "PD":  4.5,
     "SA":  4.5,
     "PL":  4.5,
-    "BL1": 5.0,
-    "FL1": 5.0,
-}
-
-# Número total de equipos por liga (para calcular zona de descenso / bottom-6).
-_LEAGUE_TOTAL_TEAMS: dict[str, int] = {
-    "PD": 20, "SA": 20, "PL": 20, "FL1": 18, "BL1": 18,
+    "BL1": 4.5,
+    "FL1": 4.5,
 }
 
 # Cache en memoria de posiciones de tabla: {league_team_key: position}
@@ -2542,34 +2524,12 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 )
                 return None
 
-        # --- 5c. Filtro rival élite (top-3 + posición en tabla) ---
-        # Los bookmakers son más eficientes en partidos con equipos top-3 → descuento del 20% en edge.
-        # Si además el equipo seleccionado está en bottom-6 → señal directamente descartada.
-        top3_keywords = _TOP3_KEYWORDS.get(league, [])
-        rival_lower = rival_team.lower()
-        rival_is_top3 = top3_keywords and any(kw in rival_lower for kw in top3_keywords)
-        if rival_is_top3:
-            # Descuento del 20% por eficiencia del mercado en partidos de élite
-            best_edge = round(best_edge * 0.80, 4)
-            logger.info(
-                "generate_signal(%s): rival top-3 '%s' → edge descontado 20%% → edge=%.3f [%s]",
-                match_id, rival_team, best_edge, league,
-            )
-            # Filtro bottom-6: si el equipo seleccionado está en los últimos 6 puestos → descartar
-            total_teams = _LEAGUE_TOTAL_TEAMS.get(league, 20)
-            bottom6_threshold = total_teams - 5  # posición > (total-5) → bottom 6
-            selected_id = (
-                enriched_match.get("home_team_id") if team_to_back == str(home_team)
-                else enriched_match.get("away_team_id")
-            )
-            selected_pos = _get_table_position(selected_id, league)
-            if selected_pos is not None and selected_pos > bottom6_threshold:
-                logger.info(
-                    "generate_signal(%s): señal descartada — bottom-6 (pos=%d > %d) "
-                    "vs rival top-3 '%s' [%s]",
-                    match_id, selected_pos, bottom6_threshold, rival_team, league,
-                )
-                return None
+        # --- 5c. (eliminado) Filtro rival élite: descuento -20% por rival top-3 y corte
+        # bottom-6. Ambas reglas eran heurísticas de nombres/posición sin validación: el
+        # descuento distorsionaba el edge que después se compara contra LEAGUE_MIN_EDGE
+        # (y arrastraba edges marginales a ≤0), y el corte bottom-6 solo se aplicaba si el
+        # rival casaba con una keyword hardcodeada. El contexto de tabla sigue vivo, pero
+        # como penalización de confianza en 5g (rival_position_better), no como corte.
 
         # --- 5e. Filtros AWAY anti-sesgo (diagnóstico 2026-04-29: 12.5% acc vs 21.4% HOME) ---
         _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
@@ -2588,27 +2548,15 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     str(home_team), str(away_team), best_odds, best_confidence,
                 )
                 return None
-            # F2: AWAY en PD con odds > umbral dinámico — 0% accuracy histórico
-            _pd_threshold = _get_filter_params()["AWAY_PD_FILTER"].get("odds_threshold", 2.5)
-            if league == "PD" and best_odds > _pd_threshold:
-                logger.info(
-                    "generate_signal(%s): AWAY underdog descartada en %s (odds=%.2f > %.2f) [%s vs %s]",
-                    match_id, league, best_odds, _pd_threshold, home_team, away_team,
-                )
-                _log_filter_block(
-                    "AWAY_PD_FILTER", match_id, team_to_back, league,
-                    str(home_team), str(away_team), best_odds, best_confidence,
-                )
-                return None
-            # F3: gate final con umbral de confianza dinámico
-            # CL/EL/ECL: cualquier underdog hasta 6.00 con conf>0.65 (torneos eliminatorios)
-            # Resto: solo favorito (<2.5) o underdog extremo (>3.5 + conf>umbral dinámico)
-            _intl_away_leagues = {"CL", "EL", "ECL"}
+            # F2: (eliminado) AWAY en PD con odds > umbral. Era el único filtro de liga
+            # única del motor, justificado por un "0% accuracy" sobre un puñado de señales.
+            # Si el sesgo AWAY existe, no es exclusivo de LaLiga.
+            # F3: gate final con umbral de confianza dinámico.
+            # Sin excepción por competición: CL/EL/ECL pasaban por una rama propia
+            # (cualquier cuota <6.00 con conf>0.65) que abría el gate justo donde el
+            # mercado es más eficiente. Regla única para todas las ligas.
             _gate_conf = _get_filter_params()["AWAY_GATE_CONF"].get("conf_threshold", 0.85)
-            if league in _intl_away_leagues:
-                _gate_ok = best_odds < 6.00 and best_confidence > 0.65
-            else:
-                _gate_ok = best_odds < 2.5 or (best_odds > 3.5 and best_confidence > _gate_conf)
+            _gate_ok = best_odds < 2.5 or (best_odds > 3.5 and best_confidence > _gate_conf)
             if not _gate_ok:
                 logger.info(
                     "generate_signal(%s): AWAY gate descartada "
@@ -2629,8 +2577,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     match_id, best_odds, home_team, away_team, league,
                 )
                 return None
-            if best_odds > 4.00 and league not in {"CL", "EL", "ECL"}:
-                best_confidence = round(min(best_confidence, 0.70), 4)
+            # (eliminado) cap de confianza a 0.70 para AWAY con odds>4.00: penalizaba dos
+            # veces lo mismo — la cuota alta ya entra en el gate y en los tiers de EV.
         _sel_form = (
             enriched_match.get("home_form_score", 50.0) if team_to_back == str(home_team)
             else enriched_match.get("away_form_score", 50.0)
@@ -2782,8 +2730,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             )
 
         # FIX-EDGE0: si best_edge ≤ 0 no hay valor real — descartar ANTES del threshold check.
-        # Causa: discount rival_top3 (×0.80) puede llevar un edge marginal a 0 mientras best_ev
-        # sigue positivo (best_ev no se descuenta en ese paso), dejando pasar la señal.
+        # (El descuento ×0.80 por rival top-3 que lo motivó ya no existe; el guard se queda
+        # porque edge≤0 con ev>0 sigue siendo posible y nunca es una apuesta.)
         if best_edge <= 0.0:
             logger.debug(
                 "generate_signal(%s): descartado — edge=%.4f ≤ 0 [%s vs %s | %s]",
@@ -2809,25 +2757,10 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
 
         _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
 
-        # Umbral estricto por competición europea — independiente de data_quality.
-        # CL: mercado muy eficiente, equipos top → EV>15% y conf>75%
-        # EL/ECL: mercado menos eficiente, más edge disponible → EV>10% y conf>68%
-        if league == "CL":
-            if best_ev <= 0.15 or best_confidence <= 0.75:
-                logger.info(
-                    "generate_signal(%s): descartado — CL EV=%.3f conf=%.3f "
-                    "(requiere EV>0.15 y conf>0.75)",
-                    match_id, best_ev, best_confidence,
-                )
-                return None
-        elif league in {"EL", "ECL"}:
-            if best_ev <= 0.10 or best_confidence <= 0.68:
-                logger.info(
-                    "generate_signal(%s): descartado — %s EV=%.3f conf=%.3f "
-                    "(requiere EV>0.10 y conf>0.68)",
-                    match_id, league, best_ev, best_confidence,
-                )
-                return None
+        # (eliminado) Umbrales estrictos EV/conf para CL/EL/ECL. Eran una tercera capa de
+        # umbral sobre los tiers de arriba, con números por competición sin backtest detrás
+        # (CL EV>0.15+conf>0.75, EL/ECL EV>0.10+conf>0.68). El umbral por liga vive ahora
+        # en un solo sitio: LEAGUE_MIN_EDGE (vía _min_edge) y los tiers de intensidad.
 
         _intl_strict_leagues = {"CL", "EL", "ECL"}
         # Calidad de datos: si es partial (y no es CL/EL/ECL), reducir confianza 10% y re-evaluar tiers

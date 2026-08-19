@@ -44,9 +44,8 @@ _FOOTBALL_LEAGUES = set(SUPPORTED_FOOTBALL_LEAGUES.keys())
 # ── Parámetros por defecto de filtros de bloqueo ─────────────────────────────
 _DEFAULT_FILTER_PARAMS: dict = {
     "HIGH_DRAW_PROB":   {"threshold": 0.30},
-    "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 5.0, "FL1": 5.0},
+    "UNDERDOG_EXTREME": {"PD": 4.5, "SA": 4.5, "PL": 4.5, "BL1": 4.5, "FL1": 4.5},
     "AWAY_DEAD_ZONE":   {"odds_min": 2.5, "odds_max": 3.5},
-    "AWAY_PD_FILTER":   {"odds_threshold": 2.5},
     "AWAY_GATE_CONF":   {"conf_threshold": 0.85},
 }
 
@@ -54,9 +53,8 @@ _DEFAULT_FILTER_PARAMS: dict = {
 _FILTER_PARAM_BOUNDS: dict = {
     "HIGH_DRAW_PROB":   {"threshold": (0.22, 0.40)},
     "UNDERDOG_EXTREME": {"PD": (3.5, 6.0), "SA": (3.5, 6.0), "PL": (3.5, 6.0),
-                         "BL1": (4.0, 7.0), "FL1": (4.0, 7.0)},
+                         "BL1": (3.5, 6.0), "FL1": (3.5, 6.0)},
     "AWAY_DEAD_ZONE":   {"odds_min": (2.0, 2.8), "odds_max": (3.0, 4.2)},
-    "AWAY_PD_FILTER":   {"odds_threshold": (1.8, 3.5)},
     "AWAY_GATE_CONF":   {"conf_threshold": (0.70, 0.95)},
 }
 
@@ -65,7 +63,6 @@ _FILTER_ADJUSTMENT_STEP: dict = {
     "HIGH_DRAW_PROB":   {"threshold": 0.02},
     "UNDERDOG_EXTREME": {"PD": 0.25, "SA": 0.25, "PL": 0.25, "BL1": 0.25, "FL1": 0.25},
     "AWAY_DEAD_ZONE":   {"odds_min": 0.10, "odds_max": 0.10},
-    "AWAY_PD_FILTER":   {"odds_threshold": 0.10},
     "AWAY_GATE_CONF":   {"conf_threshold": 0.03},
 }
 
@@ -1137,17 +1134,6 @@ def _adjust_filter_params(filter_name: str, params: dict, direction: str) -> dic
             # Ampliar la zona muerta: bajar mínimo y subir máximo
             new_params["odds_min"] = max(lo_min, round(cur_min - step_min, 2))
             new_params["odds_max"] = min(hi_max, round(cur_max + step_max, 2))
-
-    elif filter_name == "AWAY_PD_FILTER":
-        step = steps.get("odds_threshold", 0.10)
-        lo, hi = bounds.get("odds_threshold", (1.8, 3.5))
-        cur = params.get("odds_threshold", 2.5)
-        # relax → subir umbral (permite odds más altas en PD)
-        # tighten → bajar umbral
-        new_params["odds_threshold"] = (
-            min(hi, round(cur + step, 2)) if direction == "relax"
-            else max(lo, round(cur - step, 2))
-        )
 
     elif filter_name == "AWAY_GATE_CONF":
         step = steps.get("conf_threshold", 0.03)
