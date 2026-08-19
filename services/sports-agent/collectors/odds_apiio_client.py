@@ -634,18 +634,26 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
                     if not isinstance(mkt, dict):
                         continue
                     mkt_key = mkt.get("name") or mkt.get("key") or mkt.get("type") or ""
-                    # Odds are nested under "odds": [{"home":..., "draw":..., "away":...}]
+                    norm_key = _normalise_market_key(mkt_key)
+                    if norm_key not in _MARKETS_ENABLED:
+                        continue
+                    # Odds vienen en "odds". Mercados de una sola línea (ML, BTTS, Double
+                    # Chance) traen UN dict: se desenvuelve. Mercados con líneas (Totals,
+                    # Spread, Corners) traen N dicts y hay que pasar la lista ENTERA.
+                    # Antes se desenvolvía siempre que la 1ª entrada tuviera home/away, así
+                    # que Spread perdía 13 de sus 14 líneas —incluida la -0.5 que busca el
+                    # consumidor— y se quedaba con una arbitraria.
                     raw_odds = mkt.get("odds") or mkt.get("outcomes") or []
-                    if (isinstance(raw_odds, list) and raw_odds
+                    if (isinstance(raw_odds, list) and len(raw_odds) == 1
                             and isinstance(raw_odds[0], dict)
                             and any(k in raw_odds[0]
-                                    for k in ("home", "draw", "away", "1", "2", "x"))):
+                                    for k in ("home", "draw", "away", "1", "2", "x",
+                                              "yes", "no"))):
                         mkt_data = raw_odds[0]
                     else:
                         mkt_data = raw_odds or mkt
                     outcomes = _parse_market(mkt_key, mkt_data, home)
                     if outcomes:
-                        norm_key = _normalise_market_key(mkt_key)
                         markets_out.append({"key": norm_key, "outcomes": outcomes})
                         markets_agg.setdefault(norm_key, []).append(
                             {"bookmaker": bkm_key, "outcomes": outcomes}
@@ -699,26 +707,76 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
     }
 
 
+# Mercados de odds-api.io → clave estándar (la de The Odds API, que es la que consume
+# _extract_markets_summary y _generate_oddsapiio_extra_signals).
+#
+# odds-api.io manda el nombre EN TEXTO LEGIBLE dentro de mkt["name"]: "Both Teams To
+# Score", "Corners Totals", "Alternative Asian Handicap"… El mapa original solo conocía
+# snake_case, así que solo sobrevivían "ML" y "Totals" y all_markets quedaba en ['h2h'].
+# Por eso las claves se normalizan con _market_slug() antes de buscar.
+#
+# DELIBERADAMENTE FUERA (no tienen fuente de resultado, no se pueden graduar):
+#   "Corners Totals"/"Total Corners" → corners_ou   (haría falta FDCO)
+#   "Totals HT"                      → ht_totals    (haría falta score.halfTime)
+# Sus entradas siguen en el mapa para documentarlas, pero se filtran en _MARKETS_ENABLED.
+_MARKET_ALIASES: dict[str, str] = {
+    # 1X2
+    "1x2": "h2h", "moneyline": "h2h", "ml": "h2h", "match_winner": "h2h",
+    "1_x_2": "h2h", "three_way": "h2h", "home_draw_away": "h2h",
+    # Hándicap asiático / spread
+    "asian_handicap": "spreads", "handicap": "spreads", "ah": "spreads",
+    "spread": "spreads", "spreads": "spreads",
+    "alternative_asian_handicap": "spreads", "alternative_spread": "spreads",
+    # Totales de goles
+    "over_under": "totals", "totals": "totals", "goals": "totals",
+    "total_goals": "totals", "goals_over_under": "totals",
+    "alternative_total_goals": "totals", "alternative_goal_line": "totals",
+    # Ambos marcan
+    "btts": "btts", "both_teams_to_score": "btts", "gg": "btts",
+    # Resultado exacto
+    "correct_score": "correct_score", "score": "correct_score",
+    # --- desactivados (sin grader) ---
+    "1st_half_goals": "ht_totals", "halftime_goals": "ht_totals",
+    "1st_half_total": "ht_totals", "ht_over_under": "ht_totals",
+    "1st_half_total_goals": "ht_totals", "h1_totals": "ht_totals",
+    "first_half_goals": "ht_totals", "first_half_total": "ht_totals",
+    "totals_ht": "ht_totals",
+    "corners": "corners_ou", "corner": "corners_ou",
+    "total_corners": "corners_ou", "corners_over_under": "corners_ou",
+    "corners_totals": "corners_ou", "alternative_corners": "corners_ou",
+}
+
+# Mercados que llegan a all_markets. Un mercado solo se activa cuando existe la vía para
+# GRADUARLO; si no, generaría señales que evaluate_prediction marca fallidas siempre y que
+# contaminan accuracy_by_market y el PnL shadow sin aportar información.
+# corners_ou y ht_totals quedan fuera a propósito — ver _MARKET_ALIASES.
+_MARKETS_ENABLED: frozenset[str] = frozenset({
+    "h2h", "btts", "totals", "spreads", "correct_score",
+})
+
+
+def _market_slug(raw: str) -> str:
+    """'Both Teams To Score' → 'both_teams_to_score'. Unifica espacios, barras y guiones."""
+    out = []
+    for ch in str(raw).lower().strip():
+        out.append(ch if ch.isalnum() else "_")
+    slug = "".join(out)
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug.strip("_")
+
+
 def _normalise_market_key(raw: str) -> str:
     """Normaliza claves de mercado al estándar de The Odds API."""
-    raw = raw.lower().strip()
-    mapping = {
-        "1x2": "h2h", "moneyline": "h2h", "ml": "h2h", "match_winner": "h2h",
-        "match winner": "h2h", "1_x_2": "h2h", "three_way": "h2h",
-        "asian_handicap": "spreads", "handicap": "spreads", "ah": "spreads",
-        "over_under": "totals", "totals": "totals", "goals": "totals",
-        "over/under": "totals", "total_goals": "totals",
-        "btts": "btts", "both_teams_to_score": "btts", "gg": "btts",
-        "correct_score": "correct_score", "score": "correct_score",
-        "1st_half_goals": "ht_totals", "halftime_goals": "ht_totals",
-        "1st_half_total": "ht_totals", "ht_over_under": "ht_totals",
-        "1st_half_total_goals": "ht_totals", "h1_totals": "ht_totals",
-        "first_half_goals": "ht_totals", "first_half_total": "ht_totals",
-        "corners": "corners_ou", "corner": "corners_ou",
-        "total_corners": "corners_ou", "corners_over_under": "corners_ou",
-        "corners_totals": "corners_ou",
-    }
-    return mapping.get(raw, raw)
+    return _MARKET_ALIASES.get(_market_slug(raw), _market_slug(raw))
+
+
+def _first_present(d: dict, *keys):
+    """Primer valor NO nulo entre las claves dadas. A diferencia de `a or b`, no descarta 0."""
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
 
 
 def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
@@ -747,10 +805,11 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
     elif norm == "totals":
         if isinstance(mkt_data, list):
             for o in mkt_data:
-                line = _to_float(o.get("line") or o.get("total") or o.get("handicap"))
+                # odds-api.io nombra la línea "hdp": [{"hdp":2.5,"over":"1.775","under":"2.025"}]
+                line = _to_point(_first_present(o, "hdp", "line", "total", "handicap", "point"))
                 over = _to_float(o.get("over") or o.get("overOdds"))
                 under = _to_float(o.get("under") or o.get("underOdds"))
-                if line and over and under:
+                if line is not None and over and under:
                     outcomes.append({"name": "Over", "price": over, "point": line})
                     outcomes.append({"name": "Under", "price": under, "point": line})
         elif isinstance(mkt_data, dict):
@@ -778,10 +837,24 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
                 outcomes.append({"name": "Away", "price": a, "point": away_pt})
         elif isinstance(mkt_data, list):
             for o in mkt_data:
+                # Forma odds-api.io: {"hdp":-0.5,"home":"1.325","away":"3.300"} → 2 outcomes.
+                if ("home" in o or "away" in o) and not o.get("name"):
+                    point = _to_point(_first_present(o, "hdp", "point", "handicap", "line"))
+                    h = _to_float(o.get("home"))
+                    a = _to_float(o.get("away"))
+                    if h:
+                        outcomes.append({"name": home_team, "price": h, "point": point})
+                    if a:
+                        outcomes.append({
+                            "name": "Away", "price": a,
+                            "point": (-point if point is not None else None),
+                        })
+                    continue
+                # Forma genérica: un outcome por entrada.
                 name = o.get("name") or o.get("team") or ""
                 price = _to_float(o.get("price") or o.get("odds"))
-                point = _to_float(o.get("point") or o.get("handicap") or o.get("line"))
-                if price and price > 1:
+                point = _to_point(_first_present(o, "point", "handicap", "line", "hdp"))
+                if price:
                     outcomes.append({"name": name, "price": price, "point": point})
 
     elif norm == "btts":
@@ -815,10 +888,10 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
         # Same structure as totals but for first half
         if isinstance(mkt_data, list):
             for o in mkt_data:
-                line = _to_float(o.get("line") or o.get("total") or o.get("handicap"))
+                line = _to_point(_first_present(o, "hdp", "line", "total", "handicap", "point"))
                 over = _to_float(o.get("over") or o.get("overOdds"))
                 under = _to_float(o.get("under") or o.get("underOdds"))
-                if line and over and under:
+                if line is not None and over and under:
                     outcomes.append({"name": "Over", "price": over, "point": line})
                     outcomes.append({"name": "Under", "price": under, "point": line})
         elif isinstance(mkt_data, dict):
@@ -833,10 +906,10 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
         # Corners Over/Under — misma estructura que totals (líneas típicas: 8.5, 9.5, 10.5, 11.5)
         if isinstance(mkt_data, list):
             for o in mkt_data:
-                line = _to_float(o.get("line") or o.get("total") or o.get("handicap"))
+                line = _to_point(_first_present(o, "hdp", "line", "total", "handicap", "point"))
                 over = _to_float(o.get("over") or o.get("overOdds"))
                 under = _to_float(o.get("under") or o.get("underOdds"))
-                if line and over and under and 5.0 <= line <= 20.0:  # filtrar líneas absurdas
+                if line is not None and over and under and 5.0 <= line <= 20.0:
                     outcomes.append({"name": "Over", "price": over, "point": line})
                     outcomes.append({"name": "Under", "price": under, "point": line})
         elif isinstance(mkt_data, dict):
@@ -851,9 +924,22 @@ def _parse_market(mkt_key: str, mkt_data, home_team: str) -> list[dict]:
 
 
 def _to_float(v) -> float | None:
+    """Cuota decimal. Devuelve None si no supera 1.0 (una cuota <=1 no es apostable)."""
     try:
         f = float(v)
         return f if f > 1.0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_point(v) -> float | None:
+    """
+    Línea/hándicap. A diferencia de _to_float NO exige > 1.0: las líneas válidas incluyen
+    0.0, -0.5, -1.75… Usar _to_float aquí (como se hacía) convertía en None toda línea
+    <= 1.0, es decir todos los hándicaps asiáticos negativos y los totales de primera parte.
+    """
+    try:
+        return float(v)
     except (TypeError, ValueError):
         return None
 
@@ -893,6 +979,23 @@ def _build_comp_string(ev: dict) -> str:
                     parts.append(sv.lower())
 
     return " ".join(parts)
+
+
+def _fair_two_way(odds_a: float, odds_b: float) -> float | None:
+    """
+    Probabilidad JUSTA (vig removida, normalizada a 1) del lado A en un mercado de dos vías.
+    Sirve de referencia para medir divergencia modelo-mercado; NO para calcular el pago.
+    El pago usa el mejor precio disponible, que es lo que realmente se puede cobrar.
+    Medido 2026-08-19 sobre PD/ECL: 1/mejor_cuota queda ~2,9 pp por ENCIMA de esta
+    probabilidad (la vig del mejor precio no desaparece), así que usar 1/cuota como
+    referencia de mercado subestima la divergencia en vez de inflarla.
+    """
+    try:
+        ia, ib = 1.0 / float(odds_a), 1.0 / float(odds_b)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    tot = ia + ib
+    return round(ia / tot, 4) if tot > 0 else None
 
 
 def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
@@ -939,6 +1042,7 @@ def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
                     "yes_odds": round(by_, 3),
                     "no_odds": round(bn, 3) if bn else None,
                     "bookmaker": bk,
+                    "fair_yes": _fair_two_way(by_, bn) if bn else None,
                 }
 
         elif mkt_key == "totals":
@@ -956,29 +1060,40 @@ def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
                     elif o.get("name") == "Under" and p > by_line[ln]["under_odds"]:
                         by_line[ln]["under_odds"] = p
             out["totals"] = [
-                {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
+                {**{k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()},
+                 "fair_over": _fair_two_way(entry["over_odds"], entry["under_odds"])}
                 for entry in by_line.values()
                 if entry["over_odds"] and entry["under_odds"]
             ]
 
         elif mkt_key == "spreads":
+            # La línea se guarda SIEMPRE en referencia al local. Cada outcome trae su propio
+            # punto y el del visitante es el opuesto, así que hay que negarlo antes de
+            # agrupar: sin eso, el local de la línea -0.5 caía en el cubo -0.5 y su visitante
+            # en el +0.5, ninguno de los dos completaba par y el mercado salía vacío salvo
+            # cuando la casa cotizaba +X y -X a la vez. Mismo arreglo que ya se hizo en
+            # football_markets.parse_spreads_event.
             by_pt: dict[float, dict] = {}
             for e in entries:
                 bk = e["bookmaker"]
                 for idx, o in enumerate(e["outcomes"]):
-                    pt = round(float(o.get("point") or 0.0), 2)
+                    raw_pt = o.get("point")
+                    if raw_pt is None:
+                        continue
+                    name = o.get("name", "")
+                    is_home = (name == home) or (not name and idx % 2 == 0)
+                    pt = round(float(raw_pt) if is_home else -float(raw_pt), 2)
                     if pt not in by_pt:
                         by_pt[pt] = {"point": pt, "home_odds": 0.0, "away_odds": 0.0, "bookmaker": ""}
                     p = float(o.get("price") or 0)
-                    name = o.get("name", "")
-                    is_home = (name == home) or (not name and idx == 0)
                     if is_home and p > by_pt[pt]["home_odds"]:
                         by_pt[pt]["home_odds"] = p
                         by_pt[pt]["bookmaker"] = bk
                     elif not is_home and p > by_pt[pt]["away_odds"]:
                         by_pt[pt]["away_odds"] = p
             out["spreads"] = [
-                {k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()}
+                {**{k: round(v, 3) if isinstance(v, float) else v for k, v in entry.items()},
+                 "fair_home": _fair_two_way(entry["home_odds"], entry["away_odds"])}
                 for entry in by_pt.values()
                 if entry["home_odds"] and entry["away_odds"]
             ]
