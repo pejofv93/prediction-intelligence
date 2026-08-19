@@ -351,6 +351,18 @@ def main() -> None:
     if not args.no_reset_weights:
         reset_weights(db, now)
 
+    # La semana en curso queda a caballo entre las dos épocas: lo ya acumulado en su fila
+    # de accuracy_log salió del ELO corrupto y lo que venga después, no. Se marca para que
+    # el corte sea legible al leer el histórico.
+    week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+    actual_log = {d["_id"]: d for d in db.read_collection("accuracy_log")}
+    if week in actual_log:
+        fila = {k: v for k, v in actual_log[week].items() if k != "_id"}
+        fila["elo_rebuild_boundary"] = True
+        fila["elo_rebuild_at"] = now
+        db.write_docs("accuracy_log", {week: fila})
+        print(f"   accuracy_log/{week} marcado como frontera entre épocas")
+
     print("\nHecho. Comprobar con: python scripts/diagnose_elo_drift.py "
           f"(y contra la copia: --elo-collection {backup_col})")
 
