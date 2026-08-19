@@ -1473,8 +1473,10 @@ async def _bg_analyze() -> None:
                 + [_get_league_events(sk, "prefetch", _now)
                    for lg, sk in _ODDS_SPORT_MAP.items()
                    if lg in _active_leagues and _has_upcoming(lg, 48)]
-                # OddsPapi v4: fixtures de hoy (corners/bookings del día)
-                + [_fetch_fixtures_for_date(_today)]
+                # OddsPapi v4: un único rango semanal [hoy, hoy+7d]. La llamada extra
+                # a "solo hoy" era redundante — el rango semanal ya lo cubre y ahora
+                # _fetch_fixtures_for_date reutiliza cualquier rango que contenga el
+                # pedido, así que las búsquedas por partido salen de esta misma carga.
                 + [_fetch_fixtures_for_date(_today, to_date=_week_end)]
                 # The Odds API: baloncesto (NBA + Euroleague)
                 # ACB excluido: basketball_spain_acb no existe en The Odds API (HTTP 404)

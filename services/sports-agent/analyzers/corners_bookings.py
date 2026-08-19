@@ -75,7 +75,7 @@ _TOURNAMENT_IDS: dict[str, int] = {
     "WC26": 77,   # FIFA World Cup 2026
 }
 
-# Cache de fixtures v4 (TTL 24h, clave = fecha)
+# Cache de fixtures v4 (TTL 24h, clave = "{from}_{to}" en ISO)
 _FIXTURES_CACHE: dict[str, tuple[datetime, list]] = {}
 _CACHE_TTL = timedelta(hours=24)
 
@@ -94,6 +94,31 @@ _ODDSPAPI_BACKOFF_UNTIL: "datetime | None" = None
 
 # ── Fetch fixtures OddsPapi v4 ─────────────────────────────────────────────────
 
+def _cached_range_covering(start: date, end: date, now: datetime) -> list | None:
+    """
+    Devuelve los fixtures de una entrada de caché vigente cuyo rango contenga
+    [start, end], o None. Permite que la búsqueda de un día suelto reutilice el
+    rango semanal cargado por el pre-fetch en vez de disparar otro request.
+    Los llamantes filtran después por equipo (_find_fixture), así que un conjunto
+    más amplio es equivalente para ellos.
+    """
+    for key, (fetched_at, fixtures) in _FIXTURES_CACHE.items():
+        if (now - fetched_at) >= _CACHE_TTL:
+            continue
+        try:
+            c_start_s, c_end_s = key.split("_", 1)
+            c_start, c_end = date.fromisoformat(c_start_s), date.fromisoformat(c_end_s)
+        except ValueError:
+            continue
+        if c_start <= start and end <= c_end:
+            logger.debug(
+                "corners_bookings: fixtures %s→%s servidos del rango cacheado %s→%s",
+                start, end, c_start, c_end,
+            )
+            return fixtures
+    return None
+
+
 async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = None) -> list[dict]:
     """
     GET /v4/fixtures?sportId=10&from=DATE&to=DATE
@@ -109,6 +134,14 @@ async def _fetch_fixtures_for_date(target_date: date, to_date: date | None = Non
     cached = _FIXTURES_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _CACHE_TTL:
         return cached[1]
+
+    # Reutilizar un rango ya cacheado que CONTENGA el pedido. El pre-fetch de analyze
+    # carga [hoy, hoy+7d] de una vez (~4.100 fixtures), pero la búsqueda por partido pedía
+    # "{fecha}_{fecha}" — clave distinta, cache miss, y un request nuevo por cada partido.
+    # OddsPapi free son 250/mes: cada miss evitado cuenta.
+    covering = _cached_range_covering(target_date, end_date, now)
+    if covering is not None:
+        return covering
 
     global _ODDSPAPI_BACKOFF_UNTIL
     if _ODDSPAPI_BACKOFF_UNTIL is not None and now < _ODDSPAPI_BACKOFF_UNTIL:
