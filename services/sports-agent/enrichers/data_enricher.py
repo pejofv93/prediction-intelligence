@@ -23,6 +23,17 @@ from enrichers.poisson_model import fit_attack_defense, predict_match_probs, pre
 from enrichers.elo_rating import elo_win_probability, get_team_elo, expected_score, HOME_ADVANTAGE, DEFAULT_ELO
 
 
+# Versión del esquema de enriched_matches. Se sube cada vez que enrich_match empieza a
+# escribir campos nuevos: run_enrichment re-enriquece cualquier doc con una versión menor,
+# sin esperar a que caduque por la ventana de 6h.
+# Sin esto, un campo nuevo tarda horas en aparecer y mientras tanto el motor lee el doc
+# viejo sin darse cuenta — el gate AWAY_ROAD_FORM habría caído en la rama "sin muestra"
+# para todos los partidos ya enriquecidos, midiendo el fallback en vez del gate.
+#   1 → esquema previo
+#   2 → añade home_home_split / home_away_split / away_home_split / away_away_split
+_ENRICH_SCHEMA_VERSION: int = 2
+
+
 def _resolve_elo(team_id, team_name: str = "") -> float:
     """
     Lee ELO de team_elo/{team_id}. Para selecciones WC26 con ID sf_XXXX,
@@ -455,6 +466,7 @@ async def enrich_match(match: dict) -> dict:
         "odds_current": odds_current,
         "odds_movement": odds_movement,
         "data_quality": data_quality,
+        "schema_version": _ENRICH_SCHEMA_VERSION,
         "enriched_at": datetime.now(timezone.utc),
     }
 
@@ -519,6 +531,15 @@ async def run_enrichment() -> int:
             if not doc.exists:
                 return True
             d = doc.to_dict() or {}
+            # Esquema antiguo → re-enriquecer aunque el doc sea reciente (ver
+            # _ENRICH_SCHEMA_VERSION). Los docs anteriores a esta constante no la
+            # tienen, así que el default 0 los marca a todos.
+            if int(d.get("schema_version", 0) or 0) < _ENRICH_SCHEMA_VERSION:
+                logger.info(
+                    "_check_enriched(%s): schema_version=%s < %d → forzar re-enrich",
+                    match_id, d.get("schema_version"), _ENRICH_SCHEMA_VERSION,
+                )
+                return True
             enriched_at = d.get("enriched_at")
             if enriched_at is None:
                 return True
