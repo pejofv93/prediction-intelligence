@@ -616,6 +616,9 @@ async def _bg_collect() -> None:
         # --- 5b. Mundial 2026 (Sofascore — selecciones nacionales) ---
         await _collect_wc2026()
 
+        # --- 5c. CL/EL/ECL (allsportsapi2 — football-data free no las cubre) ---
+        await _collect_uefa()
+
         # --- 6. Clasificaciones domésticas (flags motivacionales para MOTIVATION_CHECK) ---
         await _collect_standings()
 
@@ -1130,6 +1133,121 @@ async def _collect_wc2026_from_odds_api() -> list[dict]:
 
     logger.info("collect.wc2026_odds: %d partidos WC desde Odds API", len(matches))
     return matches
+
+
+_UEFA_RESULTS_HOURS = {0, 12}   # horas UTC en las que se piden resultados (ver _collect_uefa)
+
+
+async def _collect_uefa() -> None:
+    """
+    Fixtures y resultados de CL/EL/ECL desde allsportsapi2 (espejo de Sofascore).
+
+    football-data.org en plan free devuelve CL con 0 partidos (las previas y el playoff no
+    entran), EL 403 y ECL 404, así que sin esto no entra ni un partido europeo en
+    upcoming_matches por mucho que odds-api.io tenga sus cuotas.
+
+    Regla de propiedad frente a football-data: si el partido YA está en upcoming_matches
+    por otra vía (desde septiembre football-data sí sirve la fase de liga de CL), gana esa
+    otra vía y aquí se descarta. La comparación es por huella (fecha, local, visitante) con
+    ids canónicos, no por match_id, que es distinto en cada fuente. Sin esto tendríamos el
+    mismo partido dos veces y dos señales — el patrón del duplicado WC/WC26.
+
+    Los clubes sin histórico sembrado no llegarán a emitir señal (DIAG_POISSON_GUARD los
+    corta por falta de datos): es lo esperado hasta que la siembra los cubra.
+
+    Cuota: ~6 requests por ciclo para fixtures; los resultados solo en _UEFA_RESULTS_HOURS
+    para no gastar 4 veces al día lo que cambia una vez.
+    """
+    from collectors.allsports_uefa import UEFA_TOURNAMENTS, fetch_tournament_matches
+    from collectors.team_identity import build_identity_map, match_fingerprint, resolve
+    from collectors.firestore_writer import save_upcoming_matches, update_finished_matches
+    from shared.firestore_client import col
+
+    # Mapa de identidad: nombre → id canónico de los equipos que ya existen
+    try:
+        team_docs = [d.to_dict() or {} for d in col("team_stats").stream()]
+        identity = build_identity_map(
+            [t for t in team_docs if (t.get("sport") or "football").lower() == "football"]
+        )
+    except Exception:
+        logger.error("collect.uefa: no se pudo construir el mapa de identidad", exc_info=True)
+        return
+
+    # Huellas de lo que ya hay en upcoming_matches (para la regla de propiedad)
+    huellas_existentes: set[str] = set()
+    try:
+        # Solo los pendientes: upcoming_matches ha llegado a acumular decenas de miles de
+        # docs y un stream() sin filtro es justo lo que hizo lento el analyze en su día.
+        pendientes = (
+            col("upcoming_matches")
+            .where(filter=FieldFilter("status", "in", ["SCHEDULED", "TIMED"]))
+            .stream()
+        )
+        for d in pendientes:
+            m = d.to_dict() or {}
+            if m.get("sport", "football") != "football" or m.get("source") == "allsports_uefa":
+                continue
+            h, a = m.get("home_team_id"), m.get("away_team_id")
+            if h and a:
+                fecha = str(m.get("match_date") or m.get("date") or "")
+                huellas_existentes.add(match_fingerprint(fecha, h, a))
+    except Exception:
+        logger.warning("collect.uefa: no se pudieron leer las huellas existentes", exc_info=True)
+
+    hora = datetime.now(timezone.utc).hour
+    proximos: list[dict] = []
+    jugados: list[dict] = []
+    for league in UEFA_TOURNAMENTS:
+        try:
+            proximos += await fetch_tournament_matches(league, "next")
+            if hora in _UEFA_RESULTS_HOURS:
+                jugados += await fetch_tournament_matches(league, "last")
+        except Exception:
+            logger.error("collect.uefa: error recogiendo %s", league, exc_info=True)
+
+    def _canonizar(m: dict) -> dict:
+        h = resolve(m["home_team"], m["home_source_id"], identity)
+        a = resolve(m["away_team"], m["away_source_id"], identity)
+        return {**m,
+                "home_team_id": int(h) if str(h).isdigit() else h,
+                "away_team_id": int(a) if str(a).isdigit() else a}
+
+    # --- Fixtures ---
+    nuevos, duplicados = [], 0
+    for m in (_canonizar(x) for x in proximos):
+        fp = match_fingerprint(m.get("match_date", ""), m["home_team_id"], m["away_team_id"])
+        if fp in huellas_existentes:
+            duplicados += 1
+            continue
+        huellas_existentes.add(fp)
+        nuevos.append(m)
+
+    if nuevos:
+        await save_upcoming_matches(nuevos)
+    logger.info(
+        "collect.uefa: %d partidos guardados en upcoming_matches (%d descartados por estar "
+        "ya cubiertos por otra fuente)", len(nuevos), duplicados,
+    )
+
+    # --- Resultados: match_results (graduación) + ELO ---
+    if not jugados:
+        return
+    terminados = [_canonizar(m) for m in jugados
+                  if m.get("goals_home") is not None and m.get("goals_away") is not None]
+    escritos = await update_finished_matches(terminados)
+    logger.info("collect.uefa: %d resultados escritos en match_results", escritos)
+
+    try:
+        from enrichers.elo_rating import update_all_elos
+        await update_all_elos(
+            [{"home_team_id": m["home_team_id"], "away_team_id": m["away_team_id"],
+              "result": ("HOME_WIN" if m["goals_home"] > m["goals_away"]
+                         else "AWAY_WIN" if m["goals_away"] > m["goals_home"] else "DRAW"),
+              "date": m.get("date", "")} for m in terminados],
+            source="collect_uefa",
+        )
+    except Exception:
+        logger.error("collect.uefa: error actualizando ELO", exc_info=True)
 
 
 async def _collect_standings() -> None:

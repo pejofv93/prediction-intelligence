@@ -127,6 +127,17 @@ class QuotaManager:
         if used >= limit:
             logger.warning("QuotaManager: %s cuota diaria agotada (%d/%d)", api_name, used, limit)
             return False
+        # Si la API informa de lo que le queda, esa cifra manda sobre el contador interno:
+        # el contador solo ve las llamadas hechas desde el servicio, y la misma clave la
+        # gastan tambien los scripts one-shot (siembra UEFA) y las sesiones manuales. Sin
+        # esto el colector cree tener presupuesto y quema el ciclo entero contra 429.
+        reportado = doc.get("remaining_reported")
+        if reportado is not None and int(reportado) <= 0:
+            logger.warning(
+                "QuotaManager: %s sin cuota segun la propia API (remaining=%s) — no se llama",
+                api_name, reportado,
+            )
+            return False
         return True
 
     def track_call(self, api_name: str, remaining: Optional[str | int] = None) -> None:
