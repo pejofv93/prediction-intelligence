@@ -1664,6 +1664,16 @@ async def _bg_analyze() -> None:
         except Exception as _diag_e:
             logger.warning("analyze[diag]: error leyendo oaio cache — %s", _diag_e)
 
+        # Volcar los bloqueos de filtro acumulados durante el análisis (escritura por
+        # lotes; ver value_bet_engine._flush_filter_blocks).
+        try:
+            from analyzers.value_bet_engine import _flush_filter_blocks
+            _blocks_written = _flush_filter_blocks()
+            if _blocks_written:
+                logger.info("analyze: %d bloqueos de filtro registrados", _blocks_written)
+        except Exception:
+            logger.warning("analyze: error volcando filter_blocks", exc_info=True)
+
         logger.info(
             "analyze: %d senales generadas de %d enriquecidos en %.1fs "
             "(%d partidos descartados por TIMING_GUARD: ya empezados/demasiado próximos)",

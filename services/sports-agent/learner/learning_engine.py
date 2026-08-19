@@ -1056,7 +1056,14 @@ async def run_daily_learning() -> None:
         len(processed_predictions), week_accuracy * 100,
     )
 
-    # --- 8. Evaluación semanal de filtros de bloqueo ---
+    # --- 8. Graduación diaria de bloqueos + evaluación semanal de filtros ---
+    # La graduación va a diario aunque la evaluación sea semanal: match_results se limpia
+    # a las 48h, así que un bloqueo que no se gradúa hoy puede quedarse sin veredicto.
+    try:
+        await grade_filter_blocks()
+    except Exception:
+        logger.error("run_daily_learning: error graduando bloqueos de filtro", exc_info=True)
+
     try:
         await _maybe_evaluate_filters(now)
     except Exception:
@@ -1151,6 +1158,139 @@ def _adjust_filter_params(filter_name: str, params: dict, direction: str) -> dic
     return new_params
 
 
+# Filtros con parámetros auto-ajustables. El resto de nombres que aparezcan en
+# filter_blocks se gradúan y se reportan igual, pero no se tocan automáticamente:
+# son cortes estructurales (EDGE_ZERO, BELOW_THRESHOLD…) cuyo umbral vive en otro sitio.
+_TUNABLE_FILTERS: set[str] = set(_DEFAULT_FILTER_PARAMS)
+
+# Margen tras el inicio del partido antes de intentar graduar un bloqueo.
+_FILTER_BLOCK_GRADE_DELAY = timedelta(hours=3)
+
+
+async def grade_filter_blocks(max_age_days: int = 30, max_docs: int = 3000) -> dict:
+    """
+    Gradúa los bloqueos registrados en filter_blocks: resuelve el resultado real del
+    partido y escribe en el propio doc si la señal bloqueada HABRÍA acertado.
+
+    Sin esto, filter_blocks es una lista de cortes sin veredicto: se sabe qué se dejó de
+    apostar pero no si dejarlo fue acierto o error, que es justo lo que hay que medir para
+    decidir si un filtro se queda, se relaja o se va.
+
+    Escribe en cada doc graduado:
+      result          — "HOME_WIN" | "AWAY_WIN" | "DRAW"
+      would_have_won  — True si el equipo bloqueado ganó (None si no se pudo emparejar)
+      graded_at       — timestamp
+
+    Devuelve un resumen {"pendientes", "graduados", "aciertos", "sin_resultado"}.
+    Nunca lanza.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_age_days)
+    summary = {"pendientes": 0, "graduados": 0, "aciertos": 0,
+               "sin_resultado": 0, "sin_emparejar": 0}
+
+    # Un solo filtro de Firestore + criba en memoria: combinar "blocked_at >=" con
+    # "result == None" exigiría un índice compuesto, y el despliegue de índices de este
+    # proyecto no es fiable. Orden ascendente para que el tope de max_docs se lleve los
+    # bloqueos más antiguos, que son justo los que ya tienen resultado.
+    try:
+        docs = list(
+            col("filter_blocks")
+            .where(filter=FieldFilter("blocked_at", ">=", cutoff))
+            .order_by("blocked_at")
+            .limit(max_docs)
+            .stream()
+        )
+    except Exception:
+        logger.error("grade_filter_blocks: error leyendo filter_blocks", exc_info=True)
+        return summary
+
+    # Solo partidos que ya deberían haber terminado. Sin match_date no se puede saber,
+    # así que se intenta igual: check_result devolverá None si aún no hay resultado.
+    pending: list[tuple[str, dict]] = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        if data.get("result") is not None:
+            continue  # ya graduado
+        md = data.get("match_date")
+        if isinstance(md, str):
+            try:
+                md = datetime.fromisoformat(md.replace("Z", "+00:00"))
+            except Exception:
+                md = None
+        if md is not None and hasattr(md, "tzinfo"):
+            if md.tzinfo is None:
+                md = md.replace(tzinfo=timezone.utc)
+            if md > now - _FILTER_BLOCK_GRADE_DELAY:
+                continue  # aún no ha terminado
+        pending.append((doc.id, data))
+
+    summary["pendientes"] = len(pending)
+    if not pending:
+        logger.info("grade_filter_blocks: nada que graduar")
+        return summary
+
+    mids = sorted({str(d.get("match_id", "")) for _, d in pending if d.get("match_id")})
+    sem = asyncio.Semaphore(8)
+
+    async def _bounded(mid: str):
+        async with sem:
+            try:
+                return await check_result(mid)
+            except Exception:
+                return None
+
+    raw = await asyncio.gather(*[_bounded(m) for m in mids], return_exceptions=True)
+    results_map = {m: (r if isinstance(r, str) else None) for m, r in zip(mids, raw)}
+
+    updates: list[tuple[str, dict]] = []
+    for doc_id, data in pending:
+        actual = results_map.get(str(data.get("match_id", "")))
+        if actual is None:
+            summary["sin_resultado"] += 1
+            continue
+        ttb  = _norm(str(data.get("team_to_back", "")))
+        home = _norm(str(data.get("home_team", "")))
+        away = _norm(str(data.get("away_team", "")))
+        if ttb and ttb == home:
+            won = actual == "HOME_WIN"
+        elif ttb and ttb == away:
+            won = actual == "AWAY_WIN"
+        else:
+            # Guardar el resultado igualmente: sirve para depurar el emparejamiento
+            # y evita re-consultar el mismo partido en cada pasada.
+            summary["sin_emparejar"] += 1
+            updates.append((doc_id, {"result": actual, "would_have_won": None,
+                                     "grade_error": "team_unmatched", "graded_at": now}))
+            continue
+        summary["graduados"] += 1
+        if won:
+            summary["aciertos"] += 1
+        updates.append((doc_id, {"result": actual, "would_have_won": won, "graded_at": now}))
+
+    # Escritura por lotes — mismo motivo que en el registro (value_bet_engine).
+    if updates:
+        try:
+            from shared.firestore_client import get_client
+            client = get_client()
+            for i in range(0, len(updates), 400):
+                batch = client.batch()
+                for doc_id, payload in updates[i:i + 400]:
+                    batch.set(col("filter_blocks").document(doc_id), payload, merge=True)
+                batch.commit()
+        except Exception:
+            logger.error("grade_filter_blocks: error escribiendo graduaciones", exc_info=True)
+
+    _wr = (summary["aciertos"] / summary["graduados"]) if summary["graduados"] else 0.0
+    logger.info(
+        "grade_filter_blocks: %d pendientes → %d graduados (%d aciertos, %.1f%% win rate), "
+        "%d sin resultado, %d sin emparejar",
+        summary["pendientes"], summary["graduados"], summary["aciertos"], _wr * 100,
+        summary["sin_resultado"], summary["sin_emparejar"],
+    )
+    return summary
+
+
 async def evaluate_filter_performance() -> None:
     """
     Evalúa el rendimiento de cada filtro de bloqueo en las últimas 4 semanas.
@@ -1172,7 +1312,16 @@ async def evaluate_filter_performance() -> None:
         cutoff_4w.date(),
     )
 
+    # --- 0. Graduar primero los bloqueos que ya tengan resultado ---
+    try:
+        await grade_filter_blocks()
+    except Exception:
+        logger.error("evaluate_filter_performance: error graduando bloqueos", exc_info=True)
+
     # --- 1. Leer todos los filter_blocks de las últimas 4 semanas ---
+    # Se agrupan TODOS los nombres de filtro presentes, no solo los auto-ajustables:
+    # los cortes estructurales (EDGE_ZERO, BELOW_THRESHOLD, LOW_POISSON…) no se tocan
+    # solos, pero su win rate es justo lo que hay que ver para decidirlos a mano.
     blocks_by_filter: dict[str, list[dict]] = {k: [] for k in _DEFAULT_FILTER_PARAMS}
     try:
         docs = list(
@@ -1187,34 +1336,46 @@ async def evaluate_filter_performance() -> None:
     for doc in docs:
         data = doc.to_dict()
         fname = data.get("filter_name")
-        if fname in blocks_by_filter:
-            blocks_by_filter[fname].append(data)
+        if not fname:
+            continue
+        blocks_by_filter.setdefault(fname, []).append(data)
 
     logger.info(
         "evaluate_filter_performance: bloques encontrados — %s",
-        {k: len(v) for k, v in blocks_by_filter.items()},
+        {k: len(v) for k, v in sorted(blocks_by_filter.items())},
     )
 
-    # --- 2. Paralelizar check_result para todos los match_ids únicos ---
-    all_match_ids: set[str] = set()
+    # --- 2. Resultados: usar la graduación ya escrita y consultar solo lo que falte ---
+    missing_ids: set[str] = set()
     for blocks in blocks_by_filter.values():
         for b in blocks:
-            if b.get("match_id"):
-                all_match_ids.add(str(b["match_id"]))
+            if b.get("result") is None and b.get("match_id"):
+                missing_ids.add(str(b["match_id"]))
 
-    if not all_match_ids:
-        logger.info("evaluate_filter_performance: sin match_ids — saltando")
+    results_map: dict[str, str | None] = {}
+    if missing_ids:
+        mid_list = sorted(missing_ids)
+        _sem = asyncio.Semaphore(8)
+
+        async def _bounded_check(mid: str):
+            async with _sem:
+                try:
+                    return await check_result(mid)
+                except Exception:
+                    return None
+
+        raw_results = await asyncio.gather(
+            *[_bounded_check(mid) for mid in mid_list],
+            return_exceptions=True,
+        )
+        results_map = {
+            mid: (r if isinstance(r, str) else None)
+            for mid, r in zip(mid_list, raw_results)
+        }
+
+    if not blocks_by_filter or not any(blocks_by_filter.values()):
+        logger.info("evaluate_filter_performance: sin bloqueos — saltando")
         return
-
-    mid_list = sorted(all_match_ids)
-    raw_results = await asyncio.gather(
-        *[check_result(mid) for mid in mid_list],
-        return_exceptions=True,
-    )
-    results_map: dict[str, str | None] = {
-        mid: (r if isinstance(r, str) else None)
-        for mid, r in zip(mid_list, raw_results)
-    }
 
     # --- 3. Cargar parámetros actuales (con fallback a defaults) ---
     current_params: dict = {k: dict(v) for k, v in _DEFAULT_FILTER_PARAMS.items()}
@@ -1234,37 +1395,47 @@ async def evaluate_filter_performance() -> None:
     filter_stats: dict[str, dict] = {}
     updated_params: dict[str, dict] = {k: dict(v) for k, v in current_params.items()}
 
-    for filter_name, blocks in blocks_by_filter.items():
+    for filter_name, blocks in sorted(blocks_by_filter.items()):
+        _tunable = filter_name in _TUNABLE_FILTERS
         if len(blocks) < 10:
             logger.info(
                 "evaluate_filter_performance: %s — %d bloques (min 10) — sin ajuste",
                 filter_name, len(blocks),
             )
             filter_stats[filter_name] = {
-                "blocks": len(blocks), "evaluated": 0,
+                "blocks": len(blocks), "evaluated": 0, "tunable": _tunable,
                 "win_rate": None, "action": "skip_insufficient_data",
             }
             continue
 
         wins = 0
         evaluated = 0
+        _pnl = 0.0          # unidades a stake plano 1u sobre las señales bloqueadas
         for b in blocks:
-            mid = str(b.get("match_id", ""))
-            actual = results_map.get(mid)
-            if actual is None:
-                continue
-            ttb = _norm(str(b.get("team_to_back", "")))
-            home = _norm(str(b.get("home_team", "")))
-            away = _norm(str(b.get("away_team", "")))
-            if ttb == home:
-                correct = actual == "HOME_WIN"
-            elif ttb == away:
-                correct = actual == "AWAY_WIN"
-            else:
-                continue  # equipo no identificable — omitir
+            # Preferir la graduación ya escrita por grade_filter_blocks.
+            correct = b.get("would_have_won")
+            if correct is None:
+                actual = b.get("result") or results_map.get(str(b.get("match_id", "")))
+                if actual is None:
+                    continue
+                ttb = _norm(str(b.get("team_to_back", "")))
+                home = _norm(str(b.get("home_team", "")))
+                away = _norm(str(b.get("away_team", "")))
+                if ttb == home:
+                    correct = actual == "HOME_WIN"
+                elif ttb == away:
+                    correct = actual == "AWAY_WIN"
+                else:
+                    continue  # equipo no identificable — omitir
             evaluated += 1
             if correct:
                 wins += 1
+                try:
+                    _pnl += float(b.get("odds") or 0.0) - 1.0
+                except (TypeError, ValueError):
+                    pass
+            else:
+                _pnl -= 1.0
 
         if evaluated < 5:
             logger.info(
@@ -1272,15 +1443,19 @@ async def evaluate_filter_performance() -> None:
                 filter_name, evaluated,
             )
             filter_stats[filter_name] = {
-                "blocks": len(blocks), "evaluated": evaluated,
+                "blocks": len(blocks), "evaluated": evaluated, "tunable": _tunable,
                 "win_rate": None, "action": "skip_no_results",
             }
             continue
 
         win_rate = wins / evaluated
+        roi = _pnl / evaluated
         action = "no_change"
 
-        if win_rate > 0.45:
+        if not _tunable:
+            # Corte estructural: se mide y se reporta, pero su umbral no vive aquí.
+            action = "report_only"
+        elif win_rate > 0.45:
             action = "relax"
             updated_params[filter_name] = _adjust_filter_params(
                 filter_name, current_params[filter_name], direction="relax"
@@ -1293,17 +1468,23 @@ async def evaluate_filter_performance() -> None:
 
         logger.info(
             "evaluate_filter_performance: %s — %d bloques, %d evaluados, "
-            "win_rate=%.1f%% → %s",
-            filter_name, len(blocks), evaluated, win_rate * 100, action,
+            "win_rate=%.1f%% roi=%+.1f%% (%+.2fu) → %s",
+            filter_name, len(blocks), evaluated, win_rate * 100,
+            roi * 100, _pnl, action,
         )
         filter_stats[filter_name] = {
             "blocks": len(blocks),
             "evaluated": evaluated,
             "wins": wins,
             "win_rate": round(win_rate, 4),
+            # ROI a stake plano de lo que se dejó de apostar: un filtro puede tener win
+            # rate alto y seguir siendo correcto si cortaba cuotas malas, y al revés.
+            "roi": round(roi, 4),
+            "pnl_units": round(_pnl, 2),
+            "tunable": _tunable,
             "action": action,
-            "params_before": current_params[filter_name],
-            "params_after": updated_params[filter_name],
+            "params_before": current_params.get(filter_name),
+            "params_after": updated_params.get(filter_name),
         }
 
     # --- 5. Guardar resultado en Firestore ---

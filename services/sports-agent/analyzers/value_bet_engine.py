@@ -146,6 +146,42 @@ def _get_filter_params() -> dict:
     return _FILTER_PARAMS_CACHE
 
 
+# Buffer de bloqueos pendientes de escribir. Firestore admite 500 operaciones por lote;
+# 400 deja margen y mantiene los lotes pequeños si el proceso muere a mitad de analyze.
+_FILTER_BLOCK_BUFFER: list[tuple[str, dict]] = []
+_FILTER_BLOCK_BATCH_SIZE: int = 400
+
+
+def _flush_filter_blocks() -> int:
+    """
+    Vuelca el buffer de bloqueos a Firestore en lotes. Devuelve cuántos se escribieron.
+    Nunca lanza: un fallo escribiendo diagnóstico no puede tumbar el análisis.
+    """
+    global _FILTER_BLOCK_BUFFER
+    if not _FILTER_BLOCK_BUFFER:
+        return 0
+    pending, _FILTER_BLOCK_BUFFER = _FILTER_BLOCK_BUFFER, []
+    written = 0
+    try:
+        from shared.firestore_client import get_client
+        client = get_client()
+        for i in range(0, len(pending), _FILTER_BLOCK_BATCH_SIZE):
+            chunk = pending[i:i + _FILTER_BLOCK_BATCH_SIZE]
+            batch = client.batch()
+            for doc_id, payload in chunk:
+                batch.set(col("filter_blocks").document(doc_id), payload)
+            batch.commit()
+            written += len(chunk)
+    except Exception:
+        logger.warning(
+            "_flush_filter_blocks: error escribiendo %d bloqueos — se descartan",
+            len(pending), exc_info=True,
+        )
+        return written
+    logger.info("_flush_filter_blocks: %d bloqueos registrados", written)
+    return written
+
+
 def _log_filter_block(
     filter_name: str,
     match_id: str,
@@ -156,28 +192,58 @@ def _log_filter_block(
     odds: float,
     confidence: float,
     extra: dict | None = None,
+    *,
+    side: str | None = None,
+    match_date=None,
+    ev: float | None = None,
+    edge: float | None = None,
+    prob: float | None = None,
 ) -> None:
-    """Registra un bloqueo de filtro en Firestore para evaluación posterior."""
+    """
+    Registra un bloqueo de filtro en Firestore para evaluación posterior
+    (learning_engine.grade_filter_blocks → evaluate_filter_performance).
+
+    side: "home" | "away" — desde el fix de ambos-lados, _eval_side puede bloquear los
+    dos lados del MISMO partido con el mismo filtro. Sin el lado en el doc_id el segundo
+    bloqueo pisaba al primero y la mitad de los cortes desaparecía de la muestra.
+
+    match_date / ev / edge / prob: necesarios para graduar el bloqueo después (saber si
+    el partido ya se jugó) y para saber CON QUÉ magnitud se cortó — el gate decide por
+    ev, no por edge, y sin guardar ambas no se puede reconstruir la decisión.
+    """
     try:
-        doc_id = f"{filter_name}_{match_id}"
+        doc_id = f"{filter_name}_{match_id}" + (f"_{side}" if side else "")
         payload: dict = {
             "filter_name": filter_name,
             "match_id": match_id,
             "team_to_back": team_to_back,
+            "side": side,
             "league": league,
             "home_team": home_team,
             "away_team": away_team,
+            "match_date": match_date,
+            "market_type": "h2h",
             "odds": round(float(odds), 4),
             "confidence": round(float(confidence), 4),
+            "ev": round(float(ev), 4) if ev is not None else None,
+            "edge": round(float(edge), 4) if edge is not None else None,
+            "calculated_prob": round(float(prob), 4) if prob is not None else None,
             "blocked_at": datetime.now(timezone.utc),
             "result": None,
+            "would_have_won": None,
         }
         if extra:
             payload.update(extra)
-        col("filter_blocks").document(doc_id).set(payload)
+        # Los cortes instrumentados incluyen los dos más frecuentes (BELOW_THRESHOLD,
+        # EDGE_ZERO): con ~600 partidos × 2 lados, un .set() suelto por bloqueo serían
+        # miles de escrituras síncronas dentro del bucle async de analyze. Se acumulan y
+        # se escriben por lotes (ver _flush_filter_blocks).
+        _FILTER_BLOCK_BUFFER.append((doc_id, payload))
+        if len(_FILTER_BLOCK_BUFFER) >= _FILTER_BLOCK_BATCH_SIZE:
+            _flush_filter_blocks()
     except Exception:
         logger.warning(
-            "_log_filter_block(%s, %s): error escribiendo Firestore",
+            "_log_filter_block(%s, %s): error preparando registro",
             filter_name, match_id,
         )
 
@@ -2341,6 +2407,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "HIGH_DRAW_PROB", match_id, _tob_guess, league,
                 str(home_team), str(away_team), 0.0, 0.0,
                 {"prob_draw": round(prob_draw_est, 4)},
+                match_date=match_date,
+                prob=max(prob_home_raw, prob_away_raw),
             )
             return []
 
@@ -2452,6 +2520,16 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             _prob_away, _impl_away, _prob_away / max(_impl_away, 0.01),
             home_team, away_team, league,
         )
+        _log_filter_block(
+            "DIVERGENCE_BOTH_SIDES", match_id,
+            str(home_team) if _prob_home >= _prob_away else str(away_team), league,
+            str(home_team), str(away_team),
+            home_odds if _prob_home >= _prob_away else away_odds, 0.0,
+            {"prob_home": round(_prob_home, 4), "implied_home": round(_impl_home, 4),
+             "prob_away": round(_prob_away, 4), "implied_away": round(_impl_away, 4)},
+            match_date=match_date,
+            prob=max(_prob_home, _prob_away),
+        )
         return []
     if _div_home or _div_away:
         logger.info(
@@ -2502,6 +2580,9 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             best_signals = result_away["signals"]
             best_odds = away_odds
             team_to_back = str(away_team)
+        # Etiqueta de lado — entra en el doc_id de filter_blocks para que los bloqueos
+        # de HOME y AWAY del mismo partido no se pisen entre sí.
+        _side_tag = "home" if pick_home else "away"
         # --- 5a-prev. RISING_ODDS_BLOCK ---
         # Cuota del equipo apostado subiendo >20% = el bookmaker tiene info negativa
         # (lesión, alineación débil, etc.). Una cuota en alza infla el edge aritméticamente
@@ -2520,6 +2601,14 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "generate_signal(%s): RISING_ODDS_BLOCK — cuota de %s subió %.1f%% "
                 "(bookmaker tiene info negativa) — descartado [%s vs %s | %s]",
                 match_id, team_to_back, _max_rising * 100, home_team, away_team, league,
+            )
+            _log_filter_block(
+                "RISING_ODDS_BLOCK", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
+                {"pct_change_6h": round(_om_pct6, 4), "pct_change_24h": round(_om_pct24, 4),
+                 "movement_direction": _om_dir},
+                side=_side_tag, match_date=match_date,
+                ev=best_ev, edge=best_edge, prob=best_prob,
             )
             return None
 
@@ -2562,7 +2651,9 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 _log_filter_block(
                     "UNDERDOG_EXTREME", match_id, team_to_back, league,
                     str(home_team), str(away_team), best_odds, best_confidence,
-                    {"rival_team": rival_team},
+                    {"rival_team": rival_team, "threshold": underdog_threshold},
+                    side=_side_tag, match_date=match_date,
+                    ev=best_ev, edge=best_edge, prob=best_prob,
                 )
                 return None
 
@@ -2593,8 +2684,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
         #      diferencia: por encima de eso la ventaja de campo no es marginal.
         # Sin muestra suficiente (< min_played partidos fuera) no hay factores que mirar:
         # se cae al único criterio disponible, confianza > no_data_conf (0.70). Es más
-        # permisivo que el 0.85 ciego anterior, pero se registra aparte (AWAY_ROAD_NO_DATA)
-        # para poder medir cuánto vale ese tramo por separado.
+        # permisivo que el 0.85 ciego anterior; el bloqueo se registra con reason="no_data"
+        # (log AWAY_ROAD_NO_DATA) para poder medir ese tramo por separado del resto.
         _lado = "HOME" if team_to_back == str(home_team) else "AWAY"
         _ctx_road_factors: dict = {}
         if _lado == "AWAY":
@@ -2624,6 +2715,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                         str(home_team), str(away_team), best_odds, best_confidence,
                         {"reason": "no_data", "road_played": _road_n,
                          "no_data_conf": _no_data_conf},
+                        side=_side_tag, match_date=match_date,
+                        ev=best_ev, edge=best_edge, prob=best_prob,
                     )
                     return None
                 logger.info(
@@ -2668,6 +2761,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                             "host_ppg": _host["ppg"] if _host else None,
                             "ppg_gap": round(_ppg_gap, 3) if _ppg_gap is not None else None,
                         },
+                        side=_side_tag, match_date=match_date,
+                        ev=best_ev, edge=best_edge, prob=best_prob,
                     )
                     return None
                 logger.info(
@@ -2691,6 +2786,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                     "generate_signal(%s): AWAY extremo descartado (odds=%.2f > 6.00) [%s vs %s | %s]",
                     match_id, best_odds, home_team, away_team, league,
                 )
+                _log_filter_block(
+                    "AWAY_EXTREME_ODDS", match_id, team_to_back, league,
+                    str(home_team), str(away_team), best_odds, best_confidence,
+                    {"threshold": 6.00},
+                    side=_side_tag, match_date=match_date,
+                    ev=best_ev, edge=best_edge, prob=best_prob,
+                )
                 return None
             # (eliminado) cap de confianza a 0.70 para AWAY con odds>4.00: penalizaba dos
             # veces lo mismo — la cuota alta ya entra en el gate y en los tiers de EV.
@@ -2708,6 +2810,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "[%s | %s] — los mercados alt siguen evaluándose",
                 match_id, _sel_form, _sel_poisson, team_to_back, league,
             )
+            _log_filter_block(
+                "LOW_FORM_POISSON", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
+                {"sel_form": round(_sel_form, 4), "sel_poisson": round(_sel_poisson, 4)},
+                side=_side_tag, match_date=match_date,
+                ev=best_ev, edge=best_edge, prob=best_prob,
+            )
             # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador, y la cola
             # de generate_signal ya los genera. _eval_side devuelve UN candidato 1X2 o None.
             return None
@@ -2721,6 +2830,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "generate_signal(%s): h2h descartado — poisson=%.2f < 0.35 (prob propia demasiado baja) "
                 "[%s | %s] — los mercados alt siguen evaluándose",
                 match_id, _sel_poisson, team_to_back, league,
+            )
+            _log_filter_block(
+                "LOW_POISSON", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
+                {"sel_poisson": round(_sel_poisson, 4), "threshold": 0.35},
+                side=_side_tag, match_date=match_date,
+                ev=best_ev, edge=best_edge, prob=best_prob,
             )
             # FIX 3: guard es para 1X2; BTTS/O-U/corners no dependen del ganador, y la cola
             # de generate_signal ya los genera. _eval_side devuelve UN candidato 1X2 o None.
@@ -2854,6 +2970,12 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "generate_signal(%s): descartado — edge=%.4f ≤ 0 [%s vs %s | %s]",
                 match_id, best_edge, home_team, away_team, league,
             )
+            _log_filter_block(
+                "EDGE_ZERO", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
+                side=_side_tag, match_date=match_date,
+                ev=best_ev, edge=best_edge, prob=best_prob,
+            )
             return None
 
         # --- 6. Umbrales de intensidad basados en EV (FIX 2 + EV) ---
@@ -2869,6 +2991,13 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "(ev=%.1f%% min_ev=%.1f%% conf=%.0f%% odds=%.2f) [%s vs %s | %s]",
                 match_id, best_ev * 100, _min_edge * 100, best_confidence * 100, best_odds,
                 home_team, away_team, league,
+            )
+            _log_filter_block(
+                "BELOW_THRESHOLD", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
+                {"min_ev": round(float(_min_edge), 4)},
+                side=_side_tag, match_date=match_date,
+                ev=best_ev, edge=best_edge, prob=best_prob,
             )
             return None
 
@@ -2887,6 +3016,19 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             _is_moderada  = best_ev > 0.12 and best_confidence > 0.65 and best_odds < 6.00
             _is_detectada = best_ev > _min_edge and best_confidence > 0.65 and best_odds < (6.00 if _is_intl_cup else 4.00)
             if not (_is_fuerte or _is_moderada or _is_detectada):
+                logger.info(
+                    "generate_signal(%s): descartado — data_quality=partial baja la confianza "
+                    "a %.2f y ya no cumple umbral (ev=%.3f odds=%.2f) [%s vs %s | %s]",
+                    match_id, best_confidence, best_ev, best_odds,
+                    home_team, away_team, league,
+                )
+                _log_filter_block(
+                    "QUALITY_PARTIAL_RECHECK", match_id, team_to_back, league,
+                    str(home_team), str(away_team), best_odds, best_confidence,
+                    {"min_ev": round(float(_min_edge), 4), "data_quality": data_quality},
+                    side=_side_tag, match_date=match_date,
+                    ev=best_ev, edge=best_edge, prob=best_prob,
+                )
                 return None
             _signal_intensity = "🔥" if _is_fuerte else ("✅" if _is_moderada else "📊")
 
@@ -2901,6 +3043,14 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 logger.info(
                     "generate_signal(%s): descartado por contexto externo (conf ajustada a %.3f) — %s",
                     match_id, best_confidence, external_ctx["notes"],
+                )
+                _log_filter_block(
+                    "EXTERNAL_CONTEXT", match_id, team_to_back, league,
+                    str(home_team), str(away_team), best_odds, best_confidence,
+                    {"confidence_adj": round(float(external_ctx["confidence_adj"]), 4),
+                     "notes": [str(n) for n in (external_ctx.get("notes") or [])[:3]]},
+                    side=_side_tag, match_date=match_date,
+                    ev=best_ev, edge=best_edge, prob=best_prob,
                 )
                 return None
 
@@ -2926,6 +3076,14 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 "(edge inflado de underdog; favoritos <%.2f exentos)",
                 match_id, team_to_back, best_odds,
                 best_prob, _implied, _divergence, _MAX_DIVERGENCE, _DIVERGENCE_UNDERDOG_ODDS,
+            )
+            _log_filter_block(
+                "SKIP_HIGH_DIVERGENCE", match_id, team_to_back, league,
+                str(home_team), str(away_team), best_odds, best_confidence,
+                {"divergence": round(_divergence, 4), "implied": round(_implied, 4),
+                 "max_divergence": _MAX_DIVERGENCE},
+                side=_side_tag, match_date=match_date,
+                ev=best_ev, edge=best_edge, prob=best_prob,
             )
             return None
 
@@ -3287,9 +3445,10 @@ _MARKET_EMOJI: dict[str, str] = {
 }
 
 
-def _intensity_emoji(edge: float) -> str:
-    if edge > 0.15: return "🔥"
-    if edge > 0.08: return "✅"
+def _intensity_emoji(ev: float) -> str:
+    """Tier de intensidad sobre EV — la misma magnitud con la que decide el gate."""
+    if ev > 0.15: return "🔥"
+    if ev > 0.08: return "✅"
     return "📊"
 
 
@@ -3297,7 +3456,10 @@ def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:
     """Construye el payload de alerta con los campos del formato Telegram."""
     signals = prediction.get("signals", prediction.get("factors", {}))
     market  = prediction.get("market_type", prediction.get("market", "h2h"))
-    edge    = float(prediction.get("edge", 0))
+    # Fallback de intensidad sobre EV, no sobre edge: es EV lo que compara el motor
+    # contra los tiers y contra SPORTS_ALERT_EDGE.
+    _ev_raw = prediction.get("ev")
+    _ev     = float(_ev_raw) if _ev_raw is not None else float(prediction.get("edge", 0))
     return {
         **prediction,
         "home_team":    prediction.get("home_team", ""),
@@ -3306,7 +3468,7 @@ def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:
         "sport":        prediction.get("sport", "football"),
         "market_type":  market,
         "market_emoji": prediction.get("market_emoji") or _MARKET_EMOJI.get(market, "📊"),
-        "intensity":    prediction.get("intensity") or _intensity_emoji(edge),
+        "intensity":    prediction.get("intensity") or _intensity_emoji(_ev),
         "poisson":      signals.get("poisson"),
         "elo":          signals.get("elo"),
         "form":         signals.get("form"),

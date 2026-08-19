@@ -185,19 +185,33 @@ def _format_alert_unified(prediction: dict) -> str:
     """Formato unificado para todos los deportes y mercados."""
     sport = prediction.get("sport", "football")
     market_type = prediction.get("market_type", "h2h")
+    # edge y EV son magnitudes distintas, y la alerta enseñaba solo edge mientras el motor
+    # decide por EV (tiers de intensidad, LEAGUE_MIN_EDGE, gate de envío). En cuotas altas
+    # divergen mucho: se veía un número que no era el que había filtrado. Ahora salen las
+    # dos, etiquetadas, y la intensidad se lee del propio motor.
     edge = float(prediction.get("edge") or 0)
+    _ev_raw = prediction.get("ev")
+    ev = float(_ev_raw) if _ev_raw is not None else edge
     conf = float(prediction.get("confidence") or 0)
     odds = float(prediction.get("odds") or 0)
     kelly = float(prediction.get("kelly_fraction") or 0)
     league_code = prediction.get("league", "?")
 
-    # Intensidad
-    if edge >= 0.15:
-        intensity = "🔥 SEÑAL FUERTE"
-    elif edge >= 0.10:
-        intensity = "✅ SEÑAL DETECTADA"
-    else:
-        intensity = "📊 SEÑAL MODERADA"
+    # Intensidad — el motor ya la calculó sobre EV (value_bet_engine, paso 6) y viaja en
+    # la señal. Si no viene (otros generadores), se reconstruye sobre EV, nunca sobre edge.
+    _INTENSITY_BY_EMOJI = {
+        "🔥": "🔥 SEÑAL FUERTE",
+        "✅": "✅ SEÑAL DETECTADA",
+        "📊": "📊 SEÑAL MODERADA",
+    }
+    intensity = _INTENSITY_BY_EMOJI.get(str(prediction.get("intensity") or ""))
+    if intensity is None:
+        if ev >= 0.15:
+            intensity = "🔥 SEÑAL FUERTE"
+        elif ev >= 0.10:
+            intensity = "✅ SEÑAL DETECTADA"
+        else:
+            intensity = "📊 SEÑAL MODERADA"
 
     sport_emoji = _SPORT_EMOJI.get(sport, "🏟")
     league_label = _escape_md(_LEAGUE_LABEL.get(league_code, league_code))
@@ -235,7 +249,8 @@ def _format_alert_unified(prediction: dict) -> str:
         f"{home} vs {away}\n"
         f"{_date_line}"
         f"Mercado: {market_label} | Selección: *{selection}*\n"
-        f"Cuota: *{odds:.2f}* | Edge: *+{edge:.1%}* | Confianza: *{conf:.0%}*\n"
+        f"Cuota: *{odds:.2f}* | Confianza: *{conf:.0%}*\n"
+        f"EV: *{ev:+.1%}* (es el que filtra) | Edge: *{edge:+.1%}*\n"
         f"Factores: {factors_text}"
         f"{om_line}\n"
         f"🧮 Kelly: {kelly:.1%} del bankroll"
@@ -244,8 +259,8 @@ def _format_alert_unified(prediction: dict) -> str:
     if ext_ctx:
         ctx_str = "; ".join(str(n) for n in ext_ctx[:3])
         msg += f"\n⚠️ Contexto: {ctx_str}"
-    if abs(edge) > 0.20:
-        msg += "\n⚠️ Edge alto — posible sobreestimación del modelo (edge no validado con histórico)."
+    if abs(ev) > 0.20:
+        msg += "\n⚠️ EV alto — posible sobreestimación del modelo (no validado con histórico)."
     msg += "\n\n⚠️ Apuesta responsablemente. No es asesoramiento financiero."
     return msg
 
