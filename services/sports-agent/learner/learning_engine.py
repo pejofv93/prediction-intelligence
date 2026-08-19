@@ -697,6 +697,58 @@ def _top_factor(signals: dict) -> str:
     return max(valid, key=lambda k: valid[k])
 
 
+# ── Épocas del modelo ────────────────────────────────────────────────────────
+# El ELO estuvo re-aplicando los mismos resultados en cada ciclo (K=32, sin registro de
+# lo ya aplicado) hasta 2026-08-19. Las señales emitidas antes de la reconstrucción salieron
+# de un ELO distorsionado: se gradúan igual (son historial real) pero NO alimentan pesos ni
+# accuracy, porque mezclarlas con las posteriores hace ilegible cualquier medición.
+#
+# El corte es temporal — created_at vs model_weights/elo_rebuild.rebuilt_at — en vez de un
+# campo nuevo en cada señal: las predicciones se escriben desde ~10 sitios distintos y todas
+# llevan created_at desde el principio, así que el corte es exacto y no necesita backfill.
+MODEL_EPOCH_PRE_ELO_REBUILD = 1
+MODEL_EPOCH_CURRENT = 2
+
+
+def _elo_rebuild_cutoff() -> datetime | None:
+    """Instante de la reconstrucción del ELO. None si aún no se ha ejecutado."""
+    try:
+        doc = col("model_weights").document("elo_rebuild").get()
+        if not doc.exists:
+            return None
+        ts = (doc.to_dict() or {}).get("rebuilt_at")
+        if ts is None:
+            return None
+        if isinstance(ts, str):
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = ts if isinstance(ts, datetime) else datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        logger.warning("_elo_rebuild_cutoff: no se pudo leer el marcador", exc_info=True)
+        return None
+
+
+def _prediction_epoch(prediction: dict, cutoff: datetime | None) -> int:
+    """Época de una predicción. Sin marcador o sin created_at → época actual."""
+    if cutoff is None:
+        return MODEL_EPOCH_CURRENT
+    created = prediction.get("created_at")
+    if created is None:
+        return MODEL_EPOCH_CURRENT
+    try:
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        if not isinstance(created, datetime):
+            created = created.replace(tzinfo=timezone.utc) if hasattr(created, "replace") else None
+        if created is None:
+            return MODEL_EPOCH_CURRENT
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except Exception:
+        return MODEL_EPOCH_CURRENT
+    return MODEL_EPOCH_PRE_ELO_REBUILD if created < cutoff else MODEL_EPOCH_CURRENT
+
+
 async def run_daily_learning() -> None:
     """
     Pipeline completo de aprendizaje diario:
@@ -744,6 +796,11 @@ async def run_daily_learning() -> None:
     weights_start = dict(current_weights)
 
     # --- 3. Procesar cada prediccion ---
+    # Corte de época: las señales anteriores a la reconstrucción del ELO se gradúan pero
+    # no cuentan para pesos ni accuracy (ver MODEL_EPOCH_PRE_ELO_REBUILD).
+    _epoch_cutoff = _elo_rebuild_cutoff()
+    legacy_predictions: list[dict] = []   # resueltas de la época anterior
+
     processed_predictions: list[dict] = []
     finished_matches_for_elo: list[dict] = []
     accuracy_by_league: dict[str, list[bool]] = {k: [] for k in _FOOTBALL_LEAGUES}
@@ -879,15 +936,22 @@ async def run_daily_learning() -> None:
                     logger.warning("run_daily_learning: error marcando push %s", match_id, exc_info=True)
                 continue
 
+            # Época de la señal: las anteriores a la reconstrucción del ELO se gradúan y
+            # se sincronizan con shadow_trades (son historial real y hay que cerrarlas),
+            # pero quedan fuera de pesos, accuracy y totales.
+            _epoch = _prediction_epoch(prediction, _epoch_cutoff)
+            _is_legacy = _epoch == MODEL_EPOCH_PRE_ELO_REBUILD
+
             # Identificar factor dominante
             factors = prediction.get("factors", {})
             top = _top_factor(factors)
 
             # Ajustar pesos para todas las predicciones resueltas — groq_ai incluida
             data_source = prediction.get("data_source", "statistical_model")
-            if data_source == "groq_ai":
-                groq_predictions_count += 1
-            current_weights = update_weights(error_type, top, current_weights, correct)
+            if not _is_legacy:
+                if data_source == "groq_ai":
+                    groq_predictions_count += 1
+                current_weights = update_weights(error_type, top, current_weights, correct)
 
             # Guardar para actualizacion de ELOs (partidos de futbol verificados)
             if league in _FOOTBALL_LEAGUES and prediction.get("home_team_id") and prediction.get("away_team_id"):
@@ -899,7 +963,7 @@ async def run_daily_learning() -> None:
                 })
 
             # Acumular accuracy por liga
-            if league in accuracy_by_league:
+            if league in accuracy_by_league and not _is_legacy:
                 accuracy_by_league[league].append(correct)
 
             # Acumular accuracy por tipo de mercado
@@ -907,35 +971,37 @@ async def run_daily_learning() -> None:
             # la cesta del 1X2 y envenenaba la única métrica que hoy es fiable. market_type
             # se guarda a veces en mayúsculas ("CORRECT_SCORE"), de ahí el .lower().
             # Sin mapeo → cadena vacía → el guard de abajo lo descarta.
-            market_type = str(prediction.get("market_type") or "h2h").lower()
-            bucket = _MARKET_BUCKETS.get(market_type, "")
-            if bucket in accuracy_by_market:
-                accuracy_by_market[bucket].append(correct)
-            elif not bucket:
-                logger.debug(
-                    "run_daily_learning: market_type '%s' sin bucket — fuera de accuracy_by_market",
-                    prediction.get("market_type"),
-                )
+            if not _is_legacy:
+                market_type = str(prediction.get("market_type") or "h2h").lower()
+                bucket = _MARKET_BUCKETS.get(market_type, "")
+                if bucket in accuracy_by_market:
+                    accuracy_by_market[bucket].append(correct)
+                elif not bucket:
+                    logger.debug(
+                        "run_daily_learning: market_type '%s' sin bucket — fuera de accuracy_by_market",
+                        prediction.get("market_type"),
+                    )
 
-            # Acumular accuracy por bucket de confianza (calibración)
-            _conf = float(prediction.get("confidence") or 0.0)
-            if 0.65 <= _conf < 0.70:
-                accuracy_by_confidence["65_70"].append(correct)
-            elif 0.70 <= _conf < 0.80:
-                accuracy_by_confidence["70_80"].append(correct)
-            elif 0.80 <= _conf < 0.90:
-                accuracy_by_confidence["80_90"].append(correct)
-            elif _conf >= 0.90:
-                accuracy_by_confidence["90_99"].append(correct)
+                # Acumular accuracy por bucket de confianza (calibración)
+                _conf = float(prediction.get("confidence") or 0.0)
+                if 0.65 <= _conf < 0.70:
+                    accuracy_by_confidence["65_70"].append(correct)
+                elif 0.70 <= _conf < 0.80:
+                    accuracy_by_confidence["70_80"].append(correct)
+                elif 0.80 <= _conf < 0.90:
+                    accuracy_by_confidence["80_90"].append(correct)
+                elif _conf >= 0.90:
+                    accuracy_by_confidence["90_99"].append(correct)
 
             # Actualizar el documento prediction en Firestore
-            processed_predictions.append({
+            (legacy_predictions if _is_legacy else processed_predictions).append({
                 "match_id": match_id,
                 # _firestore_doc_id garantiza el doc ID real aunque match_id difiera
                 "_firestore_doc_id": prediction.get("_firestore_doc_id") or match_id,
                 "result": actual_result,
                 "correct": correct,
                 "error_type": error_type,
+                "model_epoch": _epoch,
             })
 
             # Sincronizar shadow_trade — crea el doc si no existe, luego lo resuelve
@@ -1013,13 +1079,35 @@ async def run_daily_learning() -> None:
     if finished_matches_for_elo:
         try:
             from enrichers.elo_rating import update_all_elos
-            await update_all_elos(finished_matches_for_elo)
+            await update_all_elos(finished_matches_for_elo, source="learning")
             logger.info("run_daily_learning: ELOs actualizados para %d partidos", len(finished_matches_for_elo))
         except Exception:
             logger.error("run_daily_learning: error actualizando ELOs", exc_info=True)
 
+    if legacy_predictions:
+        logger.info(
+            "run_daily_learning: %d predicciones de la época anterior al rebuild de ELO "
+            "(model_epoch=%d) — graduadas pero fuera de pesos y accuracy",
+            len(legacy_predictions), MODEL_EPOCH_PRE_ELO_REBUILD,
+        )
+
     if not processed_predictions:
-        logger.info("run_daily_learning: ninguna prediccion pudo resolverse hoy")
+        logger.info("run_daily_learning: ninguna prediccion de la época actual pudo resolverse hoy")
+        # Las de la época anterior sí hay que persistirlas para que no queden pendientes.
+        for upd in legacy_predictions:
+            try:
+                col("predictions").document(
+                    str(upd.get("_firestore_doc_id") or upd["match_id"])
+                ).update({
+                    "result": upd["result"],
+                    "correct": upd["correct"],
+                    "error_type": upd["error_type"],
+                    "model_epoch": MODEL_EPOCH_PRE_ELO_REBUILD,
+                    "excluded_from_learning": True,
+                })
+            except Exception:
+                logger.error("run_daily_learning: error actualizando prediction legacy %s",
+                             upd.get("match_id"), exc_info=True)
         return
 
     # --- 5. Guardar model_weights actualizado ---
@@ -1132,12 +1220,17 @@ async def run_daily_learning() -> None:
         logger.error("run_daily_learning: error guardando accuracy_log", exc_info=True)
 
     # --- 7. Actualizar cada prediction con result/correct/error_type ---
-    for upd in processed_predictions:
+    # Las de la época anterior también se persisten: se gradúan igual, solo que marcadas
+    # con model_epoch=1 y excluidas de pesos/accuracy más arriba.
+    for upd in processed_predictions + legacy_predictions:
         payload = {
             "result": upd["result"],
             "correct": upd["correct"],
             "error_type": upd["error_type"],
+            "model_epoch": upd.get("model_epoch", MODEL_EPOCH_CURRENT),
         }
+        if upd.get("model_epoch") == MODEL_EPOCH_PRE_ELO_REBUILD:
+            payload["excluded_from_learning"] = True
         mid = upd["match_id"]
         # Usar el Firestore doc ID real (preservado en fetch_pending_results)
         # para evitar 404 si el campo match_id almacenado difiere del doc ID
