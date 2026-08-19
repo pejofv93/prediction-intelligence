@@ -18,10 +18,14 @@ on:
         default: 'false'
         type: choice
         options: ['false', 'true']
-      max_uefa_teams:
-        description: 'Clubes UEFA a sembrar en esta tanda (cuota 100/día)'
+      history_budget:
+        description: 'Requests de historial en esta tanda (cuota 100/día)'
         required: false
         default: '80'
+      history_pages:
+        description: 'Páginas de historial por club (30 partidos cada una)'
+        required: false
+        default: '1'
       no_uefa:
         description: 'Saltar la siembra UEFA (solo recomputo)'
         required: false
@@ -62,7 +66,8 @@ jobs:
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           FOOTBALL_RAPID_API_KEY: ${{ secrets.FOOTBALL_RAPID_API_KEY }}
         run: |
-          ARGS="--transport grpc --max-uefa-teams ${{ inputs.max_uefa_teams }}"
+          ARGS="--transport grpc --history-budget ${{ inputs.history_budget }}"
+          ARGS="$ARGS --history-pages ${{ inputs.history_pages }}"
           if [ "${{ inputs.confirm }}" = "true" ]; then ARGS="$ARGS --confirm"; fi
           if [ "${{ inputs.no_uefa }}" = "true" ]; then ARGS="$ARGS --no-uefa"; fi
           python scripts/rebuild_elo.py $ARGS

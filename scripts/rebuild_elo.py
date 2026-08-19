@@ -23,12 +23,16 @@ Fases:
   6. Marcador model_weights/elo_rebuild + reset de pesos a DEFAULT_WEIGHTS
 
 Uso:
-    python scripts/rebuild_elo.py                          # dry-run: no escribe nada
-    python scripts/rebuild_elo.py --confirm                # ejecuta
-    python scripts/rebuild_elo.py --confirm --max-uefa-teams 80
-    python scripts/rebuild_elo.py --no-uefa --confirm      # solo recomputo, sin siembra
+    python scripts/rebuild_elo.py                                   # dry-run
+    python scripts/rebuild_elo.py --confirm --skip-backup           # tanda siguiente
+    python scripts/rebuild_elo.py --confirm --history-pages 3       # objetivo: 90 partidos/club
+    python scripts/rebuild_elo.py --no-uefa --confirm               # solo recomputo
 
-Cuota allsportsapi2: 100 requests/día. El censo gasta ~8 y cada club 1.
+Cuota allsportsapi2: 100 requests/día. El censo gasta ~13, cada página de historial 1 y
+las clasificaciones 2 por liga. `--history-budget` topa el gasto de esta tanda y el
+progreso queda en api_meta/uefa_seed_progress, así que las tandas se reanudan solas.
+`--skip-backup` es obligatorio al repetir: si no, la copia buena se pisa con el estado ya
+reconstruido.
 Local: Python 3.11 con SSL_CERT_FILE al bundle de Norton (gRPC está bloqueado → --transport rest).
 """
 import argparse
@@ -56,6 +60,7 @@ from collectors.stats_processor import (                                # noqa: 
     build_results_list, calculate_form_score, calculate_home_away_split,
     calculate_xg_proxy, detect_streak,
 )
+from enrichers.elo_prior import build_priors                            # noqa: E402
 
 K_FACTOR, HOME_ADVANTAGE, DEFAULT_ELO = 32, 100, 1500.0
 _RAW_MATCHES_KEEP = 20        # igual que firestore_writer
@@ -126,30 +131,107 @@ def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[i
     return matches, clubs
 
 
-def fetch_club_histories(key: str, clubs: dict[int, str], limit: int) -> list[dict]:
-    """1 request por club: 30 partidos con marcador (todas las competiciones)."""
+SEED_PROGRESS_DOC = "uefa_seed_progress"
+
+
+def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
+                         objetivo_paginas: int, presupuesto: int) -> tuple[list[dict], dict]:
+    """
+    Historial por club, paginado y reanudable.
+
+    Cada página son 30 partidos: la 0 llega a marzo, la 1 y la 2 cubren la temporada
+    pasada. Con 60-90 partidos el ELO ya tiene con qué separar fuerza de forma, que es
+    justo lo que no consigue con los 10-14 de football-data.
+
+    `progreso` ({source_id: {"name", "pages"}}) hace la siembra reanudable entre tandas:
+    la cuota son 100 requests/día y cubrir ~250 clubes a 3 páginas son varios días. Se
+    atiende primero a quien menos páginas tiene, y dentro de eso a los clubes que juegan
+    competición europea ahora.
+    """
     out: list[dict] = []
-    for i, (sf_id, name) in enumerate(sorted(clubs.items())):
-        if i >= limit:
-            print(f"  tope de {limit} clubes alcanzado — quedan {len(clubs) - limit} "
-                  f"para la siguiente tanda (cuota diaria)")
+    prog = {str(k): dict(v) for k, v in (progreso or {}).items()}
+    for sid, nombre in candidatos.items():
+        prog.setdefault(str(sid), {"name": nombre, "pages": 0})
+        prog[str(sid)]["name"] = prog[str(sid)].get("name") or nombre
+
+    en_competicion = {str(s) for s in candidatos}
+    pendientes = [
+        (int(v.get("pages", 0)), 0 if sid in en_competicion else 1, v.get("name", ""), sid)
+        for sid, v in prog.items() if int(v.get("pages", 0)) < objetivo_paginas
+    ]
+    pendientes.sort()
+
+    gastados = 0
+    for paginas_hechas, _, nombre, sid in pendientes:
+        if gastados >= presupuesto:
             break
+        pagina = paginas_hechas
         try:
-            data, headers = _uefa_get(f"/api/team/{sf_id}/matches/previous/0", key)
+            data, headers = _uefa_get(f"/api/team/{sid}/matches/previous/{pagina}", key)
         except Exception as e:
-            print(f"  {name}: ERROR {type(e).__name__} {e}")
+            print(f"  {nombre}: ERROR {type(e).__name__} {e}")
             continue
+        gastados += 1
         events = data.get("events", [])
         for e in events:
             m = parse_event(e, "OTHER")
             if m:
+                torneo = ((e.get("tournament") or {}).get("uniqueTournament") or {})
+                m["tournament"] = torneo.get("name", "")
                 out.append(m)
+        prog[str(sid)]["pages"] = pagina + 1
+        prog[str(sid)]["name"] = nombre
+
         rem = headers.get("X-RateLimit-Requests-Remaining", "?")
-        print(f"  [{i + 1}/{min(limit, len(clubs))}] {name}: {len(events)} partidos "
+        print(f"  [{gastados}/{presupuesto}] {nombre} pág.{pagina}: {len(events)} partidos "
               f"(cuota {rem})")
+        if not data.get("hasNextPage"):
+            prog[str(sid)]["pages"] = objetivo_paginas   # no hay más historial que pedir
         if str(rem).isdigit() and int(rem) <= 2:
-            print("  cuota diaria casi agotada — se corta la siembra aquí")
+            print("  cuota diaria agotada — la siembra continúa en la próxima tanda")
             break
+
+    restantes = sum(1 for v in prog.values() if int(v.get("pages", 0)) < objetivo_paginas)
+    print(f"  {gastados} requests gastados · {restantes} clubes aún por debajo de "
+          f"{objetivo_paginas} páginas")
+    return out, prog
+
+
+def fetch_previous_standings(key: str, codigos: list[str]) -> dict[str, list[dict]]:
+    """
+    Clasificación FINAL de la temporada pasada por liga doméstica, para el ajuste por
+    puesto del prior. 2 requests por liga (descubrir temporada + tabla) y una sola vez:
+    es lo que separa a Liverpool de Burnley dentro del mismo escalón de país.
+    """
+    from collectors.sofascore_client import TOURNAMENTS
+    por_codigo = {v.get("league_code"): v["id"] for v in TOURNAMENTS.values()
+                  if v.get("sport") == "football" and v.get("league_code")}
+    anterior = _season_label(datetime.now(timezone.utc).replace(year=datetime.now().year - 1))
+
+    out: dict[str, list[dict]] = {}
+    for code in codigos:
+        tid = por_codigo.get(code)
+        if not tid:
+            continue
+        try:
+            data, _ = _uefa_get(f"/api/tournament/{tid}/seasons", key)
+            temporadas = data.get("seasons", [])
+            sid = next((t["id"] for t in temporadas if str(t.get("year")) == anterior), None)
+            if not sid:
+                print(f"  {code}: sin temporada {anterior} en /seasons — sin ajuste por puesto")
+                continue
+            tabla, _ = _uefa_get(
+                f"/api/tournament/{tid}/season/{sid}/standings/total", key)
+            grupos = tabla.get("standings") or []
+            filas = grupos[0].get("rows", []) if grupos else []
+            out[code] = [
+                {"team_name": (f.get("team") or {}).get("name", ""),
+                 "position": f.get("position")}
+                for f in filas if (f.get("team") or {}).get("name")
+            ]
+            print(f"  {code}: clasificación {anterior} → {len(out[code])} equipos")
+        except Exception as e:
+            print(f"  {code}: sin clasificación ({type(e).__name__})")
     return out
 
 
@@ -176,8 +258,13 @@ def main() -> None:
     ap.add_argument("--account", default=os.environ.get("GCLOUD_ACCOUNT"))
     ap.add_argument("--no-uefa", action="store_true", help="solo recomputo, sin siembra UEFA")
     ap.add_argument("--leagues", default="CL,EL,ECL")
-    ap.add_argument("--max-uefa-teams", type=int, default=80,
-                    help="tope de clubes por ejecución (cuota 100/día)")
+    ap.add_argument("--history-budget", type=int, default=80,
+                    help="requests de historial por ejecución (cuota 100/día)")
+    ap.add_argument("--history-pages", type=int, default=1,
+                    help="páginas de historial por club (30 partidos cada una): "
+                         "1 llega a marzo, 3 cubren la temporada pasada")
+    ap.add_argument("--no-priors", action="store_true",
+                    help="arrancar todos en 1500 en vez de usar el prior por fuerza de liga")
     ap.add_argument("--skip-backup", action="store_true")
     ap.add_argument("--no-reset-weights", action="store_true",
                     help="no resetear model_weights a DEFAULT_WEIGHTS")
@@ -219,8 +306,48 @@ def main() -> None:
         leagues = [x.strip().upper() for x in args.leagues.split(",") if x.strip()]
         print("\n   siembra UEFA:")
         uefa_matches, clubs = fetch_uefa_matches(key, leagues)
-        club_hist = fetch_club_histories(key, clubs, args.max_uefa_teams)
+        progreso_previo = next(
+            (d for d in db.read_collection("api_meta") if d["_id"] == SEED_PROGRESS_DOC), {})
+        progreso_previo = {k: v for k, v in progreso_previo.items() if k != "_id"}
+        club_hist, progreso = fetch_club_histories(
+            key, clubs, progreso_previo, args.history_pages, args.history_budget)
         print(f"   histórico de clubes: {len(club_hist)} partidos brutos")
+
+    # ── 1b. Prior de fuerza: de dónde arranca cada club ──────────────────────
+    # Torneo habitual de cada club sembrado: es la única pista de procedencia que tenemos
+    # para los que entran por la vía UEFA (su doc no trae liga, su historial sí dice dónde
+    # juega la mayoría del tiempo).
+    torneos: dict[str, dict[str, int]] = {}
+    for m in club_hist:
+        t = m.get("tournament") or ""
+        if not t:
+            continue
+        for nombre, sid in ((m["home_team"], m["home_source_id"]),
+                            (m["away_team"], m["away_source_id"])):
+            cid = resolve(nombre, sid, imap)
+            torneos.setdefault(cid, {})[t] = torneos.setdefault(cid, {}).get(t, 0) + 1
+
+    clubs_info: dict[str, dict] = {}
+    for t in team_stats:
+        cid = str(t.get("team_id"))
+        clubs_info[cid] = {"league": t.get("league", ""), "name": t.get("team_name", ""),
+                           "tournament": ""}
+    for cid, cuenta in torneos.items():
+        info = clubs_info.setdefault(cid, {"league": "", "name": names.get(cid, "")})
+        info["tournament"] = max(cuenta.items(), key=lambda kv: kv[1])[0]
+
+    priors: dict[str, float] = {}
+    if not args.no_priors:
+        standings = {}
+        if not args.no_uefa:
+            print("\n   clasificaciones de la temporada pasada (ajuste del prior):")
+            standings = fetch_previous_standings(
+                key, ["PL", "PD", "SA", "BL1", "FL1", "BSA"])
+        priors = build_priors(clubs_info, standings)
+
+    def arranque(team_id: str) -> float:
+        """ELO de partida: prior de fuerza si lo hay, 1500 si no."""
+        return priors.get(team_id, DEFAULT_ELO)
 
     # ── 2. Universo de partidos, deduplicado por huella ──────────────────────
     universe: dict[str, dict] = {}
@@ -278,7 +405,7 @@ def main() -> None:
     orden = sorted(universe.items(), key=lambda kv: str(kv[1]["date"]))
     for fp, m in orden:
         h, a = m["h"], m["a"]
-        eh, ea = elo.get(h, DEFAULT_ELO), elo.get(a, DEFAULT_ELO)
+        eh, ea = elo.get(h, arranque(h)), elo.get(a, arranque(a))
         score = 1.0 if m["gh"] > m["ga"] else 0.0 if m["ga"] > m["gh"] else 0.5
         p = expected(eh + HOME_ADVANTAGE, ea)
         elo[h] = (eh + HOME_ADVANTAGE) + K_FACTOR * (score - p) - HOME_ADVANTAGE
@@ -312,16 +439,31 @@ def main() -> None:
     elo_docs = {
         tid: {"team_id": typed(tid), "team_name": names.get(tid, f"Team_{tid}"),
               "elo": round(v, 1), "elo_history": history.get(tid, [])[-_ELO_HISTORY_KEEP:],
-              "updated_at": now, "rebuilt_at": now}
+              "updated_at": now, "rebuilt_at": now,
+              # prior y nº de partidos quedan visibles en el doc: sin ellos no hay forma de
+              # saber si un ELO lo sostiene el historial o casi todo el punto de partida.
+              "prior": priors.get(tid), "matches_applied": len(history.get(tid, []))}
         for tid, v in elo.items()
     }
-    huerfanos = [d["_id"] for d in old_elo if d["_id"] not in elo_docs]
+    # Huérfanos: docs de team_elo que el recomputo no regenera. Se borran para que no
+    # sobreviva ningún valor de la época corrupta... salvo los que NO son nuestros: las
+    # selecciones que init_wc26_national_elos siembra con puntos FIFA (source=fifa_init,
+    # ids wc_*) nunca están en el universo de partidos de clubes y borrarlas dejaría al
+    # Mundial sin ELO hasta el siguiente collect.
+    huerfanos = [
+        d["_id"] for d in old_elo
+        if d["_id"] not in elo_docs
+        and d.get("source") != "fifa_init"
+        and not str(d["_id"]).startswith("wc_")
+    ]
+    protegidos = len(old_elo) - len(elo_docs.keys() & {d["_id"] for d in old_elo}) - len(huerfanos)
 
     # team_stats de los clubes UEFA sembrados
     stats_docs = build_uefa_team_stats(club_hist, clubs, team_stats, imap, names)
 
     print(f"\n4. team_elo: {len(elo_docs)} docs a escribir, {len(huerfanos)} huérfanos "
-          f"(equipos sin partidos en el universo) a borrar")
+          f"(equipos sin partidos en el universo) a borrar, {protegidos} preservados "
+          f"(selecciones con ELO FIFA)")
     print(f"5. elo_applied: {len(applied)} huellas")
     print(f"6. team_stats sembrados desde UEFA: {len(stats_docs)}")
 
@@ -336,6 +478,8 @@ def main() -> None:
                                   for fp, meta in applied.items()})
     if stats_docs:
         db.write_docs("team_stats", stats_docs)
+    if not args.no_uefa:
+        db.write_docs("api_meta", {SEED_PROGRESS_DOC: {**progreso, "updated_at": now}})
 
     # Marcador de época: learning_engine lo usa para separar las señales emitidas con el
     # ELO corrupto de las posteriores.
