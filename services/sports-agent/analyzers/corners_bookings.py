@@ -27,9 +27,8 @@ import httpx
 import numpy as np
 from scipy.stats import poisson as _poisson
 
-from shared.config import ODDSPAPI_KEY, ODDS_API_KEY, SPORTS_MIN_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_ALERT_EDGE
+from shared.config import ODDSPAPI_KEY, SPORTS_MIN_EDGE, SPORTS_MIN_CONFIDENCE, SPORTS_ALERT_EDGE
 from shared.api_quota_manager import quota
-from shared import odds_cache
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +77,6 @@ _TOURNAMENT_IDS: dict[str, int] = {
 # Cache de fixtures v4 (TTL 24h, clave = "{from}_{to}" en ISO)
 _FIXTURES_CACHE: dict[str, tuple[datetime, list]] = {}
 _CACHE_TTL = timedelta(hours=24)
-
-# Cache de eventos The Odds API con corners (TTL 1h, clave = sport_key)
-_THEODDS_CORNERS_CACHE: dict[str, tuple[datetime, list]] = {}
-_THEODDS_CACHE_TTL = timedelta(hours=1)
-_THEODDS_BASE = "https://api.the-odds-api.com/v4/sports"
 
 # ROBUSTEZ 429 OddsPapi: backoff corto en memoria. Un 429 de OddsPapi suele ser rate-limit
 # (por segundo/minuto), NO agotamiento de la cuota mensual (250). Antes se escribía
@@ -448,294 +442,22 @@ async def _load_team_stats(league: str, home_team: str, away_team: str) -> tuple
     return home_stats, away_stats
 
 
-# ── The Odds API — alternate_totals_corners ───────────────────────────────────
-
-async def _fetch_corners_theodds(sport_key: str) -> list[dict]:
-    """
-    GET /v4/sports/{sport_key}/odds?markets=alternate_totals_corners
-    Devuelve eventos con líneas O/U corners. Cache 1h por sport_key.
-    422 = mercado no disponible en el plan actual → cachea vacío para no reintentar.
-    """
-    if not ODDS_API_KEY:
-        return []
-
-    now = datetime.now(timezone.utc)
-    cached = _THEODDS_CORNERS_CACHE.get(sport_key)
-    if cached and (now - cached[0]) < _THEODDS_CACHE_TTL:
-        return cached[1]
-    # FIX B: caché Firestore (TTL 1h) — sobrevive cold starts (min-instances=0).
-    fs = odds_cache.get_events("corners", sport_key, _THEODDS_CACHE_TTL.total_seconds())
-    if fs is not None:
-        _THEODDS_CORNERS_CACHE[sport_key] = (now, fs)
-        return fs
-    # FIX C: gate de cuota — The Odds API cobra créditos; no llamar si está agotada.
-    if not quota.can_call_monthly("the_odds_api"):
-        logger.warning("corners_bookings[theodds]: The Odds API cuota agotada — saltando %s", sport_key)
-        return []
-
-    markets = "alternate_totals_corners"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "eu",
-        "markets": markets,
-        "oddsFormat": "decimal",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(f"{_THEODDS_BASE}/{sport_key}/odds", params=params)
-
-        if resp.status_code == 422:
-            # Mercado no disponible en el plan free para este sport_key
-            logger.info(
-                "corners_bookings[theodds]: corners no disponible (422) para %s", sport_key
-            )
-            _THEODDS_CORNERS_CACHE[sport_key] = (now, [])
-            return []
-        if resp.status_code == 401:
-            logger.warning("corners_bookings[theodds]: ODDS_API_KEY inválida (401)")
-            return []
-        if resp.status_code == 429:
-            # Cuota real agotada → marcar remaining=0 para que el gate corte el resto.
-            quota.track_monthly("the_odds_api", remaining=0)
-            logger.warning("corners_bookings[theodds]: The Odds API 429 (cuota agotada)")
-            return []
-        if resp.status_code != 200:
-            logger.warning(
-                "corners_bookings[theodds]: HTTP %d para %s", resp.status_code, sport_key
-            )
-            return []
-
-        events = resp.json()
-        if not isinstance(events, list):
-            events = []
-        # FIX C: reportar consumo (header = fuente de verdad; alternate_totals_corners = 1 market).
-        _remaining = resp.headers.get("x-requests-remaining")
-        quota.track_monthly("the_odds_api", remaining=_remaining, cost=len(markets.split(",")))
-        _THEODDS_CORNERS_CACHE[sport_key] = (now, events)
-        odds_cache.set_events("corners", sport_key, events)
-        logger.info(
-            "corners_bookings[theodds]: %d eventos corners para %s (req restantes=%s)",
-            len(events), sport_key, _remaining or "?",
-        )
-        return events
-
-    except Exception:
-        logger.error("corners_bookings[theodds]: error fetch %s", sport_key, exc_info=True)
-        return []
-
-
-def _find_event_theodds(events: list[dict], home_team: str, away_team: str) -> dict | None:
-    """Busca evento en The Odds API por nombre de equipo (fuzzy, sin acentos)."""
-    import unicodedata
-    import re
-
-    def _n(s: str) -> str:
-        s = unicodedata.normalize("NFD", str(s)).encode("ascii", "ignore").decode()
-        return re.sub(r"[^a-z0-9]", "", s.lower())
-
-    h, a = _n(home_team), _n(away_team)
-    for ev in events:
-        eh = _n(ev.get("home_team", ""))
-        ea = _n(ev.get("away_team", ""))
-        if (h in eh or eh in h) and (a in ea or ea in a):
-            return ev
-    return None
-
-
-def _extract_corners_ou_consensus(event: dict) -> dict | None:
-    """
-    Calcula la probabilidad implícita (vig removida) de O/U corners para la línea
-    con más cobertura de bookmakers.
-    Devuelve {line, over_prob, under_prob, n_bookmakers} o None si < 2 bookmakers.
-    """
-    line_raw: dict[float, list[tuple[float, float]]] = {}
-
-    for bkm in event.get("bookmakers", []):
-        for mkt in bkm.get("markets", []):
-            if mkt.get("key") != "alternate_totals_corners":
-                continue
-            by_line: dict[float, dict[str, float]] = {}
-            for o in mkt.get("outcomes", []):
-                pt = o.get("point")
-                if pt is None:
-                    continue
-                ln = round(float(pt), 1)
-                pr = float(o.get("price", 0))
-                if pr <= 1.0:
-                    continue
-                nm = o.get("name", "")
-                by_line.setdefault(ln, {})
-                if nm == "Over":
-                    by_line[ln]["over"] = pr
-                elif nm == "Under":
-                    by_line[ln]["under"] = pr
-            for ln, pp in by_line.items():
-                if "over" not in pp or "under" not in pp:
-                    continue
-                oi = 1.0 / pp["over"]
-                ui = 1.0 / pp["under"]
-                tot = oi + ui
-                if tot > 0:
-                    line_raw.setdefault(ln, []).append((oi / tot, ui / tot))
-
-    if not line_raw:
-        return None
-
-    best_line = max(line_raw, key=lambda l: len(line_raw[l]))
-    entries = line_raw[best_line]
-    if len(entries) < 2:
-        return None
-
-    return {
-        "line":         best_line,
-        "over_prob":    round(float(np.median([e[0] for e in entries])), 4),
-        "under_prob":   round(float(np.median([e[1] for e in entries])), 4),
-        "n_bookmakers": len(entries),
-    }
-
-
-def _best_ou_odds(event: dict, name: str, line: float) -> dict | None:
-    """Mejor cuota disponible para 'Over' o 'Under' en una línea corners concreta."""
-    best_price = 0.0
-    best_bk = ""
-    for bkm in event.get("bookmakers", []):
-        for mkt in bkm.get("markets", []):
-            if mkt.get("key") != "alternate_totals_corners":
-                continue
-            for o in mkt.get("outcomes", []):
-                if o.get("name") != name:
-                    continue
-                if abs(float(o.get("point", -1)) - line) > 0.01:
-                    continue
-                p = float(o.get("price", 0))
-                if p > best_price:
-                    best_price = p
-                    best_bk = bkm.get("key", "")
-    return {"price": best_price, "bookmaker": best_bk} if best_price > 1.0 else None
-
-
-def _poisson_ou_corners(lambda_total: float, line: float) -> tuple[float, float]:
-    """
-    P(corners_total > line) y P(corners_total <= line) via Poisson.
-    line es X.5 → floor(line) como umbral entero.
-    """
-    line_int = int(line)
-    prob_le = float(_poisson.cdf(line_int, max(0.1, lambda_total)))
-    return round(1.0 - prob_le, 4), round(prob_le, 4)
-
-
-async def _generate_theodds_corners_signals(
-    home_team: str,
-    away_team: str,
-    league: str,
-    match_date: date,
-    home_stats: dict,
-    away_stats: dict,
-) -> list[dict]:
-    """
-    Señales de O/U corners via The Odds API alternate_totals_corners.
-    Con stats FDCO (home_corners, away_corners): calcula edge vs línea del libro.
-    Sin FDCO: line-shopping básico (fair price vig-removida vs mejor cuota).
-    """
-    try:
-        from analyzers.value_bet_engine import _ODDS_SPORT_MAP
-    except ImportError:
-        return []
-
-    sport_key = _ODDS_SPORT_MAP.get(league, "")
-    if not sport_key.startswith("soccer_"):
-        return []
-
-    events = await _fetch_corners_theodds(sport_key)
-    if not events:
-        return []
-
-    event = _find_event_theodds(events, home_team, away_team)
-    if not event:
-        logger.debug(
-            "corners_bookings[theodds]: evento no encontrado %s vs %s", home_team, away_team
-        )
-        return []
-
-    consensus = _extract_corners_ou_consensus(event)
-    if not consensus or consensus["n_bookmakers"] < 2:
-        return []
-
-    line     = consensus["line"]
-    over_mkt = consensus["over_prob"]
-    under_mkt = consensus["under_prob"]
-    n_bk     = consensus["n_bookmakers"]
-    signals: list[dict] = []
-
-    if home_stats and away_stats:
-        lh = float(home_stats.get("home_corners", 5.0))
-        la = float(away_stats.get("away_corners", 4.0))
-        over_m, under_m = _poisson_ou_corners(lh + la, line)
-
-        for sel, model_p, mkt_p, ou_name in (
-            (f"Over {line}",  over_m,  over_mkt,  "Over"),
-            (f"Under {line}", under_m, under_mkt, "Under"),
-        ):
-            edge = round(model_p - mkt_p, 4)
-            if edge < SPORTS_MIN_EDGE:
-                continue
-            conf = round(
-                max(0.0, min(0.99, 1.0 - abs(model_p - mkt_p) * 2, n_bk / 10)), 4
-            )
-            if conf < SPORTS_MIN_CONFIDENCE:
-                continue
-            best = _best_ou_odds(event, ou_name, line)
-            if not best:
-                continue
-            signals.append({
-                "market":        "corners_ou",
-                "selection":     sel,
-                "odds":          round(best["price"], 3),
-                "bookmaker":     best["bookmaker"],
-                "edge":          edge,
-                "confidence":    conf,
-                "poisson_prob":  model_p,
-                "consensus_prob": mkt_p,
-                "n_bookmakers":  n_bk,
-                "match_date":    str(match_date),
-                "home_team":     home_team,
-                "away_team":     away_team,
-                "source":        "corners_theodds_v1",
-            })
-            logger.info(
-                "corners_bookings[theodds]: SEAL corners_ou %s edge=%.3f conf=%.3f",
-                sel, edge, conf,
-            )
-    else:
-        # Sin FDCO: line-shopping (fair price vig-removida vs mejor cuota disponible)
-        for sel, ou_name, mkt_p in (
-            (f"Over {line}",  "Over",  over_mkt),
-            (f"Under {line}", "Under", under_mkt),
-        ):
-            best = _best_ou_odds(event, ou_name, line)
-            if not best or best["price"] <= 1.05 or mkt_p <= 0:
-                continue
-            edge = round(1.0 / mkt_p - best["price"], 4)
-            conf = round(min(0.99, n_bk / 10), 4)
-            if edge >= SPORTS_MIN_EDGE and conf >= SPORTS_MIN_CONFIDENCE:
-                signals.append({
-                    "market":        "corners_ou",
-                    "selection":     sel,
-                    "odds":          round(best["price"], 3),
-                    "bookmaker":     best["bookmaker"],
-                    "edge":          edge,
-                    "confidence":    conf,
-                    "poisson_prob":  None,
-                    "consensus_prob": mkt_p,
-                    "n_bookmakers":  n_bk,
-                    "match_date":    str(match_date),
-                    "home_team":     home_team,
-                    "away_team":     away_team,
-                    "source":        "corners_theodds_v1",
-                })
-
-    return signals
-
+# ── The Odds API — alternate_totals_corners: RUTA ELIMINADA ──────────────────
+# El mercado alternate_totals_corners NO existe en el endpoint bulk
+# /v4/sports/{key}/odds (verificado 2026-08-19: 422 en soccer_spain_la_liga,
+# soccer_italy_serie_a y soccer_france_ligue_one). Solo responde en el endpoint
+# per-event /v4/sports/{key}/events/{id}/odds, a 1 crédito por partido.
+#
+# No se migra a per-event porque es redundante: odds-api.io ya devuelve
+# 'Corners Totals', 'Corner Handicap', 'Total Corners' y 'Alternative Corners'
+# de Bet365 y Unibet en el mismo /odds/multi que ya pedimos, sin coste de
+# créditos. Gastar los 500/mes de The Odds API en córners nos dejaba sin margen
+# para lo único que odds-api.io no da: las cuotas LAY del escáner matched.
+#
+# La ruta además era activamente dañina: la rama 404 no cacheaba, así que cada
+# partido de PL relanzaba el request y se veían 10-15 llamadas fallidas por
+# analyze (soccer_england_premier_league ni siquiera es una clave válida — es
+# soccer_epl; ver el arreglo de _ODDS_SPORT_MAP en este mismo commit).
 
 # ── Generación de señales ─────────────────────────────────────────────────────
 
@@ -775,18 +497,16 @@ async def generate_corners_signals(
     """
     Punto de entrada principal. Devuelve señales de corners y tarjetas.
 
-    Fuente A: OddsPapi v4 (corners/bookings 1X2 + mercados binarios).
-              Requiere ODDSPAPI_KEY con cuota mensual disponible.
-    Fuente B: The Odds API (alternate_totals_corners O/U).
-              Requiere ODDS_API_KEY. Actúa siempre, independientemente de A.
-    Las stats FDCO de Firestore se cargan una vez y se comparten entre ambas fuentes.
+    Fuente única: OddsPapi v4 (corners/bookings 1X2 + mercados binarios).
+    Requiere ODDSPAPI_KEY con cuota mensual disponible.
+    Las stats FDCO de Firestore alimentan el modelo Poisson de córners.
     """
     if match_date is None:
         match_date = date.today()
 
     signals: list[dict] = []
 
-    # Cargar stats FDCO una sola vez (compartidas entre fuente A y B)
+    # Cargar stats FDCO
     home_stats, away_stats = await _load_team_stats(league, home_team, away_team)
     has_fdco = bool(home_stats and away_stats)
 
@@ -912,18 +632,9 @@ async def generate_corners_signals(
             home_team, away_team,
         )
 
-    # ── Fuente B: The Odds API (alternate_totals_corners O/U) ─────────────────
-    # Se ejecuta siempre: complementa OddsPapi (mercados distintos) o actúa
-    # como alternativa cuando OddsPapi está agotado o el fixture no existe.
-    theodds_signals = await _generate_theodds_corners_signals(
-        home_team, away_team, league, match_date, home_stats, away_stats
-    )
-    if theodds_signals:
-        signals.extend(theodds_signals)
-        logger.info(
-            "corners_bookings[theodds]: %d señales O/U para %s vs %s",
-            len(theodds_signals), home_team, away_team,
-        )
+    # (Fuente B — The Odds API alternate_totals_corners — eliminada: el mercado no
+    #  existe en el endpoint bulk y en per-event cuesta 1 crédito por partido para
+    #  datos que odds-api.io ya sirve gratis. Ver la nota de sección más arriba.)
 
     return signals
 
@@ -964,7 +675,7 @@ async def save_signals(signals: list[dict], match_id: str, enriched_match: dict 
             },
             "signals":         {},
             "data_source":     "corners_bookings_v1",
-            "odds_source":     "theoddsapi" if sig.get("source", "").startswith("corners_theodds") else "oddspapi_v4",
+            "odds_source":     "oddspapi_v4",
             "weights_version": 0,
             "created_at":      now,
             "result":          None,

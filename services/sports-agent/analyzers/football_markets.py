@@ -916,7 +916,6 @@ def _make_prediction(base: dict, market_type: str, selection: str,
 
 async def generate_football_extra_signals(
     enriched_match: dict,
-    cached_events: list,
     home_team: str,
     away_team: str,
     league: str,
@@ -926,8 +925,23 @@ async def generate_football_extra_signals(
 ) -> list[dict]:
     """
     Genera señales para BTTS, Double Chance, Asian Handicap y Over 3.5.
-    cached_events: lista de eventos ya obtenida de The Odds API para esta liga.
     Usa WriteBatch: todos los writes de este partido en 1 sola RPC (de N×300ms → 1×300ms).
+
+    RUTA THE ODDS API ELIMINADA (2026-08-19). Esta función recibía cached_events de
+    _LEAGUE_ODDS_CACHE y parseaba de ahí btts/spreads/totals, pero desde el arreglo de
+    créditos (_get_league_events pide markets="h2h" y nada más) esa caché solo contiene
+    h2h: parse_btts_event / parse_spreads_event / _parse_totals_event devolvían None en
+    el 100% de los partidos. En producción se veía "BTTS — op=False toa=False af=False"
+    en todos los fixtures, sin una sola excepción.
+
+    Descartado revivirla con markets="h2h,btts,spreads,totals": The Odds API cobra
+    créditos = mercados × regiones, o sea 4 por llamada de liga. Con ~6 ligas activas y
+    caché de 24h son ~720 créditos/mes sobre un presupuesto de 500 — y esos 500 hacen
+    falta para las cuotas LAY del escáner matched, lo único que odds-api.io no da.
+    odds-api.io ya devuelve BTTS, totales, hándicap y córners en el mismo /odds/multi
+    que ya pedimos, sin coste.
+
+    Queda API-Football como única fuente de cuotas de esta ruta.
     """
     from analyzers.value_bet_engine import (
         _teams_match, _send_telegram_alert, _build_alert_payload
@@ -964,32 +978,6 @@ async def generate_football_extra_signals(
     _batch = _fs.batch()
     _pending_alerts: list[dict] = []  # alerts se envían después del commit
 
-    # Encontrar evento en caché
-    event = None
-    for ev in cached_events:
-        if _teams_match(home_team, ev.get("home_team", "")) and \
-           _teams_match(away_team, ev.get("away_team", "")):
-            event = ev
-            break
-
-    if event:
-        _ev_bkm_keys = [bk.get("key", "") for bk in event.get("bookmakers", [])]
-        _ev_mkt_keys: set[str] = set()
-        for _bk in event.get("bookmakers", []):
-            for _mkt in _bk.get("markets", []):
-                _ev_mkt_keys.add(_mkt.get("key", ""))
-        logger.info(
-            "football_markets(%s): evento The Odds API encontrado (%s vs %s) — "
-            "bookmakers=%s markets=%s",
-            match_id, event.get("home_team", "?"), event.get("away_team", "?"),
-            _ev_bkm_keys, sorted(_ev_mkt_keys),
-        )
-    else:
-        logger.info(
-            "football_markets(%s): evento NO encontrado en %d cached_events The Odds API "
-            "para %s vs %s",
-            match_id, len(cached_events), home_team, away_team,
-        )
 
     base = {
         "match_id": match_id,
@@ -1012,10 +1000,16 @@ async def generate_football_extra_signals(
     op_btts_ev = None
     op_ah_ev   = None
 
-    # Fallback: API-Football solo si The Odds API tampoco tiene el evento.
-    # Con btts añadido al markets_param TOA ya cubre BTTS/AH/T2.5 para WC26 y ligas EU.
+    # Evento de The Odds API: siempre None desde que se eliminó esa ruta (ver docstring).
+    # Se conserva la variable para que los bloques que la consultaban (hándicap europeo,
+    # goles por equipo) queden inertes sin borrar su lógica de modelo, que vuelve a servir
+    # en cuanto se les conecte una fuente de cuotas.
+    event = None
+
+    # API-Football: única fuente de cuotas de esta ruta (antes solo actuaba de reserva
+    # cuando The Odds API no traía el evento; ahora nunca lo trae).
     _af_odds: dict | None = None
-    if not event:
+    if True:
         try:
             from collectors.apifootball_odds import get_match_odds as _get_af_odds
             from datetime import date as _date_t
@@ -1039,7 +1033,7 @@ async def generate_football_extra_signals(
         from collectors.apifootball_odds import parse_btts as _af_parse_btts
         _af_btts = _af_parse_btts(_af_odds)
     _btts_op = _parse_oddspapi_btts(op_btts_ev) if op_btts_ev else None
-    _btts_toa = parse_btts_event(event) if event else None
+    _btts_toa = None  # ruta The Odds API eliminada
     logger.info(
         "football_markets(%s): BTTS — op=%s toa=%s af=%s",
         match_id, bool(_btts_op), bool(_btts_toa), bool(_af_btts),
@@ -1082,7 +1076,7 @@ async def generate_football_extra_signals(
         if _af_odds:
             from collectors.apifootball_odds import parse_double_chance as _af_parse_dc
             _af_dc = _af_parse_dc(_af_odds)
-        dc_odds = (parse_double_chance_event(event) if event else None) or _af_dc
+        dc_odds = _af_dc  # ruta The Odds API eliminada
         dc_probs = calc_double_chance(float(hw), float(d), float(aw))
         if dc_odds and dc_probs:
             for sel in ("1X", "X2", "12"):
@@ -1112,7 +1106,7 @@ async def generate_football_extra_signals(
     # ── ASIAN HANDICAP ────────────────────────────────────────────────────────
     # OddsPapi primario; The Odds API spreads como fallback; API-Football como tercer fallback
     op_ah_lines  = _parse_oddspapi_ah(op_ah_ev) if op_ah_ev else []
-    the_odds_ah  = parse_spreads_event(event) if event else []
+    the_odds_ah  = []  # ruta The Odds API eliminada
     _af_ah_lines: list = []
     if _af_odds and not op_ah_lines and not the_odds_ah:
         from collectors.apifootball_odds import parse_asian_handicap as _af_parse_ah
@@ -1189,7 +1183,7 @@ async def generate_football_extra_signals(
     t25 = calc_totals_n(home_xg, away_xg, 2.5)
     if t25:
         from analyzers.value_bet_engine import _parse_totals_event
-        _t25_toa  = _parse_totals_event(event, line=2.5) if event else None
+        _t25_toa  = None  # ruta The Odds API eliminada
         _op_t25   = _parse_oddspapi_totals(op_ev, line=2.5) if op_ev and not _t25_toa else None
         _af_t25   = None
         if _af_odds and not _t25_toa and not _op_t25:
@@ -1234,7 +1228,7 @@ async def generate_football_extra_signals(
 
     # ── DRAW NO BET ───────────────────────────────────────────────────────────
     if hw is not None and aw is not None:
-        dnb_odds = parse_draw_no_bet_event(event) if event else None
+        dnb_odds = None  # ruta The Odds API eliminada
         if dnb_odds:
             dnb_probs = calc_draw_no_bet(float(hw), float(aw))
             for sel, prob, odds_key in [

@@ -254,7 +254,9 @@ _THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 # The Odds API — sport key map (league field in Firestore → The Odds API sport key)
 _ODDS_SPORT_MAP: dict[str, str] = {
     # ── Fútbol masculino Europa (football-data.org) ────────────────────────────
-    "PL":  "soccer_england_premier_league",
+    # "soccer_england_premier_league" NO existe en The Odds API (devuelve 404 en todos
+    # los endpoints). La clave real es "soccer_epl" — verificada contra /v4/sports.
+    "PL":  "soccer_epl",
     "PD":  "soccer_spain_la_liga",
     "BL1": "soccer_germany_bundesliga",
     "SA":  "soccer_italy_serie_a",
@@ -331,7 +333,7 @@ _ODDS_SPORT_MAP: dict[str, str] = {
 _FOOTBALL_SPORT_KEYS: frozenset[str] = frozenset({
     # ── Ligas domésticas masculinas (modelo Poisson+ELO completo) ─────────────
     # Europa
-    "soccer_england_premier_league",
+    "soccer_epl",
     "soccer_spain_la_liga",
     "soccer_germany_bundesliga",
     "soccer_italy_serie_a",
@@ -375,7 +377,7 @@ _FOOTBALL_TOTALS_LINE: float = 2.5
 # Ligas que reciben markets=h2h,h2h_h1 en The Odds API (top ligas con máxima cobertura)
 _TOP_LEAGUES_H2H_H1: frozenset[str] = frozenset({
     "soccer_uefa_champs_league",
-    "soccer_england_premier_league",
+    "soccer_epl",
     "soccer_spain_la_liga",
     "soccer_italy_serie_a",
     "soccer_germany_bundesliga",
@@ -2149,15 +2151,12 @@ async def _alt_football_signals_only(
 
     try:
         from analyzers.football_markets import generate_football_extra_signals
-        cached = _LEAGUE_ODDS_CACHE.get(sport_key)
-        cached_events = cached[1] if cached else []
-        if cached_events:
-            extra2 = await generate_football_extra_signals(
-                enriched_match, cached_events,
-                home_team, away_team,
-                league, match_id, match_date, weights_version,
-            )
-            results.extend(extra2)
+        extra2 = await generate_football_extra_signals(
+            enriched_match,
+            home_team, away_team,
+            league, match_id, match_date, weights_version,
+        )
+        results.extend(extra2)
     except Exception:
         logger.error(
             "_alt_football_signals_only(%s): error football_markets extra", match_id, exc_info=True
@@ -2446,14 +2445,11 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             _alt_noh2h: list[dict] = []
             try:
                 from analyzers.football_markets import generate_football_extra_signals
-                _cl_noh2h = _LEAGUE_ODDS_CACHE.get(_sport_key_noh2h)
-                _ce_noh2h = _cl_noh2h[1] if _cl_noh2h else []
-                if _ce_noh2h:
-                    _alt_noh2h = await generate_football_extra_signals(
-                        enriched_match, _ce_noh2h,
-                        str(home_team), str(away_team),
-                        league, match_id, match_date, weights_version,
-                    )
+                _alt_noh2h = await generate_football_extra_signals(
+                    enriched_match,
+                    str(home_team), str(away_team),
+                    league, match_id, match_date, weights_version,
+                )
             except Exception:
                 logger.error(
                     "generate_signal(%s): error en alt markets (sin cuotas h2h)", match_id, exc_info=True
@@ -3322,10 +3318,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     if sport_key in _FOOTBALL_SPORT_KEYS:
         try:
             from analyzers.football_markets import generate_football_extra_signals
-            cached_league = _LEAGUE_ODDS_CACHE.get(sport_key)
-            cached_events = cached_league[1] if cached_league else []
             extra = await generate_football_extra_signals(
-                enriched_match, cached_events,
+                enriched_match,
                 str(home_team), str(away_team),
                 league, match_id, match_date, weights_version,
             )
