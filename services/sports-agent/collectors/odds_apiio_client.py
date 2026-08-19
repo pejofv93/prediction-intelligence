@@ -61,9 +61,101 @@ _TTL_RATE_LIMIT = timedelta(seconds=3600) # 429 — esperar reset completo de 1h
 _SOCCER_ALL_KEY  = "__soccer_all__"
 _SOCCER_ALL_LOCK = asyncio.Lock()
 
+# ── Emparejamiento de ligas de FÚTBOL: por slug exacto, no por subcadena ──────
+# odds-api.io identifica cada competición con league.slug = "<pais>-<liga>[-<matiz>]",
+# p. ej. "spain-laliga", "italy-serie-a", "turkiye-super-lig",
+# "international-clubs-uefa-champions-league-playoff-round".
+#
+# El emparejamiento anterior buscaba palabras sueltas dentro de un blob de texto
+# (_build_comp_string) y producía falsos positivos masivos, medidos contra el catálogo
+# real (5.000 eventos / 578 ligas, verificado 2026-08-19):
+#   "primera division" → Venezuela, Guatemala, Perú, Chile, Uruguay, El Salvador (PD: 128
+#                        candidatos de los que solo 13 eran LaLiga)
+#   "bundesliga"       → Austria + amateur femenino alemán (BL1: 25 candidatos, 0 reales)
+#   "super-lig"        → Serbia y Moldavia "super-liga" (TU1: 20 candidatos, 9 reales)
+#   "uel"              → "venEZUELa" (latente: hoy no estalla solo porque el keyword
+#                        específico de EL acierta primero)
+# Además "spain-primera-division", "germany-bundesliga" y "turkey-super-lig" no existen:
+# los slugs reales son "spain-laliga", "germany-bundesliga" (sin jornada aún) y
+# "turkiye-super-lig" (Turkiye, no Turkey).
+#
+# Regla nueva: slug == prefijo, o slug empieza por "prefijo-" y ningún token del resto
+# está en _SLUG_VARIANT_DENY. Así "spain-laliga" entra y "spain-laliga-2" no;
+# "…uefa-champions-league-playoff-round" entra y "…-women-qualification" no.
+_LEAGUE_SLUG_PREFIXES: dict[str, tuple[str, ...]] = {
+    "PL":   ("england-premier-league",),
+    "PD":   ("spain-laliga",),
+    "BL1":  ("germany-bundesliga",),
+    "SA":   ("italy-serie-a",),
+    "FL1":  ("france-ligue-1",),
+    "CL":   ("international-clubs-uefa-champions-league",),
+    "EL":   ("international-clubs-uefa-europa-league",),
+    "ECL":  ("international-clubs-uefa-conference-league",),
+    "TU1":  ("turkiye-super-lig",),
+    "CLI":  ("international-clubs-conmebol-libertadores",),
+    "CSUD": ("international-clubs-conmebol-sudamericana",),
+    "BSA":  ("brazil-brasileiro-serie-a",),
+    "ARG":  ("argentina-primera-lpf",),
+    # Mundial: SIN VERIFICAR — el torneo no está en el catálogo fuera de temporada.
+    # Si el slug real difiere, el emparejamiento devuelve 0 y se registra un WARNING
+    # (mismo resultado que hoy, pero explícito en vez de silencioso).
+    "WC":   ("international-fifa-world-cup",),
+    "WC26": ("international-fifa-world-cup",),
+}
+
+# Tokens que marcan una VARIANTE de la competición (otra categoría, otra división u otro
+# torneo que comparte prefijo) y que por tanto la descartan.
+_SLUG_VARIANT_DENY: frozenset[str] = frozenset({
+    "women", "w", "femenina", "youth", "amateur", "reserve", "reserves",
+    "u17", "u18", "u19", "u20", "u21", "u23",
+    "cup", "trophy", "friendly", "friendlies", "supercup", "playoffs",
+    "2", "3", "4", "5", "b", "c", "d", "ii", "iii", "a2", "a3",
+})
+
+
+def _event_slug(ev: dict) -> str:
+    """Slug de competición del evento en minúsculas ('' si no viene)."""
+    lg = ev.get("league")
+    if isinstance(lg, dict):
+        for k in ("slug", "key"):
+            v = lg.get(k)
+            if isinstance(v, str) and v:
+                return v.lower().strip()
+    v = ev.get("leagueSlug") or ev.get("competitionSlug")
+    return v.lower().strip() if isinstance(v, str) else ""
+
+
+def _event_matches_league(ev: dict, league: str) -> bool:
+    """
+    True si el evento pertenece EXACTAMENTE a la liga interna dada.
+    Fútbol: prefijo de slug + denylist de variantes (ver _LEAGUE_SLUG_PREFIXES).
+    Otros deportes (baloncesto/tenis): se mantiene el emparejamiento por keywords,
+    que ahí sí discrimina bien porque los nombres son únicos ("usa - nba", "spain - acb").
+    """
+    prefixes = _LEAGUE_SLUG_PREFIXES.get(league)
+    if prefixes:
+        slug = _event_slug(ev)
+        if not slug:
+            return False
+        for base in prefixes:
+            if slug == base:
+                return True
+            if slug.startswith(base + "-"):
+                rest = slug[len(base) + 1:].split("-")
+                if not (set(rest) & _SLUG_VARIANT_DENY):
+                    return True
+        return False
+    keywords = _LEAGUE_KEYWORDS.get(league, [])
+    if not keywords:
+        return False
+    comp = _build_comp_string(ev)
+    return any(kw in comp for kw in keywords)
+
+
 # Mapeo liga interna → palabras clave del nombre de competición en odds-api.io.
-# Múltiples variantes por liga porque odds-api.io puede cambiar slugs entre versiones.
-# Se compara contra _build_comp_string(ev) que agrega slug+name+competition+tournament+…
+# SOLO se usa ya para baloncesto y tenis (ver _event_matches_league). Las entradas de
+# fútbol se conservan como documentación de los nombres vistos históricamente, pero el
+# emparejamiento de fútbol pasa por _LEAGUE_SLUG_PREFIXES.
 _LEAGUE_KEYWORDS: dict[str, list[str]] = {
     "PL":   ["england-premier-league", "premier-league", "premier league",
              "english premier", "epl"],
@@ -235,10 +327,20 @@ _ODDS_MAP_LOCK = asyncio.Lock()
 # Ligas prioritarias para pre-fetch de odds. CLI/BSA/ARG quedan fuera:
 # sus bookmakers (1xbet, etc.) no cubren CONMEBOL sistemáticamente
 # y se sirven con Poisson sintético cuando faltan odds reales.
-_PRIORITY_LEAGUES_FOR_ODDS: frozenset[str] = frozenset({
-    "PD", "SA", "BL1", "PL", "FL1", "CL", "EL", "ECL", "TU1",
-    "WC", "WC26",  # Mundial 2026 — ligas de selecciones sin Poisson → necesitan odds reales
-})
+# TUPLA, no frozenset: el orden de iteración define qué ligas sobreviven cuando muerde
+# _MAX_ODDS_PREFETCH. Un frozenset reordena en cada arranque (hash randomization) y el
+# recorte era distinto por instancia, dejando ligas enteras sin cuotas de forma aleatoria.
+# Orden = prioridad de negocio: domésticas top primero, UEFA después.
+# TU1 (Süper Lig turca) queda FUERA: no está en SUPPORTED_FOOTBALL_LEAGUES y el plan free
+# de football-data.org solo cubre 13 competiciones (PL/PD/BL1/SA/FL1/CL/EC/WC/ELC/DED/
+# PPL/BSA/CLI), así que nunca entra un partido turco en upcoming_matches → pedir sus
+# cuotas era gasto puro (20 eventos/semana). Volver a añadirla solo si se conecta antes
+# un colector de fixtures para TU1.
+_PRIORITY_LEAGUES_FOR_ODDS: tuple[str, ...] = (
+    "PD", "PL", "SA", "BL1", "FL1",
+    "CL", "EL", "ECL",
+    "WC", "WC26",  # Mundial — ligas de selecciones sin Poisson → necesitan odds reales
+)
 # Ventana jugable para el pre-fetch de odds: se piden cuotas de TODOS los partidos de
 # ligas prioritarias cuyo kickoff cae en [ahora, ahora+_PREFETCH_WINDOW]. Sustituye al
 # tope fijo de N-por-liga, que dejaba sin cuotas los match-days con >N partidos (fase de
@@ -247,13 +349,16 @@ _PRIORITY_LEAGUES_FOR_ODDS: frozenset[str] = frozenset({
 # (commenceTimeTo = now+7d). Con 72h solo se pedían cuotas de ~1/4 de los partidos que
 # analyze evalúa, y el resto quedaba "fuera de ventana de cuotas" sesgando el embudo.
 _PREFETCH_WINDOW: timedelta = timedelta(days=7)
-# Backstop global: 300 IDs / 10 = 30 requests /odds/multi por pre-fetch (1 por analyze,
-# 4 analyze/día → ~3.000 req/mes sobre un presupuesto de 72.000). Subido de 120 al ampliar
-# la ventana a 7 días: con 72h entraban 72 partidos y el cap nunca mordía; con 7 días entran
-# ~246, y al morder el cap el recorte era NO DETERMINISTA (_PRIORITY_LEAGUES_FOR_ODDS es un
-# frozenset y su orden de iteración cambia en cada arranque), dejando ligas enteras sin cuotas
-# de forma aleatoria según la instancia.
-_MAX_ODDS_PREFETCH: int = 300
+# Backstop global: IDs máximos por pre-fetch (se piden en lotes de 10 → N/10 requests).
+# Con el emparejamiento por slug el volumen real medido (2026-08-19) es 84 partidos/semana
+# de las 8 ligas prioritarias. El peor caso previsible es una semana de fase de liga UEFA
+# (CL 18 + EL 18 + ECL 18) solapada con jornada doméstica completa (10+10+10+9+9 = 48):
+# ~102 eventos. 150 deja margen sin volver a hacer del cap el factor limitante.
+# Ya no hace falta el 300 anterior: aquel número solo existía para absorber los ~160
+# eventos basura (Guatemala, Venezuela, Austria, Serbia…) que colaba el matching por
+# subcadena. Con el cap mordiendo, el recorte ahora es determinista porque
+# _PRIORITY_LEAGUES_FOR_ODDS es una tupla ordenada.
+_MAX_ODDS_PREFETCH: int = 150
 
 
 def _cache_ttl(entry: dict) -> timedelta:
@@ -991,21 +1096,19 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
     priority_events: list[dict] = []
 
     for lg in _PRIORITY_LEAGUES_FOR_ODDS:
-        lg_keywords = _LEAGUE_KEYWORDS.get(lg, [])
-        if not lg_keywords:
-            continue
-        # Usar el keyword más específico (primero de la lista: "england-premier-league" etc.)
-        specific_kw = lg_keywords[0]
+        # Emparejamiento por slug exacto (ver _event_matches_league). Sin cascada de
+        # keywords: si el slug no está mapeado preferimos 0 candidatos y un WARNING
+        # accionable antes que arrastrar media Sudamérica por "primera division".
         lg_events = sorted(
-            [ev for ev in all_events if specific_kw in _build_comp_string(ev)],
+            [ev for ev in all_events if _event_matches_league(ev, lg)],
             key=_commence_key,
         )
         if not lg_events:
-            # Fallback: intentar con todos los keywords de la liga
-            lg_events = sorted(
-                [ev for ev in all_events
-                 if any(kw in _build_comp_string(ev) for kw in lg_keywords)],
-                key=_commence_key,
+            logger.warning(
+                "odds-api.io: pre-fetch %s → 0 eventos para slugs=%s. "
+                "O la liga no tiene partidos en el catálogo, o el slug cambió: "
+                "revisar _LEAGUE_SLUG_PREFIXES.",
+                lg, _LEAGUE_SLUG_PREFIXES.get(lg),
             )
         added = 0
         fallback_added = 0
@@ -1034,16 +1137,16 @@ async def _prefetch_priority_odds(all_events: list[dict], now: datetime) -> None
                         int(_PREFETCH_WINDOW.total_seconds() // 3600))
 
     if not priority_events and all_events:
-        _sample_fields = ("id", "league", "competition", "competitionName",
-                          "tournament", "sport_title", "leagueName", "name")
-        _sample = [{k: ev.get(k) for k in _sample_fields if ev.get(k)}
-                   for ev in all_events[:5]]
+        # SIN fallback "primeros N sin filtro": con 578 ligas en el catálogo, los primeros
+        # N son fútbol amateur australiano y femenino sub-19. Gastaba hasta 30 requests
+        # para llenar la caché de partidos que nunca se analizan. Preferimos 0 y un
+        # WARNING con muestra de slugs para corregir _LEAGUE_SLUG_PREFIXES.
+        _sample = sorted({_event_slug(ev) for ev in all_events[:200] if _event_slug(ev)})[:20]
         logger.warning(
-            "odds-api.io: pre-fetch — 0 prioritarios de %d eventos con keywords EU. "
-            "Fallback: primeros %d sin filtro liga. Sample: %s",
-            len(all_events), _MAX_ODDS_PREFETCH, str(_sample)[:800],
+            "odds-api.io: pre-fetch — 0 prioritarios de %d eventos. NO se hace fallback "
+            "sin filtro. Ligas prioritarias=%s. Muestra de slugs del catálogo: %s",
+            len(all_events), list(_PRIORITY_LEAGUES_FOR_ODDS), _sample,
         )
-        priority_events = all_events[:_MAX_ODDS_PREFETCH]
 
     capped = priority_events[:_MAX_ODDS_PREFETCH]
     event_ids = [
@@ -1185,22 +1288,23 @@ async def get_league_odds(league: str) -> list[dict]:
 
         quota.track_monthly("oddsapiio")
 
-        keywords = _LEAGUE_KEYWORDS.get(league, [])
-        filtered = []
-        for ev in all_events:
-            if not keywords or any(kw in _build_comp_string(ev) for kw in keywords):
-                filtered.append(ev)
+        # Mismo criterio que el pre-fetch: slug exacto. Antes esto filtraba por keywords
+        # sueltas y devolvía 128 "partidos de PD" de los que 115 eran Guatemala, Venezuela,
+        # Perú, Chile y LaLiga 2 — que luego se intentaban emparejar por nombre de equipo
+        # contra el fixture español.
+        _selector = _LEAGUE_SLUG_PREFIXES.get(league) or _LEAGUE_KEYWORDS.get(league, [])
+        filtered = [ev for ev in all_events if _event_matches_league(ev, league)]
 
-        logger.info("odds-api.io: %d eventos soccer totales, %d para %s (keywords=%s)",
-                    all_count, len(filtered), league, keywords)
+        logger.info("odds-api.io: %d eventos soccer totales, %d para %s (slugs=%s)",
+                    all_count, len(filtered), league, _selector)
 
         if not filtered:
             if all_events:
-                _sample_comps = [_build_comp_string(ev) for ev in all_events[:5]]
+                _sample = sorted({_event_slug(ev) for ev in all_events[:200] if _event_slug(ev)})[:20]
                 logger.warning(
-                    "odds-api.io: %s — 0 de %d eventos coinciden con keywords=%s. "
-                    "Comp strings muestra: %s",
-                    league, all_count, keywords, _sample_comps,
+                    "odds-api.io: %s — 0 de %d eventos coinciden con slugs=%s. "
+                    "Muestra del catálogo: %s",
+                    league, all_count, _selector, _sample,
                 )
             _EVENT_CACHE[league] = {"events": [], "error": True, "cached_at": now}
             return []
@@ -1245,10 +1349,13 @@ async def get_league_odds(league: str) -> list[dict]:
 
     quota.track_monthly("oddsapiio")
 
-    keywords = _LEAGUE_KEYWORDS.get(league, [])
-    filtered = [ev for ev in raw_events if not keywords or any(
-        kw in _build_comp_string(ev) for kw in keywords
-    )]
+    # Baloncesto/tenis: _event_matches_league cae a keywords (los nombres son únicos).
+    # Se conserva el comportamiento permisivo previo para las ligas sin keywords
+    # (varios torneos WTA no están en _LEAGUE_KEYWORDS): sin filtro en vez de 0 eventos.
+    if _LEAGUE_KEYWORDS.get(league):
+        filtered = [ev for ev in raw_events if _event_matches_league(ev, league)]
+    else:
+        filtered = list(raw_events)
 
     if not filtered:
         _EVENT_CACHE[league] = {"events": [], "error": True, "cached_at": now}
