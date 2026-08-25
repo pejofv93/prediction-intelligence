@@ -3,6 +3,14 @@ name: rebuild-elo
 # Diagnóstico y reconstrucción del ELO. En CI el cliente oficial de Firestore funciona,
 # así que se usa --transport grpc (en local hay que ir por REST: el proxy TLS del puesto
 # de trabajo bloquea gRPC).
+#
+# Cron diario: continúa la siembra de historial UEFA en tandas de --history-budget,
+# reanudable vía api_meta/uefa_seed_progress. rebuild_elo.py corta solo cuando
+# X-RateLimit-Requests-Remaining (cabecera real de allsportsapi2) baja de 2, así que
+# convive con el collect de cada 6h (sports-collect.yml) sin coordinación explícita —
+# en el peor caso esa tanda gasta menos y sigue al día siguiente. 03:00 UTC para no
+# solaparse con las horas exactas del collect (0/6/12/18) ni con la petición de
+# resultados UEFA (_UEFA_RESULTS_HOURS = {0, 12}).
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +40,14 @@ on:
         default: 'false'
         type: choice
         options: ['false', 'true']
+      skip_backup:
+        description: 'Saltar backup de team_elo (obligatorio al repetir en el mismo día)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC diario — siguiente tanda de historial, automática
 
 jobs:
   run:
@@ -52,28 +68,48 @@ jobs:
       - name: Install dependencies
         run: pip install google-cloud-firestore httpx
 
+      - name: Resolver parámetros
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "mode=rebuild" >> "$GITHUB_OUTPUT"
+            echo "confirm=true" >> "$GITHUB_OUTPUT"
+            echo "history_budget=60" >> "$GITHUB_OUTPUT"
+            echo "history_pages=1" >> "$GITHUB_OUTPUT"
+            echo "no_uefa=false" >> "$GITHUB_OUTPUT"
+            echo "skip_backup=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+            echo "confirm=${{ inputs.confirm }}" >> "$GITHUB_OUTPUT"
+            echo "history_budget=${{ inputs.history_budget }}" >> "$GITHUB_OUTPUT"
+            echo "history_pages=${{ inputs.history_pages }}" >> "$GITHUB_OUTPUT"
+            echo "no_uefa=${{ inputs.no_uefa }}" >> "$GITHUB_OUTPUT"
+            echo "skip_backup=${{ inputs.skip_backup }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Diagnóstico de desviación del ELO
-        if: ${{ inputs.mode == 'diagnose' }}
+        if: ${{ steps.params.outputs.mode == 'diagnose' }}
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
         run: python scripts/diagnose_elo_drift.py --transport grpc
 
       - name: Reconstrucción del ELO
-        if: ${{ inputs.mode == 'rebuild' }}
+        if: ${{ steps.params.outputs.mode == 'rebuild' }}
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           FOOTBALL_RAPID_API_KEY: ${{ secrets.FOOTBALL_RAPID_API_KEY }}
         run: |
-          ARGS="--transport grpc --history-budget ${{ inputs.history_budget }}"
-          ARGS="$ARGS --history-pages ${{ inputs.history_pages }}"
-          if [ "${{ inputs.confirm }}" = "true" ]; then ARGS="$ARGS --confirm"; fi
-          if [ "${{ inputs.no_uefa }}" = "true" ]; then ARGS="$ARGS --no-uefa"; fi
+          ARGS="--transport grpc --history-budget ${{ steps.params.outputs.history_budget }}"
+          ARGS="$ARGS --history-pages ${{ steps.params.outputs.history_pages }}"
+          if [ "${{ steps.params.outputs.confirm }}" = "true" ]; then ARGS="$ARGS --confirm"; fi
+          if [ "${{ steps.params.outputs.no_uefa }}" = "true" ]; then ARGS="$ARGS --no-uefa"; fi
+          if [ "${{ steps.params.outputs.skip_backup }}" = "true" ]; then ARGS="$ARGS --skip-backup"; fi
           python scripts/rebuild_elo.py $ARGS
 
       - name: Verificación posterior
-        if: ${{ inputs.mode == 'rebuild' && inputs.confirm == 'true' }}
+        if: ${{ steps.params.outputs.mode == 'rebuild' && steps.params.outputs.confirm == 'true' }}
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
