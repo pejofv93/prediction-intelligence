@@ -648,8 +648,9 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
             sel = _escape_md(m["selection"])
             pct_str = f"{m['pct_change']:+.1%}"
             marca = "✅" if m["new_edge"] >= SPORTS_MIN_EDGE else ("⚠️" if m["new_edge"] < 0 else "•")
+            label = _escape_md(_MARKET_LABEL.get(m["market"], m["market"].replace("_", " ").title()))
             lineas_mercado.append(
-                f"{marca} *{sel}* ({m['market']}) @ *{m['current_odds']:.2f}* ({pct_str}) "
+                f"{marca} *{sel}* ({label}) @ *{m['current_odds']:.2f}* ({pct_str}) "
                 f"— Edge: *{m['new_edge']:+.1%}*"
             )
 
