@@ -28,9 +28,15 @@ Uso:
     python scripts/rebuild_elo.py --confirm --history-pages 3       # objetivo: 90 partidos/club
     python scripts/rebuild_elo.py --no-uefa --confirm               # solo recomputo
 
-Cuota allsportsapi2: 100 requests/día. El censo gasta ~13, cada página de historial 1 y
-las clasificaciones 2 por liga. `--history-budget` topa el gasto de esta tanda y el
-progreso queda en api_meta/uefa_seed_progress, así que las tandas se reanudan solas.
+Cuota allsportsapi2: 100 requests/día, compartida sin coordinación con sports-collect.yml
+(censo+fixtures UEFA cada 6h, ~36/día). El censo gasta ~13; las clasificaciones se piden
+UNA vez por temporada y luego se leen de api_meta/uefa_standings_cache (0 requests) —
+`get_previous_standings` lleva esa caché. `--history-budget` es el TOPE de esta tanda: el
+gasto real se recorta a lo que allsportsapi2 reporta que queda de verdad menos
+`--collect-reserve` (40 por defecto), así el rebuild nunca se come la cuota que necesita
+sports-collect aunque el cron de GitHub dispare tarde (ver el 429 que tumbó la primera
+ejecución programada, 2026-08-26). El progreso de historial queda en
+api_meta/uefa_seed_progress, así que las tandas se reanudan solas.
 `--skip-backup` es obligatorio al repetir: si no, la copia buena se pisa con el estado ya
 reconstruido.
 Local: Python 3.11 con SSL_CERT_FILE al bundle de Norton (gRPC está bloqueado → --transport rest).
@@ -110,27 +116,40 @@ def _uefa_get_safe(path: str, key: str) -> tuple[dict | None, dict, bool]:
         return None, {}, True
 
 
-def discover_season(league: str, key: str) -> tuple[int | None, bool]:
+def _remaining(headers: dict) -> int | None:
+    """X-RateLimit-Requests-Remaining de una respuesta de allsportsapi2, si viene."""
+    rem = headers.get("X-RateLimit-Requests-Remaining")
+    return int(rem) if str(rem).isdigit() else None
+
+
+def discover_season(league: str, key: str) -> tuple[int | None, bool, int | None]:
     tid = UEFA_TOURNAMENTS[league]
-    data, _, exhausted = _uefa_get_safe(f"/api/tournament/{tid}/seasons", key)
+    data, headers, exhausted = _uefa_get_safe(f"/api/tournament/{tid}/seasons", key)
     if exhausted or data is None:
-        return None, exhausted
+        return None, exhausted, None
     seasons = data.get("seasons", [])
     label = _season_label()
     chosen = next((s for s in seasons if str(s.get("year")) == label), None) or (
         seasons[0] if seasons else None)
     if not chosen:
-        return None, False
+        return None, False, _remaining(headers)
     print(f"  {league}: temporada {chosen.get('year')} → season_id={chosen.get('id')}")
-    return int(chosen["id"]), False
+    return int(chosen["id"]), False, _remaining(headers)
 
 
-def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[int, str]]:
-    """Fixtures y resultados de las competiciones + censo de clubes."""
+def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[int, str], int | None]:
+    """Fixtures y resultados de las competiciones + censo de clubes.
+
+    Devuelve también la última cuota restante vista (X-RateLimit-Requests-Remaining),
+    para que main() pueda ajustar el presupuesto de historial a lo que de verdad queda.
+    """
     matches: list[dict] = []
     clubs: dict[int, str] = {}
+    remaining: int | None = None
     for lg in leagues:
-        sid, exhausted = discover_season(lg, key)
+        sid, exhausted, rem = discover_season(lg, key)
+        if rem is not None:
+            remaining = rem
         if exhausted:
             break   # cuota agotada — más leagues no van a tener mejor suerte
         if not sid:
@@ -142,11 +161,13 @@ def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[i
             if agotado:
                 break
             for page in range(2):
-                data, _, exhausted = _uefa_get_safe(
+                data, headers, exhausted = _uefa_get_safe(
                     f"/api/tournament/{tid}/season/{sid}/matches/{direction}/{page}", key)
                 if exhausted:
                     agotado = True
                     break
+                if (rem := _remaining(headers)) is not None:
+                    remaining = rem
                 events = data.get("events", [])
                 for e in events:
                     m = parse_event(e, lg)
@@ -160,7 +181,7 @@ def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[i
         if agotado:
             break
     print(f"  censo: {len(clubs)} clubes distintos, {len(matches)} partidos de competición")
-    return matches, clubs
+    return matches, clubs, remaining
 
 
 SEED_PROGRESS_DOC = "uefa_seed_progress"
@@ -258,11 +279,14 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
     return out, prog
 
 
-def fetch_previous_standings(key: str, codigos: list[str]) -> dict[str, list[dict]]:
+def fetch_previous_standings(key: str, codigos: list[str]) -> tuple[dict[str, list[dict]], int | None]:
     """
     Clasificación FINAL de la temporada pasada por liga doméstica, para el ajuste por
     puesto del prior. 2 requests por liga (descubrir temporada + tabla) y una sola vez:
     es lo que separa a Liverpool de Burnley dentro del mismo escalón de país.
+
+    "Una sola vez" es la intención, no lo que hacía el código: se pedía en cada tanda.
+    Ver `get_previous_standings` para el envoltorio que sí la cachea en Firestore.
     """
     from collectors.sofascore_client import TOURNAMENTS
     por_codigo = {v.get("league_code"): v["id"] for v in TOURNAMENTS.values()
@@ -270,19 +294,24 @@ def fetch_previous_standings(key: str, codigos: list[str]) -> dict[str, list[dic
     anterior = _season_label(datetime.now(timezone.utc).replace(year=datetime.now().year - 1))
 
     out: dict[str, list[dict]] = {}
+    remaining: int | None = None
     for code in codigos:
         tid = por_codigo.get(code)
         if not tid:
             continue
         try:
-            data, _ = _uefa_get(f"/api/tournament/{tid}/seasons", key)
+            data, headers = _uefa_get(f"/api/tournament/{tid}/seasons", key)
+            if (rem := _remaining(headers)) is not None:
+                remaining = rem
             temporadas = data.get("seasons", [])
             sid = next((t["id"] for t in temporadas if str(t.get("year")) == anterior), None)
             if not sid:
                 print(f"  {code}: sin temporada {anterior} en /seasons — sin ajuste por puesto")
                 continue
-            tabla, _ = _uefa_get(
+            tabla, headers = _uefa_get(
                 f"/api/tournament/{tid}/season/{sid}/standings/total", key)
+            if (rem := _remaining(headers)) is not None:
+                remaining = rem
             grupos = tabla.get("standings") or []
             filas = grupos[0].get("rows", []) if grupos else []
             out[code] = [
@@ -295,9 +324,41 @@ def fetch_previous_standings(key: str, codigos: list[str]) -> dict[str, list[dic
                 for f in filas if (f.get("team") or {}).get("name")
             ]
             print(f"  {code}: clasificación {anterior} → {len(out[code])} equipos")
+        except urllib.error.HTTPError as e:
+            print(f"  {code}: sin clasificación (HTTP {e.code}"
+                  f"{' — cuota agotada' if e.code == 429 else ''})")
         except Exception as e:
             print(f"  {code}: sin clasificación ({type(e).__name__})")
-    return out
+    return out, remaining
+
+
+STANDINGS_CACHE_DOC = "uefa_standings_cache"
+
+
+def get_previous_standings(db, key: str, codigos: list[str], now: datetime,
+                           confirm: bool) -> tuple[dict[str, list[dict]], int | None]:
+    """
+    Envoltorio cacheado de fetch_previous_standings: la clasificación FINAL de la
+    temporada pasada no cambia en toda la temporada actual, así que se pide una vez
+    y se guarda en api_meta/uefa_standings_cache — las tandas siguientes la leen de
+    Firestore (0 requests) hasta que _season_label detecta el cambio de temporada.
+    """
+    anterior = _season_label(now.replace(year=now.year - 1))
+    cached = next(
+        (d for d in db.read_collection("api_meta") if d["_id"] == STANDINGS_CACHE_DOC), None)
+    if cached and cached.get("season") == anterior and cached.get("standings"):
+        n_equipos = sum(len(v) for v in cached["standings"].values())
+        print(f"  cache: clasificación {anterior} ya sembrada ({n_equipos} equipos, "
+              f"0 requests)")
+        return cached["standings"], None
+
+    standings, remaining = fetch_previous_standings(key, codigos)
+    if confirm and standings:
+        db.write_docs("api_meta", {STANDINGS_CACHE_DOC: {
+            "season": anterior, "standings": standings, "cached_at": now,
+        }})
+        print(f"  clasificación {anterior} cacheada — gratis el resto de la temporada")
+    return standings, remaining
 
 
 # ── Fase 2: universo de partidos ─────────────────────────────────────────────
@@ -324,7 +385,13 @@ def main() -> None:
     ap.add_argument("--no-uefa", action="store_true", help="solo recomputo, sin siembra UEFA")
     ap.add_argument("--leagues", default="CL,EL,ECL")
     ap.add_argument("--history-budget", type=int, default=80,
-                    help="requests de historial por ejecución (cuota 100/día)")
+                    help="requests de historial por ejecución (cuota 100/día) — tope "
+                         "superior: si allsportsapi2 reporta menos cuota real restante, "
+                         "se recorta a eso menos --collect-reserve")
+    ap.add_argument("--collect-reserve", type=int, default=40,
+                    help="cuota que se deja sin tocar para sports-collect.yml (censo+"
+                         "fixtures UEFA cada 6h), que consume del mismo pool 100/día y "
+                         "no se coordina con este script más que por esta reserva")
     ap.add_argument("--history-pages", type=int, default=1,
                     help="páginas de historial por club (30 partidos cada una): "
                          "1 llega a marzo, 3 cubren la temporada pasada")
@@ -372,14 +439,17 @@ def main() -> None:
         key = _api_key()
         leagues = [x.strip().upper() for x in args.leagues.split(",") if x.strip()]
         print("\n   siembra UEFA:")
-        uefa_matches, clubs = fetch_uefa_matches(key, leagues)
+        uefa_matches, clubs, remaining = fetch_uefa_matches(key, leagues)
 
         # Las clasificaciones van ANTES que el historial: sirven para el ajuste del prior
         # y, de paso, traen los ids de Sofascore de los clubes grandes, que en agosto no
         # están en el censo europeo. Así entran ya en la cola de siembra de esta tanda.
         if not args.no_priors:
             print("\n   clasificaciones de la temporada pasada (ajuste del prior):")
-            standings = fetch_previous_standings(key, ["PL", "PD", "SA", "BL1", "FL1", "BSA"])
+            standings, rem = get_previous_standings(
+                db, key, ["PL", "PD", "SA", "BL1", "FL1", "BSA"], now, args.confirm)
+            if rem is not None:
+                remaining = rem
             de_tablas = {int(f["source_id"]): f["team_name"]
                          for filas in standings.values() for f in filas if f.get("source_id")}
             if de_tablas:
@@ -402,8 +472,20 @@ def main() -> None:
                         prioritarios.add(str(u[k]))
         except Exception as e:
             print(f"   (sin prioridades de upcoming_matches: {type(e).__name__})")
+
+        # Presupuesto dinámico: sports-collect.yml consume del mismo pool de 100/día sin
+        # coordinarse con este script (ver el 429 que tumbó la primera ejecución del cron,
+        # 2026-08-26). En vez de asumir un reparto fijo por horario, se recorta el tope
+        # configurado a lo que allsportsapi2 reporta que queda de verdad, menos la reserva.
+        history_budget = args.history_budget
+        if remaining is not None:
+            history_budget = max(0, min(args.history_budget, remaining - args.collect_reserve))
+            print(f"\n   presupuesto de historial: {history_budget} (cuota restante real "
+                  f"{remaining}, reserva {args.collect_reserve} para sports-collect.yml"
+                  f"{', tope configurado ' + str(args.history_budget) if history_budget < args.history_budget else ''})")
+
         club_hist, progreso = fetch_club_histories(
-            key, clubs, progreso_previo, args.history_pages, args.history_budget,
+            key, clubs, progreso_previo, args.history_pages, history_budget,
             imap, prioritarios)
         print(f"   {len(prioritarios)} clubes prioritarios (con partido programado)")
         print(f"   histórico de clubes: {len(club_hist)} partidos brutos")
