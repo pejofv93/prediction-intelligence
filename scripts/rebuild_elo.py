@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
 from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,17 +91,38 @@ def typed(team_id: str):
 
 # ── Fase 1: siembra UEFA ─────────────────────────────────────────────────────
 
-def discover_season(league: str, key: str) -> int | None:
+def _uefa_get_safe(path: str, key: str) -> tuple[dict | None, dict, bool]:
+    """_uefa_get protegido: un 429 (u otro fallo de red) no tumba el job, solo corta
+    la siembra UEFA de esta tanda — igual que ya hace fetch_club_histories con su bucle.
+    Devuelve (data, headers, exhausted); exhausted=True → no tiene sentido seguir pidiendo.
+    """
+    try:
+        return (*_uefa_get(path, key), False)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            print(f"  allsportsapi2: cuota agotada (429) en {path} — "
+                  f"siembra UEFA cortada, sigue con lo que hay")
+        else:
+            print(f"  allsportsapi2: HTTP {e.code} en {path} — siembra UEFA cortada")
+        return None, {}, True
+    except Exception as e:
+        print(f"  allsportsapi2: {type(e).__name__} en {path} — siembra UEFA cortada")
+        return None, {}, True
+
+
+def discover_season(league: str, key: str) -> tuple[int | None, bool]:
     tid = UEFA_TOURNAMENTS[league]
-    data, _ = _uefa_get(f"/api/tournament/{tid}/seasons", key)
+    data, _, exhausted = _uefa_get_safe(f"/api/tournament/{tid}/seasons", key)
+    if exhausted or data is None:
+        return None, exhausted
     seasons = data.get("seasons", [])
     label = _season_label()
     chosen = next((s for s in seasons if str(s.get("year")) == label), None) or (
         seasons[0] if seasons else None)
     if not chosen:
-        return None
+        return None, False
     print(f"  {league}: temporada {chosen.get('year')} → season_id={chosen.get('id')}")
-    return int(chosen["id"])
+    return int(chosen["id"]), False
 
 
 def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[int, str]]:
@@ -108,15 +130,23 @@ def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[i
     matches: list[dict] = []
     clubs: dict[int, str] = {}
     for lg in leagues:
-        sid = discover_season(lg, key)
+        sid, exhausted = discover_season(lg, key)
+        if exhausted:
+            break   # cuota agotada — más leagues no van a tener mejor suerte
         if not sid:
             print(f"  {lg}: sin temporada — omitida")
             continue
         tid = UEFA_TOURNAMENTS[lg]
+        agotado = False
         for direction in ("next", "last"):
+            if agotado:
+                break
             for page in range(2):
-                data, _ = _uefa_get(
+                data, _, exhausted = _uefa_get_safe(
                     f"/api/tournament/{tid}/season/{sid}/matches/{direction}/{page}", key)
+                if exhausted:
+                    agotado = True
+                    break
                 events = data.get("events", [])
                 for e in events:
                     m = parse_event(e, lg)
@@ -127,6 +157,8 @@ def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[i
                     clubs[m["away_source_id"]] = m["away_team"]
                 if not data.get("hasNextPage") or len(events) < 30:
                     break
+        if agotado:
+            break
     print(f"  censo: {len(clubs)} clubes distintos, {len(matches)} partidos de competición")
     return matches, clubs
 
