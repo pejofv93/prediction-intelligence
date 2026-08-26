@@ -8,9 +8,25 @@ jobs:
   keepalive:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    continue-on-error: true
     steps:
       - name: Restart WebSocket loop (background task en Cloud Run)
         run: |
+          curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-websocket" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 60 \
+            --fail --silent --show-error
+
+  retry:
+    needs: keepalive
+    if: ${{ needs.keepalive.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Retry Restart WebSocket loop (tras fallo — mismo patrón que sports-collect)
+        run: |
+          echo "Reintentando keepalive tras fallo (runner no disponible o error de red)"
           curl -X POST "${{ secrets.POLY_AGENT_URL }}/run-websocket" \
             -H "Content-Type: application/json" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
