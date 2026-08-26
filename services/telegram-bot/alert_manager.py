@@ -526,22 +526,25 @@ def _claim_alert_slot(key: str, alert_type: str) -> bool:
 async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) -> int:
     """
     Compara cuotas actuales vs cuotas en señales PENDIENTES de Firestore.
-    Para cada señal activa (result=None):
-      - Si cambio > 10% → envía alerta al topic Sports.
-      - Si nueva cuota hace edge < 0 → añade advertencia de edge negativo.
+    Para cada PARTIDO con cambio > 10% en algún mercado → UNA alerta al topic Sports
+    con todos los mercados que se movieron (antes era una alerta por mercado: un
+    partido con varios mercados pendientes — h2h/spread/totals/ml_home/ml_away, cada
+    uno un doc distinto en `predictions` — mandaba 5-8 mensajes de Telegram en el
+    mismo ciclo por el mismo evento, puro ruido).
+      - Si el cambio hace edge < 0 en algún mercado → línea marcada como advertencia.
 
     Args:
         current_odds_by_match: {match_id: cuota_actual} — proporcionado por el analyze.
 
     Returns:
-        Número de alertas de cambio enviadas.
+        Número de alertas (partidos, no mercados) enviadas.
     """
     from shared.firestore_client import col
+    from shared.match_timing import signal_is_too_late, kickoff_label
 
     if not current_odds_by_match:
         return 0
 
-    sent_count = 0
     try:
         pending_docs = list(
             col("predictions")
@@ -553,25 +556,28 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
         logger.error("check_pending_odds_changes: error leyendo predictions pendientes", exc_info=True)
         return 0
 
-    cutoff_48h = datetime.now(timezone.utc) - timedelta(hours=48)
+    # Agrupar por partido físico (base_id): cada mercado del mismo partido es un doc
+    # distinto en `predictions`, así que se recogen aquí y se manda una sola alerta
+    # por partido más abajo.
+    grouped: dict[str, list[dict]] = {}
+    match_teams: dict[str, tuple[str, str]] = {}
 
     for doc in pending_docs:
         try:
             pred = doc.to_dict()
 
-            # Guardia defensiva: saltar predicciones de partidos ya jugados
-            _md = pred.get("match_date")
-            if _md is not None:
-                if isinstance(_md, str):
-                    try:
-                        _md = datetime.fromisoformat(_md.replace("Z", "+00:00"))
-                    except ValueError:
-                        _md = None
-                if _md is not None:
-                    if hasattr(_md, "tzinfo") and _md.tzinfo is None:
-                        _md = _md.replace(tzinfo=timezone.utc)
-                    if _md < cutoff_48h:
-                        continue
+            # TIMING_GUARD real (igual que send_sports_alert): partido ya empezado o a
+            # menos de SIGNAL_MIN_MINUTES_BEFORE_KICKOFF del inicio. Sustituye al guard
+            # casero de 48h, que dejaba pasar cualquier partido ya jugado dentro de esa
+            # ventana (Valencia CF vs Real Betis, 2026-08-26: alertado 19h después del
+            # pitido inicial — el partido llevaba horas decidido).
+            if signal_is_too_late(pred.get("match_date")):
+                logger.info(
+                    "check_pending_odds_changes: TIMING_GUARD descarta %s vs %s — inicio %s",
+                    pred.get("home_team", "?"), pred.get("away_team", "?"),
+                    kickoff_label(pred.get("match_date")),
+                )
+                continue
 
             match_id = str(pred.get("match_id") or doc.id)
             # Extraer el match_id base (sin sufijos _ml_home, _spread, etc.)
@@ -599,58 +605,80 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
                 )
                 continue
 
-            market = pred.get("market_type", "h2h")
-            alert_key = f"{match_id}_{market}_{current_odds:.2f}"
-
-            # Dedup atómico: pre-escribe antes de enviar (mismo mecanismo que send_sports_alert)
-            if not _claim_alert_slot(alert_key, "odds_change"):
-                continue
-
-            # Calcular edge actualizado
             calculated_prob = float(pred.get("calculated_prob") or 0)
             new_edge = round(calculated_prob - (1.0 / current_odds), 4) if current_odds > 1 else 0.0
-            pct_str = f"{pct_change:+.1%}"
 
-            home = _escape_md(pred.get("home_team", "?"))
-            away = _escape_md(pred.get("away_team", "?"))
-            selection = _escape_md(str(pred.get("selection") or pred.get("team_to_back") or "?"))
-            conf = float(pred.get("confidence") or 0)
-            kelly = float(pred.get("kelly_fraction") or 0)
-
-            # Señal accionable si el cambio de cuota genera edge positivo suficiente
-            if new_edge >= SPORTS_MIN_EDGE:
-                msg_lines = [
-                    f"✅ SEÑAL POR CAMBIO DE CUOTA",
-                    f"{home} vs {away}",
-                    f"*{selection}* @ *{current_odds:.2f}*",
-                    f"Edge: *+{new_edge:.1%}* | Cuota cambió *{pct_str}*",
-                    f"Confianza: {conf:.0%} | Kelly: {kelly:.1%}",
-                ]
-            else:
-                msg_lines = [
-                    "📊 CAMBIO DE CUOTA",
-                    f"{home} vs {away} | {selection}",
-                    f"Cuota: *{original_odds:.2f}* → *{current_odds:.2f}* ({pct_str})",
-                    f"Edge actualizado: *{new_edge:+.1%}*",
-                ]
-                if new_edge < 0:
-                    msg_lines.append("⚠️ Edge negativo — revisar")
-
-            msg = "\n".join(msg_lines)
-            sent = await send_message(msg, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
-            if sent:
-                sent_count += 1
-                logger.info(
-                    "check_pending_odds_changes: alerta %s enviada — %s "
-                    "odds %.2f→%.2f (%s) edge_new=%.3f",
-                    "ACCIONABLE" if new_edge >= SPORTS_MIN_EDGE else "info",
-                    match_id, original_odds, current_odds, pct_str, new_edge,
-                )
-            await asyncio.sleep(0.5)
+            match_teams.setdefault(base_id, (pred.get("home_team", "?"), pred.get("away_team", "?")))
+            grouped.setdefault(base_id, []).append({
+                "market": pred.get("market_type", "h2h"),
+                "selection": str(pred.get("selection") or pred.get("team_to_back") or "?"),
+                "original_odds": original_odds,
+                "current_odds": current_odds,
+                "pct_change": pct_change,
+                "new_edge": new_edge,
+                "confidence": float(pred.get("confidence") or 0),
+                "kelly": float(pred.get("kelly_fraction") or 0),
+            })
         except Exception:
             logger.error(
                 "check_pending_odds_changes: error procesando %s", doc.id, exc_info=True
             )
+
+    sent_count = 0
+    for base_id, movements in grouped.items():
+        # Dedup a nivel de partido: la key incluye cada mercado movido y su cuota actual,
+        # así que el mismo estado no repite alerta en 24h (mismo mecanismo de siempre —
+        # _claim_alert_slot — pero una key por partido, no por mercado suelto), mientras
+        # que un mercado nuevo que se sume o una cuota que siga moviéndose sí generan una
+        # key distinta y alertan de nuevo.
+        firma = "|".join(
+            f"{m['market']}:{m['current_odds']:.2f}"
+            for m in sorted(movements, key=lambda m: m["market"])
+        )
+        alert_key = f"{base_id}_{firma}"
+        if not _claim_alert_slot(alert_key, "odds_change"):
+            continue
+
+        home, away = match_teams[base_id]
+        home, away = _escape_md(home), _escape_md(away)
+        accionables = [m for m in movements if m["new_edge"] >= SPORTS_MIN_EDGE]
+
+        lineas_mercado = []
+        for m in sorted(movements, key=lambda m: -m["new_edge"]):
+            sel = _escape_md(m["selection"])
+            pct_str = f"{m['pct_change']:+.1%}"
+            marca = "✅" if m["new_edge"] >= SPORTS_MIN_EDGE else ("⚠️" if m["new_edge"] < 0 else "•")
+            label = _escape_md(_MARKET_LABEL.get(m["market"], m["market"].replace("_", " ").title()))
+            lineas_mercado.append(
+                f"{marca} *{sel}* ({label}) @ *{m['current_odds']:.2f}* ({pct_str}) "
+                f"— Edge: *{m['new_edge']:+.1%}*"
+            )
+
+        if accionables:
+            best = max(accionables, key=lambda m: m["new_edge"])
+            msg_lines = [
+                "✅ SEÑAL POR CAMBIO DE CUOTA",
+                f"{home} vs {away}",
+                *lineas_mercado,
+                f"Confianza: {best['confidence']:.0%} | Kelly: {best['kelly']:.1%}",
+            ]
+        else:
+            msg_lines = [
+                "📊 CAMBIO DE CUOTA",
+                f"{home} vs {away}",
+                *lineas_mercado,
+            ]
+
+        msg = "\n".join(msg_lines)
+        sent = await send_message(msg, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
+        if sent:
+            sent_count += 1
+            logger.info(
+                "check_pending_odds_changes: alerta partido %s enviada — %d mercado(s) "
+                "movido(s), %d accionable(s)",
+                base_id, len(movements), len(accionables),
+            )
+        await asyncio.sleep(0.5)
 
     return sent_count
 
