@@ -458,7 +458,11 @@ def main() -> None:
 
         progreso_previo = next(
             (d for d in db.read_collection("api_meta") if d["_id"] == SEED_PROGRESS_DOC), {})
-        progreso_previo = {k: v for k, v in progreso_previo.items() if k != "_id"}
+        # Solo las entradas por club (dict {"name", "pages", ...}): el propio doc mezcla al
+        # mismo nivel "_id" (string) y "updated_at" (timestamp — bajo gRPC llega como
+        # DatetimeWithNanoseconds, no iterable). fetch_club_histories hace dict(v) a ciegas,
+        # así que hay que filtrar aquí lo que no sea un progreso de club de verdad.
+        progreso_previo = {k: v for k, v in progreso_previo.items() if isinstance(v, dict)}
         # Prioridad: clubes sobre los que estamos a punto de apostar
         prioritarios: set[str] = set()
         try:
