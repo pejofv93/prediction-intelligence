@@ -17,6 +17,9 @@ load_dotenv()
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+# Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).
+# Los usos de col() aquí son perezosos; esto garantiza que el parche esté puesto antes.
+import shared.firestore_client  # noqa: F401
 
 logging.basicConfig(
     level=logging.INFO,

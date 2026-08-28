@@ -7,6 +7,14 @@
         { "fieldPath": "market_id", "order": "ASCENDING" },
         { "fieldPath": "sent_at", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "prodshadow_trades",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "result", "order": "ASCENDING" },
+        { "fieldPath": "closed_at", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
