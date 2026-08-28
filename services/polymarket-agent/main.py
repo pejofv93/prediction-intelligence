@@ -19,23 +19,11 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# Monkey-patch: google-cloud-firestore 2.x accede a gapic_callable._retry en _UnaryStreamMultiCallable
-# que no tiene ese atributo → AttributeError. Fix: devolver False (no reintentar) si falta el atributo.
-# El método está en query.Query, no en base_query.BaseQuery.
-try:
-    from google.cloud.firestore_v1.query import Query as _FSQuery
-    _orig_retry_fn = _FSQuery._retry_query_after_exception
-
-    def _safe_retry_query_after_exception(self, exc, retry, transaction):
-        try:
-            return _orig_retry_fn(self, exc, retry, transaction)
-        except AttributeError:
-            return False
-
-    _FSQuery._retry_query_after_exception = _safe_retry_query_after_exception
-    logger.info("patch: _retry_query_after_exception en query.Query aplicado OK")
-except Exception as _patch_err:
-    logger.warning("patch: no aplicado — %s", _patch_err)
+# El parche de compatibilidad grpc/firestore (_UnaryStreamMultiCallable._retry) vive ahora
+# en shared/firestore_client.py y se aplica al importar ese módulo — lo hace cualquier ruta
+# que consulte Firestore (col/get_client). Se importa aquí explícitamente para que el parche
+# esté puesto antes de servir la primera petición, aunque los usos de col() sean perezosos.
+import shared.firestore_client  # noqa: F401
 
 app = FastAPI(title="polymarket-agent")
 

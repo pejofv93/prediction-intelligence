@@ -15,6 +15,8 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
+# Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).
+import shared.firestore_client  # noqa: F401
 from api import backtest, calculator, matched, poly_stats, polymarket, predictions, shadow, tracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
