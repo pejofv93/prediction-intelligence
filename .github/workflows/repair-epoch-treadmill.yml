@@ -1,0 +1,53 @@
+name: repair-epoch-treadmill
+
+# Repara el daño de la "cinta de correr" del rebuild de ELO:
+#   - congela model_weights/elo_rebuild.rebuilt_at + accuracy_log/*.elo_rebuild_at
+#     en 2026-08-25 (última reconstrucción estructural real)
+#   - rescata predicciones marcadas legacy indebidamente (created_at >= 2026-08-25)
+#   - recalcula model_weights/current.total_predictions/.correct_predictions y
+#     accuracy_log de las semanas afectadas, CIEGO A LA ÉPOCA
+#   - repara closed_at/regraded_at guardados como string en shadow_trades
+#
+# One-shot. Ejecutar en dry-run primero, revisar el log, luego apply=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'true = escribir en Firestore | false = dry-run'
+        required: true
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+      weeks:
+        description: 'Semanas ISO de accuracy_log a recomputar (coma-separadas)'
+        required: false
+        default: '2026-W34,2026-W35,2026-W36'
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Ejecutar reparación
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: |
+          ARGS="--weeks ${{ inputs.weeks }}"
+          if [ "${{ inputs.apply }}" = "true" ]; then ARGS="$ARGS --apply"; fi
+          python scripts/repair_epoch_treadmill.py $ARGS

@@ -4,8 +4,13 @@ name: rebuild-elo
 # así que se usa --transport grpc (en local hay que ir por REST: el proxy TLS del puesto
 # de trabajo bloquea gRPC).
 #
-# Cron diario: continúa la siembra de historial UEFA en tandas de --history-budget,
-# reanudable vía api_meta/uefa_seed_progress. rebuild_elo.py corta solo cuando
+# Cron diario: SOLO siembra historial UEFA (--seed-only) — escribe team_stats y
+# api_meta/uefa_seed_progress y nada más. NO recomputa el ELO, NO resetea los pesos y
+# NO mueve la frontera de época (model_weights/elo_rebuild.rebuilt_at). Eso último era
+# la "cinta de correr": el cron movía rebuilt_at al presente cada noche y dejaba como
+# legacy a toda señal de más de un día. El reset de pesos y un recompute completo solo
+# ocurren ahora en un workflow_dispatch manual con seed_only=false.
+# Reanudable vía api_meta/uefa_seed_progress. rebuild_elo.py corta solo cuando
 # X-RateLimit-Requests-Remaining (cabecera real de allsportsapi2) baja de 2, así que
 # convive con el collect de cada 6h (sports-collect.yml) sin coordinación explícita —
 # en el peor caso esa tanda gasta menos y sigue al día siguiente. 03:00 UTC para no
@@ -46,8 +51,14 @@ on:
         default: 'false'
         type: choice
         options: ['false', 'true']
+      seed_only:
+        description: 'true = solo sembrar historial (sin recompute ni reset de pesos). El cron siempre usa true.'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
   schedule:
-    - cron: '0 3 * * *'   # 03:00 UTC diario — siguiente tanda de historial, automática
+    - cron: '0 3 * * *'   # 03:00 UTC diario — SOLO siembra de historial (--seed-only)
 
 jobs:
   run:
@@ -74,6 +85,7 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ]; then
             echo "mode=rebuild" >> "$GITHUB_OUTPUT"
             echo "confirm=true" >> "$GITHUB_OUTPUT"
+            echo "seed_only=true" >> "$GITHUB_OUTPUT"
             echo "history_budget=60" >> "$GITHUB_OUTPUT"
             echo "history_pages=1" >> "$GITHUB_OUTPUT"
             echo "no_uefa=false" >> "$GITHUB_OUTPUT"
@@ -81,6 +93,7 @@ jobs:
           else
             echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
             echo "confirm=${{ inputs.confirm }}" >> "$GITHUB_OUTPUT"
+            echo "seed_only=${{ inputs.seed_only }}" >> "$GITHUB_OUTPUT"
             echo "history_budget=${{ inputs.history_budget }}" >> "$GITHUB_OUTPUT"
             echo "history_pages=${{ inputs.history_pages }}" >> "$GITHUB_OUTPUT"
             echo "no_uefa=${{ inputs.no_uefa }}" >> "$GITHUB_OUTPUT"
@@ -106,10 +119,11 @@ jobs:
           if [ "${{ steps.params.outputs.confirm }}" = "true" ]; then ARGS="$ARGS --confirm"; fi
           if [ "${{ steps.params.outputs.no_uefa }}" = "true" ]; then ARGS="$ARGS --no-uefa"; fi
           if [ "${{ steps.params.outputs.skip_backup }}" = "true" ]; then ARGS="$ARGS --skip-backup"; fi
+          if [ "${{ steps.params.outputs.seed_only }}" = "true" ]; then ARGS="$ARGS --seed-only"; fi
           python scripts/rebuild_elo.py $ARGS
 
       - name: Verificación posterior
-        if: ${{ steps.params.outputs.mode == 'rebuild' && steps.params.outputs.confirm == 'true' }}
+        if: ${{ steps.params.outputs.mode == 'rebuild' && steps.params.outputs.confirm == 'true' && steps.params.outputs.seed_only != 'true' }}
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}

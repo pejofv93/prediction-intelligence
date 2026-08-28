@@ -24,6 +24,29 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc_dt(v):
+    """Normaliza a datetime tz-aware. Acepta datetime (incl. DatetimeWithNanoseconds de
+    Firestore), str ISO-8601 o None. Devuelve None si no se puede parsear.
+
+    Existe porque algunos closed_at en shadow_trades quedaron como string ISO (scripts de
+    backfill que escriben por REST — p. ej. regrade_alt_markets_backfill.py) y el resto
+    como timestamp nativo; mezclarlos en un sorted() reventaba calculate_metrics con
+    "'<' not supported between instances of 'str' and 'DatetimeWithNanoseconds'" y la
+    función devolvía su dict de ceros (bankroll 50 €, ROI 0 %, 0 señales).
+    """
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    if isinstance(v, str):
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
 def _calc_virtual_stake(kelly: float) -> float:
     return min(_MAX_STAKE, max(_MIN_STAKE, kelly * _INITIAL_BANKROLL))
 
@@ -366,7 +389,10 @@ def calculate_metrics(trades: list = None) -> dict:
     """Calcula métricas de rendimiento. Si trades=None, leerlos de Firestore."""
     try:
         if trades is None:
-            docs = col("shadow_trades").limit(500).stream()
+            # Sin limit: ROI, bankroll y win rate son agregados de POR VIDA — un
+            # limit(500) sin order_by devolvía una rebanada arbitraria por doc-id (UUID)
+            # y falseaba todos los totales.
+            docs = col("shadow_trades").stream()
             trades = []
             for doc in docs:
                 if doc.id == _RETROACTIVE_DOC:
@@ -437,9 +463,10 @@ def calculate_metrics(trades: list = None) -> dict:
         current_bankroll = round(_INITIAL_BANKROLL + sum(pnl_all), 4)
 
         # Last 20 win rate
+        _epoch0 = datetime.min.replace(tzinfo=timezone.utc)
         closed_sorted = sorted(
             closed,
-            key=lambda t: t.get("closed_at") or datetime.min.replace(tzinfo=timezone.utc),
+            key=lambda t: _as_utc_dt(t.get("closed_at")) or _epoch0,
         )
         last_20 = closed_sorted[-20:] if len(closed_sorted) >= 20 else closed_sorted
         last_20_wins = [t for t in last_20 if t.get("result") == "win"]

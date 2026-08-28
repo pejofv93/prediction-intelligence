@@ -11,7 +11,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from shared.firestore_client import col
-from shared.shadow_engine import calculate_metrics, _INITIAL_BANKROLL, _RETROACTIVE_DOC
+from shared.shadow_engine import (
+    calculate_metrics, _INITIAL_BANKROLL, _RETROACTIVE_DOC, _as_utc_dt,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,7 +76,7 @@ async def get_shadow_trades(
 async def get_shadow_bankroll() -> dict:
     """Bankroll actual e historial diario agregado."""
     try:
-        docs = col("shadow_trades").limit(500).stream()
+        docs = col("shadow_trades").stream()
         trades = []
         for doc in docs:
             if doc.id == _RETROACTIVE_DOC:
@@ -83,14 +85,11 @@ async def get_shadow_bankroll() -> dict:
             if data.get("pnl_virtual") is not None:
                 trades.append(data)
 
-        # Ordenar por closed_at
+        # Ordenar por closed_at — robusto a str / datetime / None (ver _as_utc_dt).
+        _epoch0 = datetime.min.replace(tzinfo=timezone.utc)
+
         def _closed_at(t):
-            ca = t.get("closed_at")
-            if ca is None:
-                return datetime.min.replace(tzinfo=timezone.utc)
-            if isinstance(ca, datetime) and ca.tzinfo is None:
-                return ca.replace(tzinfo=timezone.utc)
-            return ca
+            return _as_utc_dt(t.get("closed_at")) or _epoch0
 
         trades_sorted = sorted(trades, key=_closed_at)
 

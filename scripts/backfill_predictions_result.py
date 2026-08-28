@@ -186,9 +186,18 @@ def _evaluate(data: dict, fields: dict, actual_result_str: str) -> dict:
     home_team_id = str(_fv(fields, "home_team_id") or "")
     away_team_id = str(_fv(fields, "away_team_id") or "")
 
-    if team_to_back == home_team or team_to_back == home_team_id:
+    # GUARD (mismo bug que learning_engine.evaluate_prediction, sesión 2026-08-25):
+    # si team_to_back viene vacío (mercados alternativos sin nombre de equipo) nunca debe
+    # compararse contra home_team_id/away_team_id — cuando también faltan (siempre, en
+    # esos mercados) ambos son "" y "" == "" daba un acierto por pura coincidencia,
+    # ignorando la selección real. Ver scripts/regrade_alt_markets_backfill.py.
+    if not team_to_back:
+        logger.warning("  team_to_back vacío — no se puede graduar por nombre (match_id=%r)",
+                        _fv(fields, "match_id"))
+        correct = False
+    elif team_to_back == home_team or (home_team_id and team_to_back == home_team_id):
         correct = (actual_result_str == "HOME_WIN")
-    elif team_to_back == away_team or team_to_back == away_team_id:
+    elif team_to_back == away_team or (away_team_id and team_to_back == away_team_id):
         correct = (actual_result_str == "AWAY_WIN")
     else:
         logger.warning("  team_to_back=%r no coincide home=%r away=%r", team_to_back, home_team, away_team)
