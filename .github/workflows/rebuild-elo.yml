@@ -86,7 +86,9 @@ jobs:
             echo "mode=rebuild" >> "$GITHUB_OUTPUT"
             echo "confirm=true" >> "$GITHUB_OUTPUT"
             echo "seed_only=true" >> "$GITHUB_OUTPUT"
-            echo "history_budget=60" >> "$GITHUB_OUTPUT"
+            # 100/día − ~36 que gasta sports-collect − ~13 de censo − margen. El script
+            # recorta aún más a la baja según la cuota real (contador api_quotas + cabecera).
+            echo "history_budget=35" >> "$GITHUB_OUTPUT"
             echo "history_pages=1" >> "$GITHUB_OUTPUT"
             echo "no_uefa=false" >> "$GITHUB_OUTPUT"
             echo "skip_backup=true" >> "$GITHUB_OUTPUT"
