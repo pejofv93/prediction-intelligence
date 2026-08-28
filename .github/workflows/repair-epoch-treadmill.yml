@@ -20,9 +20,9 @@ on:
         type: choice
         options: ['false', 'true']
       weeks:
-        description: 'Semanas ISO de accuracy_log a recomputar (coma-separadas)'
+        description: 'accuracy_log a recomputar por created_at (coma-separadas). none = saltar (recomendado)'
         required: false
-        default: '2026-W34,2026-W35,2026-W36'
+        default: 'none'
 
 jobs:
   repair:
