@@ -20,12 +20,14 @@ load_dotenv()
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from shared.config import TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID, TELEGRAM_DAILY_THREAD_ID
 from fastapi.responses import JSONResponse
-# Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).
-# Los usos de col() aquí son perezosos; esto garantiza que el parche esté puesto antes.
-import shared.firestore_client  # noqa: F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).
+# Los usos de col() aquí son perezosos; esto garantiza que el parche esté puesto antes.
+# Tras logging.basicConfig para que su INFO de confirmación sea visible.
+import shared.firestore_client  # noqa: F401,E402
 
 app = FastAPI(title="telegram-bot")
 

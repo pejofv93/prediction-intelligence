@@ -11,16 +11,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 # Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).
-import shared.firestore_client  # noqa: F401
-from api import backtest, calculator, matched, poly_stats, polymarket, predictions, shadow, tracker
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+# Antes de `from api import …`, que lo importaría de forma transitiva vía shadow_engine.
+import shared.firestore_client  # noqa: F401,E402
+from api import backtest, calculator, matched, poly_stats, polymarket, predictions, shadow, tracker  # noqa: E402
 
 app = FastAPI(title="dashboard")
 security = HTTPBasic()
