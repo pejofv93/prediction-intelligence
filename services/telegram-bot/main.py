@@ -34,6 +34,34 @@ def verify_token(x_cloud_token: str = Header(...)) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+# Etiqueta legible por mercado para el reporte semanal — ver _describe_bet().
+_MARKET_LABELS: dict[str, str] = {
+    "h2h":            "1X2",
+    "totals":         "Más/Menos goles",
+    "asian_handicap": "Hándicap",
+    "spread":         "Hándicap",
+    "btts":           "Ambos marcan",
+    "correct_score":  "Marcador exacto",
+    "double_chance":  "Doble oportunidad",
+}
+
+
+def _describe_bet(pred: dict) -> str:
+    """
+    "Equipo A vs Equipo B (mercado: selección)" para best_match/worst_match del reporte
+    semanal. Antes solo mostraba los nombres de los equipos (home_team vs away_team) sin
+    decir qué se apostó — en mercados alternativos (totals/hándicap/marcador exacto) eso
+    hacía parecer invertida una señal que en realidad iba sobre goles/marcador, no sobre
+    quién ganaba (ver sesión 2026-08-25, caso Hull City AFC vs Manchester United FC).
+    """
+    home = pred.get("home_team", "?")
+    away = pred.get("away_team", "?")
+    market = str(pred.get("market_type") or "h2h").lower()
+    label = _MARKET_LABELS.get(market, market or "1X2")
+    selection = pred.get("team_to_back") or pred.get("selection") or "?"
+    return f"{home} vs {away} ({label}: {selection})"
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -198,7 +226,14 @@ async def _bg_daily_report() -> None:
         }
         tier_stats: dict = {"fuerte": [], "detectada": [], "moderada": []}
         try:
-            all_preds = list(col("predictions").limit(500).stream())
+            # 500 más recientes por created_at: determinista. Antes era limit(500) sin
+            # order_by → rebanada arbitraria por doc-id que derivaba al crecer la colección.
+            all_preds = list(
+                col("predictions")
+                .order_by("created_at", direction="DESCENDING")
+                .limit(500)
+                .stream()
+            )
             for doc in all_preds:
                 d = doc.to_dict()
                 pred_stats["total"] += 1
@@ -340,18 +375,14 @@ async def send_weekly_report() -> JSONResponse:
             correct_preds = [p for p in week_preds if p.get("correct") is True]
             if correct_preds:
                 best_pred = max(correct_preds, key=lambda p: float(p.get("edge") or 0))
-                best_match = (
-                    f"{best_pred.get('home_team', '?')} vs {best_pred.get('away_team', '?')}"
-                )
+                best_match = _describe_bet(best_pred)
                 best_edge = float(best_pred.get("edge") or 0)
                 best_result = best_pred.get("result", "N/A") or "N/A"
 
             wrong_preds = [p for p in week_preds if p.get("correct") is False]
             if wrong_preds:
                 worst_pred = min(wrong_preds, key=lambda p: float(p.get("confidence") or 1))
-                worst_match = (
-                    f"{worst_pred.get('home_team', '?')} vs {worst_pred.get('away_team', '?')}"
-                )
+                worst_match = _describe_bet(worst_pred)
                 worst_edge = float(worst_pred.get("edge") or 0)
                 worst_error = worst_pred.get("error_type", "N/A") or "N/A"
 

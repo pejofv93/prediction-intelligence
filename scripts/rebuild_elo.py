@@ -400,7 +400,16 @@ def main() -> None:
     ap.add_argument("--skip-backup", action="store_true")
     ap.add_argument("--no-reset-weights", action="store_true",
                     help="no resetear model_weights a DEFAULT_WEIGHTS")
+    ap.add_argument("--seed-only", action="store_true",
+                    help="SOLO sembrar histórico UEFA (team_stats + api_meta/uefa_seed_progress). "
+                         "NO recomputa ELO, NO escribe team_elo/elo_applied, NO resetea pesos, "
+                         "NO toca model_weights/elo_rebuild ni accuracy_log. Es el modo del cron "
+                         "nocturno: el reset de pesos y el movimiento de la frontera de época "
+                         "solo deben ocurrir en un dispatch manual explícito.")
     args = ap.parse_args()
+
+    if args.seed_only and args.no_uefa:
+        ap.error("--seed-only con --no-uefa no tiene sentido: no habría nada que sembrar")
 
     db = get_db(args.transport, args.project, args.prefix, args.account)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -493,6 +502,22 @@ def main() -> None:
             imap, prioritarios)
         print(f"   {len(prioritarios)} clubes prioritarios (con partido programado)")
         print(f"   histórico de clubes: {len(club_hist)} partidos brutos")
+
+        # ── Modo siembra: escribir SOLO team_stats + progreso y salir ────────
+        # No se recomputa el ELO ni se resetean pesos: eso solo en dispatch manual.
+        if args.seed_only:
+            stats_docs = build_uefa_team_stats(club_hist, clubs, team_stats, imap, names)
+            print(f"\n[seed-only] {len(stats_docs)} docs de team_stats a sembrar desde UEFA. "
+                  f"No se recomputa ELO ni se tocan pesos / elo_rebuild / accuracy_log.")
+            if not args.confirm:
+                print("[seed-only] dry-run: nada escrito.")
+                return
+            if stats_docs:
+                db.write_docs("team_stats", stats_docs)
+            db.write_docs("api_meta", {SEED_PROGRESS_DOC: {**progreso, "updated_at": now}})
+            print(f"[seed-only] hecho: {len(stats_docs)} team_stats + progreso de siembra "
+                  f"guardados.")
+            return
 
     # ── 1b. Prior de fuerza: de dónde arranca cada club ──────────────────────
     # Torneo habitual de cada club sembrado: es la única pista de procedencia que tenemos
@@ -749,14 +774,22 @@ def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
 
 def reset_weights(db, now: datetime) -> None:
     """
-    Resetea model_weights/current a DEFAULT_WEIGHTS: los pesos aprendidos se ajustaron con
-    el ELO corrupto como feature, así que arrastrarlos propaga la distorsión. Los contadores
-    acumulados también se ponen a cero para que la accuracy no mezcle épocas.
+    Resetea model_weights/current a DEFAULT_WEIGHTS y limpia accuracy_by_* (por
+    liga/mercado/confianza): pesos y tasas se aprendieron con el ELO corrupto como feature,
+    arrastrarlos propaga la distorsión.
+
+    NO toca total_predictions / correct_predictions: son el ledger de rendimiento de POR
+    VIDA, ciego a la época — una apuesta graduada es un resultado real aunque el ELO
+    estuviera distorsionado cuando saltó la señal. El learning engine los acumula sobre
+    legacy + época actual; ponerlos a cero aquí borraba el histórico en cada rebuild
+    (y con el cron nocturno, cada noche).
     """
     from shared.config import DEFAULT_WEIGHTS
     actual = {d["_id"]: d for d in db.read_collection("model_weights")}
     cur = actual.get("current", {})
     version = int(cur.get("version", 0)) + 1
+    kept_total = int(cur.get("total_predictions", 0) or 0)
+    kept_correct = int(cur.get("correct_predictions", 0) or 0)
     db.write_docs("model_weights", {"current": {
         "version": version,
         "updated": now,
@@ -767,14 +800,16 @@ def reset_weights(db, now: datetime) -> None:
         "blacklisted_leagues": [],
         "min_edge_threshold": cur.get("min_edge_threshold", 0.08),
         "min_confidence": cur.get("min_confidence", 0.65),
-        "total_predictions": 0,
-        "correct_predictions": 0,
+        # Ledger de por vida — se preserva a través del reset.
+        "total_predictions": kept_total,
+        "correct_predictions": kept_correct,
         "groq_predictions_count": 0,
         "weights_before_reset": cur.get("weights", {}),
         "reset_reason": "rebuild de ELO — pesos aprendidos sobre un feature corrupto",
     }})
-    print(f"   model_weights/current reseteado a DEFAULT_WEIGHTS (version {version}); "
-          f"pesos anteriores guardados en weights_before_reset: "
+    print(f"   model_weights/current: pesos→DEFAULT_WEIGHTS, accuracy_by_* limpias, "
+          f"contadores de por vida preservados (total={kept_total}, correct={kept_correct}); "
+          f"version {version}, pesos previos en weights_before_reset "
           f"{json.dumps(cur.get('weights', {}), ensure_ascii=False)}")
 
 

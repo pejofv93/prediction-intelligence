@@ -343,11 +343,27 @@ def evaluate_prediction(prediction: dict, actual_result: str,
     home_id = str(prediction.get("home_team_id", "")).strip()
     away_id = str(prediction.get("away_team_id", "")).strip()
 
+    # GUARD (bug real, sesión 2026-08-25): si `backed` viene vacío — mercados alternativos
+    # (totals/asian_handicap/btts/correct_score) sin score disponible, cuya selección
+    # ("Over 2.5", "4-2"...) nunca es un nombre de equipo — NUNCA debe compararse contra
+    # home_id/away_id. Cuando esos IDs también faltan (siempre, en estos mercados) quedan
+    # como "" por el default de .get(), y "" == "" daba un acierto por pura coincidencia:
+    # correct terminaba siendo literalmente "¿ganó el equipo local?", ignorando la
+    # selección real. Confirmado en producción: 10 de 23 predicciones de esa época
+    # (totals/asian_handicap graduadas antes de que existiera el grader por marcador)
+    # quedaron invertidas por esto — ver scripts/regrade_alt_markets_backfill.py.
+    if not backed:
+        logger.warning(
+            "evaluate_prediction: selección vacía — no se puede graduar por nombre "
+            "(match_id=%s, market_type=%s)",
+            prediction.get("match_id"), prediction.get("market_type"),
+        )
+        correct = False
     # Determinar si la prediccion fue correcta (comparación normalizada).
     # Basket no tiene empate → actual_result solo es HOME_WIN/AWAY_WIN.
-    if backed == home_team or backed == home_id:
+    elif backed == home_team or (home_id and backed == home_id):
         correct = (actual_result == "HOME_WIN")
-    elif backed == away_team or backed == away_id:
+    elif backed == away_team or (away_id and backed == away_id):
         correct = (actual_result == "AWAY_WIN")
     else:
         # No se puede determinar — considerar incorrecto
@@ -709,23 +725,22 @@ def _top_factor(signals: dict) -> str:
 MODEL_EPOCH_PRE_ELO_REBUILD = 1
 MODEL_EPOCH_CURRENT = 2
 
+# Frontera de época FIJA: la última reconstrucción ESTRUCTURAL del ELO (ledger + recompute
+# completo con priors, tanda 2026-08-25). NO se lee de model_weights/elo_rebuild.rebuilt_at:
+# el cron nocturno de rebuild-elo.yml movía ese campo al presente cada noche (cinta de
+# correr), dejando como "legacy" a toda señal de más de un día y bloqueando el aprendizaje
+# de forma permanente. La frontera es un hecho histórico; un rebuild estructural futuro debe
+# subir esta constante en un PR deliberado, nunca un job automático.
+ELO_STRUCTURAL_REBUILD_AT = datetime(2026, 8, 25, tzinfo=timezone.utc)
+
 
 def _elo_rebuild_cutoff() -> datetime | None:
-    """Instante de la reconstrucción del ELO. None si aún no se ha ejecutado."""
-    try:
-        doc = col("model_weights").document("elo_rebuild").get()
-        if not doc.exists:
-            return None
-        ts = (doc.to_dict() or {}).get("rebuilt_at")
-        if ts is None:
-            return None
-        if isinstance(ts, str):
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        dt = ts if isinstance(ts, datetime) else datetime.fromtimestamp(float(ts), tz=timezone.utc)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        logger.warning("_elo_rebuild_cutoff: no se pudo leer el marcador", exc_info=True)
-        return None
+    """Frontera de época: instante de la última reconstrucción estructural del ELO.
+
+    Constante fija (ELO_STRUCTURAL_REBUILD_AT), no un valor de Firestore. Ver la nota en
+    la constante: el marcador model_weights/elo_rebuild.rebuilt_at lo pisaba el cron.
+    """
+    return ELO_STRUCTURAL_REBUILD_AT
 
 
 def _prediction_epoch(prediction: dict, cutoff: datetime | None) -> int:
@@ -1086,28 +1101,30 @@ async def run_daily_learning() -> None:
 
     if legacy_predictions:
         logger.info(
-            "run_daily_learning: %d predicciones de la época anterior al rebuild de ELO "
-            "(model_epoch=%d) — graduadas pero fuera de pesos y accuracy",
+            "run_daily_learning: %d predicciones anteriores al rebuild estructural del ELO "
+            "(model_epoch=%d) — fuera de PESOS y accuracy_by_*, PERO cuentan para "
+            "total_predictions/correct_predictions y accuracy_log (rendimiento histórico "
+            "real, ciego a la época)",
             len(legacy_predictions), MODEL_EPOCH_PRE_ELO_REBUILD,
         )
 
-    if not processed_predictions:
-        logger.info("run_daily_learning: ninguna prediccion de la época actual pudo resolverse hoy")
-        # Las de la época anterior sí hay que persistirlas para que no queden pendientes.
-        for upd in legacy_predictions:
-            try:
-                col("predictions").document(
-                    str(upd.get("_firestore_doc_id") or upd["match_id"])
-                ).update({
-                    "result": upd["result"],
-                    "correct": upd["correct"],
-                    "error_type": upd["error_type"],
-                    "model_epoch": MODEL_EPOCH_PRE_ELO_REBUILD,
-                    "excluded_from_learning": True,
-                })
-            except Exception:
-                logger.error("run_daily_learning: error actualizando prediction legacy %s",
-                             upd.get("match_id"), exc_info=True)
+    # Rendimiento histórico = ciego a la época: una apuesta graduada es un resultado real
+    # aunque el ELO estuviera distorsionado cuando saltó la señal. Solo PESOS y accuracy_by_*
+    # se restringen a la época actual (ahí sí contamina el feature corrupto).
+    all_resolved = processed_predictions + legacy_predictions
+
+    if not all_resolved:
+        logger.info("run_daily_learning: nada resuelto hoy (ni época actual ni legacy)")
+        # Graduar bloqueos y evaluar filtros igualmente: no dependen de que haya
+        # predicciones resueltas y match_results se limpia a las 48h.
+        try:
+            await grade_filter_blocks()
+        except Exception:
+            logger.error("run_daily_learning: error graduando bloqueos de filtro", exc_info=True)
+        try:
+            await _maybe_evaluate_filters(now)
+        except Exception:
+            logger.error("run_daily_learning: error evaluando filtros", exc_info=True)
         return
 
     # --- 5. Guardar model_weights actualizado ---
@@ -1142,33 +1159,52 @@ async def run_daily_learning() -> None:
 
     new_version = current_version + 1
     total_in_db, correct_in_db = _get_historical_counts()
+    # Contadores de POR VIDA — ciegos a la época (legacy incluida).
+    lifetime_total = total_in_db + len(all_resolved)
+    lifetime_correct = correct_in_db + sum(1 for p in all_resolved if p.get("correct"))
 
-    try:
-        col("model_weights").document("current").set({
-            "version": new_version,
-            "updated": now,
-            "weights": current_weights,
-            "accuracy_by_league": acc_by_league,
-            "accuracy_by_market": acc_by_market,
-            "accuracy_by_confidence": acc_by_confidence,
-            "blacklisted_leagues": [],
-            "min_edge_threshold": 0.08,
-            "min_confidence": 0.65,
-            "total_predictions": total_in_db + len(processed_predictions),
-            "correct_predictions": correct_in_db + sum(
-                1 for p in processed_predictions if p.get("correct")
-            ),
-            "groq_predictions_count": groq_predictions_count,
-        })
-        logger.info(
-            "run_daily_learning: model_weights actualizado → version %d pesos=%s",
-            new_version, current_weights,
-        )
-    except Exception:
-        logger.error("run_daily_learning: error guardando model_weights", exc_info=True)
+    if processed_predictions:
+        try:
+            col("model_weights").document("current").set({
+                "version": new_version,
+                "updated": now,
+                "weights": current_weights,
+                "accuracy_by_league": acc_by_league,
+                "accuracy_by_market": acc_by_market,
+                "accuracy_by_confidence": acc_by_confidence,
+                "blacklisted_leagues": [],
+                "min_edge_threshold": 0.08,
+                "min_confidence": 0.65,
+                "total_predictions": lifetime_total,
+                "correct_predictions": lifetime_correct,
+                "groq_predictions_count": groq_predictions_count,
+            })
+            logger.info(
+                "run_daily_learning: model_weights actualizado → version %d pesos=%s",
+                new_version, current_weights,
+            )
+        except Exception:
+            logger.error("run_daily_learning: error guardando model_weights", exc_info=True)
+    else:
+        # Solo legacy resuelto hoy: nada que aprender. No se tocan weights/accuracy_by_* ni
+        # se bumpea versión — solo el contador de por vida (merge, preserva el resto).
+        try:
+            col("model_weights").document("current").update({
+                "total_predictions": lifetime_total,
+                "correct_predictions": lifetime_correct,
+                "updated": now,
+            })
+            logger.info(
+                "run_daily_learning: sin época actual — solo contadores de por vida "
+                "(+%d legacy resueltas, total=%d)", len(legacy_predictions), lifetime_total,
+            )
+        except Exception:
+            logger.error(
+                "run_daily_learning: error actualizando contadores de por vida", exc_info=True
+            )
 
-    # --- 6. Actualizar accuracy_log de la semana ---
-    week_predictions = [p for p in processed_predictions]
+    # --- 6. Actualizar accuracy_log de la semana — TOTALES ciegos a la época ---
+    week_predictions = all_resolved
     week_accuracy = calculate_accuracy(
         [{"correct": p.get("correct")} for p in week_predictions]
     )
@@ -1188,15 +1224,19 @@ async def run_daily_learning() -> None:
             correct_new = correct_prev + sum(1 for p in week_predictions if p.get("correct"))
             updated_accuracy = round(correct_new / total_new, 4) if total_new > 0 else 0.0
 
-            acc_log_ref.update({
+            _payload = {
                 "predictions_total": total_new,
                 "predictions_correct": correct_new,
                 "accuracy": updated_accuracy,
-                "accuracy_by_league": acc_by_league,
-                "accuracy_by_market": acc_by_market,
-                "weights_end": current_weights,
                 "prev_week_accuracy": prev_week_accuracy,
-            })
+            }
+            # accuracy_by_* y weights_end son foto de la ÉPOCA ACTUAL — solo se reescriben
+            # si hoy hubo aprendizaje real; si no, se conservan los del último batch.
+            if processed_predictions:
+                _payload["accuracy_by_league"] = acc_by_league
+                _payload["accuracy_by_market"] = acc_by_market
+                _payload["weights_end"] = current_weights
+            acc_log_ref.update(_payload)
         else:
             correct_count = sum(1 for p in week_predictions if p.get("correct"))
             acc_log_ref.set({
@@ -1213,8 +1253,8 @@ async def run_daily_learning() -> None:
             })
 
         logger.info(
-            "run_daily_learning: accuracy_log[%s] actualizado — accuracy=%.1f%%",
-            current_week, week_accuracy * 100,
+            "run_daily_learning: accuracy_log[%s] — +%d resueltas hoy (accuracy dia=%.1f%%)",
+            current_week, len(week_predictions), week_accuracy * 100,
         )
     except Exception:
         logger.error("run_daily_learning: error guardando accuracy_log", exc_info=True)
