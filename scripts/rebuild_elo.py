@@ -28,14 +28,17 @@ Uso:
     python scripts/rebuild_elo.py --confirm --history-pages 3       # objetivo: 90 partidos/club
     python scripts/rebuild_elo.py --no-uefa --confirm               # solo recomputo
 
-Cuota allsportsapi2: 100 requests/día, compartida sin coordinación con sports-collect.yml
-(censo+fixtures UEFA cada 6h, ~36/día). El censo gasta ~13; las clasificaciones se piden
-UNA vez por temporada y luego se leen de api_meta/uefa_standings_cache (0 requests) —
-`get_previous_standings` lleva esa caché. `--history-budget` es el TOPE de esta tanda: el
-gasto real se recorta a lo que allsportsapi2 reporta que queda de verdad menos
-`--collect-reserve` (40 por defecto), así el rebuild nunca se come la cuota que necesita
-sports-collect aunque el cron de GitHub dispare tarde (ver el 429 que tumbó la primera
-ejecución programada, 2026-08-26). El progreso de historial queda en
+Cuota allsportsapi2: 100 requests/día compartidos con sports-collect.yml (fixtures UEFA
+cada 6h, ~36/día). El censo gasta ~13; las clasificaciones se piden UNA vez por temporada
+y luego se leen de api_meta/uefa_standings_cache (0 requests). Coordinación con el colector
+vía el contador api_quotas/allsports_{fecha} que mantiene QuotaManager: al arrancar se lee
+para calcular el presupuesto, al terminar se suma lo que gastó la siembra para que el
+siguiente collect lo vea. `--history-budget` es el TOPE de la tanda; el gasto real se
+recorta a la señal de cuota MÁS PESIMISTA (cabecera X-RateLimit · límite - lo ya gastado
+por collect) menos `--collect-reserve` (40 por defecto). Si NO hay NINGUNA señal de cuota,
+se aplica un tope duro (HISTORY_BUDGET_HARD_CAP) en vez de dar por bueno `--history-budget`
+— ese fue el fallo del 429 que tumbó el cron el 2026-08-26: el recorte existía pero se
+saltaba en silencio al faltar la cabecera. El progreso de historial queda en
 api_meta/uefa_seed_progress, así que las tandas se reanudan solas.
 `--skip-backup` es obligatorio al repetir: si no, la copia buena se pisa con el estado ya
 reconstruido.
@@ -58,7 +61,7 @@ os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "prediction-intelligence")
 os.environ.setdefault("FIRESTORE_COLLECTION_PREFIX", "prod")
 
 from _fsrest import get_db                                              # noqa: E402
-from probe_uefa import _api_key, _get as _uefa_get, _season_label       # noqa: E402
+from probe_uefa import _api_key, _get as _raw_uefa_get, _season_label   # noqa: E402
 from collectors.allsports_uefa import UEFA_TOURNAMENTS, parse_event     # noqa: E402
 from collectors.team_identity import (                                  # noqa: E402
     build_identity_map, match_fingerprint, resolve,
@@ -96,6 +99,87 @@ def typed(team_id: str):
 
 
 # ── Fase 1: siembra UEFA ─────────────────────────────────────────────────────
+
+# Cuota allsportsapi2: 100 requests/día compartidos con sports-collect.yml (fixtures UEFA
+# cada 6h). No hay coordinación en tiempo real; lo único que ambos comparten es el contador
+# api_quotas/allsports_{fecha} que mantiene QuotaManager desde el colector. Este script lo
+# lee para calcular el presupuesto y lo actualiza al final para que el siguiente collect vea
+# lo que gastó la siembra. Todo request a la API pasa por _uefa_get, así que el contador de
+# aquí es exacto.
+DAILY_ALLSPORTS_LIMIT = 100
+# Tope duro cuando NO se conoce NINGÚN dato de cuota (ni cabecera, ni contador compartido):
+# la vez anterior el recorte se saltaba en silencio al faltar la cabecera y la siembra
+# quemaba el presupuesto entero. Sin señales, se asume lo peor y se gasta poco.
+HISTORY_BUDGET_HARD_CAP = 15
+
+_ALLSPORTS_REQUESTS = 0            # requests hechos por este proceso en esta ejecución
+_ALLSPORTS_LAST_REMAINING: int | None = None   # último X-RateLimit-Requests-Remaining visto
+
+
+def _uefa_get(path: str, key: str) -> tuple[dict, dict]:
+    """probe_uefa._get + contabilidad de cuota (nº de requests y cuota restante vista).
+
+    TODO acceso a allsportsapi2 del script pasa por aquí, incluido el que acaba en 429:
+    la request se cuenta igual porque la API la descuenta igual.
+    """
+    global _ALLSPORTS_REQUESTS, _ALLSPORTS_LAST_REMAINING
+    _ALLSPORTS_REQUESTS += 1
+    try:
+        data, headers = _raw_uefa_get(path, key)
+    except urllib.error.HTTPError as e:
+        rem = (getattr(e, "headers", None) or {}).get("X-RateLimit-Requests-Remaining")
+        if str(rem).isdigit():
+            _ALLSPORTS_LAST_REMAINING = int(rem)
+        raise
+    rem = headers.get("X-RateLimit-Requests-Remaining")
+    if str(rem).isdigit():
+        _ALLSPORTS_LAST_REMAINING = int(rem)
+    return data, headers
+
+
+def _read_allsports_used(db, now: datetime) -> int | None:
+    """`used` del contador compartido api_quotas/allsports_{fecha}, o None si el doc no
+    existe o no se puede leer. None NO es 0: significa "no sé lo que gastó collect hoy"."""
+    key = f"allsports_{now.strftime('%Y-%m-%d')}"
+    try:
+        doc = next((d for d in db.read_collection("api_quotas") if d["_id"] == key), None)
+    except Exception as e:
+        print(f"   contador de cuota allsports: ilegible ({type(e).__name__}) — cuota desconocida")
+        return None
+    if not doc:
+        return None
+    try:
+        return int(doc.get("used", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bump_allsports_used(db, now: datetime, n_requests: int, last_remaining: int | None,
+                         confirm: bool) -> None:
+    """Suma al contador compartido lo que gastó la siembra, para que el siguiente
+    sports-collect vea la cuota real. Read-modify-write: la ventana de carrera con el
+    colector es de milisegundos y ambos lados corren en horarios disjuntos."""
+    if n_requests <= 0:
+        return
+    key = f"allsports_{now.strftime('%Y-%m-%d')}"
+    if not confirm:
+        print(f"   [dry-run] registraría +{n_requests} en {key} "
+              f"(remaining~{last_remaining if last_remaining is not None else '?'})")
+        return
+    try:
+        prev = next((d for d in db.read_collection("api_quotas") if d["_id"] == key), None) or {}
+        doc = {k: v for k, v in prev.items() if k != "_id"}
+        doc["key"] = key
+        doc["used"] = int(doc.get("used", 0) or 0) + int(n_requests)
+        doc["last_call"] = now.isoformat()
+        if last_remaining is not None:
+            doc["remaining_reported"] = int(last_remaining)
+        db.write_docs("api_quotas", {key: doc})
+        print(f"   contador de cuota allsports: +{n_requests} → used={doc['used']}"
+              f"{f', remaining_reported={last_remaining}' if last_remaining is not None else ''}")
+    except Exception as e:
+        print(f"   contador de cuota allsports: no se pudo actualizar ({type(e).__name__})")
+
 
 def _uefa_get_safe(path: str, key: str) -> tuple[dict | None, dict, bool]:
     """_uefa_get protegido: un 429 (u otro fallo de red) no tumba el job, solo corta
@@ -213,7 +297,11 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
     imap = imap or {}
     prioritarios = prioritarios or set()
     out: list[dict] = []
-    prog = {str(k): dict(v) for k, v in (progreso or {}).items()}
+    # Defensa propia: el doc api_meta/uefa_seed_progress mezcla al mismo nivel los progresos
+    # por club (dict) con metadata suelta — "_id" (str) y "updated_at" (timestamp, que bajo
+    # gRPC llega como DatetimeWithNanoseconds no iterable). main() ya filtra al releerlo, pero
+    # esta función hace dict(v) a ciegas y no debe reventar aunque un caller pase el doc crudo.
+    prog = {str(k): dict(v) for k, v in (progreso or {}).items() if isinstance(v, dict)}
     for sid, nombre in candidatos.items():
         prog.setdefault(str(sid), {"name": nombre, "pages": 0})
         prog[str(sid)]["name"] = prog[str(sid)].get("name") or nombre
@@ -232,6 +320,7 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
         )
 
     gastados = 0
+    errores_seguidos = 0
     atendidos: set[str] = set()
     while gastados < presupuesto:
         pendientes = [x for x in _cola() if x[3] not in atendidos]
@@ -244,7 +333,15 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
             data, headers = _uefa_get(f"/api/team/{sid}/matches/previous/{pagina}", key)
         except Exception as e:
             print(f"  {nombre}: ERROR {type(e).__name__} {e}")
+            errores_seguidos += 1
+            # 429 en cadena (o la API caída): no seguir rociando requests contra un pozo
+            # seco — cada uno cuenta contra la cuota compartida igual que si tuviera éxito.
+            if errores_seguidos >= 3:
+                print("  3 errores seguidos (¿cuota agotada / API caída?) — corto la "
+                      "siembra de esta tanda, se reanuda en la próxima")
+                break
             continue
+        errores_seguidos = 0
         gastados += 1
         events = data.get("events", [])
         for e in events:
@@ -448,17 +545,18 @@ def main() -> None:
         key = _api_key()
         leagues = [x.strip().upper() for x in args.leagues.split(",") if x.strip()]
         print("\n   siembra UEFA:")
-        uefa_matches, clubs, remaining = fetch_uefa_matches(key, leagues)
+        # La cuota restante y el nº de requests gastados los lleva el envoltorio _uefa_get
+        # en _ALLSPORTS_LAST_REMAINING / _ALLSPORTS_REQUESTS — cubre census, clasificaciones
+        # e historial por igual, así que no hace falta ir pasando `remaining` a mano.
+        uefa_matches, clubs, _ = fetch_uefa_matches(key, leagues)
 
         # Las clasificaciones van ANTES que el historial: sirven para el ajuste del prior
         # y, de paso, traen los ids de Sofascore de los clubes grandes, que en agosto no
         # están en el censo europeo. Así entran ya en la cola de siembra de esta tanda.
         if not args.no_priors:
             print("\n   clasificaciones de la temporada pasada (ajuste del prior):")
-            standings, rem = get_previous_standings(
+            standings, _ = get_previous_standings(
                 db, key, ["PL", "PD", "SA", "BL1", "FL1", "BSA"], now, args.confirm)
-            if rem is not None:
-                remaining = rem
             de_tablas = {int(f["source_id"]): f["team_name"]
                          for filas in standings.values() for f in filas if f.get("source_id")}
             if de_tablas:
@@ -486,20 +584,38 @@ def main() -> None:
         except Exception as e:
             print(f"   (sin prioridades de upcoming_matches: {type(e).__name__})")
 
-        # Presupuesto dinámico: sports-collect.yml consume del mismo pool de 100/día sin
-        # coordinarse con este script (ver el 429 que tumbó la primera ejecución del cron,
-        # 2026-08-26). En vez de asumir un reparto fijo por horario, se recorta el tope
-        # configurado a lo que allsportsapi2 reporta que queda de verdad, menos la reserva.
-        history_budget = args.history_budget
-        if remaining is not None:
-            history_budget = max(0, min(args.history_budget, remaining - args.collect_reserve))
-            print(f"\n   presupuesto de historial: {history_budget} (cuota restante real "
-                  f"{remaining}, reserva {args.collect_reserve} para sports-collect.yml"
-                  f"{', tope configurado ' + str(args.history_budget) if history_budget < args.history_budget else ''})")
+        # Presupuesto dinámico. La cuota (100/día) es compartida con sports-collect.yml, que
+        # la gasta sin coordinarse salvo por el contador api_quotas/allsports_{fecha} que
+        # mantiene QuotaManager. Se toma la señal de cuota MÁS PESIMISTA de las que haya
+        # (cabecera X-RateLimit vista en el censo · límite - lo que ya gastó collect hoy),
+        # se le resta la reserva del colector y se recorta a eso el tope configurado.
+        # Si NO hay NINGUNA señal, NO se da por bueno --history-budget: tope duro. Ese fue
+        # el fallo del 2026-08-26 — el recorte existía pero se saltaba al faltar la cabecera.
+        used_hoy = _read_allsports_used(db, now)
+        señales: list[tuple[str, int]] = []
+        if _ALLSPORTS_LAST_REMAINING is not None:
+            señales.append(("cabecera X-RateLimit", _ALLSPORTS_LAST_REMAINING))
+        if used_hoy is not None:
+            señales.append(("contador compartido",
+                            DAILY_ALLSPORTS_LIMIT - used_hoy - _ALLSPORTS_REQUESTS))
+
+        if señales:
+            peor_nombre, peor_valor = min(señales, key=lambda s: s[1])
+            history_budget = max(0, min(args.history_budget, peor_valor - args.collect_reserve))
+            print(f"\n   presupuesto de historial: {history_budget} — cuota restante ~{peor_valor} "
+                  f"(«{peor_nombre}»{f', la más baja de {len(señales)}' if len(señales) > 1 else ''}), "
+                  f"reserva {args.collect_reserve} para sports-collect, censo ya gastado "
+                  f"{_ALLSPORTS_REQUESTS}, tope configurado {args.history_budget}")
+        else:
+            history_budget = min(args.history_budget, HISTORY_BUDGET_HARD_CAP)
+            print(f"\n   presupuesto de historial: {history_budget} — SIN datos de cuota "
+                  f"(ni cabecera ni contador compartido api_quotas/allsports_*): se aplica el "
+                  f"tope duro {HISTORY_BUDGET_HARD_CAP}, NO --history-budget {args.history_budget}")
 
         club_hist, progreso = fetch_club_histories(
             key, clubs, progreso_previo, args.history_pages, history_budget,
             imap, prioritarios)
+        _bump_allsports_used(db, now, _ALLSPORTS_REQUESTS, _ALLSPORTS_LAST_REMAINING, args.confirm)
         print(f"   {len(prioritarios)} clubes prioritarios (con partido programado)")
         print(f"   histórico de clubes: {len(club_hist)} partidos brutos")
 

@@ -39,14 +39,19 @@ def fit_attack_defense(matches: list[dict]) -> dict:
         logger.warning("fit_attack_defense: lista de partidos vacia — usando cold start")
         return {"home_advantage": COLD_START_PARAMS["home_advantage"]}
 
-    # Extraer equipos unicos y contar partidos por equipo
-    team_match_count: dict[int, int] = {}
+    # Extraer equipos unicos y contar partidos por equipo.
+    # Los team_id se normalizan a str: football-data los da como int y la siembra UEFA de
+    # clubes sin histórico previo los deja como str (id canónico no numérico). Mezclar ambos
+    # tipos en un mismo all_raw hacía reventar sorted() ('<' not supported between int y str).
+    team_match_count: dict[str, int] = {}
     for m in matches:
         home_id = m.get("home_team_id")
         away_id = m.get("away_team_id")
         if home_id is not None:
+            home_id = str(home_id)
             team_match_count[home_id] = team_match_count.get(home_id, 0) + 1
         if away_id is not None:
+            away_id = str(away_id)
             team_match_count[away_id] = team_match_count.get(away_id, 0) + 1
 
     if not team_match_count:
@@ -56,11 +61,11 @@ def fit_attack_defense(matches: list[dict]) -> dict:
     n = len(teams)
     team_idx = {t: i for i, t in enumerate(teams)}
 
-    # Partidos validos (con goles definidos)
+    # Partidos validos (con goles definidos) — misma normalización a str en la pertenencia
     valid_matches = [
         m for m in matches
         if m.get("goals_home") is not None and m.get("goals_away") is not None
-        and m.get("home_team_id") in team_idx and m.get("away_team_id") in team_idx
+        and str(m.get("home_team_id")) in team_idx and str(m.get("away_team_id")) in team_idx
     ]
 
     if len(valid_matches) < 2:
@@ -92,8 +97,8 @@ def fit_attack_defense(matches: list[dict]) -> dict:
 
         ll = 0.0
         for m in valid_matches:
-            hi = team_idx[m["home_team_id"]]
-            ai = team_idx[m["away_team_id"]]
+            hi = team_idx[str(m["home_team_id"])]
+            ai = team_idx[str(m["away_team_id"])]
             gh = int(m["goals_home"])
             ga = int(m["goals_away"])
 
@@ -189,8 +194,9 @@ def predict_match_probs(
     """
     MAX_GOALS = 8
 
-    home_p = team_params.get(home_id, {})
-    away_p = team_params.get(away_id, {})
+    # fit_attack_defense devuelve el dict con las claves de equipo normalizadas a str
+    home_p = team_params.get(str(home_id), {})
+    away_p = team_params.get(str(away_id), {})
     home_adv = team_params.get("home_advantage", COLD_START_PARAMS["home_advantage"])
 
     attack_home = home_p.get("attack", COLD_START_PARAMS["default_attack"])
@@ -231,7 +237,7 @@ def predict_match_probs(
     away_win = float(np.sum(np.triu(score_matrix, k=1)))
 
     logger.debug(
-        "predict_match_probs(%d vs %d): H=%.3f D=%.3f A=%.3f | λ=%.2f μ=%.2f",
+        "predict_match_probs(%s vs %s): H=%.3f D=%.3f A=%.3f | λ=%.2f μ=%.2f",
         home_id, away_id, home_win, draw, away_win, lambda_home, mu_away,
     )
 
