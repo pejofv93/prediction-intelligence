@@ -23,6 +23,8 @@ from shared.config import (
     MATCHED_ALERT_COVERAGE_MIN_RATING,
     MATCHED_ALERT_CONFIDENCE,
     MATCHED_ALERT_MAX_ODDS,
+    MATCHED_ALERT_BASE_STAKE,
+    MATCHED_MAX_BACK_LAY_RATIO,
 )
 
 from .models import MatchedSignal
@@ -33,20 +35,26 @@ _ALLOWED_CONFIDENCE = {c.strip() for c in MATCHED_ALERT_CONFIDENCE.split(",") if
 
 
 def should_alert(sig: MatchedSignal) -> bool:
-    """True si la señal cumple umbral, confianza y rango de cuotas para alertar."""
+    """True si la señal cumple umbral, confianza, cuota y proxies de liquidez para alertar."""
     if sig.confidence not in _ALLOWED_CONFIDENCE:
         return False
     # Longshots: cuota alta → liquidez de exchange ínfima → surebet no ejecutable.
     if max(sig.back_odds, sig.lay_odds) > MATCHED_ALERT_MAX_ODDS:
         return False
+    # Fase 3 — proxy de liquidez: lay muy por encima del back = mercado fino o cuota stale.
+    if sig.back_odds > 0 and sig.lay_odds > sig.back_odds * MATCHED_MAX_BACK_LAY_RATIO:
+        return False
     if sig.signal_type == "surebet":
+        # Surebet solo con lay recién actualizado: mercado activo = hay dinero real.
+        if sig.confidence != "high":
+            return False
         return sig.qualifying_rating >= MATCHED_ALERT_SUREBET_MIN_RATING
     if sig.signal_type == "coverage":
         return sig.qualifying_rating >= MATCHED_ALERT_COVERAGE_MIN_RATING
     return False
 
 
-def format_alert(sig: MatchedSignal, back_stake: float = 100.0) -> str:
+def format_alert(sig: MatchedSignal, back_stake: float = MATCHED_ALERT_BASE_STAKE) -> str:
     """Mensaje de texto plano para el canal General."""
     scale = back_stake / 100.0
     lay_stake = sig.lay_stake_per_100 * scale

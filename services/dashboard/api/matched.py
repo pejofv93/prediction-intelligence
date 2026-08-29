@@ -77,8 +77,8 @@ _DEFAULT_BONUSES = [
 ]
 
 # Tope de cuota para la jugada de una freebet: por encima la liquidez del exchange
-# es ínfima aunque el SNR sea alto (mismo criterio que MATCHED_ALERT_MAX_ODDS).
-_PLAY_MAX_ODDS = 7.0
+# es ínfima aunque el SNR sea alto (mismo criterio que MATCHED_ALERT_MAX_ODDS, Fase 3).
+_PLAY_MAX_ODDS = 4.0
 
 
 def _seed_bonuses(coll) -> None:
