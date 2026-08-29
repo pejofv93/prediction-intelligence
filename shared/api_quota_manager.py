@@ -69,7 +69,7 @@ _MONTHLY_LIMITS: dict[str, int] = {
                             # La API no devuelve cabecera de cuota, así que el contador
                             # interno es la única señal — de ahí que el número deba ser real.
     "the_odds_api":    500, # 500/mes — verificado. Header x-requests-remaining fiable.
-    "the_odds_api_matched": int(os.environ.get("MATCHED_MONTHLY_CREDIT_BUDGET", "200")),
+    "the_odds_api_matched": int(os.environ.get("MATCHED_MONTHLY_CREDIT_BUDGET", "210")),
                             # sub-presupuesto del escáner matched dentro de los 500 reales.
                             # Evita que matched agote la cuota que necesita el value engine.
     "oddspapi":        250, # 250/mes — confirmado. Agotada hasta ~May 1.

@@ -41,6 +41,25 @@ _GROUP_PRIORITY = {
 # Subcadenas de sport_key que indican mercado de futuros / outright (sin h2h por partido).
 _EXCLUDE_SUBSTR = ("_winner", "championship_winner", "election")
 
+# Fase 3 — whitelist de competiciones con profundidad real de lay en Betfair. The Odds API
+# no da size del lay, así que es un proxy: solo emitimos donde el exchange tiene fondo
+# (tour ATP/WTA, top-5 europeo + UEFA, NBA/Euroliga). Fuera quedan ligas menores y
+# qualifiers, donde el lay es fino aunque el precio parezca bueno.
+_LIQUID_SOCCER = {
+    "soccer_epl", "soccer_spain_la_liga", "soccer_germany_bundesliga",
+    "soccer_italy_serie_a", "soccer_france_ligue_one",
+    "soccer_uefa_champs_league", "soccer_uefa_europa_league",
+    "soccer_uefa_europa_conference_league",
+}
+_LIQUID_OTHER = {"basketball_nba", "basketball_euroleague"}
+
+
+def _is_liquid_key(key: str) -> bool:
+    """Proxy de liquidez: True si la competición tiene lay de Betfair con fondo real."""
+    if key.startswith(("tennis_atp_", "tennis_wta_")):
+        return True
+    return key in _LIQUID_SOCCER or key in _LIQUID_OTHER
+
 _COLL = "matched_signals"
 
 
@@ -67,6 +86,8 @@ async def _active_sport_keys() -> list[str]:
             continue
         if any(sub in key for sub in _EXCLUDE_SUBSTR):
             continue
+        if not _is_liquid_key(key):
+            continue        # Fase 3 — fuera competiciones sin fondo de lay en Betfair
         cand.append((_GROUP_PRIORITY[group], key))
 
     cand.sort(key=lambda t: (t[0], t[1]))

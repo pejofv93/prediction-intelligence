@@ -80,8 +80,10 @@ MATCHED_COVERAGE_MIN_RATING = float(os.environ.get("MATCHED_COVERAGE_MIN_RATING"
 # como sentinela de "sin lay disponible" para esa selección).
 MATCHED_LAY_ODDS_MAX = float(os.environ.get("MATCHED_LAY_ODDS_MAX", "51.0"))
 # Máx sport_keys por escaneo (backstop de coste: N × 2 créditos de The Odds API).
-# Con budget 200/mes y 2 créditos/key: 4 keys = 8 créditos/scan → ~25 scans/mes (diario holgado).
-MATCHED_MAX_KEYS_PER_SCAN = int(os.environ.get("MATCHED_MAX_KEYS_PER_SCAN", "4"))
+# 3 keys = 6 créditos/scan → ~31 scans/mes contra el tope 210 (diario todo el mes, con
+# margen para runs manuales). La 4ª key era siempre una liga menor (Austria/Bélgica) con
+# lay de Betfair casi inexistente → recortarla no pierde señal accionable.
+MATCHED_MAX_KEYS_PER_SCAN = int(os.environ.get("MATCHED_MAX_KEYS_PER_SCAN", "3"))
 # Staleness del lay (The Odds API no da liquidez/size, sí last_update por mercado):
 #   lay más fresco que FRESH_SEC  → confianza "high"
 #   entre FRESH y STALE           → confianza "medium"
@@ -100,7 +102,15 @@ MATCHED_ALERT_CONFIDENCE = os.environ.get("MATCHED_ALERT_CONFIDENCE", "high,medi
 # desploma y el "surebet" es un espejismo (fresco pero no ejecutable a tamaño real).
 # The Odds API no da size → usamos la cuota como proxy. La señal SÍ se persiste (visible
 # en el dashboard), solo NO se alerta si back o lay superan este tope.
-MATCHED_ALERT_MAX_ODDS = float(os.environ.get("MATCHED_ALERT_MAX_ODDS", "7.0"))
+# 4.0 (Fase 3): por encima el lay de Betfair es casi siempre fino.
+MATCHED_ALERT_MAX_ODDS = float(os.environ.get("MATCHED_ALERT_MAX_ODDS", "4.0"))
+# Fase 3 — proxy de liquidez: si el lay está muy por encima del back, el mercado del
+# exchange es fino o la cuota está stale → la cobertura no es ejecutable a tamaño real.
+# Ratio lay_odds / back_odds máximo para alertar (un mercado líquido los tiene pegados).
+MATCHED_MAX_BACK_LAY_RATIO = float(os.environ.get("MATCHED_MAX_BACK_LAY_RATIO", "1.15"))
+# Stake base con el que se expresan los importes de la alerta (back stake).
+# El motor calcula todo por back_stake=100; la alerta reescala a este valor.
+MATCHED_ALERT_BASE_STAKE = float(os.environ.get("MATCHED_ALERT_BASE_STAKE", "10.0"))
 
 BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral menor
 POLY_MIN_EDGE = 0.08
