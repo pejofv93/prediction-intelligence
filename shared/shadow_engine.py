@@ -80,13 +80,47 @@ def _poly_decimal_odds(selection: str, market_price_yes: float) -> float:
     return round(1.0 / market_price_yes, 2)
 
 
+_TRADES_PAGE_SIZE = 1000
+
+
+def _iter_all_shadow_trades() -> list:
+    """Lee shadow_trades entero paginando por nombre de documento.
+
+    calculate_metrics / _calc_bankroll_after necesitan agregados DE POR VIDA (ROI,
+    bankroll, win rate) → no se pueden acotar con limit(). Pero un único .stream()
+    de la colección entera empezó a pasarse del deadline de 60s de Firestore
+    ("504 Deadline Exceeded") según crecía la colección, y la función caía en su
+    except → el reporte diario salía en ceros (50 €, ROI 0 %, 0 señales).
+
+    Paginar por __name__ hace que cada página sea una query nueva bajo su propio
+    deadline: el coste total sigue siendo lineal en nº de trades, pero ya no hay
+    una sola consulta que pueda expirar. Excluye el doc marcador _RETROACTIVE_DOC.
+    """
+    coll = col("shadow_trades")
+    out: list = []
+    cursor = None
+    while True:
+        q = coll.order_by("__name__").limit(_TRADES_PAGE_SIZE)
+        if cursor is not None:
+            q = q.start_after(cursor)
+        page = list(q.stream())
+        if not page:
+            break
+        for doc in page:
+            if doc.id == _RETROACTIVE_DOC:
+                continue
+            out.append(doc.to_dict())
+        if len(page) < _TRADES_PAGE_SIZE:
+            break
+        cursor = page[-1]
+    return out
+
+
 def _calc_bankroll_after() -> float:
     """Recalcula bankroll desde 50.0 sumando todos los pnl de trades cerrados."""
     try:
-        docs = col("shadow_trades").stream()
         bankroll = _INITIAL_BANKROLL
-        for doc in docs:
-            data = doc.to_dict()
+        for data in _iter_all_shadow_trades():
             if data.get("result") in ("win", "loss", "void") and data.get("pnl_virtual") is not None:
                 bankroll += float(data["pnl_virtual"])
         return round(bankroll, 4)
@@ -389,15 +423,11 @@ def calculate_metrics(trades: list = None) -> dict:
     """Calcula métricas de rendimiento. Si trades=None, leerlos de Firestore."""
     try:
         if trades is None:
-            # Sin limit: ROI, bankroll y win rate son agregados de POR VIDA — un
-            # limit(500) sin order_by devolvía una rebanada arbitraria por doc-id (UUID)
-            # y falseaba todos los totales.
-            docs = col("shadow_trades").stream()
-            trades = []
-            for doc in docs:
-                if doc.id == _RETROACTIVE_DOC:
-                    continue
-                trades.append(doc.to_dict())
+            # ROI, bankroll y win rate son agregados de POR VIDA — hay que leer la
+            # colección entera, pero paginada: un solo .stream() se pasaba del
+            # deadline de 60s de Firestore ("504 Deadline Exceeded") y la función
+            # caía en su except → reporte en ceros. Ver _iter_all_shadow_trades.
+            trades = _iter_all_shadow_trades()
 
         closed = [t for t in trades if t.get("result") in ("win", "loss")]
         pending = [t for t in trades if t.get("result") == "pending"]
