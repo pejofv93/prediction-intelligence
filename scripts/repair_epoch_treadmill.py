@@ -25,8 +25,10 @@ Este script (idempotente, dry-run por defecto):
   4. Recalcula model_weights/current.total_predictions / .correct_predictions desde un
      barrido completo de predictions, CIEGO A LA ÉPOCA (una apuesta graduada es un
      resultado real). Coherente con el nuevo learning_engine.
-  5. Recalcula accuracy_log de las semanas afectadas (--weeks, por defecto W34..W36)
-     desde predictions.created_at, ciego a la época.
+  5. (DESACTIVADO por defecto, --weeks none) Recontaría accuracy_log semanal desde
+     predictions.created_at — pero las filas van por semana de GRADUACIÓN, no de creación,
+     así que se dejan las semanas pasadas incompletas. El learning_engine ya desplegado
+     suma bien de aquí en adelante.
   6. Repara closed_at / regraded_at que quedaron como string en shadow_trades (rompían
      calculate_metrics → bankroll 50 €, ROI 0 %).
 
@@ -207,8 +209,10 @@ def main() -> None:
     ap.add_argument("--project", default=os.environ.get("GOOGLE_CLOUD_PROJECT", "prediction-intelligence"))
     ap.add_argument("--prefix", default=os.environ.get("FIRESTORE_COLLECTION_PREFIX", "prod"))
     ap.add_argument("--account", default=os.environ.get("GCLOUD_ACCOUNT"))
-    ap.add_argument("--weeks", default="2026-W34,2026-W35,2026-W36",
-                    help="semanas ISO de accuracy_log a recomputar (coma-separadas)")
+    ap.add_argument("--weeks", default="none",
+                    help="semanas ISO de accuracy_log a recomputar por created_at "
+                         "(coma-separadas). 'none'/vacío = SALTAR (recomendado: las filas "
+                         "semanales van por semana de graduación, no de creación).")
     args = ap.parse_args()
 
     fs = Fs(args.project, args.prefix, args.account)
@@ -303,8 +307,17 @@ def main() -> None:
         })
 
     # ── 5. accuracy_log semanas afectadas ─────────────────────────────────
-    print("\n5. accuracy_log — recuento por semana (created_at, ciego a época)")
-    for wk in [w.strip() for w in args.weeks.split(",") if w.strip()]:
+    # DESACTIVADO por defecto: las filas semanales particionan por SEMANA DE GRADUACIÓN
+    # (así lo hace run_daily_learning), y aquí solo se puede recontar por created_at —
+    # criterio distinto (ver el commit). Se dejan las semanas pasadas incompletas antes
+    # que rellenarlas con otro criterio. El learning_engine ya desplegado suma bien de
+    # aquí en adelante. Pasar --weeks 2026-W34,... para forzarlo igualmente.
+    _weeks = [w.strip() for w in (args.weeks or "").split(",")
+              if w.strip() and w.strip().lower() not in ("none", "skip", "-")]
+    if not _weeks:
+        print("\n5. accuracy_log semanal — SALTADO (--weeks vacío/none). "
+              "Semanas pasadas quedan incompletas a propósito.")
+    for wk in _weeks:
         start, end = _iso_week_range(wk)
         wk_res = [f for _i, f in resolved
                   if (c := _parse_dt(_dec(f["created_at"]) if "created_at" in f else None))
