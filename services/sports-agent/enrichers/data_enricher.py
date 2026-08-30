@@ -12,6 +12,7 @@ Flujo por partido:
 """
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -79,6 +80,109 @@ def _detect_sport(match: dict) -> str:
     return "football"
 
 
+# --- Ventana de enriquecimiento -------------------------------------------------
+# Solo se enriquecen partidos que arrancan dentro de esta ventana. run_analyze ya
+# solo consume ~7d; sin este tope, run_enrichment procesaba TODOS los SCHEDULED/TIMED
+# (1181 y subiendo con la siembra UEFA) → cruzaba el timeout del workflow. Con la
+# ventana el runtime es función de la densidad de calendario, no del archivo.
+_ENRICH_HORIZON_DAYS = 10
+
+# 'partial' = a la vez anterior faltaba team_stats o falló un modelo. Antes se
+# re-enriquecía en CADA pasada; para UEFA el hueco es estructural (los team_id de
+# allsportsapi2 no casan con team_stats domésticos) → nunca converge a 'full' y el
+# working set solo crece. Ahora reintenta en esta cadencia (por si el colector trae
+# los stats más tarde) en vez de cada run.
+_PARTIAL_RETRY_INTERVAL = timedelta(hours=24)
+
+# Índice {nombre_normalizado: doc_id} de team_stats, cacheado a nivel de módulo.
+_TEAM_STATS_INDEX_TTL = timedelta(minutes=30)
+_team_stats_name_index: dict | None = None
+_team_stats_name_index_at: datetime | None = None
+
+
+def _normalize_team_name(name: str) -> str:
+    """Slug para búsqueda por nombre: minúsculas, solo alfanumérico."""
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _canonical_pair(a, b):
+    """Par ordenado (t1, t2) para el pair_key de h2h_data.
+
+    Ordena numéricamente cuando ambos ids son enteros (comportamiento histórico,
+    para no romper los pair_key ya escritos) y por string solo cuando hay ids
+    mezclados int/str — equipos UEFA de allsportsapi2 —, que antes reventaban
+    enrich_match entero con TypeError en min()/max().
+    """
+    if not a or not b:
+        return 0, 0
+    try:
+        ia, ib = int(a), int(b)
+        return (ia, ib) if ia <= ib else (ib, ia)
+    except (TypeError, ValueError):
+        sa, sb = str(a), str(b)
+        return (sa, sb) if sa <= sb else (sb, sa)
+
+
+def _kickoff_within_horizon(match: dict, now: datetime, horizon: datetime) -> bool:
+    """True si el partido arranca en [ahora-1d, horizonte] o si no hay fecha legible
+    (mejor enriquecer de más que perder una señal por un campo de fecha raro)."""
+    raw = match.get("match_date") or match.get("date")
+    if not raw:
+        return True
+    try:
+        if isinstance(raw, str):
+            dt = datetime.fromisoformat(raw[:10]).replace(tzinfo=timezone.utc)
+        elif hasattr(raw, "tzinfo"):
+            dt = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+        else:
+            return True
+    except Exception:
+        return True
+    return (now - timedelta(days=1)) <= dt <= horizon
+
+
+def _get_team_stats_name_index() -> dict:
+    """Índice {nombre_normalizado: doc_id} de team_stats, construido una vez y
+    cacheado 30 min. Antes _find_team_stats_by_name hacía un stream() completo de
+    team_stats POR CADA equipo internacional sin match de id, en cada run — O(n·m)."""
+    global _team_stats_name_index, _team_stats_name_index_at
+    now = datetime.now(timezone.utc)
+    if (
+        _team_stats_name_index is not None
+        and _team_stats_name_index_at is not None
+        and now - _team_stats_name_index_at < _TEAM_STATS_INDEX_TTL
+    ):
+        return _team_stats_name_index
+    idx: dict = {}
+    try:
+        for doc in col("team_stats").stream():
+            d = doc.to_dict() or {}
+            stored = _normalize_team_name(d.get("team_name", ""))
+            if stored:
+                idx.setdefault(stored, doc.id)
+    except Exception:
+        logger.warning("_get_team_stats_name_index: error construyendo índice", exc_info=True)
+        return _team_stats_name_index or {}
+    _team_stats_name_index = idx
+    _team_stats_name_index_at = now
+    return idx
+
+
+def _find_team_stats_id_by_name(team_name: str) -> str | None:
+    """doc_id de team_stats cuyo team_name normalizado casa (exacto o substring ≥5
+    chars) con team_name. Usa el índice cacheado — cero I/O de Firestore por llamada."""
+    needle = _normalize_team_name(team_name)
+    if len(needle) < 5:
+        return None
+    idx = _get_team_stats_name_index()
+    if needle in idx:
+        return idx[needle]
+    for stored, doc_id in idx.items():
+        if len(stored) >= 5 and (needle in stored or stored in needle):
+            return doc_id
+    return None
+
+
 async def enrich_match(match: dict) -> dict:
     """
     Orquesta todos los enrichers para un partido.
@@ -100,8 +204,7 @@ async def enrich_match(match: dict) -> dict:
     logger.debug("enrich_match: %s (%s) — %s vs %s", match_id, sport, home_id, away_id)
 
     # --- 1-4. Reads en paralelo: team_stats ×2 + h2h_data + odds_cache ---
-    canonical_t1 = min(home_id, away_id) if home_id and away_id else 0
-    canonical_t2 = max(home_id, away_id) if home_id and away_id else 0
+    canonical_t1, canonical_t2 = _canonical_pair(home_id, away_id)
     pair_key = f"{canonical_t1}_{canonical_t2}"
 
     loop = asyncio.get_event_loop()
@@ -113,34 +216,6 @@ async def enrich_match(match: dict) -> dict:
         if not doc_id:
             return None
         return col(collection).document(doc_id).get()
-
-    def _normalize_name(name: str) -> str:
-        """Slug para búsqueda por nombre: minúsculas, solo alfanumérico."""
-        import re as _re
-        return _re.sub(r"[^a-z0-9]", "", name.lower())
-
-    def _find_team_stats_by_name(team_name: str):
-        """
-        Fallback: busca team_stats por nombre normalizado cuando el team_id no matchea.
-        Recorre team_stats y compara el campo team_name normalizado.
-        Devuelve el DocumentSnapshot encontrado o None.
-        """
-        if not team_name:
-            return None
-        needle = _normalize_name(team_name)
-        if not needle:
-            return None
-        try:
-            docs = col("team_stats").stream()
-            for doc in docs:
-                d = doc.to_dict() or {}
-                stored = _normalize_name(d.get("team_name", ""))
-                # Coincidencia si needle está contenido en stored o viceversa (≥5 chars)
-                if len(needle) >= 5 and (needle in stored or stored in needle):
-                    return doc
-        except Exception:
-            pass
-        return None
 
     try:
         home_doc, away_doc, h2h_doc, odds_doc = await asyncio.gather(
@@ -161,16 +236,17 @@ async def enrich_match(match: dict) -> dict:
         if home_doc.exists:
             home_stats = home_doc.to_dict() or {}
         elif home_id:
-            logger.warning("enrich_match(%s): sin team_stats para home_id=%d", match_id, home_id)
+            logger.warning("enrich_match(%s): sin team_stats para home_id=%s", match_id, home_id)
             # Fallback por nombre en ligas internacionales (CL/EL/ECL: team_id puede diferir)
             if league in _INTL_LEAGUES:
                 home_name = match.get("home_team", match.get("home_team_name", ""))
-                fallback = await loop.run_in_executor(None, _find_team_stats_by_name, home_name)
-                if fallback and fallback.exists:
-                    home_stats = fallback.to_dict() or {}
+                fb_id = await loop.run_in_executor(None, _find_team_stats_id_by_name, home_name)
+                fb_doc = await loop.run_in_executor(None, _get, "team_stats", fb_id) if fb_id else None
+                if fb_doc is not None and fb_doc.exists:
+                    home_stats = fb_doc.to_dict() or {}
                     logger.info(
                         "enrich_match(%s): home team_stats fallback por nombre '%s' → id=%s",
-                        match_id, home_name, fallback.id,
+                        match_id, home_name, fb_id,
                     )
                 else:
                     data_quality = "partial"
@@ -181,15 +257,16 @@ async def enrich_match(match: dict) -> dict:
         if away_doc.exists:
             away_stats = away_doc.to_dict() or {}
         elif away_id:
-            logger.warning("enrich_match(%s): sin team_stats para away_id=%d", match_id, away_id)
+            logger.warning("enrich_match(%s): sin team_stats para away_id=%s", match_id, away_id)
             if league in _INTL_LEAGUES:
                 away_name = match.get("away_team", match.get("away_team_name", ""))
-                fallback = await loop.run_in_executor(None, _find_team_stats_by_name, away_name)
-                if fallback and fallback.exists:
-                    away_stats = fallback.to_dict() or {}
+                fb_id = await loop.run_in_executor(None, _find_team_stats_id_by_name, away_name)
+                fb_doc = await loop.run_in_executor(None, _get, "team_stats", fb_id) if fb_id else None
+                if fb_doc is not None and fb_doc.exists:
+                    away_stats = fb_doc.to_dict() or {}
                     logger.info(
                         "enrich_match(%s): away team_stats fallback por nombre '%s' → id=%s",
-                        match_id, away_name, fallback.id,
+                        match_id, away_name, fb_id,
                     )
                 else:
                     data_quality = "partial"
@@ -517,9 +594,24 @@ async def run_enrichment() -> int:
 
     now = datetime.now(timezone.utc)
     stale_threshold = now - timedelta(hours=6)
+    horizon = now + timedelta(days=_ENRICH_HORIZON_DAYS)
     enriched_count = 0
 
-    logger.info("run_enrichment: evaluando %d partidos SCHEDULED", len(scheduled_matches))
+    # Ventana de kickoff: fuera quedan los partidos sembrados con semanas de
+    # antelación (siembra UEFA) que analyze no consume todavía. Se re-evalúan
+    # cuando entren en la ventana.
+    _total_before = len(scheduled_matches)
+    scheduled_matches = [
+        m for m in scheduled_matches if _kickoff_within_horizon(m.to_dict(), now, horizon)
+    ]
+    logger.info(
+        "run_enrichment: %d SCHEDULED/TIMED · %d dentro de la ventana de %dd (fuera: %d)",
+        _total_before, len(scheduled_matches), _ENRICH_HORIZON_DAYS,
+        _total_before - len(scheduled_matches),
+    )
+    if not scheduled_matches:
+        logger.info("run_enrichment: nada dentro de la ventana de %dd", _ENRICH_HORIZON_DAYS)
+        return 0
 
     # --- Verificar estado de enriquecimiento en paralelo ---
     loop = asyncio.get_event_loop()
@@ -543,13 +635,13 @@ async def run_enrichment() -> int:
             enriched_at = d.get("enriched_at")
             if enriched_at is None:
                 return True
-            # Re-enriquecer si datos parciales (team_stats no encontrado la vez anterior)
-            if d.get("data_quality") == "partial":
-                logger.info("_check_enriched(%s): data_quality=partial → forzar re-enrich", match_id)
-                return True
             if hasattr(enriched_at, "tzinfo") and enriched_at.tzinfo is None:
                 from datetime import timezone as tz
                 enriched_at = enriched_at.replace(tzinfo=tz.utc)
+            # 'partial': reintento en cadencia propia (por si el colector trae los
+            # team_stats más tarde), NO en cada pasada — ver _PARTIAL_RETRY_INTERVAL.
+            if d.get("data_quality") == "partial":
+                return enriched_at <= (now - _PARTIAL_RETRY_INTERVAL)
             return enriched_at <= stale_threshold
         except Exception:
             return True
