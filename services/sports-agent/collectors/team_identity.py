@@ -20,19 +20,32 @@ import unicodedata
 
 logger = logging.getLogger(__name__)
 
-# Palabras que no distinguen un club de otro
+# Palabras que no distinguen un club de otro. Incluye sufijos societarios de varios
+# idiomas (fk/sk/if/bk/kv...) porque cada fuente los pone o los quita a su antojo:
+# football-data trae "Sabah FK" y "Fenerbahçe SK", allsportsapi2 trae "Sabah" y
+# "Fenerbahçe" a secas — sin esto son clubes distintos para resolve() y acaban con
+# dos team_id, dos ELO y dos docs en upcoming_matches (el bug del doble Como/Leipzig).
 _GENERIC_WORDS = {
     "fc", "cf", "ac", "as", "sc", "sv", "ss", "ssc", "us", "afc", "rc", "rcd", "cd", "ud",
+    "fk", "sk", "if", "bk", "kv", "nk", "hnk", "gnk", "ik", "aik", "sad", "kf", "cs", "ks",
     "club", "de", "the", "team", "calcio", "futbol", "football", "atletico", "athletic",
 }
 
 
 def normalize(name: str) -> str:
-    """Minúsculas, sin acentos, sin puntuación ni palabras genéricas."""
+    """
+    Minúsculas, sin acentos, sin puntuación, sin palabras genéricas y SIN tokens
+    puramente numéricos (años de fundación: "Como 1907" → "como", "Schalke 04" →
+    "schalke", "Bayer 04 Leverkusen" → "bayer leverkusen"). Cada fuente decide por su
+    cuenta si incluye el año, así que dejarlo dentro parte la identidad del club.
+    """
     n = unicodedata.normalize("NFD", (name or "").lower().strip())
     n = n.encode("ascii", "ignore").decode()
     n = "".join(c if c.isalnum() else " " for c in n)
-    return " ".join(w for w in n.split() if w and w not in _GENERIC_WORDS)
+    return " ".join(
+        w for w in n.split()
+        if w and not w.isdigit() and w not in _GENERIC_WORDS
+    )
 
 
 def _tokens(name: str) -> frozenset:
@@ -84,6 +97,25 @@ def resolve(team_name: str, source_id: int | str, identity_map: dict[str, str],
                 if frozenset(known.split()) == toks:
                     return tid
     return f"{prefix}_{source_id}"
+
+
+def physical_fixture_key(match_date, home_team: str, away_team: str) -> str:
+    """
+    Huella de un partido a partir de FECHA + NOMBRES (no ids), independiente de la
+    fuente. Se usa para deduplicar señales entre docs distintos del mismo partido
+    (`CL_SF_16939034` y `575339` para Como–RB Leipzig): match_fingerprint() no sirve
+    ahí porque cada fuente resuelve el club a un id distinto.
+
+    Los nombres pasan por normalize() (sin año, sin sufijo societario) y se ordenan,
+    así que "Como 1907 vs RB Leipzig" y "RB Leipzig vs Como" dan la misma clave.
+    Devuelve "" si falta algún dato — el llamador debe tratar "" como "sin huella".
+    """
+    day = str(match_date or "")[:10].replace("/", "-")
+    a, b = normalize(home_team), normalize(away_team)
+    if not day or not a or not b:
+        return ""
+    lo, hi = sorted((a, b))
+    return f"{day}|{lo}|{hi}"
 
 
 def match_fingerprint(date: str, home_id, away_id) -> str:

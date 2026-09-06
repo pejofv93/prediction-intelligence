@@ -43,6 +43,10 @@ _SEASON_BACKFILL_MAX_PER_RUN = int(os.environ.get("SEASON_BACKFILL_MAX_PER_RUN",
 _STALE_CLEANUP_MAX_DELETES = int(os.environ.get("STALE_CLEANUP_MAX_DELETES", "12000"))
 _FIRESTORE_BATCH_SIZE = 500   # tope duro de operaciones por batch en Firestore
 
+# Centinela alto para consultas por prefijo en Firestore: match_id >= base AND
+# match_id < base + _PREFIX_HI captura "base", "base_btts", "base_ou25_oaio"…
+_PREFIX_HI = ""
+
 # Timestamps de ultima ejecucion (en memoria — se pierden al reiniciar)
 _status: dict = {"last_collect": None, "last_enrich": None, "last_analyze": None}
 
@@ -1142,6 +1146,13 @@ async def _collect_wc2026_from_odds_api() -> list[dict]:
 
 _UEFA_RESULTS_HOURS = {0, 12}   # horas UTC en las que se piden resultados (ver _collect_uefa)
 
+# Solo se ingieren partidos UEFA que arrancan dentro de esta ventana. La fase de liga de
+# CL/EL/ECL tiene 8 jornadas repartidas de septiembre a enero y Sofascore las sirve TODAS
+# de golpe; las rondas sin horario confirmado caían con la fecha de la J1 (48 partidos el
+# 08-sep) y entraban en la ventana de enrich/analyze meses antes de tiempo. Con el tope,
+# las jornadas lejanas se descartan y vuelven a entrar cuando de verdad están cerca.
+_UEFA_FIXTURE_HORIZON_DAYS = int(os.environ.get("UEFA_FIXTURE_HORIZON_DAYS", "30"))
+
 
 async def _collect_uefa() -> None:
     """
@@ -1151,11 +1162,16 @@ async def _collect_uefa() -> None:
     entran), EL 403 y ECL 404, así que sin esto no entra ni un partido europeo en
     upcoming_matches por mucho que odds-api.io tenga sus cuotas.
 
-    Regla de propiedad frente a football-data: si el partido YA está en upcoming_matches
-    por otra vía (desde septiembre football-data sí sirve la fase de liga de CL), gana esa
-    otra vía y aquí se descarta. La comparación es por huella (fecha, local, visitante) con
-    ids canónicos, no por match_id, que es distinto en cada fuente. Sin esto tendríamos el
-    mismo partido dos veces y dos señales — el patrón del duplicado WC/WC26.
+    Regla de propiedad frente a football-data (BIDIRECCIONAL): si el partido ya está en
+    upcoming_matches por otra vía (desde septiembre football-data sí sirve la fase de liga
+    de CL), gana esa otra vía. La comparación es por DOS huellas — ids canónicos y nombres
+    normalizados — porque cada fuente resuelve el club a un id distinto ("Como" sf_2704 vs
+    "Como 1907" 7397) y la de ids sola no casaba. El doc `*_SF_*` que pierde no solo no se
+    escribe: se BORRA en la pasada de poda de abajo.
+
+    Poda: al final se eliminan los docs `allsports_uefa` SCHEDULED/TIMED de las ligas que
+    SÍ se han podido leer y que no aparecen en el fetch de esta pasada — jornadas lejanas
+    ya fuera de ventana, partidos ya jugados y los cedidos a football-data.
 
     Los clubes sin histórico sembrado no llegarán a emitir señal (DIAG_POISSON_GUARD los
     corta por falta de datos): es lo esperado hasta que la siembra los cubra.
@@ -1166,7 +1182,7 @@ async def _collect_uefa() -> None:
     from collectors.allsports_uefa import UEFA_TOURNAMENTS, fetch_tournament_matches
     from collectors.team_identity import build_identity_map, match_fingerprint, resolve
     from collectors.firestore_writer import save_upcoming_matches, update_finished_matches
-    from shared.firestore_client import col
+    from shared.firestore_client import col, get_client
 
     # Mapa de identidad: nombre → id canónico de los equipos que ya existen
     try:
@@ -1178,8 +1194,14 @@ async def _collect_uefa() -> None:
         logger.error("collect.uefa: no se pudo construir el mapa de identidad", exc_info=True)
         return
 
-    # Huellas de lo que ya hay en upcoming_matches (para la regla de propiedad)
-    huellas_existentes: set[str] = set()
+    # Regla de propiedad: qué partidos ya tiene football-data (u otra fuente no-UEFA).
+    #  - huellas_id: match_fingerprint exacto (fecha + ids canónicos).
+    #  - nonuefa_por_dia: {día: [(home_norm, away_norm)]} para un match blando por
+    #    subcadena — "Real Betis" vs "Real Betis Balompié", "Lille" vs "Lille OSC",
+    #    "Como" vs "Como 1907"… donde la huella exacta no casa.
+    from collectors.team_identity import normalize as _norm_team
+    huellas_id: set[str] = set()
+    nonuefa_por_dia: dict[str, list[tuple[str, str]]] = {}
     try:
         # Solo los pendientes: upcoming_matches ha llegado a acumular decenas de miles de
         # docs y un stream() sin filtro es justo lo que hizo lento el analyze en su día.
@@ -1192,19 +1214,39 @@ async def _collect_uefa() -> None:
             m = d.to_dict() or {}
             if m.get("sport", "football") != "football" or m.get("source") == "allsports_uefa":
                 continue
+            fecha = str(m.get("match_date") or m.get("date") or "")
             h, a = m.get("home_team_id"), m.get("away_team_id")
             if h and a:
-                fecha = str(m.get("match_date") or m.get("date") or "")
-                huellas_existentes.add(match_fingerprint(fecha, h, a))
+                huellas_id.add(match_fingerprint(fecha, h, a))
+            nh, na = _norm_team(m.get("home_team", "")), _norm_team(m.get("away_team", ""))
+            if fecha and nh and na:
+                nonuefa_por_dia.setdefault(fecha[:10], []).append((nh, na))
     except Exception:
         logger.warning("collect.uefa: no se pudieron leer las huellas existentes", exc_info=True)
 
+    def _mismo_equipo(x: str, y: str) -> bool:
+        return bool(x) and bool(y) and (x == y or (len(x) >= 4 and x in y) or (len(y) >= 4 and y in x))
+
+    def _lo_tiene_footballdata(fecha: str, home: str, away: str) -> bool:
+        nh, na = _norm_team(home), _norm_team(away)
+        if not (nh and na):
+            return False
+        for (fh, fa) in nonuefa_por_dia.get(str(fecha)[:10], []):
+            if _mismo_equipo(nh, fh) and _mismo_equipo(na, fa):
+                return True
+        return False
+
     hora = datetime.now(timezone.utc).hour
+    horizonte = datetime.now(timezone.utc) + timedelta(days=_UEFA_FIXTURE_HORIZON_DAYS)
     proximos: list[dict] = []
     jugados: list[dict] = []
+    ligas_leidas: set[str] = set()   # solo se poda lo que se ha podido releer
     for league in UEFA_TOURNAMENTS:
         try:
-            proximos += await fetch_tournament_matches(league, "next")
+            got = await fetch_tournament_matches(league, "next")
+            if got:
+                ligas_leidas.add(league)
+            proximos += got
             if hora in _UEFA_RESULTS_HOURS:
                 jugados += await fetch_tournament_matches(league, "last")
         except Exception:
@@ -1217,21 +1259,100 @@ async def _collect_uefa() -> None:
                 "home_team_id": int(h) if str(h).isdigit() else h,
                 "away_team_id": int(a) if str(a).isdigit() else a}
 
+    def _fecha_dt(s: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(str(s).replace("Z", "+00:00").replace(" ", "T")[:19])
+        except Exception:
+            return None
+
     # --- Fixtures ---
-    nuevos, duplicados = [], 0
+    nuevos, duplicados, fuera_ventana = [], 0, 0
+    vistos_por_liga: dict[str, set[str]] = {lg: set() for lg in UEFA_TOURNAMENTS}
     for m in (_canonizar(x) for x in proximos):
-        fp = match_fingerprint(m.get("match_date", ""), m["home_team_id"], m["away_team_id"])
-        if fp in huellas_existentes:
+        fecha = m.get("match_date", "") or m.get("date", "")
+        dt = _fecha_dt(fecha)
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt > horizonte:
+                fuera_ventana += 1
+                continue
+        fp_id = match_fingerprint(fecha, m["home_team_id"], m["away_team_id"])
+        if fp_id in huellas_id or _lo_tiene_footballdata(
+            fecha, m.get("home_team", ""), m.get("away_team", "")
+        ):
             duplicados += 1
-            continue
-        huellas_existentes.add(fp)
+            continue   # lo tiene football-data → cedido; el doc *_SF_* se poda abajo
+        huellas_id.add(fp_id)
+        nonuefa_por_dia.setdefault(str(fecha)[:10], []).append(
+            (_norm_team(m.get("home_team", "")), _norm_team(m.get("away_team", "")))
+        )
+        vistos_por_liga.get(m.get("league", ""), set()).add(m["match_id"])
         nuevos.append(m)
 
     if nuevos:
         await save_upcoming_matches(nuevos)
+
+    # --- Poda: docs allsports_uefa SCHEDULED/TIMED que ya no tocan ---
+    # De las ligas que SÍ se han leído esta pasada, borrar todo doc *_SF_* pendiente que
+    # no esté entre los vistos: jornadas fuera de ventana (con fecha vieja de la J1),
+    # partidos ya jugados y los cedidos a football-data.
+    podados = 0
+    if ligas_leidas:
+        try:
+            vivos = set()
+            for lg in ligas_leidas:
+                vivos |= vistos_por_liga.get(lg, set())
+            a_borrar = []
+            # Filtro por un solo campo (source) — siempre indexado; el status y la liga
+            # se filtran en memoria (los docs allsports_uefa son unos cientos).
+            uefa_pend = (
+                col("upcoming_matches")
+                .where(filter=FieldFilter("source", "==", "allsports_uefa"))
+                .stream()
+            )
+            for d in uefa_pend:
+                data = d.to_dict() or {}
+                if data.get("status") not in ("SCHEDULED", "TIMED"):
+                    continue
+                if data.get("league") not in ligas_leidas:
+                    continue
+                if str(data.get("match_id", "")) not in vivos:
+                    a_borrar.append(d.reference)
+            client = get_client()
+            for i in range(0, len(a_borrar), _FIRESTORE_BATCH_SIZE):
+                batch = client.batch()
+                for ref in a_borrar[i:i + _FIRESTORE_BATCH_SIZE]:
+                    batch.delete(ref)
+                batch.commit()
+                podados += len(a_borrar[i:i + _FIRESTORE_BATCH_SIZE])
+            # Señales huérfanas de los docs podados (incluye mercados alternativos con
+            # sufijo, p.ej. CL_SF_x_btts): el partido ganador de football-data genera las
+            # suyas bajo su propio match_id.
+            preds_borradas = 0
+            for ref in a_borrar:
+                base = ref.id
+                try:
+                    orphans = list(
+                        col("predictions")
+                        .where(filter=FieldFilter("match_id", ">=", base))
+                        .where(filter=FieldFilter("match_id", "<", base + _PREFIX_HI))
+                        .stream()
+                    )
+                    for o in orphans:
+                        o.reference.delete()
+                        preds_borradas += 1
+                except Exception:
+                    logger.debug("collect.uefa: no se pudieron limpiar señales de %s", base)
+            if preds_borradas:
+                logger.info("collect.uefa: %d señales huérfanas eliminadas de docs podados", preds_borradas)
+        except Exception:
+            logger.warning("collect.uefa: error en la poda de docs allsports_uefa", exc_info=True)
+
     logger.info(
-        "collect.uefa: %d partidos guardados en upcoming_matches (%d descartados por estar "
-        "ya cubiertos por otra fuente)", len(nuevos), duplicados,
+        "collect.uefa: %d guardados · %d cedidos a football-data · %d fuera de ventana (>%dd) "
+        "· %d docs *_SF_* podados",
+        len(nuevos), duplicados, fuera_ventana, _UEFA_FIXTURE_HORIZON_DAYS, podados,
     )
 
     # --- Resultados: match_results (graduación) + ELO ---
@@ -1464,6 +1585,82 @@ def _dedup_signals_for_match(base_match_id: str, signals: list[dict]) -> None:
         logger.info("dedup(%s): %d señales eliminadas, quedan 2 máx", base_match_id, len(to_delete))
 
 
+def _dedup_signals_for_fixture(fixture_key: str, base_match_ids: list[str]) -> int:
+    """
+    Deduplica señales del MISMO PARTIDO FÍSICO repartidas en varios docs (match_id
+    distinto por fuente): p.ej. `CL_SF_16939034` (Como @1.95) y `575339` (RB Leipzig
+    @3.40) para Como–RB Leipzig. `_dedup_signals_for_match` no lo pilla porque opera
+    por prefijo de un único match_id.
+
+    Regla: por partido físico se conserva 1 señal 1X2 (la de mayor EV — esto elimina el
+    lado contrario) + 1 mercado alternativo (el de mayor EV). El resto se borra de
+    `predictions`. El doc que sobrevive es el de football-data cuando existe (id numérico),
+    sólo para desempatar EVs idénticos. Devuelve cuántas señales se han borrado.
+    """
+    from shared.firestore_client import col
+
+    if len(base_match_ids) < 2:
+        return 0
+
+    preds: list[dict] = []
+    for base in base_match_ids:
+        try:
+            for d in (
+                col("predictions")
+                .where(filter=FieldFilter("match_id", ">=", base))
+                .where(filter=FieldFilter("match_id", "<", base + _PREFIX_HI))
+                .stream()
+            ):
+                rec = d.to_dict() or {}
+                rec["_id"] = d.id
+                preds.append(rec)
+        except Exception as e:
+            logger.debug("dedup_fixture: error leyendo predictions de %s — %s", base, e)
+
+    if len(preds) < 2:
+        return 0
+
+    def _ev(s: dict) -> float:
+        try:
+            return float(s.get("ev", s.get("edge", 0)) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # football-data (id numérico) gana los empates de EV
+    def _rank(s: dict) -> tuple:
+        return (_ev(s), 0 if str(s.get("match_id", "")).split("_")[0].isdigit() else -1)
+
+    h2h = [s for s in preds if s.get("market_type") in ("h2h", None, "")]
+    alt = [s for s in preds if s.get("market_type") not in ("h2h", None, "")]
+
+    to_delete: list[str] = []
+    if len(h2h) > 1:
+        h2h.sort(key=_rank, reverse=True)
+        to_delete += [s["_id"] for s in h2h[1:]]
+    # alternativos: 1 por tipo de mercado (totals/btts/ah…), el de mayor EV
+    by_mkt: dict[str, list[dict]] = {}
+    for s in alt:
+        by_mkt.setdefault(s.get("market_type", "?"), []).append(s)
+    for mkt, group in by_mkt.items():
+        if len(group) > 1:
+            group.sort(key=_rank, reverse=True)
+            to_delete += [s["_id"] for s in group[1:]]
+
+    deleted = 0
+    for doc_id in to_delete:
+        try:
+            col("predictions").document(doc_id).delete()
+            deleted += 1
+        except Exception as e:
+            logger.warning("dedup_fixture: error eliminando %s — %s", doc_id, e)
+    if deleted:
+        logger.info(
+            "dedup_fixture(%s): %d señales duplicadas eliminadas (%s)",
+            fixture_key, deleted, "+".join(base_match_ids),
+        )
+    return deleted
+
+
 async def _bg_analyze() -> None:
     """
     Pipeline de analisis:
@@ -1630,7 +1827,13 @@ async def _bg_analyze() -> None:
         )
 
         from shared.match_timing import signal_is_too_late, kickoff_label
+        from collectors.team_identity import physical_fixture_key
         _skipped_started = 0
+
+        # Partido físico (fecha+equipos normalizados) → match_ids distintos que lo cubren.
+        # Al final del bucle se deduplican las señales entre esos docs (lados contrarios,
+        # tope por partido) — ver _dedup_signals_for_fixture.
+        _fixtures_this_run: dict[str, set[str]] = {}
 
         for doc in docs:
             enriched = doc.to_dict()
@@ -1661,6 +1864,12 @@ async def _bg_analyze() -> None:
                 # que generate_signal guarda internamente sin retornarlas.
                 base_match_id = str(enriched.get("match_id", ""))
                 if base_match_id:
+                    _fx_key = physical_fixture_key(
+                        enriched.get("match_date") or enriched.get("date"),
+                        enriched.get("home_team", ""), enriched.get("away_team", ""),
+                    )
+                    if _fx_key:
+                        _fixtures_this_run.setdefault(_fx_key, set()).add(base_match_id)
                     try:
                         from shared.firestore_client import col as _col_dedup
                         all_match_docs = list(
@@ -1707,6 +1916,23 @@ async def _bg_analyze() -> None:
                 signals_generated += len(cb_sigs)
             except Exception:
                 logger.error("analyze: error corners_bookings %s", enriched.get("match_id"), exc_info=True)
+
+        # --- Dedup entre docs del MISMO partido físico ---
+        # Cubre el caso de dos fuentes con match_id distinto (CL_SF_* de allsports_uefa y
+        # el id numérico de football-data) que se cuelan como partidos separados y emiten
+        # señales de lados contrarios (Como @1.95 / RB Leipzig @3.40).
+        _fx_dups = {k: sorted(v) for k, v in _fixtures_this_run.items() if len(v) > 1}
+        if _fx_dups:
+            _fx_deleted = 0
+            for _k, _ids in _fx_dups.items():
+                try:
+                    _fx_deleted += _dedup_signals_for_fixture(_k, _ids)
+                except Exception:
+                    logger.warning("analyze: error en dedup_fixture %s", _k, exc_info=True)
+            logger.info(
+                "analyze: dedup por partido físico — %d fixtures con doc duplicado, %d señales eliminadas",
+                len(_fx_dups), _fx_deleted,
+            )
 
         # --- Tenis — solo partidos en las próximas 48h ---
         try:
