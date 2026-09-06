@@ -291,7 +291,11 @@ def dedupe_team_identity(apply: bool) -> None:
             continue
         num = max(num_docs, key=lambda t: len(t.get("raw_matches", []) or []))
         sf = max(sf_docs, key=lambda t: len(t.get("raw_matches", []) or []))
-        num_real = bool(num.get("league")) and len(num.get("raw_matches", []) or []) >= 10
+        # El id numérico gana en cuanto tenga una liga real (football-data lo sigue
+        # alimentando en cada collect y `rebuild_elo --seed-only` le vuelca el histórico
+        # europeo que ahora está en el sf_). Quedarse con el sf_ solo re-parte la
+        # identidad en la siguiente pasada del colector.
+        num_real = bool(num.get("league")) and len(num.get("raw_matches", []) or []) >= 1
         num_placeholder = str(num.get("team_name", "")).startswith("Team_") or \
             len(num.get("raw_matches", []) or []) == 0
 
