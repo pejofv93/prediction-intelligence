@@ -212,6 +212,15 @@ TREND_ROLLING_MIN_RATIO = 1.30    # promedio del equipo >= 1.3x la media de la l
 # para no repetir el mismo equipo en varios mercados.
 TREND_MAX_SIGNALS_PER_RUN = 10
 TREND_MAX_SIGNALS_PER_TEAM = 2
+# Reparto de mercados en el ranking: round-robin (ver rank_and_cap). Alternativa
+# pendiente para más adelante — normalizar la "fuerza" de cada candidato contra
+# la distribución histórica de SU mercado (percentil dentro del tipo) en vez de
+# round-robin — pero hace falta muestra por mercado en trend_accuracy_log para
+# calibrar percentiles con sentido; con menos, serían números inventados.
+# Umbral elegido: 30 graduadas de un mismo mercado — mínimo habitual para que un
+# percentil no sea ruido de muestra pequeña. El dashboard de tendencias avisa
+# solo cuando algún mercado ya lo alcanza (GET /api/trend-accuracy).
+TREND_PERCENTILE_MIN_SAMPLE = 30
 
 LEARNING_RATE = 0.05
 DEFAULT_WEIGHTS = {

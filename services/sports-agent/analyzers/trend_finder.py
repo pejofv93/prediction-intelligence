@@ -43,6 +43,16 @@ logger = logging.getLogger(__name__)
 _GOAL_THRESHOLDS = (3, 2)
 _HANDICAP_MARGIN = 2  # "ganó por 2+"
 
+# Nombre legible por competición — solo para el mensaje, no afecta a la lógica.
+# Duplicado del de alert_manager.py (telegram-bot): son servicios Cloud Run
+# independientes, cada uno con su propia copia de shared/, sin código compartido
+# entre services/sports-agent y services/telegram-bot más allá de esa carpeta.
+_LEAGUE_LABEL = {
+    "PL": "Premier League", "PD": "La Liga", "BL1": "Bundesliga",
+    "SA": "Serie A", "FL1": "Ligue 1",
+    "CL": "Champions League", "EL": "Europa League", "ECL": "Conference League",
+}
+
 _MARKET_EMOJI = {
     "team_goals_over": "⚽",
     "btts": "🟩",
@@ -266,30 +276,88 @@ async def _fixture_candidates(enriched: dict) -> list[dict]:
 
 # ── Ranking, tope de volumen y envío ─────────────────────────────────────────────
 
+def _dedup_by_fixture(candidates: list[dict]) -> list[dict]:
+    """
+    Colapsa a 1 candidato por encuentro físico (fecha + equipos, sin importar
+    el orden local/visitante ni de qué fuente venga cada doc de
+    enriched_matches) — se queda con el de mayor score. Sin esto, el mismo
+    partido puede aparecer dos veces con los equipos invertidos cuando dos
+    fuentes distintas lo traen por separado (mismo bug de fondo que los
+    duplicados CL_SF_*/id numérico ya vistos en UEFA).
+    """
+    from collectors.team_identity import physical_fixture_key
+
+    best_by_fixture: dict[str, dict] = {}
+    passthrough: list[dict] = []
+    for c in candidates:
+        key = physical_fixture_key(c.get("match_date"), c.get("home_team", ""), c.get("away_team", ""))
+        if not key:
+            passthrough.append(c)
+            continue
+        current = best_by_fixture.get(key)
+        if current is None or c["score"] > current["score"]:
+            best_by_fixture[key] = c
+    return list(best_by_fixture.values()) + passthrough
+
+
 def rank_and_cap(candidates: list[dict]) -> list[dict]:
     """
-    Ordena por 'fuerza de patrón' (score) y capa a TREND_MAX_SIGNALS_PER_RUN,
-    con máximo TREND_MAX_SIGNALS_PER_TEAM por equipo para no repetir el mismo
-    equipo en varios mercados.
+    Colapsa a 1 señal por encuentro físico (_dedup_by_fixture), reparte por
+    mercado en round-robin (turno por mercado, mejor score primero dentro de
+    cada uno) para que ningún mercado fácil de cumplir (goles/BTTS) cope el
+    ranking, y capa a TREND_MAX_SIGNALS_PER_RUN con máximo
+    TREND_MAX_SIGNALS_PER_TEAM por equipo.
+
+    Round-robin elegido sobre cuota fija por mercado: se adapta solo cuando
+    un mercado no tiene candidatos ese día (p.ej. rolling, más escaso) sin
+    forzar a entrar una señal floja solo por rellenar cupo. Alternativa para
+    más adelante: normalizar la "fuerza" contra la distribución histórica de
+    cada mercado (percentil dentro del tipo) en vez de round-robin — más
+    justo estadísticamente, pero necesita trend_accuracy_log con muestra
+    por mercado para calibrar (ver TREND_PERCENTILE_MIN_SAMPLE en config.py
+    y el aviso de "listo para normalizar" en el dashboard de tendencias).
     """
-    ranked = sorted(candidates, key=lambda c: -c["score"])
+    deduped = _dedup_by_fixture(candidates)
+
+    by_market: dict[str, list[dict]] = {}
+    for c in deduped:
+        by_market.setdefault(c["market"], []).append(c)
+    for group in by_market.values():
+        group.sort(key=lambda c: -c["score"])
+
+    market_order = [m for m in _MARKET_EMOJI if m in by_market]
+    cursor = {m: 0 for m in market_order}
     selected: list[dict] = []
     per_team: dict[str, int] = {}
-    for c in ranked:
-        key = f"{c['team']}_{c.get('team_id') or ''}"
-        if per_team.get(key, 0) >= TREND_MAX_SIGNALS_PER_TEAM:
-            continue
-        selected.append(c)
-        per_team[key] = per_team.get(key, 0) + 1
-        if len(selected) >= TREND_MAX_SIGNALS_PER_RUN:
+
+    while len(selected) < TREND_MAX_SIGNALS_PER_RUN:
+        progressed = False
+        for m in market_order:
+            i = cursor[m]
+            if i >= len(by_market[m]):
+                continue
+            cursor[m] += 1
+            progressed = True
+            c = by_market[m][i]
+            key = f"{c['team']}_{c.get('team_id') or ''}"
+            if per_team.get(key, 0) >= TREND_MAX_SIGNALS_PER_TEAM:
+                continue
+            selected.append(c)
+            per_team[key] = per_team.get(key, 0) + 1
+            if len(selected) >= TREND_MAX_SIGNALS_PER_RUN:
+                break
+        if not progressed:
             break
+
     return selected
 
 
 def _format_message(c: dict) -> str:
     emoji = _MARKET_EMOJI.get(c["market"], "📊")
     tag = "🎯 PATRÓN" if c["pattern_type"] == "series" else "📉 PROMEDIO (evidencia más débil)"
-    return f"{emoji} {tag} — {c['team']} — {c['label']}\n{c['detail']}\n\n{_DISCLAIMER}"
+    league_label = _LEAGUE_LABEL.get(c["league"], c["league"])
+    header = f"{emoji} {tag} — {c['team']} vs {c['opponent']} ({league_label}) — {c['label']}"
+    return f"{header}\n{c['detail']}\n\n{_DISCLAIMER}"
 
 
 async def _persist_and_send(selected: list[dict]) -> int:
