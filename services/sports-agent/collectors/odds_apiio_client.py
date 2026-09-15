@@ -751,17 +751,22 @@ _MARKET_ALIASES: dict[str, str] = {
 # accuracy_by_market y el PnL shadow sin aportar información.
 #
 # FUERA a propósito:
-#   corners_ou, ht_totals  → sin fuente de resultado (harían falta FDCO y score.halfTime)
-#   correct_score          → sí se gradúa, pero NO tiene guarda real. _fair_two_way solo
-#       aplica a mercados de dos vías y el resultado exacto tiene 38 salidas, así que se
-#       quedaba con el viejo corte por ratio de 2,5x. En longshots ese corte no discrimina:
-#       medido en producción 2026-08-19, 22 de 33 señales del run salían por ahí con cuota
-#       mediana 41,0 (hasta 401,0) y EV de hasta +135%, TODAS apiñadas en ratio 2,00-2,35x
-#       justo por debajo del umbral. Edge fantasma de manual.
-#       Para reactivarlo hace falta normalizar las 38 salidas a suma 1 y medir divergencia
-#       sobre esa probabilidad justa — el equivalente multi-vía de _fair_two_way.
+#   corners_ou, ht_totals  → sin fuente de resultado (harían falta FDCO y score.halfTime;
+#       ht_totals ya tiene fuente parcial vía HT real en raw_matches — Tanda 3 — pero
+#       falta el consumidor, sigue fuera hasta que exista)
+#
+# correct_score REACTIVADO (Tanda 4, 2026-09-15): tenía guarda real (_alt_divergence_blocks
+# en value_bet_engine.py, mismo helper que BTTS/totals/AH) pero medía divergencia con el
+# corte de ratio 2,5x sobre 1/cuota en vez de una probabilidad justa. En longshots ese
+# corte no discriminaba: medido en producción 2026-08-19, 22 de 33 señales del run salían
+# por ahí con cuota mediana 41,0 (hasta 401,0) y EV de hasta +135%, TODAS apiñadas en ratio
+# 2,00-2,35x justo por debajo del umbral. Edge fantasma de manual.
+# Fix: _fair_multi_way normaliza SOLO las salidas que este partido realmente cotiza (no las
+# 38 teóricas) a que sumen 1, y _extract_markets_summary adjunta fair_prob por scoreline —
+# el equivalente multi-vía de fair_yes/fair_over/fair_home. value_bet_engine ahora compara
+# el modelo contra esa probabilidad justa con el mismo _MAX_DIVERGENCE (0.10) que el resto.
 _MARKETS_ENABLED: frozenset[str] = frozenset({
-    "h2h", "btts", "totals", "spreads",
+    "h2h", "btts", "totals", "spreads", "correct_score",
 })
 
 
@@ -1008,6 +1013,28 @@ def _fair_two_way(odds_a: float, odds_b: float) -> float | None:
     return round(ia / tot, 4) if tot > 0 else None
 
 
+def _fair_multi_way(by_score: dict[str, dict]) -> dict[str, float]:
+    """
+    Equivalente multi-vía de _fair_two_way: probabilidades JUSTAS (vig removida,
+    normalizadas a que sumen 1) de un mercado N-vías, usando SOLO las salidas que
+    ESTE partido de verdad cotiza (no las 38 teóricas de correct score) — así el
+    resultado exacto no reparte probabilidad entre scorelines que ningún bookmaker
+    ofrece para este encuentro concreto.
+    """
+    implied: dict[str, float] = {}
+    for score, info in by_score.items():
+        try:
+            o = float(info.get("odds"))
+        except (TypeError, ValueError):
+            continue
+        if o > 1.0:
+            implied[score] = 1.0 / o
+    total = sum(implied.values())
+    if total <= 0:
+        return {}
+    return {score: round(p / total, 4) for score, p in implied.items()}
+
+
 def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
     """
     Construye el mejor precio por mercado a partir de los datos de todos los bookmakers.
@@ -1119,6 +1146,9 @@ def _extract_markets_summary(markets_agg: dict[str, list], home: str) -> dict:
                         if score not in by_score or p > by_score[score]["odds"]:
                             by_score[score] = {"odds": round(p, 3), "bookmaker": bk}
             if by_score:
+                fair = _fair_multi_way(by_score)
+                for score, info in by_score.items():
+                    info["fair_prob"] = fair.get(score)
                 out["correct_score"] = by_score
 
         elif mkt_key == "ht_totals":

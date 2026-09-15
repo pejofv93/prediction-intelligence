@@ -1665,6 +1665,18 @@ async def _generate_oddsapiio_extra_signals(
 
     # ── Correct Score ─────────────────────────────────────────────────────────
     _CS_MIN_EV = 0.20
+    # Corte por RATIO sobre fair_prob (no divergencia absoluta como BTTS/totals/AH):
+    # verificado 2026-09-15 con los números reales del bug (EV hasta +135%, cuota
+    # 41-401) que la divergencia absoluta nunca supera ~0.04 en este mercado — un
+    # resultado exacto tiene 38 salidas con probabilidades individuales pequeñas,
+    # así que 0.10 absoluto (calibrado para mercados de 2 vías ~0.3-0.7) es un listón
+    # que casi nunca se alcanza y habría dejado pasar el bug igual. La ratio sí
+    # discrimina esos mismos casos (2.7-3.0x) una vez la referencia es fair_prob
+    # (renormalizado SOLO contra las salidas que este partido realmente cotiza, ver
+    # _fair_multi_way en odds_apiio_client.py) en vez de 1/cuota sin corregir por vig
+    # del resto del mercado (el corte viejo de 2,5x, que se quedaba clavado en
+    # 2,00-2,35x justo por debajo del umbral).
+    _CS_MAX_PROB_RATIO = 2.0
     cs_mkt = all_markets.get("correct_score", {})
     logger.info("EXTRA_MARKETS_CS(%s): %d scorelines disponibles", match_id, len(cs_mkt))
     if cs_mkt and enriched_match.get("home_xg") is not None:
@@ -1676,6 +1688,7 @@ async def _generate_oddsapiio_extra_signals(
         best_cs_odds = 0.0
         best_cs_prob = 0.0
         best_cs_bk = ""
+        best_cs_fair: float | None = None
         for score, mkt_info in cs_mkt.items():
             prob = cs_probs.get(score, 0.0)
             if prob <= 0.0:
@@ -1690,18 +1703,18 @@ async def _generate_oddsapiio_extra_signals(
                 best_cs_odds = s_odds
                 best_cs_prob = prob
                 best_cs_bk = mkt_info.get("bookmaker", "")
+                best_cs_fair = mkt_info.get("fair_prob")
         logger.info(
             "EXTRA_MARKETS_CS(%s): best=%s odds=%.2f prob=%.4f ev=%.4f (min=%.2f) → %s",
             match_id, best_cs_score, best_cs_odds, best_cs_prob, best_cs_ev, _CS_MIN_EV,
             "OK" if best_cs_ev > _CS_MIN_EV else "SKIP",
         )
         if best_cs_score and best_cs_ev > _CS_MIN_EV:
-            # Divergence guard: discard if model prob > 2.5× implied
-            _cs_implied = 1.0 / best_cs_odds
-            if best_cs_prob > _cs_implied * 2.5:
+            _cs_ratio = (best_cs_prob / best_cs_fair) if best_cs_fair else None
+            if _cs_ratio is not None and _cs_ratio > _CS_MAX_PROB_RATIO:
                 logger.warning(
-                    "EXTRA_MARKETS_CS(%s): divergencia extrema %s prob=%.4f impl=%.4f — descartado",
-                    match_id, best_cs_score, best_cs_prob, _cs_implied,
+                    "EXTRA_MARKETS_CS(%s): divergencia %s prob=%.4f fair=%.4f ratio=%.2f > %.1f — descartado",
+                    match_id, best_cs_score, best_cs_prob, best_cs_fair, _cs_ratio, _CS_MAX_PROB_RATIO,
                 )
             else:
                 doc_id = f"{match_id}_cs_{best_cs_score.replace('-', '')}"
@@ -1718,6 +1731,7 @@ async def _generate_oddsapiio_extra_signals(
                         "home_xg": enriched_match.get("home_xg"),
                         "away_xg": enriched_match.get("away_xg"),
                         "model_prob": best_cs_prob,
+                        "fair_prob": best_cs_fair,
                     },
                     "signals": {}, "data_source": "poisson_cs", "odds_source": "oddsapiio",
                     "match_date": match_date, "weights_version": weights_version,
