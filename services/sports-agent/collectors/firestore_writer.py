@@ -166,8 +166,11 @@ def stored_raw_match_count(team_id: int) -> int:
 
 def _to_raw_poisson(team_id: int, matches: list[dict]) -> list[dict]:
     """Normaliza al formato exacto que consume poisson_model.py."""
-    return [
-        {
+    out = []
+    for m in matches:
+        if not m.get("match_id") or m.get("goals_home") is None or m.get("goals_away") is None:
+            continue
+        row = {
             "match_id": m["match_id"],
             "date": m["date"],
             "home_team_id": m["home_team_id"],
@@ -176,11 +179,14 @@ def _to_raw_poisson(team_id: int, matches: list[dict]) -> list[dict]:
             "goals_away": m.get("goals_away") or 0,
             "was_home": m["home_team_id"] == team_id,
         }
-        for m in matches
-        if m.get("match_id")
-        and m.get("goals_home") is not None
-        and m.get("goals_away") is not None
-    ]
+        # HT real (Tanda 3) — opcional, solo si football_api.py lo trajo. No fabricar 0:
+        # ausencia real (partido guardado antes de este deploy) debe seguir distinguiéndose
+        # de un 0-0 real al descanso.
+        if m.get("ht_goals_home") is not None and m.get("ht_goals_away") is not None:
+            row["ht_goals_home"] = m["ht_goals_home"]
+            row["ht_goals_away"] = m["ht_goals_away"]
+        out.append(row)
+    return out
 
 
 def _merge_raw_matches(stored: list[dict], fresh: list[dict]) -> list[dict]:

@@ -67,6 +67,7 @@ def _parse_match(m: dict) -> dict | None:
     """
     try:
         score = m.get("score", {}).get("fullTime", {})
+        ht_score = m.get("score", {}).get("halfTime", {})
         return {
             "match_id": str(m["id"]),
             "date": m["utcDate"],
@@ -76,6 +77,11 @@ def _parse_match(m: dict) -> dict | None:
             "away_team_name": m["awayTeam"].get("name", ""),
             "goals_home": score.get("home"),    # None si partido no terminado
             "goals_away": score.get("away"),
+            # HT real (Tanda 3) — opcional: None si el partido no ha terminado o la API
+            # no trae halfTime. Solo alimenta partidos guardados desde este deploy en
+            # adelante, no hay dato retroactivo.
+            "ht_goals_home": ht_score.get("home"),
+            "ht_goals_away": ht_score.get("away"),
             "league": m.get("competition", {}).get("code", ""),
             "status": m.get("status", "SCHEDULED"),
             # Shots — disponibles según plan; None en free tier
