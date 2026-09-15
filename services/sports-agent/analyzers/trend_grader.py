@@ -14,9 +14,10 @@ series+model porque ambas se resuelven contra el marcador final):
             de Poisson/ELO (doble oportunidad, DNB, total exacto, margen) —
             evidencia de otra naturaleza, pero se resuelve igual: contra el
             resultado final.
-  rolling — contra el CSV de football-data.co.uk (HC/AC/HY/AR), buscando la
-            fila del partido concreto por equipos+fecha. Mismo CSV gratis que
-            ya descarga fdco_collector — sin llamada ni coste nuevo.
+  rolling — contra el CSV de football-data.co.uk (HC/AC/HY/AR/HS/AS/HST/AST/
+            HF/AF/HTHG/HTAG), buscando la fila del partido concreto por
+            equipos+fecha. Mismo CSV gratis que ya descarga fdco_collector —
+            sin llamada ni coste nuevo.
 
 result puede ser "hit"/"miss"/"void" — "void" solo lo usa DNB cuando el
 partido acaba en empate (en un Draw No Bet real se anula el envite, no es un
@@ -208,6 +209,20 @@ async def grade_rolling_signals() -> dict:
                 # "Expulsión probable" no guarda umbral (la media de rojas/partido
                 # es casi siempre <1) — se gradúa como "¿hubo al menos 1 roja?".
                 actual = float(row.get("HR") or 0) if is_home else float(row.get("AR") or 0)
+                threshold = 1
+            elif market == "shots":
+                actual = float(row.get("HS") or 0) if is_home else float(row.get("AS") or 0)
+                threshold = threshold or 0
+            elif market == "shots_on_target":
+                actual = float(row.get("HST") or 0) if is_home else float(row.get("AST") or 0)
+                threshold = threshold or 0
+            elif market == "fouls":
+                actual = float(row.get("HF") or 0) if is_home else float(row.get("AF") or 0)
+                threshold = threshold or 0
+            elif market == "ht_goals":
+                # "Gol en la 1ª parte probable" — mismo caso que expulsiones,
+                # sin umbral guardado: "¿marcó 1+ en la 1ª parte?".
+                actual = float(row.get("HTHG") or 0) if is_home else float(row.get("HTAG") or 0)
                 threshold = 1
             else:
                 continue

@@ -14,9 +14,9 @@ mensaje y graduados por separado (pattern_type en trend_signals):
             goles marcados, BTTS, margen de victoria (hándicap). Hit-rate real
             sobre una ventana de partidos → evidencia fuerte.
   rolling — promedio rolling-15 de football-data.co.uk (team_corner_stats):
-            córners, tarjetas, expulsiones. No hay serie partido a partido,
-            solo el promedio acumulado vs la media de la liga → evidencia
-            más débil.
+            córners, tarjetas, expulsiones, tiros, tiros a puerta, faltas,
+            goles en la 1ª parte. No hay serie partido a partido, solo el
+            promedio acumulado vs la media de la liga → evidencia más débil.
   model   — salida directa de Poisson/ELO ya calculada en enriched_matches
             (doble oportunidad, DNB, total exacto, margen de victoria): NO es
             hit-rate histórico, es la probabilidad de un solo modelo para ESE
@@ -96,10 +96,11 @@ _LEAGUE_AVG_TTL_SECONDS = 3600
 
 def _league_averages(league: str) -> dict:
     """
-    Media de córners/amarillas/rojas de la liga a partir de team_corner_stats
-    (~20 equipos/liga). Cacheado 1h en memoria — evita releer la colección por
-    cada candidato de la jornada. Amarillas y rojas separadas (antes "cards"
-    las mezclaba) para poder emitir "expulsiones" como mercado propio.
+    Media de córners/amarillas/rojas/tiros/tiros a puerta/faltas/goles al
+    descanso de la liga a partir de team_corner_stats (~20 equipos/liga).
+    Cacheado 1h en memoria — evita releer la colección por cada candidato de
+    la jornada. Amarillas y rojas separadas (antes "cards" las mezclaba) para
+    poder emitir "expulsiones" como mercado propio.
     """
     now = datetime.now(timezone.utc)
     cached = _LEAGUE_AVG_CACHE.get(league)
@@ -107,7 +108,9 @@ def _league_averages(league: str) -> dict:
         return cached[1]
 
     from shared.firestore_client import col
-    corners_sum, yellows_sum, reds_sum, n = 0.0, 0.0, 0.0, 0
+    corners_sum, yellows_sum, reds_sum = 0.0, 0.0, 0.0
+    shots_sum, shots_on_target_sum, fouls_sum, ht_goals_sum = 0.0, 0.0, 0.0, 0.0
+    n = 0
     try:
         query = col("team_corner_stats").where(filter=FieldFilter("league", "==", league))
         for d in query.stream():
@@ -115,13 +118,19 @@ def _league_averages(league: str) -> dict:
             corners_sum += (doc.get("home_corners", 0) + doc.get("away_corners", 0)) / 2
             yellows_sum += (doc.get("home_yellows", 0) + doc.get("away_yellows", 0)) / 2
             reds_sum += (doc.get("home_reds", 0) + doc.get("away_reds", 0)) / 2
+            shots_sum += (doc.get("home_shots", 0) + doc.get("away_shots", 0)) / 2
+            shots_on_target_sum += (doc.get("home_shots_on_target", 0) + doc.get("away_shots_on_target", 0)) / 2
+            fouls_sum += (doc.get("home_fouls", 0) + doc.get("away_fouls", 0)) / 2
+            ht_goals_sum += (doc.get("home_ht_goals", 0) + doc.get("away_ht_goals", 0)) / 2
             n += 1
     except Exception:
         logger.error("trend_finder: error calculando medias de liga %s", league, exc_info=True)
 
     result = (
         {"corners": round(corners_sum / n, 2), "yellows": round(yellows_sum / n, 2),
-         "reds": round(reds_sum / n, 3), "n_teams": n}
+         "reds": round(reds_sum / n, 3), "shots": round(shots_sum / n, 2),
+         "shots_on_target": round(shots_on_target_sum / n, 2), "fouls": round(fouls_sum / n, 2),
+         "ht_goals": round(ht_goals_sum / n, 3), "n_teams": n}
         if n else {}
     )
     _LEAGUE_AVG_CACHE[league] = (now, result)
@@ -267,6 +276,63 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
             "detail": (f"Promedia {team_reds:.2f} rojas por partido "
                        f"en sus últimos {sample} (liga: {league_reds:.2f})"),
             "line": f"{team_name} — Expulsión probable: promedia {team_reds:.2f}/partido (liga: {league_reds:.2f})",
+        })
+
+    team_shots = corner_stats.get(f"{side}_shots", 0.0)
+    league_shots = league_avg.get("shots", 0)
+    if league_shots > 0 and team_shots / league_shots >= TREND_ROLLING_MIN_RATIO:
+        ratio = team_shots / league_shots
+        n_line = max(1, math.floor(team_shots))
+        candidates.append({
+            "market": "shots", "threshold": n_line,
+            "sample": sample, "rate": round(ratio, 3),
+            "label": f"{n_line}+ tiros",
+            "detail": (f"Promedia {team_shots:.1f} tiros por partido "
+                       f"en sus últimos {sample} (liga: {league_shots:.1f})"),
+            "line": f"{team_name} — {n_line}+ tiros: promedia {team_shots:.1f}/partido (liga: {league_shots:.1f})",
+        })
+
+    team_sot = corner_stats.get(f"{side}_shots_on_target", 0.0)
+    league_sot = league_avg.get("shots_on_target", 0)
+    if league_sot > 0 and team_sot / league_sot >= TREND_ROLLING_MIN_RATIO:
+        ratio = team_sot / league_sot
+        n_line = max(1, math.floor(team_sot))
+        candidates.append({
+            "market": "shots_on_target", "threshold": n_line,
+            "sample": sample, "rate": round(ratio, 3),
+            "label": f"{n_line}+ tiros a puerta",
+            "detail": (f"Promedia {team_sot:.1f} tiros a puerta por partido "
+                       f"en sus últimos {sample} (liga: {league_sot:.1f})"),
+            "line": f"{team_name} — {n_line}+ tiros a puerta: promedia {team_sot:.1f}/partido (liga: {league_sot:.1f})",
+        })
+
+    team_fouls = corner_stats.get(f"{side}_fouls", 0.0)
+    league_fouls = league_avg.get("fouls", 0)
+    if league_fouls > 0 and team_fouls / league_fouls >= TREND_ROLLING_MIN_RATIO:
+        ratio = team_fouls / league_fouls
+        n_line = max(1, math.floor(team_fouls))
+        candidates.append({
+            "market": "fouls", "threshold": n_line,
+            "sample": sample, "rate": round(ratio, 3),
+            "label": f"{n_line}+ faltas",
+            "detail": (f"Promedia {team_fouls:.1f} faltas por partido "
+                       f"en sus últimos {sample} (liga: {league_fouls:.1f})"),
+            "line": f"{team_name} — {n_line}+ faltas: promedia {team_fouls:.1f}/partido (liga: {league_fouls:.1f})",
+        })
+
+    # Goles en la 1ª parte: mismo caso que expulsiones — la media por mitad
+    # suele ser <1, sin línea "N+" con sentido.
+    team_ht_goals = corner_stats.get(f"{side}_ht_goals", 0.0)
+    league_ht_goals = league_avg.get("ht_goals", 0)
+    if league_ht_goals > 0 and team_ht_goals / league_ht_goals >= TREND_ROLLING_MIN_RATIO:
+        ratio = team_ht_goals / league_ht_goals
+        candidates.append({
+            "market": "ht_goals", "threshold": None,
+            "sample": sample, "rate": round(ratio, 3),
+            "label": "Gol en la 1ª parte probable",
+            "detail": (f"Promedia {team_ht_goals:.2f} goles en la 1ª parte "
+                       f"en sus últimos {sample} (liga: {league_ht_goals:.2f})"),
+            "line": f"{team_name} — Gol en la 1ª parte probable: promedia {team_ht_goals:.2f}/partido (liga: {league_ht_goals:.2f})",
         })
 
     for c in candidates:

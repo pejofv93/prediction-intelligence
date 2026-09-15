@@ -2,7 +2,9 @@
 services/sports-agent/collectors/fdco_collector.py
 
 Descarga datos históricos de football-data.co.uk (gratis, sin API key).
-Columnas usadas: HC/AC (corners), HY/AY/HR/AR (tarjetas), HomeTeam/AwayTeam.
+Columnas usadas: HC/AC (corners), HY/AY/HR/AR (tarjetas), HS/AS (tiros),
+HST/AST (tiros a puerta), HF/AF (faltas), HTHG/HTAG (goles al descanso),
+HomeTeam/AwayTeam.
 
 Calcula promedios por equipo (últimos N partidos en casa / fuera) y los guarda
 en Firestore colección team_corner_stats/{league}_{team_slug}.
@@ -98,14 +100,19 @@ async def fetch_league_csv(league_code: str, season_year: int = 2025) -> list[di
 
 def compute_team_averages(rows: list[dict]) -> dict[str, dict]:
     """
-    Calcula promedios de corners y tarjetas por equipo usando los últimos N partidos.
-    Los datos FDCO están en orden cronológico ascendente.
+    Calcula promedios de corners, tarjetas, tiros, faltas y goles al descanso
+    por equipo usando los últimos N partidos. Los datos FDCO están en orden
+    cronológico ascendente.
 
     Devuelve:
       { team_name: {
           home_corners: float, away_corners: float,
           home_yellows: float, away_yellows: float,
           home_reds: float, away_reds: float,
+          home_shots: float, away_shots: float,
+          home_shots_on_target: float, away_shots_on_target: float,
+          home_fouls: float, away_fouls: float,
+          home_ht_goals: float, away_ht_goals: float,
           home_matches: int, away_matches: int,
         }
       }
@@ -127,6 +134,14 @@ def compute_team_averages(rows: list[dict]) -> dict[str, dict]:
             "ay": _safe(row.get("AY")),
             "hr": _safe(row.get("HR")),
             "ar": _safe(row.get("AR")),
+            "hs": _safe(row.get("HS")),
+            "as": _safe(row.get("AS")),
+            "hst": _safe(row.get("HST")),
+            "ast": _safe(row.get("AST")),
+            "hf": _safe(row.get("HF")),
+            "af": _safe(row.get("AF")),
+            "hthg": _safe(row.get("HTHG")),
+            "htag": _safe(row.get("HTAG")),
         }
         home_history.setdefault(home, []).append(stats)
         away_history.setdefault(away, []).append(stats)
@@ -149,6 +164,19 @@ def compute_team_averages(rows: list[dict]) -> dict[str, dict]:
             "away_yellows":      avg(a_rows, "ay"),
             "home_reds":         avg(h_rows, "hr"),
             "away_reds":         avg(a_rows, "ar"),
+            "home_shots":            avg(h_rows, "hs"),
+            "away_shots":            avg(a_rows, "as"),
+            "home_shots_on_target":  avg(h_rows, "hst"),
+            "away_shots_on_target":  avg(a_rows, "ast"),
+            "home_fouls":            avg(h_rows, "hf"),
+            "away_fouls":            avg(a_rows, "af"),
+            # Goles marcados en la 1ª parte — no confundir con el resultado al
+            # descanso (HTR): esto es solo lo anotado por CADA equipo, la mitad
+            # "barata" de resultado-al-descanso/goles-por-mitad (pieza E de la
+            # spec) — la otra mitad (HT real en team_stats.raw_matches, vía
+            # football_api.py/firestore_writer.py) va en la Tanda 3.
+            "home_ht_goals":         avg(h_rows, "hthg"),
+            "away_ht_goals":         avg(a_rows, "htag"),
             "home_matches":      len(h_rows),
             "away_matches":      len(a_rows),
             # Corners concedidos (para ajuste del oponente)
