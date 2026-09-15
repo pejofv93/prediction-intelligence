@@ -434,7 +434,8 @@ _LEAGUE_CACHE_TTL = timedelta(hours=24)
 #   1 → parser original (all_markets solo contenía h2h)
 #   2 → alias por nombre legible + campo hdp + líneas múltiples + signo de spreads
 #   3 → correct_score fuera de _MARKETS_ENABLED (sin guarda válida para longshots)
-_ODDS_CACHE_PARSER_VERSION: int = 3
+#   4 → correct_score reactivado con fair_prob multi-vía (Tanda 4, 2026-09-15)
+_ODDS_CACHE_PARSER_VERSION: int = 4
 
 _ODDSAPIIO_CACHE: dict[str, tuple[datetime, list, bool]] = {}
 _ODDSAPIIO_CACHE_TTL     = timedelta(hours=24)
