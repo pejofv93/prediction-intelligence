@@ -11,9 +11,12 @@ repetirlo en el main.py de cada servicio.
 import logging
 
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 from shared.config import GOOGLE_CLOUD_PROJECT, COLLECTION_PREFIX
 
 logger = logging.getLogger(__name__)
+
+_ITER_ALL_PAGE_SIZE = 1000
 
 _client = None
 _async_client = None
@@ -96,3 +99,42 @@ def get_async_client() -> firestore.AsyncClient:
 def async_col(name: str) -> firestore.AsyncCollectionReference:
     """Devuelve referencia a coleccion con prefijo (cliente async — usar para lecturas en contexto async)."""
     return get_async_client().collection(f"{COLLECTION_PREFIX}{name}")
+
+
+def iter_all(name: str, page_size: int = _ITER_ALL_PAGE_SIZE, where: tuple | None = None):
+    """
+    Generador: recorre una colección ENTERA paginando por __name__, en vez de un
+    único .stream() sin límite.
+
+    Un solo .stream() sobre una colección que crece se pasa antes o después del
+    deadline de ~60s de Firestore ("504 Deadline Exceeded") y la función que lo
+    llama cae en su except sin dato alguno — visto en shadow_trades (2026-08-28,
+    PR #13) y de nuevo en poly_predictions (2026-09-11, _alerted_poly_ids). Cada
+    página es una query propia bajo su propio deadline: el coste total sigue
+    siendo lineal en nº de docs, pero ya no hay una sola llamada que pueda expirar.
+
+    `where`: tupla opcional (field, op, value) para un filtro de igualdad/rango
+    simple aplicado en cada página. No uses esto en vez de un filtro real y
+    selectivo cuando exista uno — es para los casos que sí necesitan barrer la
+    colección completa.
+
+    Yields firestore.DocumentSnapshot (no .to_dict()) para que el llamador pueda
+    leer doc.id si lo necesita.
+    """
+    coll = col(name)
+    cursor = None
+    while True:
+        q = coll
+        if where is not None:
+            field, op, value = where
+            q = q.where(filter=FieldFilter(field, op, value))
+        q = q.order_by("__name__").limit(page_size)
+        if cursor is not None:
+            q = q.start_after(cursor)
+        page = list(q.stream())
+        if not page:
+            return
+        yield from page
+        if len(page) < page_size:
+            return
+        cursor = page[-1]

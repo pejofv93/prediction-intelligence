@@ -9,6 +9,8 @@ jobs:
     steps:
       - name: Send daily report
         run: |
+          # /daily-report ahora responde SÍNCRONO (ver services/telegram-bot/main.py) —
+          # --max-time debe cubrir el cálculo completo, no solo el 202 instantáneo de antes.
           curl -X POST "${{ secrets.TELEGRAM_BOT_URL }}/daily-report" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 60 --retry 2 --retry-delay 5 --fail --silent --show-error
+            --max-time 110 --retry 2 --retry-delay 5 --fail --silent --show-error

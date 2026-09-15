@@ -510,7 +510,7 @@ async def _bg_analyze() -> dict:
 
         from groq_analyzer import analyze_market, run_maintenance
         from alert_engine import check_and_alert
-        from shared.firestore_client import col
+        from shared.firestore_client import col, iter_all
         from shared.groq_client import GROQ_CALL_DELAY
 
         try:
@@ -593,9 +593,12 @@ async def _bg_analyze() -> dict:
 
         # Cargar poly_markets una vez como fallback para docs enriched que aún no
         # tienen end_date/price_yes (enriquecidos antes del fix de market_enricher)
+        # Paginado (shared.firestore_client.iter_all): poly_markets tiene 8.090 docs
+        # y creciendo — un .stream() sin límite aquí es el mismo patrón que causó el
+        # 504 de calculate_metrics, y este corre en CADA ciclo de analyze.
         _poly_cache: dict[str, dict] = {}
         try:
-            for _pd in col("poly_markets").stream():
+            for _pd in iter_all("poly_markets"):
                 _poly_cache[_pd.id] = _pd.to_dict()
             logger.info("analyze: poly_cache cargado (%d docs)", len(_poly_cache))
         except Exception as _pce:

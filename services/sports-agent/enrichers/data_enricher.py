@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.config import MIN_MATCHES_TO_FIT, SUPPORTED_FOOTBALL_LEAGUES
-from shared.firestore_client import col
+from shared.firestore_client import col, iter_all
 
 from enrichers.poisson_model import fit_attack_defense, predict_match_probs, predict_match_probs_from_xg
 from enrichers.elo_rating import elo_win_probability, get_team_elo, expected_score, HOME_ADVANTAGE, DEFAULT_ELO
@@ -144,7 +144,12 @@ def _kickoff_within_horizon(match: dict, now: datetime, horizon: datetime) -> bo
 def _get_team_stats_name_index() -> dict:
     """Índice {nombre_normalizado: doc_id} de team_stats, construido una vez y
     cacheado 30 min. Antes _find_team_stats_by_name hacía un stream() completo de
-    team_stats POR CADA equipo internacional sin match de id, en cada run — O(n·m)."""
+    team_stats POR CADA equipo internacional sin match de id, en cada run — O(n·m).
+
+    Paginado (shared.firestore_client.iter_all): team_stats tiene 2.245 docs y
+    creciendo — un .stream() sin límite es el mismo patrón que causó el 504 de
+    calculate_metrics/_alerted_poly_ids; la caché de 30 min baja la frecuencia
+    pero no elimina el riesgo cuando sí toca reconstruirlo."""
     global _team_stats_name_index, _team_stats_name_index_at
     now = datetime.now(timezone.utc)
     if (
@@ -155,7 +160,7 @@ def _get_team_stats_name_index() -> dict:
         return _team_stats_name_index
     idx: dict = {}
     try:
-        for doc in col("team_stats").stream():
+        for doc in iter_all("team_stats"):
             d = doc.to_dict() or {}
             stored = _normalize_team_name(d.get("team_name", ""))
             if stored:

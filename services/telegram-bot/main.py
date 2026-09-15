@@ -199,10 +199,25 @@ async def send_alert(request: Request) -> JSONResponse:
 async def daily_report() -> JSONResponse:
     """
     Genera y envia el reporte diario a Telegram.
-    Llamado por Cloud Scheduler o GitHub Actions a las 08:00 Europe/Madrid.
+    Llamado por Cloud Scheduler o GitHub Actions a las 07:00 UTC.
+
+    Se ejecuta SÍNCRONO (await directo), no como tarea en segundo plano. Antes
+    hacía asyncio.create_task(...) y devolvía 202 al instante — pero Cloud Run
+    solo asigna CPU mientras hay una request en curso; en cuanto la respuesta
+    202 salía, la tarea de fondo quedaba sin CPU hasta la siguiente request que
+    tocase esa instancia. Confirmado en logs de producción del 11-sep: el POST
+    llegó a las 12:00:02 UTC (el cron de GitHub Actions se retrasó 5h respecto
+    a las 07:00 programadas — ajeno a este código), check_model_health() se
+    completó a las 12:00:19, y calculate_metrics() no falló con
+    "504 Deadline Exceeded" hasta las 12:05:21 — casi 5 minutos después, y justo
+    cuando empezó a llegar tráfico nuevo al contenedor (send-alert). La consulta
+    en sí no tarda 5 minutos; el proceso estuvo congelado sin CPU hasta que otra
+    request lo reactivó, momento en el que el deadline interno de Firestore ya
+    llevaba rato superado. Al hacerlo síncrono, la CPU queda asignada durante
+    todo el cálculo porque forma parte de la misma request.
     """
-    asyncio.create_task(_bg_daily_report())
-    return JSONResponse(status_code=202, content={"status": "accepted", "job": "daily-report"})
+    await _bg_daily_report()
+    return JSONResponse(status_code=200, content={"status": "sent", "job": "daily-report"})
 
 
 async def _bg_daily_report() -> None:
@@ -436,25 +451,37 @@ async def send_weekly_report() -> JSONResponse:
         # Esquema real escrito por polymarket_resolver: result="win"/"loss",
         # outcome="YES"/"NO", resolved_at=<ts>. NO existe campo booleano "resolved"
         # ni outcome=="correct" — leerlos daba siempre 0/0 (bug histórico).
-        # Coherencia con "emitido real": el resolver solo resuelve docs alertados
-        # (escribe result únicamente si alerted=True), así que filtrar por result
-        # ya restringe a lo alertado; lo hacemos explícito por robustez. Por eso un
-        # split crudo/alertado por dirección NO aplica aquí: poly_predictions no
-        # tiene población "cruda" resuelta que contrastar (eso vive en shadow_trades,
-        # ya cubierto por las dos líneas de ROI). Este desglose ES el "emitido real".
-        # NOTA: si no hay mercados resueltos en la ventana analyzed_at de la semana,
-        # 0/0 es LEGÍTIMO (resoluciones aún pendientes), no el bug de campos.
-        resolved_poly = [
-            p for p in poly_preds
-            if p.get("result") in ("win", "loss") and p.get("alerted") is True
-        ]
+        #
+        # OJO: esto NO se puede derivar de poly_preds (arriba) — poly_preds está
+        # acotado por analyzed_at, que es cuándo se ANALIZÓ el mercado, no cuándo
+        # RESOLVIÓ. Polymarket puede tardar semanas o meses en resolver un mercado
+        # tras analizarlo, así que "analizado esta semana AND ya resuelto" es casi
+        # siempre un conjunto vacío por diseño — daba 0/0 casi todas las semanas
+        # aunque sí hubiera resoluciones reales esa semana (bug descubierto 2026-09-12).
+        # Fix: query propia por resolved_at en la ventana de la semana.
+        resolved_poly: list[dict] = []
+        try:
+            resolved_docs = list(
+                col("poly_predictions")
+                .where(filter=FieldFilter("resolved_at", ">=", week_start))
+                .where(filter=FieldFilter("resolved_at", "<", week_end))
+                .stream()
+            )
+            _resolved_dicts = [d.to_dict() for d in resolved_docs]
+            resolved_poly = [
+                p for p in _resolved_dicts
+                if p.get("result") in ("win", "loss") and p.get("alerted") is True
+            ]
+        except Exception:
+            logger.warning("send-weekly-report: error en query resolved_at", exc_info=True)
+
         poly_buy_yes = [p for p in resolved_poly if p.get("recommendation") == "BUY_YES"]
         poly_buy_no = [p for p in resolved_poly if p.get("recommendation") == "BUY_NO"]
         poly_buy_yes_correct = sum(1 for p in poly_buy_yes if p.get("result") == "win")
         poly_buy_no_correct = sum(1 for p in poly_buy_no if p.get("result") == "win")
         if not resolved_poly:
             logger.info(
-                "send-weekly-report: 0 mercados poly resueltos en ventana %s "
+                "send-weekly-report: 0 mercados poly resueltos (resolved_at) en ventana %s "
                 "(BUY_YES/BUY_NO 0/0 legítimo, no bug de conteo)", prev_week,
             )
 
@@ -466,6 +493,24 @@ async def send_weekly_report() -> JSONResponse:
             best_poly = max(alerted_poly, key=lambda p: abs(float(p.get("edge") or 0)))
             poly_best_market = str(best_poly.get("question") or "")[:40]
             poly_best_edge = abs(float(best_poly.get("edge") or 0))
+
+        # Confianza media REAL de las señales emitidas esta semana (no la media de
+        # los pesos del ensemble — eso mide otra cosa y siempre ronda el 25% porque
+        # 4 pesos normalizados a sumar ~1.0 dan de media ~1/4 sea cual sea la
+        # confianza real de las señales; bug descubierto 2026-09-12).
+        # week_preds = predictions creadas esa semana → cada doc ES una señal
+        # emitida (los filtros bloqueados se guardan en filter_blocks, no aquí).
+        _signal_confidences = [
+            float(p["confidence"]) for p in week_preds
+            if p.get("confidence") is not None
+        ] + [
+            float(p["confidence"]) for p in alerted_poly
+            if p.get("confidence") is not None
+        ]
+        avg_signal_confidence = (
+            sum(_signal_confidences) / len(_signal_confidences) if _signal_confidences else 0.0
+        )
+        n_signal_confidence = len(_signal_confidences)
 
         # Bankroll virtual (shadow trades) — ejecutar en executor para no bloquear event loop
         try:
@@ -519,6 +564,8 @@ async def send_weekly_report() -> JSONResponse:
             "poly_buy_no_total": len(poly_buy_no),
             "poly_best_market": poly_best_market,
             "poly_best_edge": poly_best_edge,
+            "avg_signal_confidence": avg_signal_confidence,
+            "n_signal_confidence": n_signal_confidence,
             "bankroll_current": shadow_metrics.get("current_bankroll", 50.0),
             "roi_total": shadow_metrics.get("roi_total", 0.0),
             "roi_sports": shadow_metrics.get("roi_sports", 0.0),

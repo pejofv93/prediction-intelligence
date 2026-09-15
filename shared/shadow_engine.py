@@ -10,7 +10,7 @@ from typing import Optional
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.firestore_client import col
+from shared.firestore_client import col, iter_all
 
 logger = logging.getLogger(__name__)
 
@@ -80,40 +80,14 @@ def _poly_decimal_odds(selection: str, market_price_yes: float) -> float:
     return round(1.0 / market_price_yes, 2)
 
 
-_TRADES_PAGE_SIZE = 1000
-
-
 def _iter_all_shadow_trades() -> list:
-    """Lee shadow_trades entero paginando por nombre de documento.
+    """Lee shadow_trades entero paginando por nombre de documento (ver shared.firestore_client.iter_all).
 
     calculate_metrics / _calc_bankroll_after necesitan agregados DE POR VIDA (ROI,
-    bankroll, win rate) → no se pueden acotar con limit(). Pero un único .stream()
-    de la colección entera empezó a pasarse del deadline de 60s de Firestore
-    ("504 Deadline Exceeded") según crecía la colección, y la función caía en su
-    except → el reporte diario salía en ceros (50 €, ROI 0 %, 0 señales).
-
-    Paginar por __name__ hace que cada página sea una query nueva bajo su propio
-    deadline: el coste total sigue siendo lineal en nº de trades, pero ya no hay
-    una sola consulta que pueda expirar. Excluye el doc marcador _RETROACTIVE_DOC.
+    bankroll, win rate) → no se pueden acotar con limit(). Excluye el doc marcador
+    _RETROACTIVE_DOC.
     """
-    coll = col("shadow_trades")
-    out: list = []
-    cursor = None
-    while True:
-        q = coll.order_by("__name__").limit(_TRADES_PAGE_SIZE)
-        if cursor is not None:
-            q = q.start_after(cursor)
-        page = list(q.stream())
-        if not page:
-            break
-        for doc in page:
-            if doc.id == _RETROACTIVE_DOC:
-                continue
-            out.append(doc.to_dict())
-        if len(page) < _TRADES_PAGE_SIZE:
-            break
-        cursor = page[-1]
-    return out
+    return [doc.to_dict() for doc in iter_all("shadow_trades") if doc.id != _RETROACTIVE_DOC]
 
 
 def _calc_bankroll_after() -> float:
@@ -404,16 +378,18 @@ def _alerted_poly_ids() -> set:
     shadow_trade.signal_data.alerted es un snapshot tomado en el análisis
     (antes de decidir la alerta) y queda en False casi siempre — NO es fiable.
     El join correcto es shadow_trade.signal_id == poly_predictions doc id.
+
+    Paginado igual que _iter_all_shadow_trades (ver shared.firestore_client.iter_all):
+    esta llamada era un único .stream() sin límite sobre poly_predictions completo
+    (4.168 docs y creciendo); es exactamente el mismo patrón que causó el 504 original
+    en shadow_trades, solo que en la otra colección — reproducido en producción el
+    2026-09-11 (calculate_metrics volvió a caer en 504 Deadline Exceeded).
+
     Devuelve set vacío si falla (las métricas "alertadas" quedan a 0 sin romper
     el resto del cálculo).
     """
     try:
-        docs = (
-            col("poly_predictions")
-            .where(filter=FieldFilter("alerted", "==", True))
-            .stream()
-        )
-        return {d.id for d in docs}
+        return {doc.id for doc in iter_all("poly_predictions", where=("alerted", "==", True))}
     except Exception as e:
         logger.error("shadow: error cargando alerted poly ids: %s", e)
         return set()

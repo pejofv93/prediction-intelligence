@@ -59,7 +59,7 @@ jobs:
 
           gcloud run deploy telegram-bot \
             --source services/telegram-bot --project $PROJECT --region $REGION \
-            --allow-unauthenticated --timeout=60 --min-instances=0 --memory=256Mi --cpu=1 \
+            --allow-unauthenticated --timeout=120 --min-instances=0 --memory=256Mi --cpu=1 \
             --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,TELEGRAM_TOKEN=$TELEGRAM_TOKEN,TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID,CLOUD_RUN_TOKEN=$CLOUD_RUN_TOKEN,FIRESTORE_COLLECTION_PREFIX=$FIRESTORE_COLLECTION_PREFIX,TELEGRAM_SPORTS_THREAD_ID=$TELEGRAM_SPORTS_THREAD_ID,TELEGRAM_POLY_THREAD_ID=$TELEGRAM_POLY_THREAD_ID,TELEGRAM_DAILY_THREAD_ID=$TELEGRAM_DAILY_THREAD_ID"
 
           gcloud run deploy dashboard \

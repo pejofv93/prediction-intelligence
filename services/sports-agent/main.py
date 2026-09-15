@@ -1182,11 +1182,13 @@ async def _collect_uefa() -> None:
     from collectors.allsports_uefa import UEFA_TOURNAMENTS, fetch_tournament_matches
     from collectors.team_identity import build_identity_map, match_fingerprint, resolve
     from collectors.firestore_writer import save_upcoming_matches, update_finished_matches
-    from shared.firestore_client import col, get_client
+    from shared.firestore_client import col, get_client, iter_all
 
     # Mapa de identidad: nombre → id canónico de los equipos que ya existen
+    # Paginado (shared.firestore_client.iter_all): team_stats tiene 2.245 docs y
+    # creciendo — mismo patrón que el 504 de calculate_metrics/_alerted_poly_ids.
     try:
-        team_docs = [d.to_dict() or {} for d in col("team_stats").stream()]
+        team_docs = [d.to_dict() or {} for d in iter_all("team_stats")]
         identity = build_identity_map(
             [t for t in team_docs if (t.get("sport") or "football").lower() == "football"]
         )

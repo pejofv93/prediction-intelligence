@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.firestore_client import col
+from shared.firestore_client import col, iter_all
 
 logger = logging.getLogger(__name__)
 
@@ -282,10 +282,17 @@ async def save_market_group_labels() -> None:
     """
     Lee todos los poly_predictions, asigna topic_group via assign_topic_group,
     actualiza el campo group en Firestore poly_predictions si no existe.
-    Ejecutar una vez al deploy.
+    Ejecutar una vez al deploy (en la práctica: una vez por arranque de instancia,
+    ver el guard _groups_labeled en main.py — con min-instances=0 esto puede ser
+    varias veces al día).
+
+    Paginado (ver shared.firestore_client.iter_all): un único .stream() sin
+    límite sobre poly_predictions completo (4.168 docs y creciendo) es el mismo
+    patrón que causó el 504 de calculate_metrics/_alerted_poly_ids el 2026-09-11,
+    solo que aquí corre en cada cold start de polymarket-agent, no una vez al día.
     """
     try:
-        docs = list(col("poly_predictions").stream())
+        docs = list(iter_all("poly_predictions"))
         updated = 0
         for doc in docs:
             data = doc.to_dict()

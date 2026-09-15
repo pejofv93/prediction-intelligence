@@ -22,6 +22,7 @@ def generate_weekly_report(
         poly_buy_yes_correct, poly_buy_yes_total,
         poly_buy_no_correct, poly_buy_no_total,
         poly_best_market, poly_best_edge,
+        avg_signal_confidence, n_signal_confidence,
 
     weights_before / weights_after: dicts con claves poisson, elo, form, h2h.
     bankroll_metrics: resultado de shadow_engine.calculate_metrics() (opcional).
@@ -80,15 +81,14 @@ def generate_weekly_report(
     up_str = ", ".join(up_keys) if up_keys else "—"
     down_str = ", ".join(down_keys) if down_keys else "—"
 
-    conf_values: list[float] = []
-    for k in weight_keys:
-        v = weights_after.get(k)
-        if v is not None:
-            try:
-                conf_values.append(float(v))
-            except (TypeError, ValueError):
-                pass
-    avg_conf = sum(conf_values) / len(conf_values) if conf_values else 0.0
+    # Confianza media REAL de las señales emitidas esta semana (calculada en
+    # send-weekly-report sobre el campo `confidence` de cada señal, sports +
+    # poly alertadas). Antes este campo promediaba los 4 pesos del ensemble
+    # (poisson/elo/form/h2h) — como se normalizan para sumar ~1.0, su media
+    # daba ~25% SIEMPRE sin importar la confianza real de las señales (70-91%);
+    # medía el reparto del ensemble, no confianza (bug descubierto 2026-09-12).
+    avg_signal_confidence = float(week_stats.get("avg_signal_confidence", 0.0))
+    n_signal_confidence = int(week_stats.get("n_signal_confidence", 0))
 
     bankroll_current = float(week_stats.get("bankroll_current", 50.0))
     roi_total = float(week_stats.get("roi_total", 0.0))
@@ -128,18 +128,28 @@ def generate_weekly_report(
     lines += [
         "",
         "🔮 POLYMARKET:",
-        f"Mercados resueltos: {poly_total}",
-        f"BUY\\_YES: {poly_buy_yes_correct}/{poly_buy_yes_total} ({buy_yes_pct}%)",
-        f"BUY\\_NO: {poly_buy_no_correct}/{poly_buy_no_total} ({buy_no_pct}%)",
+        # "analizados" (no "resueltos"): poly_total cuenta mercados con analyzed_at
+        # en la semana, no mercados que hayan resuelto esa semana — un mercado se
+        # analiza en el momento pero puede resolver meses después.
+        f"Mercados analizados: {poly_total}",
+        # BUY_YES/BUY_NO SÍ están acotados a resoluciones de ESTA semana
+        # (poly_predictions.resolved_at, no analyzed_at — ver send-weekly-report).
+        f"BUY\\_YES (resueltos esta semana): {poly_buy_yes_correct}/{poly_buy_yes_total} ({buy_yes_pct}%)",
+        f"BUY\\_NO (resueltos esta semana): {poly_buy_no_correct}/{poly_buy_no_total} ({buy_no_pct}%)",
     ]
     if poly_best_market and poly_best_market != "—":
         lines.append(f"Mejor: {poly_best_market} +{poly_best_edge:.0%} ✅")
 
+    conf_line = (
+        f"Confianza media de señales emitidas: {avg_signal_confidence:.0%} (n={n_signal_confidence})"
+        if n_signal_confidence > 0
+        else "Confianza media de señales emitidas: — (sin señales esta semana)"
+    )
     lines += [
         "",
         "🧠 MODELO:",
         f"Pesos actualizados: {up_str} ↑ {down_str} ↓",
-        f"Confianza media: {avg_conf:.0%}",
+        conf_line,
         "Próxima mejora automática: lunes",
     ]
 
