@@ -1,0 +1,22 @@
+name: sports-fdco-collect
+on:
+  schedule:
+    # 06:00 UTC — tras los partidos europeos del día anterior, antes de trend-grade (06:20)
+    # y de sports-trends (07:30). No existía ningún disparador para este job: team_corner_stats
+    # solo se actualizaba si alguien llamaba /run-fdco-collect a mano.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger Cloud Run (sync)
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-fdco-collect" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 500 \
+            --no-buffer \
+            --fail --silent --show-error

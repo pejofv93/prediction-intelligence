@@ -10,6 +10,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")    # solo telegram-bot
 TELEGRAM_SPORTS_THREAD_ID = int(os.environ.get("TELEGRAM_SPORTS_THREAD_ID", "4"))   # topic Sports
 TELEGRAM_POLY_THREAD_ID   = int(os.environ.get("TELEGRAM_POLY_THREAD_ID",   "3"))   # topic Polymarket
 TELEGRAM_DAILY_THREAD_ID  = int(os.environ.get("TELEGRAM_DAILY_THREAD_ID",  "4"))   # topic Daily Report
+TELEGRAM_TRENDS_THREAD_ID = int(os.environ.get("TELEGRAM_TRENDS_THREAD_ID", "4"))   # topic Tendencias
 TELEGRAM_BOT_URL = os.environ.get("TELEGRAM_BOT_URL")    # sports-agent + polymarket-agent
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
@@ -195,6 +196,22 @@ BASKETBALL_SPREAD_SIGMA  = 12.0  # desviación estándar del margen (distribuci�
 
 # Tenis — pesos del ensemble
 TENNIS_WEIGHTS = {"form": 0.30, "surface": 0.30, "ranking": 0.25, "h2h": 0.15}
+
+# ── Feed de tendencias (Telegram, tema aparte) ──────────────────────────────────
+# Solo estadística/hit-rate, SIN cuotas ni EV. Aislado de predictions/shadow_trades/
+# accuracy_log/model_weights — colección propia trend_signals, ver analyzers/trend_finder.py.
+# Series (goles/BTTS/hándicap): ventana de partidos propios del equipo, evidencia fuerte.
+TREND_SERIES_WINDOW = 10          # últimos N partidos considerados
+TREND_SERIES_MIN_SAMPLE = 8       # mínimo de partidos válidos en la ventana
+TREND_SERIES_MIN_HIT_RATE = 0.70  # umbral de hit-rate para emitir el patrón
+# Rolling (córners/tarjetas, football-data.co.uk): solo promedio, no serie partido a
+# partido → evidencia más débil. Umbral por desviación sobre la media de la liga.
+TREND_ROLLING_MIN_SAMPLE = 8
+TREND_ROLLING_MIN_RATIO = 1.30    # promedio del equipo >= 1.3x la media de la liga
+# Volumen por jornada: tope duro tras rankear por "fuerza de patrón", máx por equipo
+# para no repetir el mismo equipo en varios mercados.
+TREND_MAX_SIGNALS_PER_RUN = 10
+TREND_MAX_SIGNALS_PER_TEAM = 2
 
 LEARNING_RATE = 0.05
 DEFAULT_WEIGHTS = {

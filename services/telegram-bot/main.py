@@ -18,7 +18,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from shared.config import TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID, TELEGRAM_DAILY_THREAD_ID
+from shared.config import (
+    TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID, TELEGRAM_DAILY_THREAD_ID,
+    TELEGRAM_TRENDS_THREAD_ID,
+)
 from fastapi.responses import JSONResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -186,6 +189,14 @@ async def send_alert(request: Request) -> JSONResponse:
             text = data.get("text", "")
             if text:
                 sent = await send_message(text, parse_mode=None, message_thread_id=None)
+        elif alert_type == "trend":
+            # Feed de tendencias estadísticas (sin cuotas/EV) → tema propio "Tendencias".
+            # Aislado del resto: nunca toca predictions/shadow_trades/accuracy_log.
+            # parse_mode=None: nombres de equipo pueden traer caracteres que rompen
+            # entidades Markdown (mismo motivo que el tipo "matched").
+            text = data.get("text", "")
+            if text:
+                sent = await send_message(text, parse_mode=None, message_thread_id=TELEGRAM_TRENDS_THREAD_ID)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
     except Exception:

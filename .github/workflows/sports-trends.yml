@@ -1,0 +1,21 @@
+name: sports-trends
+on:
+  schedule:
+    # 07:30 UTC — tras sports-analyze (corre a las 07:00) y sports-fdco-collect (06:00),
+    # una vez por jornada. Feed de tendencias sin cuotas/EV → tema Telegram "Tendencias".
+    - cron: '30 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger Cloud Run (sync)
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-trends" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 800 \
+            --no-buffer \
+            --fail --silent --show-error

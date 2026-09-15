@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 # Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).
 # Antes de `from api import …`, que lo importaría de forma transitiva vía shadow_engine.
 import shared.firestore_client  # noqa: F401,E402
-from api import backtest, calculator, matched, poly_stats, polymarket, predictions, shadow, tracker  # noqa: E402
+from api import backtest, calculator, matched, poly_stats, polymarket, predictions, shadow, tracker, trends  # noqa: E402
 
 app = FastAPI(title="dashboard")
 security = HTTPBasic()
@@ -86,6 +86,11 @@ app.include_router(
 )
 app.include_router(
     backtest.router,
+    prefix="/api",
+    dependencies=[Depends(verify_credentials)],
+)
+app.include_router(
+    trends.router,
     prefix="/api",
     dependencies=[Depends(verify_credentials)],
 )

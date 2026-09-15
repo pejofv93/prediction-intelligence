@@ -255,6 +255,27 @@ async def run_fdco_collect() -> StreamingResponse:
     return StreamingResponse(_stream_job(_bg_fdco_collect, "fdco-collect"), media_type="text/plain")
 
 
+@app.post("/run-trends", dependencies=[Depends(verify_token)])
+async def run_trends() -> StreamingResponse:
+    """
+    Feed de tendencias estadísticas (sin cuotas/EV) → tema Telegram "Tendencias".
+    Lee team_stats/team_corner_stats en solo-lectura, escribe únicamente en
+    trend_signals — aislado del sistema de valor (predictions/shadow_trades/
+    accuracy_log). Ejecutar tras /run-analyze y /run-fdco-collect del día.
+    """
+    return StreamingResponse(_stream_job(_bg_trend_finder, "trends"), media_type="text/plain")
+
+
+@app.post("/run-trend-grade", dependencies=[Depends(verify_token)])
+async def run_trend_grade() -> StreamingResponse:
+    """
+    Gradúa trend_signals pendientes contra match_results (series) y el CSV de
+    football-data.co.uk (rolling). Escribe en trend_accuracy_log — separada
+    de accuracy_log. Ejecutar diariamente, tras los partidos del día anterior.
+    """
+    return StreamingResponse(_stream_job(_bg_trend_grade, "trend-grade"), media_type="text/plain")
+
+
 @app.get("/api/oddsapiio-coverage", dependencies=[Depends(verify_token)])
 async def api_oddsapiio_coverage() -> dict:
     """
@@ -2257,11 +2278,41 @@ async def _bg_fdco_collect() -> None:
         logger.info("fdco-collect: iniciando descarga de stats corners/tarjetas")
         from collectors.fdco_collector import run_all_leagues
 
-        results = await run_all_leagues(season_year=2025)
+        # Temporada calculada en runtime — football-data.co.uk codifica por año de FIN
+        # (2024/25 → 2025). Estaba fijo en 2025: pasada una temporada, team_corner_stats
+        # se habría quedado congelada en 2024/25 para siempre.
+        _now = datetime.now(timezone.utc)
+        season_year = _now.year + 1 if _now.month >= 7 else _now.year
+
+        results = await run_all_leagues(season_year=season_year)
         total_teams = sum(results.values())
         logger.info(
-            "fdco-collect: completado — %d equipos guardados en %d ligas: %s",
-            total_teams, len(results), results,
+            "fdco-collect: completado (temporada %d) — %d equipos guardados en %d ligas: %s",
+            season_year, total_teams, len(results), results,
         )
     except Exception as e:
         logger.error("fdco-collect: error no controlado — %s", e, exc_info=True)
+
+
+async def _bg_trend_finder() -> None:
+    """Feed de tendencias estadísticas (sin cuotas/EV) → tema Telegram 'Tendencias'."""
+    try:
+        logger.info("trends: iniciando generación de tendencias")
+        from analyzers.trend_finder import run_trend_finder
+
+        summary = await run_trend_finder()
+        logger.info("trends: completado — %s", summary)
+    except Exception as e:
+        logger.error("trends: error no controlado — %s", e, exc_info=True)
+
+
+async def _bg_trend_grade() -> None:
+    """Gradúa trend_signals pendientes (series contra match_results, rolling contra FDCO)."""
+    try:
+        logger.info("trend-grade: iniciando graduación de tendencias")
+        from analyzers.trend_grader import run_trend_grader
+
+        summary = await run_trend_grader()
+        logger.info("trend-grade: completado — %s", summary)
+    except Exception as e:
+        logger.error("trend-grade: error no controlado — %s", e, exc_info=True)

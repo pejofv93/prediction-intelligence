@@ -1,0 +1,21 @@
+name: sports-trend-grade
+on:
+  schedule:
+    # 06:20 UTC — justo tras sports-fdco-collect (06:00), para graduar con el CSV
+    # ya actualizado con los resultados córners/tarjetas del día anterior.
+    - cron: '20 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger Cloud Run (sync)
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-trend-grade" \
+            -H "Content-Type: application/json" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 500 \
+            --no-buffer \
+            --fail --silent --show-error
