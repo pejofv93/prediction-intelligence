@@ -422,12 +422,18 @@ async def _fixture_candidates(enriched: dict) -> list[dict]:
 def _candidate_key(c: dict) -> tuple:
     """
     Clave de deduplicación dentro de un mismo partido. Los candidatos "model"
-    son de partido entero (no de un lado concreto) — clave solo por mercado.
-    Los de series/rolling son por equipo — clave por mercado+equipo, para que
-    dos docs de enriched_matches del mismo partido (fuentes distintas, a veces
-    con local/visitante invertido) no dupliquen la misma afirmación.
+    y "btts" son de partido entero, no de un lado concreto — clave solo por
+    mercado. BTTS se calcula desde la historia de UN equipo a la vez (mismo
+    código que team_goals_over/handicap), pero es una afirmación sobre el
+    partido ("ambos marcan"), no sobre ese equipo — sin este caso especial,
+    el mismo partido podía salir con "Ambos marcan" repetido dos veces (una
+    por la historia de cada equipo), indistinguibles en el mensaje porque la
+    línea de BTTS no lleva nombre de equipo. El resto de series/rolling sí son
+    por equipo — clave por mercado+equipo, para que dos docs de
+    enriched_matches del mismo partido (fuentes distintas, a veces con
+    local/visitante invertido) no dupliquen la misma afirmación.
     """
-    if c["pattern_type"] == "model":
+    if c["pattern_type"] == "model" or c["market"] == "btts":
         return (c["market"],)
     return (c["market"], c.get("team_id") or c.get("team"))
 
