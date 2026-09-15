@@ -208,19 +208,35 @@ TREND_SERIES_MIN_HIT_RATE = 0.70  # umbral de hit-rate para emitir el patrón
 # partido → evidencia más débil. Umbral por desviación sobre la media de la liga.
 TREND_ROLLING_MIN_SAMPLE = 8
 TREND_ROLLING_MIN_RATIO = 1.30    # promedio del equipo >= 1.3x la media de la liga
-# Volumen por jornada: tope duro tras rankear por "fuerza de patrón", máx por equipo
-# para no repetir el mismo equipo en varios mercados.
-TREND_MAX_SIGNALS_PER_RUN = 10
-TREND_MAX_SIGNALS_PER_TEAM = 2
-# Reparto de mercados en el ranking: round-robin (ver rank_and_cap). Alternativa
-# pendiente para más adelante — normalizar la "fuerza" de cada candidato contra
-# la distribución histórica de SU mercado (percentil dentro del tipo) en vez de
-# round-robin — pero hace falta muestra por mercado en trend_accuracy_log para
-# calibrar percentiles con sentido; con menos, serían números inventados.
+# Volumen por jornada: mensaje agrupado por PARTIDO (todos los mercados que
+# aplican van en el mismo mensaje). Tope duro de partidos tras rankear por la
+# SUMA de "fuerza de patrón" de sus mercados, máx por equipo para no repetir el
+# mismo equipo en varios partidos (p.ej. liga + copa la misma semana).
+# Renombrado 2026-09-15 (antes TREND_MAX_SIGNALS_PER_RUN/_PER_TEAM, cuando el
+# tope era por señal suelta, no por partido).
+TREND_MAX_FIXTURES_PER_RUN = 10
+TREND_MAX_FIXTURES_PER_TEAM = 2
+# Reparto de mercados: descartado el round-robin (tenía sentido cuando cada
+# mensaje era 1 señal suelta; con el mensaje agrupado por partido la variedad
+# de mercados ya sale sola dentro de cada mensaje). Alternativa pendiente para
+# más adelante — normalizar la "fuerza" de cada candidato contra la
+# distribución histórica de SU mercado (percentil dentro del tipo) — pero hace
+# falta muestra por mercado en trend_accuracy_log para calibrar con sentido.
 # Umbral elegido: 30 graduadas de un mismo mercado — mínimo habitual para que un
 # percentil no sea ruido de muestra pequeña. El dashboard de tendencias avisa
 # solo cuando algún mercado ya lo alcanza (GET /api/trend-accuracy).
 TREND_PERCENTILE_MIN_SAMPLE = 30
+
+# Mercados "model" (salida directa de Poisson/ELO ya en enriched_matches — NO
+# hit-rate histórico ni promedio, es la probabilidad de un solo modelo para
+# ESE partido). Tercer tipo de evidencia junto a series/rolling, marcado aparte
+# en el mensaje y graduado aparte en trend_accuracy_log.
+TREND_MODEL_DOUBLE_CHANCE_MIN = 0.75  # doble oportunidad: prob combinada mínima
+TREND_MODEL_DNB_MIN = 0.65            # draw no bet: prob mínima tras renormalizar sin empate
+# Total exacto / margen de victoria: no hay un "umbral de probabilidad" limpio
+# (la salida más probable de una Poisson rara vez supera el 30% en solitario) —
+# en su lugar exigimos que el resultado modal domine claramente al segundo.
+TREND_MODEL_MODAL_RATIO_MIN = 1.5
 
 LEARNING_RATE = 0.05
 DEFAULT_WEIGHTS = {

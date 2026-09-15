@@ -21,7 +21,7 @@ router = APIRouter()
 async def trend_signals(pattern_type: str = "", limit: int = 100) -> dict:
     """
     Últimas señales del feed de tendencias, más recientes primero.
-    pattern_type: "series" | "rolling" | "" (todas).
+    pattern_type: "series" | "rolling" | "model" | "" (todas).
     """
     from shared.firestore_client import col
 
@@ -49,9 +49,10 @@ async def trend_signals(pattern_type: str = "", limit: int = 100) -> dict:
 async def trend_accuracy() -> dict:
     """
     Hit-rate real de las tendencias graduadas, separado por tipo de evidencia
-    (series = hit-rate real, rolling = promedio — evidencia más débil) y
-    desglosado por mercado y por equipo, para poder comparar los dos tipos
-    de patrón sin que se mezclen.
+    (series = hit-rate histórico real, rolling = promedio — evidencia más
+    débil, model = salida de Poisson/ELO — naturaleza distinta a las otras
+    dos) y desglosado por mercado y por equipo, para poder comparar los tres
+    sin que se mezclen.
     """
     from shared.firestore_client import col
 
@@ -64,12 +65,16 @@ async def trend_accuracy() -> dict:
         return {"error": "No se pudo leer la graduación", "by_pattern_type": {}, "by_market": {}}
 
     def _bucket(rows_subset: list[dict]) -> dict:
-        n = len(rows_subset)
-        hits = sum(1 for r in rows_subset if r.get("result") == "hit")
-        return {"n": n, "hits": hits, "hit_rate": round(hits / n, 4) if n else None}
+        # "void" (DNB anulado por empate) no cuenta ni como acierto ni como
+        # fallo — se excluye del hit-rate, pero se informa aparte.
+        graded_rows = [r for r in rows_subset if r.get("result") in ("hit", "miss")]
+        n = len(graded_rows)
+        hits = sum(1 for r in graded_rows if r.get("result") == "hit")
+        voids = sum(1 for r in rows_subset if r.get("result") == "void")
+        return {"n": n, "hits": hits, "voids": voids, "hit_rate": round(hits / n, 4) if n else None}
 
     by_pattern_type: dict[str, dict] = {}
-    for pt in ("series", "rolling"):
+    for pt in ("series", "rolling", "model"):
         by_pattern_type[pt] = _bucket([r for r in rows if r.get("pattern_type") == pt])
 
     by_market: dict[str, dict] = {}
@@ -77,10 +82,11 @@ async def trend_accuracy() -> dict:
     for m in markets:
         by_market[m] = _bucket([r for r in rows if r.get("market") == m])
 
-    # Aviso de "listo para normalización por percentil" — alternativa al
-    # round-robin de rank_and_cap (ver TREND_PERCENTILE_MIN_SAMPLE en
-    # shared/config.py) que necesita muestra por mercado para calibrar
-    # percentiles con sentido. Se avisa aquí para no depender de acordarse.
+    # Aviso de "listo para normalización por percentil" — alternativa al score
+    # crudo (rate*log(n)) que suma rank_and_cap por partido (ver
+    # TREND_PERCENTILE_MIN_SAMPLE en shared/config.py) que necesita muestra
+    # por mercado para calibrar percentiles con sentido. Se avisa aquí para no
+    # depender de acordarse.
     from shared.config import TREND_PERCENTILE_MIN_SAMPLE
 
     markets_ready = sorted(
@@ -91,10 +97,10 @@ async def trend_accuracy() -> dict:
         "markets_ready": markets_ready,
         "note": (
             f"Ya hay {len(markets_ready)} mercado(s) con ≥{TREND_PERCENTILE_MIN_SAMPLE} señales "
-            "graduadas — hay muestra suficiente para pasar de round-robin a normalización "
-            "por percentil en al menos uno de ellos." if markets_ready else
+            "graduadas — hay muestra suficiente para normalizar su score por percentil "
+            "en vez del hit-rate/ratio crudo." if markets_ready else
             f"Ningún mercado llega aún a {TREND_PERCENTILE_MIN_SAMPLE} señales graduadas — "
-            "round-robin sigue siendo la opción razonable."
+            "el score crudo sigue siendo la opción razonable."
         ),
     }
 

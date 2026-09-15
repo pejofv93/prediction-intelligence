@@ -2,19 +2,26 @@
 services/sports-agent/analyzers/trend_finder.py
 
 Feed de tendencias estadísticas para el tema Telegram "Tendencias" — SOLO
-estadística/hit-rate, sin cuotas ni EV. Aislado a propósito del sistema de
-valor: colección propia trend_signals, lee team_stats/team_corner_stats en
-modo solo-lectura y nunca escribe en predictions/shadow_trades/accuracy_log
-ni toca model_weights.
+estadística/hit-rate/modelo, sin cuotas ni EV. Aislado a propósito del sistema
+de valor: colección propia trend_signals, lee team_stats/team_corner_stats/
+enriched_matches en modo solo-lectura y nunca escribe en predictions/
+shadow_trades/accuracy_log ni toca model_weights.
 
-Dos tipos de evidencia, marcados de forma distinta en el mensaje y graduados
-por separado (pattern_type en trend_signals):
+Un mensaje por PARTIDO (no por señal suelta) con todos los mercados que
+apliquen debajo. Tres tipos de evidencia, marcados de forma distinta en el
+mensaje y graduados por separado (pattern_type en trend_signals):
   series  — serie partido a partido del propio equipo (team_stats.raw_matches):
             goles marcados, BTTS, margen de victoria (hándicap). Hit-rate real
             sobre una ventana de partidos → evidencia fuerte.
   rolling — promedio rolling-15 de football-data.co.uk (team_corner_stats):
-            córners y tarjetas. No hay serie partido a partido, solo el
-            promedio acumulado vs la media de la liga → evidencia más débil.
+            córners, tarjetas, expulsiones. No hay serie partido a partido,
+            solo el promedio acumulado vs la media de la liga → evidencia
+            más débil.
+  model   — salida directa de Poisson/ELO ya calculada en enriched_matches
+            (doble oportunidad, DNB, total exacto, margen de victoria): NO es
+            hit-rate histórico, es la probabilidad de un solo modelo para ESE
+            partido concreto — evidencia de naturaleza distinta a las otras
+            dos, marcada aparte.
 """
 import logging
 import math
@@ -27,8 +34,11 @@ from collectors.fdco_collector import _slugify
 from shared.config import (
     CLOUD_RUN_TOKEN,
     TELEGRAM_BOT_URL,
-    TREND_MAX_SIGNALS_PER_RUN,
-    TREND_MAX_SIGNALS_PER_TEAM,
+    TREND_MAX_FIXTURES_PER_RUN,
+    TREND_MAX_FIXTURES_PER_TEAM,
+    TREND_MODEL_DNB_MIN,
+    TREND_MODEL_DOUBLE_CHANCE_MIN,
+    TREND_MODEL_MODAL_RATIO_MIN,
     TREND_ROLLING_MIN_RATIO,
     TREND_ROLLING_MIN_SAMPLE,
     TREND_SERIES_MIN_HIT_RATE,
@@ -53,13 +63,7 @@ _LEAGUE_LABEL = {
     "CL": "Champions League", "EL": "Europa League", "ECL": "Conference League",
 }
 
-_MARKET_EMOJI = {
-    "team_goals_over": "⚽",
-    "btts": "🟩",
-    "handicap": "📐",
-    "corners": "🚩",
-    "cards": "🟨",
-}
+_PATTERN_TAG = {"series": "🎯", "rolling": "📉", "model": "📐"}
 _DISCLAIMER = "📈 Tendencia estadística, no consejo de inversión."
 
 
@@ -92,9 +96,10 @@ _LEAGUE_AVG_TTL_SECONDS = 3600
 
 def _league_averages(league: str) -> dict:
     """
-    Media de córners/tarjetas de la liga a partir de team_corner_stats (~20
-    equipos/liga). Cacheado 1h en memoria — evita releer la colección por cada
-    candidato de la jornada.
+    Media de córners/amarillas/rojas de la liga a partir de team_corner_stats
+    (~20 equipos/liga). Cacheado 1h en memoria — evita releer la colección por
+    cada candidato de la jornada. Amarillas y rojas separadas (antes "cards"
+    las mezclaba) para poder emitir "expulsiones" como mercado propio.
     """
     now = datetime.now(timezone.utc)
     cached = _LEAGUE_AVG_CACHE.get(league)
@@ -102,21 +107,23 @@ def _league_averages(league: str) -> dict:
         return cached[1]
 
     from shared.firestore_client import col
-    corners_sum, cards_sum, n = 0.0, 0.0, 0
+    corners_sum, yellows_sum, reds_sum, n = 0.0, 0.0, 0.0, 0
     try:
         query = col("team_corner_stats").where(filter=FieldFilter("league", "==", league))
         for d in query.stream():
             doc = d.to_dict() or {}
             corners_sum += (doc.get("home_corners", 0) + doc.get("away_corners", 0)) / 2
-            cards_sum += (
-                doc.get("home_yellows", 0) + doc.get("away_yellows", 0)
-                + doc.get("home_reds", 0) + doc.get("away_reds", 0)
-            ) / 2
+            yellows_sum += (doc.get("home_yellows", 0) + doc.get("away_yellows", 0)) / 2
+            reds_sum += (doc.get("home_reds", 0) + doc.get("away_reds", 0)) / 2
             n += 1
     except Exception:
         logger.error("trend_finder: error calculando medias de liga %s", league, exc_info=True)
 
-    result = {"corners": round(corners_sum / n, 2), "cards": round(cards_sum / n, 2), "n_teams": n} if n else {}
+    result = (
+        {"corners": round(corners_sum / n, 2), "yellows": round(yellows_sum / n, 2),
+         "reds": round(reds_sum / n, 3), "n_teams": n}
+        if n else {}
+    )
     _LEAGUE_AVG_CACHE[league] = (now, result)
     return result
 
@@ -139,7 +146,11 @@ def _team_series(raw_matches: list[dict], team_id: int, window: int) -> list[dic
 
 def _score(rate_or_ratio: float, n: int) -> float:
     """'Fuerza' del patrón: hit-rate/ratio alto, sin premiar en exceso una
-    muestra diminuta frente a un porcentaje algo menor con más partidos detrás."""
+    muestra diminuta frente a un porcentaje algo menor con más partidos detrás.
+    Los candidatos "model" no tienen un tamaño de muestra real (es la salida de
+    un modelo, no un conteo histórico) — usan TREND_SERIES_WINDOW como "n"
+    convencional para que su score caiga en la misma escala que series/rolling
+    y se puedan sumar todos juntos al rankear partidos."""
     return round(rate_or_ratio * math.log(max(n, 2)), 4)
 
 
@@ -163,6 +174,7 @@ def _series_candidates(team_name: str, team_id: int, side: str, opponent: str,
                 "sample": n, "rate": round(rate, 4),
                 "label": f"{threshold}+ goles",
                 "detail": f"Marcó {threshold}+ goles en {hits} de sus últimos {n} partidos ({rate*100:.0f}%)",
+                "line": f"{team_name} — {threshold}+ goles: {hits}/{n} ({rate*100:.0f}%)",
             })
             break  # el umbral más alto que cumple es la señal a emitir, no los dos
 
@@ -174,6 +186,7 @@ def _series_candidates(team_name: str, team_id: int, side: str, opponent: str,
             "sample": n, "rate": round(rate, 4),
             "label": "Ambos marcan",
             "detail": f"BTTS se cumplió en {hits} de sus últimos {n} partidos ({rate*100:.0f}%)",
+            "line": f"Ambos marcan: {hits}/{n} ({rate*100:.0f}%)",
         })
 
     hits = sum(1 for m in matches if (m["gf"] - m["ga"]) >= _HANDICAP_MARGIN)
@@ -184,6 +197,7 @@ def _series_candidates(team_name: str, team_id: int, side: str, opponent: str,
             "sample": n, "rate": round(rate, 4),
             "label": f"Hándicap -{_HANDICAP_MARGIN}",
             "detail": f"Ganó por margen de {_HANDICAP_MARGIN}+ goles en {hits} de sus últimos {n} partidos ({rate*100:.0f}%)",
+            "line": f"{team_name} — Hándicap -{_HANDICAP_MARGIN}: {hits}/{n} ({rate*100:.0f}%)",
         })
 
     for c in candidates:
@@ -221,25 +235,153 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
             "label": f"{n_line}+ córners",
             "detail": (f"Promedia {team_corners:.1f} córners por partido "
                        f"en sus últimos {sample} (liga: {league_corners:.1f})"),
+            "line": f"{team_name} — {n_line}+ córners: promedia {team_corners:.1f}/partido (liga: {league_corners:.1f})",
         })
 
-    team_cards = corner_stats.get(f"{side}_yellows", 0.0) + corner_stats.get(f"{side}_reds", 0.0)
-    league_cards = league_avg.get("cards", 0)
-    if league_cards > 0 and team_cards / league_cards >= TREND_ROLLING_MIN_RATIO:
-        ratio = team_cards / league_cards
-        n_line = max(1, math.floor(team_cards))
+    team_yellows = corner_stats.get(f"{side}_yellows", 0.0)
+    league_yellows = league_avg.get("yellows", 0)
+    if league_yellows > 0 and team_yellows / league_yellows >= TREND_ROLLING_MIN_RATIO:
+        ratio = team_yellows / league_yellows
+        n_line = max(1, math.floor(team_yellows))
         candidates.append({
             "market": "cards", "threshold": n_line,
             "sample": sample, "rate": round(ratio, 3),
             "label": f"{n_line}+ tarjetas",
-            "detail": (f"Promedia {team_cards:.1f} tarjetas por partido "
-                       f"en sus últimos {sample} (liga: {league_cards:.1f})"),
+            "detail": (f"Promedia {team_yellows:.1f} tarjetas por partido "
+                       f"en sus últimos {sample} (liga: {league_yellows:.1f})"),
+            "line": f"{team_name} — {n_line}+ tarjetas: promedia {team_yellows:.1f}/partido (liga: {league_yellows:.1f})",
+        })
+
+    # Expulsiones: mercado propio, separado de "cards" (antes las rojas se
+    # sumaban ahí sin distinguirse). Sin línea "N+" — la media de rojas por
+    # partido es casi siempre <1, así que la afirmación útil es "expulsión
+    # probable" con el promedio como respaldo, no un umbral entero.
+    team_reds = corner_stats.get(f"{side}_reds", 0.0)
+    league_reds = league_avg.get("reds", 0)
+    if league_reds > 0 and team_reds / league_reds >= TREND_ROLLING_MIN_RATIO:
+        ratio = team_reds / league_reds
+        candidates.append({
+            "market": "red_cards", "threshold": None,
+            "sample": sample, "rate": round(ratio, 3),
+            "label": "Expulsión probable",
+            "detail": (f"Promedia {team_reds:.2f} rojas por partido "
+                       f"en sus últimos {sample} (liga: {league_reds:.2f})"),
+            "line": f"{team_name} — Expulsión probable: promedia {team_reds:.2f}/partido (liga: {league_reds:.2f})",
         })
 
     for c in candidates:
         c.update({
             "pattern_type": "rolling", "team": team_name, "team_id": None,
             "opponent": opponent, "side": side, "score": _score(c["rate"], c["sample"]),
+        })
+    return candidates
+
+
+# ── Candidatos: model (salida de Poisson/ELO, evidencia de otra naturaleza) ─────
+
+def _modal_outcome(dist: dict[int, float]) -> tuple[int, float, float] | None:
+    """Valor con mayor probabilidad + ratio frente al segundo. None si hay <2 valores."""
+    ranked = sorted(dist.items(), key=lambda kv: -kv[1])
+    if len(ranked) < 2:
+        return None
+    (best_v, best_p), (_, second_p) = ranked[0], ranked[1]
+    ratio = (best_p / second_p) if second_p > 0 else float("inf")
+    return best_v, best_p, ratio
+
+
+def _model_candidates(enriched: dict) -> list[dict]:
+    home_team = enriched.get("home_team", "")
+    away_team = enriched.get("away_team", "")
+    p_home = enriched.get("poisson_home_win")
+    p_draw = enriched.get("poisson_draw")
+    p_away = enriched.get("poisson_away_win")
+
+    candidates: list[dict] = []
+
+    if p_home is not None and p_draw is not None and p_away is not None:
+        combos = (
+            ("1X", p_home + p_draw, f"{home_team} o empate"),
+            ("X2", p_draw + p_away, f"Empate o {away_team}"),
+            ("12", p_home + p_away, f"{home_team} o {away_team} (no empate)"),
+        )
+        best_sel, best_prob, best_label = max(combos, key=lambda c: c[1])
+        if best_prob >= TREND_MODEL_DOUBLE_CHANCE_MIN:
+            candidates.append({
+                "market": "double_chance", "threshold": None, "selection": best_sel,
+                "sample": None, "rate": round(best_prob, 4),
+                "label": f"Doble oportunidad: {best_label}",
+                "detail": f"Probabilidad del modelo: {best_prob*100:.0f}% ({best_sel})",
+                "line": f"Doble oportunidad: {best_label} — {best_prob*100:.0f}%",
+            })
+
+        no_draw = p_home + p_away
+        if no_draw > 0:
+            home_dnb = p_home / no_draw
+            side, prob, team_label = (
+                ("home", home_dnb, home_team) if home_dnb >= (1 - home_dnb)
+                else ("away", 1 - home_dnb, away_team)
+            )
+            if prob >= TREND_MODEL_DNB_MIN:
+                candidates.append({
+                    "market": "dnb", "threshold": None, "side": side,
+                    "sample": None, "rate": round(prob, 4),
+                    "label": f"Sin empate: {team_label}",
+                    "detail": f"Probabilidad del modelo descartando el empate: {prob*100:.0f}%",
+                    "line": f"Sin empate: {team_label} — {prob*100:.0f}%",
+                })
+
+    home_xg = enriched.get("home_xg")
+    away_xg = enriched.get("away_xg")
+    if home_xg is not None and away_xg is not None:
+        try:
+            from analyzers.value_bet_engine import _calculate_correct_score_probs
+            cs_probs = _calculate_correct_score_probs(home_xg, away_xg, max_goals=6)
+        except Exception:
+            logger.error("trend_finder: error calculando matriz Poisson", exc_info=True)
+            cs_probs = {}
+
+        if cs_probs:
+            totals: dict[int, float] = {}
+            margins: dict[int, float] = {}
+            for score, p in cs_probs.items():
+                h_s, a_s = score.split("-")
+                h, a = int(h_s), int(a_s)
+                totals[h + a] = totals.get(h + a, 0.0) + p
+                margins[h - a] = margins.get(h - a, 0.0) + p
+
+            tm = _modal_outcome(totals)
+            if tm and tm[2] >= TREND_MODEL_MODAL_RATIO_MIN:
+                total_v, prob, ratio = tm
+                candidates.append({
+                    "market": "exact_total", "threshold": total_v,
+                    "sample": None, "rate": round(ratio, 3),
+                    "label": f"Total exacto: {total_v} goles",
+                    "detail": f"Resultado más probable del modelo ({prob*100:.0f}%, {ratio:.1f}x el siguiente)",
+                    "line": f"Total exacto: {total_v} goles — {prob*100:.0f}% (modelo, {ratio:.1f}x el siguiente)",
+                })
+
+            mm = _modal_outcome(margins)
+            if mm and mm[2] >= TREND_MODEL_MODAL_RATIO_MIN:
+                margin_v, prob, ratio = mm
+                if margin_v > 0:
+                    margin_label = f"{home_team} +{margin_v}"
+                elif margin_v < 0:
+                    margin_label = f"{away_team} +{-margin_v}"
+                else:
+                    margin_label = "Empate (margen 0)"
+                candidates.append({
+                    "market": "win_margin", "threshold": margin_v,
+                    "sample": None, "rate": round(ratio, 3),
+                    "label": f"Margen de victoria: {margin_label}",
+                    "detail": f"Resultado más probable del modelo ({prob*100:.0f}%, {ratio:.1f}x el siguiente)",
+                    "line": f"Margen de victoria: {margin_label} — {prob*100:.0f}% (modelo, {ratio:.1f}x el siguiente)",
+                })
+
+    for c in candidates:
+        c.update({
+            "pattern_type": "model", "team": f"{home_team}/{away_team}", "team_id": None,
+            "opponent": "", "side": c.get("side", "match"),
+            "score": _score(c["rate"], TREND_SERIES_WINDOW),
         })
     return candidates
 
@@ -265,6 +407,7 @@ async def _fixture_candidates(enriched: dict) -> list[dict]:
         out += _series_candidates(away_team, away_id, "away", home_team, away_stats["raw_matches"])
     out += _rolling_candidates(home_team, "home", away_team, league, home_corner)
     out += _rolling_candidates(away_team, "away", home_team, league, away_corner)
+    out += _model_candidates(enriched)
 
     for c in out:
         c.update({
@@ -274,118 +417,124 @@ async def _fixture_candidates(enriched: dict) -> list[dict]:
     return out
 
 
-# ── Ranking, tope de volumen y envío ─────────────────────────────────────────────
+# ── Agrupación por partido, ranking y envío ─────────────────────────────────────
 
-def _dedup_by_fixture(candidates: list[dict]) -> list[dict]:
+def _candidate_key(c: dict) -> tuple:
     """
-    Colapsa a 1 candidato por encuentro físico (fecha + equipos, sin importar
-    el orden local/visitante ni de qué fuente venga cada doc de
-    enriched_matches) — se queda con el de mayor score. Sin esto, el mismo
-    partido puede aparecer dos veces con los equipos invertidos cuando dos
-    fuentes distintas lo traen por separado (mismo bug de fondo que los
-    duplicados CL_SF_*/id numérico ya vistos en UEFA).
+    Clave de deduplicación dentro de un mismo partido. Los candidatos "model"
+    son de partido entero (no de un lado concreto) — clave solo por mercado.
+    Los de series/rolling son por equipo — clave por mercado+equipo, para que
+    dos docs de enriched_matches del mismo partido (fuentes distintas, a veces
+    con local/visitante invertido) no dupliquen la misma afirmación.
     """
+    if c["pattern_type"] == "model":
+        return (c["market"],)
+    return (c["market"], c.get("team_id") or c.get("team"))
+
+
+def _group_by_fixture(candidates: list[dict]) -> dict[str, dict]:
     from collectors.team_identity import physical_fixture_key
 
-    best_by_fixture: dict[str, dict] = {}
-    passthrough: list[dict] = []
+    groups: dict[str, dict] = {}
     for c in candidates:
         key = physical_fixture_key(c.get("match_date"), c.get("home_team", ""), c.get("away_team", ""))
         if not key:
-            passthrough.append(c)
-            continue
-        current = best_by_fixture.get(key)
-        if current is None or c["score"] > current["score"]:
-            best_by_fixture[key] = c
-    return list(best_by_fixture.values()) + passthrough
+            key = f"_nokey_{c.get('match_id', '')}"
+        group = groups.setdefault(key, {
+            "match_id": c["match_id"], "league": c["league"], "match_date": c["match_date"],
+            "home_team": c["home_team"], "away_team": c["away_team"],
+            "by_candidate_key": {},
+        })
+        ck = _candidate_key(c)
+        existing = group["by_candidate_key"].get(ck)
+        if existing is None or c["score"] > existing["score"]:
+            group["by_candidate_key"][ck] = c
+    return groups
 
 
 def rank_and_cap(candidates: list[dict]) -> list[dict]:
     """
-    Colapsa a 1 señal por encuentro físico (_dedup_by_fixture), reparte por
-    mercado en round-robin (turno por mercado, mejor score primero dentro de
-    cada uno) para que ningún mercado fácil de cumplir (goles/BTTS) cope el
-    ranking, y capa a TREND_MAX_SIGNALS_PER_RUN con máximo
-    TREND_MAX_SIGNALS_PER_TEAM por equipo.
+    Agrupa por partido físico (_group_by_fixture, que también deduplica
+    mercado+equipo dentro del grupo — cubre el caso de dos docs del mismo
+    partido con equipos invertidos, mismo motivo que el bug de duplicados
+    UEFA). Rankea PARTIDOS por la suma de scores de sus mercados y capa a
+    TREND_MAX_FIXTURES_PER_RUN, con máximo TREND_MAX_FIXTURES_PER_TEAM
+    apariciones por equipo.
 
-    Round-robin elegido sobre cuota fija por mercado: se adapta solo cuando
-    un mercado no tiene candidatos ese día (p.ej. rolling, más escaso) sin
-    forzar a entrar una señal floja solo por rellenar cupo. Alternativa para
-    más adelante: normalizar la "fuerza" contra la distribución histórica de
-    cada mercado (percentil dentro del tipo) en vez de round-robin — más
-    justo estadísticamente, pero necesita trend_accuracy_log con muestra
-    por mercado para calibrar (ver TREND_PERCENTILE_MIN_SAMPLE en config.py
-    y el aviso de "listo para normalizar" en el dashboard de tendencias).
+    Sin round-robin por mercado: con el mensaje agrupado por partido la
+    variedad de mercados ya sale sola dentro de cada mensaje, no hace falta
+    forzarla al elegir qué partidos entran.
     """
-    deduped = _dedup_by_fixture(candidates)
+    groups = _group_by_fixture(candidates)
+    fixtures: list[dict] = []
+    for g in groups.values():
+        cands = sorted(g["by_candidate_key"].values(), key=lambda c: -c["score"])
+        if not cands:
+            continue
+        fixtures.append({
+            "match_id": g["match_id"], "league": g["league"], "match_date": g["match_date"],
+            "home_team": g["home_team"], "away_team": g["away_team"],
+            "candidates": cands, "total_score": round(sum(c["score"] for c in cands), 4),
+        })
 
-    by_market: dict[str, list[dict]] = {}
-    for c in deduped:
-        by_market.setdefault(c["market"], []).append(c)
-    for group in by_market.values():
-        group.sort(key=lambda c: -c["score"])
+    fixtures.sort(key=lambda f: -f["total_score"])
 
-    market_order = [m for m in _MARKET_EMOJI if m in by_market]
-    cursor = {m: 0 for m in market_order}
     selected: list[dict] = []
     per_team: dict[str, int] = {}
-
-    while len(selected) < TREND_MAX_SIGNALS_PER_RUN:
-        progressed = False
-        for m in market_order:
-            i = cursor[m]
-            if i >= len(by_market[m]):
-                continue
-            cursor[m] += 1
-            progressed = True
-            c = by_market[m][i]
-            key = f"{c['team']}_{c.get('team_id') or ''}"
-            if per_team.get(key, 0) >= TREND_MAX_SIGNALS_PER_TEAM:
-                continue
-            selected.append(c)
-            per_team[key] = per_team.get(key, 0) + 1
-            if len(selected) >= TREND_MAX_SIGNALS_PER_RUN:
-                break
-        if not progressed:
+    for fx in fixtures:
+        teams = (fx["home_team"], fx["away_team"])
+        if any(per_team.get(t, 0) >= TREND_MAX_FIXTURES_PER_TEAM for t in teams):
+            continue
+        selected.append(fx)
+        for t in teams:
+            per_team[t] = per_team.get(t, 0) + 1
+        if len(selected) >= TREND_MAX_FIXTURES_PER_RUN:
             break
 
     return selected
 
 
-def _format_message(c: dict) -> str:
-    emoji = _MARKET_EMOJI.get(c["market"], "📊")
-    tag = "🎯 PATRÓN" if c["pattern_type"] == "series" else "📉 PROMEDIO (evidencia más débil)"
-    league_label = _LEAGUE_LABEL.get(c["league"], c["league"])
-    header = f"{emoji} {tag} — {c['team']} vs {c['opponent']} ({league_label}) — {c['label']}"
-    return f"{header}\n{c['detail']}\n\n{_DISCLAIMER}"
+def _format_fixture_message(fixture: dict) -> str:
+    league_label = _LEAGUE_LABEL.get(fixture["league"], fixture["league"])
+    lines = [f"⚽ {fixture['home_team']} vs {fixture['away_team']} ({league_label})"]
+    for c in fixture["candidates"]:
+        tag = _PATTERN_TAG.get(c["pattern_type"], "📊")
+        lines.append(f"{tag} {c['line']}")
+    lines.append("")
+    lines.append(_DISCLAIMER)
+    return "\n".join(lines)
 
 
-async def _persist_and_send(selected: list[dict]) -> int:
+async def _persist_and_send(selected_fixtures: list[dict]) -> int:
     """
-    Escribe cada señal seleccionada en trend_signals (colección propia, nunca
-    predictions/shadow_trades) y envía la alerta al tema Telegram "Tendencias".
+    Escribe cada señal de cada partido seleccionado en trend_signals (colección
+    propia, nunca predictions/shadow_trades — un doc por mercado, para poder
+    graduarlos individualmente) y envía UN mensaje por partido al tema
+    Telegram "Tendencias" con todos sus mercados debajo.
     """
     from shared.firestore_client import col
 
     now = datetime.now(timezone.utc)
     sent = 0
-    for c in selected:
-        team_key = c.get("team_id") or _slugify(c["team"])
-        doc_id = f"{c['match_id']}_{c['market']}_{team_key}"
-        doc = {
-            "match_id": c["match_id"], "league": c["league"], "match_date": c["match_date"],
-            "home_team": c["home_team"], "away_team": c["away_team"],
-            "team": c["team"], "team_id": c.get("team_id"), "side": c["side"], "opponent": c["opponent"],
-            "pattern_type": c["pattern_type"], "market": c["market"], "threshold": c.get("threshold"),
-            "label": c["label"], "detail": c["detail"],
-            "sample_size": c["sample"], "rate_or_ratio": c["rate"], "score": c["score"],
-            "sent_at": now.isoformat(), "graded": False, "result": None,
-        }
-        try:
-            col("trend_signals").document(doc_id).set(doc)
-        except Exception:
-            logger.error("trend_finder: error guardando trend_signals %s", doc_id, exc_info=True)
-            continue
+    for fx in selected_fixtures:
+        for c in fx["candidates"]:
+            team_key = c.get("team_id") or _slugify(c.get("team") or "") or "match"
+            doc_id = f"{fx['match_id']}_{c['market']}_{team_key}"
+            doc = {
+                "match_id": fx["match_id"], "league": fx["league"], "match_date": fx["match_date"],
+                "home_team": fx["home_team"], "away_team": fx["away_team"],
+                "team": c.get("team"), "team_id": c.get("team_id"), "side": c.get("side"),
+                "opponent": c.get("opponent"), "selection": c.get("selection"),
+                "pattern_type": c["pattern_type"], "market": c["market"], "threshold": c.get("threshold"),
+                "label": c["label"], "detail": c["detail"],
+                "sample_size": c.get("sample"), "rate_or_ratio": c["rate"], "score": c["score"],
+                "fixture_total_score": fx["total_score"],
+                "sent_at": now.isoformat(), "graded": False, "result": None,
+            }
+            try:
+                col("trend_signals").document(doc_id).set(doc)
+            except Exception:
+                logger.error("trend_finder: error guardando trend_signals %s", doc_id, exc_info=True)
 
         if not (TELEGRAM_BOT_URL and CLOUD_RUN_TOKEN):
             continue
@@ -394,12 +543,12 @@ async def _persist_and_send(selected: list[dict]) -> int:
                 resp = await client.post(
                     f"{TELEGRAM_BOT_URL}/send-alert",
                     headers={"x-cloud-token": CLOUD_RUN_TOKEN},
-                    json={"type": "trend", "data": {"text": _format_message(c)}},
+                    json={"type": "trend", "data": {"text": _format_fixture_message(fx)}},
                 )
             if resp.status_code in (200, 202) and resp.json().get("sent"):
                 sent += 1
         except Exception:
-            logger.error("trend_finder: error enviando alerta %s", doc_id, exc_info=True)
+            logger.error("trend_finder: error enviando alerta %s", fx["match_id"], exc_info=True)
 
     return sent
 
@@ -408,7 +557,8 @@ async def run_trend_finder() -> dict:
     """
     Punto de entrada del job periódico (/run-trends). Lee upcoming_matches de
     fútbol SCHEDULED/TIMED de la próxima semana + sus enriched_matches, genera
-    candidatos, rankea, capa el volumen y envía al tema Telegram "Tendencias".
+    candidatos, agrupa por partido, rankea, capa el volumen y envía un mensaje
+    por partido al tema Telegram "Tendencias".
     Solo LECTURA de upcoming_matches/enriched_matches/team_stats/team_corner_stats
     — no escribe nada fuera de trend_signals.
     """
@@ -456,11 +606,12 @@ async def run_trend_finder() -> dict:
         except Exception:
             logger.error("trend_finder: error en fixture %s", enriched.get("match_id"), exc_info=True)
 
-    selected = rank_and_cap(all_candidates)
-    sent = await _persist_and_send(selected)
+    selected_fixtures = rank_and_cap(all_candidates)
+    sent = await _persist_and_send(selected_fixtures)
+    n_signals = sum(len(fx["candidates"]) for fx in selected_fixtures)
     logger.info(
-        "trend_finder: %d enriched, %d candidatos -> %d seleccionados -> %d alertas enviadas",
-        len(enriched_docs), len(all_candidates), len(selected), sent,
+        "trend_finder: %d enriched, %d candidatos -> %d partidos (%d señales) -> %d mensajes enviados",
+        len(enriched_docs), len(all_candidates), len(selected_fixtures), n_signals, sent,
     )
     return {"enriched": len(enriched_docs), "candidates": len(all_candidates),
-            "selected": len(selected), "sent": sent}
+            "fixtures_selected": len(selected_fixtures), "signals": n_signals, "sent": sent}

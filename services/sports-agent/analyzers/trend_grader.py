@@ -5,14 +5,22 @@ Gradúa las señales de trend_signals (feed de tendencias, sin cuotas) en su
 PROPIA colección trend_accuracy_log — nunca toca accuracy_log/predictions/
 shadow_trades ni pesos del modelo.
 
-Dos rutas de graduación, una por tipo de evidencia (separadas para poder
-comparar hit-rate real de series vs rolling sin mezclarlas):
+Dos rutas de graduación (una por FUENTE de verificación, comparten pattern_type
+series+model porque ambas se resuelven contra el marcador final):
 
-  series  — contra el marcador real: col('match_results'), ya escrito por
-            update_finished_matches (goals_home/goals_away por match_id).
+  series + model — contra el marcador real: col('match_results'), ya escrito
+            por update_finished_matches (goals_home/goals_away por match_id).
+            "series" = hit-rate histórico del propio equipo; "model" = salida
+            de Poisson/ELO (doble oportunidad, DNB, total exacto, margen) —
+            evidencia de otra naturaleza, pero se resuelve igual: contra el
+            resultado final.
   rolling — contra el CSV de football-data.co.uk (HC/AC/HY/AR), buscando la
             fila del partido concreto por equipos+fecha. Mismo CSV gratis que
             ya descarga fdco_collector — sin llamada ni coste nuevo.
+
+result puede ser "hit"/"miss"/"void" — "void" solo lo usa DNB cuando el
+partido acaba en empate (en un Draw No Bet real se anula el envite, no es un
+fallo del patrón). El dashboard excluye "void" del hit-rate.
 """
 import logging
 from datetime import date, datetime, timezone
@@ -43,22 +51,42 @@ def _names_match(a: str, b: str) -> bool:
     return bool(na and nb) and (na == nb or na in nb or nb in na)
 
 
-# ── Serie: goles/BTTS/hándicap contra match_results ─────────────────────────────
+# ── Series + model: contra match_results ────────────────────────────────────────
 
-def _grade_series_doc(sig: dict, result: dict) -> bool | None:
+def _grade_series_doc(sig: dict, result: dict) -> str | None:
     gh, ga = result.get("goals_home"), result.get("goals_away")
     if gh is None or ga is None:
         return None
-    gf, ga_team = (gh, ga) if sig.get("side") == "home" else (ga, gh)
     market = sig.get("market")
     threshold = sig.get("threshold")
 
-    if market == "team_goals_over":
-        return gf >= threshold
-    if market == "btts":
-        return gf > 0 and ga_team > 0
-    if market == "handicap":
-        return (gf - ga_team) >= threshold
+    if market in ("team_goals_over", "btts", "handicap"):
+        gf, ga_team = (gh, ga) if sig.get("side") == "home" else (ga, gh)
+        if market == "team_goals_over":
+            return "hit" if gf >= threshold else "miss"
+        if market == "btts":
+            return "hit" if (gf > 0 and ga_team > 0) else "miss"
+        if market == "handicap":
+            return "hit" if (gf - ga_team) >= threshold else "miss"
+        return None
+
+    if market == "double_chance":
+        sel = sig.get("selection") or ""
+        winner = "1" if gh > ga else ("2" if gh < ga else "X")
+        return "hit" if winner in sel else "miss"
+
+    if market == "dnb":
+        if gh == ga:
+            return "void"  # empate → se anula, no es un fallo del patrón
+        winner_side = "home" if gh > ga else "away"
+        return "hit" if winner_side == sig.get("side") else "miss"
+
+    if market == "exact_total":
+        return "hit" if (gh + ga) == threshold else "miss"
+
+    if market == "win_margin":
+        return "hit" if (gh - ga) == threshold else "miss"
+
     return None
 
 
@@ -67,7 +95,7 @@ async def grade_series_signals() -> dict:
 
     pending = list(
         col("trend_signals")
-        .where(filter=FieldFilter("pattern_type", "==", "series"))
+        .where(filter=FieldFilter("pattern_type", "in", ["series", "model"]))
         .where(filter=FieldFilter("graded", "==", False))
         .stream()
     )
@@ -91,17 +119,17 @@ async def grade_series_signals() -> dict:
                 skipped += 1
             continue
 
-        hit = _grade_series_doc(sig, snap.to_dict() or {})
-        if hit is None:
+        result = _grade_series_doc(sig, snap.to_dict() or {})
+        if result is None:
             continue
-        _write_grade(d.id, sig, hit, "match_results")
+        _write_grade(d.id, sig, result, "match_results")
         graded += 1
 
-    logger.info("trend_grader(series): %d graduadas, %d abandonadas por antigüedad", graded, skipped)
+    logger.info("trend_grader(series+model): %d graduadas, %d abandonadas por antigüedad", graded, skipped)
     return {"graded": graded, "skipped": skipped}
 
 
-# ── Rolling: córners/tarjetas contra el CSV football-data.co.uk ────────────────
+# ── Rolling: córners/tarjetas/expulsiones contra el CSV football-data.co.uk ────
 
 def _season_year_for_date(d: date) -> int:
     """football-data.co.uk codifica temporada por año de FIN (2024/25 → 2025)."""
@@ -168,31 +196,36 @@ async def grade_rolling_signals() -> dict:
 
         is_home = sig.get("side") == "home"
         market = sig.get("market")
-        threshold = sig.get("threshold") or 0
+        threshold = sig.get("threshold")
         try:
             if market == "corners":
                 actual = float(row.get("HC") or 0) if is_home else float(row.get("AC") or 0)
+                threshold = threshold or 0
             elif market == "cards":
-                yellows = float(row.get("HY") or 0) if is_home else float(row.get("AY") or 0)
-                reds = float(row.get("HR") or 0) if is_home else float(row.get("AR") or 0)
-                actual = yellows + reds
+                actual = float(row.get("HY") or 0) if is_home else float(row.get("AY") or 0)
+                threshold = threshold or 0
+            elif market == "red_cards":
+                # "Expulsión probable" no guarda umbral (la media de rojas/partido
+                # es casi siempre <1) — se gradúa como "¿hubo al menos 1 roja?".
+                actual = float(row.get("HR") or 0) if is_home else float(row.get("AR") or 0)
+                threshold = 1
             else:
                 continue
         except ValueError:
             continue
 
-        _write_grade(d.id, sig, actual >= threshold, "fdco_csv", extra={"actual": actual})
+        result = "hit" if actual >= threshold else "miss"
+        _write_grade(d.id, sig, result, "fdco_csv", extra={"actual": actual})
         graded += 1
 
     logger.info("trend_grader(rolling): %d graduadas, %d abandonadas por antigüedad", graded, skipped)
     return {"graded": graded, "skipped": skipped}
 
 
-def _write_grade(doc_id: str, sig: dict, hit: bool, source: str, extra: dict | None = None) -> None:
+def _write_grade(doc_id: str, sig: dict, result: str, source: str, extra: dict | None = None) -> None:
     from shared.firestore_client import col
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    result = "hit" if hit else "miss"
     try:
         col("trend_signals").document(doc_id).update({
             "graded": True, "result": result, "graded_at": now_iso, "grade_source": source,
@@ -218,5 +251,5 @@ async def run_trend_grader() -> dict:
     """Punto de entrada del job periódico (/run-trend-grade)."""
     series_result = await grade_series_signals()
     rolling_result = await grade_rolling_signals()
-    logger.info("trend_grader: series=%s rolling=%s", series_result, rolling_result)
+    logger.info("trend_grader: series+model=%s rolling=%s", series_result, rolling_result)
     return {"series": series_result, "rolling": rolling_result}
