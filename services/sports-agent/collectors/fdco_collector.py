@@ -70,7 +70,11 @@ async def fetch_league_csv(league_code: str, season_year: int = 2025) -> list[di
     url = _FDCO_BASE.format(season=season, code=fdco_code)
 
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        # follow_redirects: football-data.co.uk redirige www.→ sin www (302) — httpx
+        # no sigue redirects por defecto, así que sin esto TODO fetch fallaba con
+        # HTTP 302 y devolvía [] (descubierto 2026-09-15: team_corner_stats llevaba
+        # desde abril sin refrescar y el cron nuevo guardaba 0 equipos en las 5 ligas).
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
         if resp.status_code != 200:
             logger.warning("fdco_collector: HTTP %d para %s (%s)", resp.status_code, league_name, url)
