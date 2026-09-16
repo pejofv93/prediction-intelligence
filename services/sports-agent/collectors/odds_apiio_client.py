@@ -210,7 +210,14 @@ _SPORT_FALLBACK_SLUGS: dict[str, list[str]] = {
 _FOOTBALL_LEAGUES = {"PL","PD","BL1","SA","FL1",
                      "CL","EL","ECL","TU1","ARG","CLI","BSA","CSUD","CAM","WC26","WC"}
 _BASKETBALL_LEAGUES = {"NBA","EUROLEAGUE","ACB"}
-_TENNIS_LEAGUES = {"ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN",
+# "ATP"/"WTA" (código de tour genérico, no de torneo concreto) son los que de verdad llega
+# a usar tennis_analyzer.py — ver match.get("league", "ATP") en tennis_analyzer.py:444. Sin
+# ellos aquí, _league_to_category() caía al default "football" (descubierto 2026-09-15/16
+# en producción: "WTA → 0 de 5000 eventos coinciden con slugs=[]", buscando tenis en el
+# catálogo de fútbol) y el tenis nunca llegaba a la ruta permisiva de abajo (sin filtro por
+# keyword) que sí sabe encontrarlo.
+_TENNIS_LEAGUES = {"ATP","WTA",
+                   "ATP_FRENCH_OPEN","ATP_WIMBLEDON","ATP_US_OPEN","ATP_AUS_OPEN",
                    "ATP_MADRID","ATP_ROME","ATP_BARCELONA",
                    "WTA_FRENCH_OPEN","WTA_WIMBLEDON","WTA_US_OPEN","WTA_AUS_OPEN"}
 
