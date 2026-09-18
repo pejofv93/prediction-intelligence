@@ -266,5 +266,19 @@ async def run_trend_grader() -> dict:
     """Punto de entrada del job periódico (/run-trend-grade)."""
     series_result = await grade_series_signals()
     rolling_result = await grade_rolling_signals()
-    logger.info("trend_grader: series+model=%s rolling=%s", series_result, rolling_result)
-    return {"series": series_result, "rolling": rolling_result}
+
+    # Auto-calibración por mercado (analyzers/trend_calibration.py) — recalcula
+    # con el trend_accuracy_log ya actualizado por las dos graduaciones de
+    # arriba. Aislada: un fallo aquí no debe tirar la graduación en sí.
+    try:
+        from analyzers.trend_calibration import run_trend_calibration
+        calibration_result = await run_trend_calibration()
+    except Exception:
+        logger.error("trend_grader: error en auto-calibración", exc_info=True)
+        calibration_result = {"markets_updated": 0, "error": "unhandled"}
+
+    logger.info(
+        "trend_grader: series+model=%s rolling=%s calibration=%s",
+        series_result, rolling_result, calibration_result,
+    )
+    return {"series": series_result, "rolling": rolling_result, "calibration": calibration_result}

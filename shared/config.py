@@ -218,14 +218,7 @@ TREND_MAX_FIXTURES_PER_RUN = 10
 TREND_MAX_FIXTURES_PER_TEAM = 2
 # Reparto de mercados: descartado el round-robin (tenía sentido cuando cada
 # mensaje era 1 señal suelta; con el mensaje agrupado por partido la variedad
-# de mercados ya sale sola dentro de cada mensaje). Alternativa pendiente para
-# más adelante — normalizar la "fuerza" de cada candidato contra la
-# distribución histórica de SU mercado (percentil dentro del tipo) — pero hace
-# falta muestra por mercado en trend_accuracy_log para calibrar con sentido.
-# Umbral elegido: 30 graduadas de un mismo mercado — mínimo habitual para que un
-# percentil no sea ruido de muestra pequeña. El dashboard de tendencias avisa
-# solo cuando algún mercado ya lo alcanza (GET /api/trend-accuracy).
-TREND_PERCENTILE_MIN_SAMPLE = 30
+# de mercados ya sale sola dentro de cada mensaje).
 
 # Mercados "model" (salida directa de Poisson/ELO ya en enriched_matches — NO
 # hit-rate histórico ni promedio, es la probabilidad de un solo modelo para
@@ -237,6 +230,39 @@ TREND_MODEL_DNB_MIN = 0.65            # draw no bet: prob mínima tras renormali
 # (la salida más probable de una Poisson rara vez supera el 30% en solitario) —
 # en su lugar exigimos que el resultado modal domine claramente al segundo.
 TREND_MODEL_MODAL_RATIO_MIN = 1.5
+
+# ── Auto-calibración por mercado (analyzers/trend_calibration.py) ──────────────
+# Cada uno de los 14 mercados del feed acumula su propio hit-rate real en
+# trend_accuracy_log. Con >= TREND_CALIBRATION_MIN_SAMPLE graduadas (excluyendo
+# "void"), su umbral de emisión deja de ser el fijo genérico de arriba y se
+# calibra con su propio historial — ver docstring de trend_calibration.py.
+# v1 SOLO APRIETA (nunca afloja): con lo que se emite hoy solo hay datos
+# graduados de la franja que ya pasó el umbral fijo — bajar el umbral exigiría
+# datos de la franja que nunca se generó (sesgo de selección). Aflojar con
+# sondas controladas queda para una fase futura con más historial acumulado.
+TREND_CALIBRATION_MIN_SAMPLE = 30      # graduadas mínimas para calibrar (antes TREND_PERCENTILE_MIN_SAMPLE)
+TREND_CALIBRATION_WINDOW = 200         # solo las N graduadas más recientes — la forma de los equipos cambia de temporada
+TREND_CALIBRATION_MIN_TAIL_SAMPLE = 10 # mínimo de señales en un corte para no calibrar con ruido de muestra pequeña
+TREND_TARGET_HIT_RATE = 0.70           # objetivo único de precisión para los 14 mercados
+
+# Umbral fijo de cada mercado — mismo valor que ya usa trend_finder.py hoy,
+# aquí como mapa para poder compararlo contra el umbral calibrado por mercado.
+TREND_MARKET_FIXED_THRESHOLD = {
+    "team_goals_over": TREND_SERIES_MIN_HIT_RATE,
+    "btts": TREND_SERIES_MIN_HIT_RATE,
+    "handicap": TREND_SERIES_MIN_HIT_RATE,
+    "corners": TREND_ROLLING_MIN_RATIO,
+    "cards": TREND_ROLLING_MIN_RATIO,
+    "red_cards": TREND_ROLLING_MIN_RATIO,
+    "shots": TREND_ROLLING_MIN_RATIO,
+    "shots_on_target": TREND_ROLLING_MIN_RATIO,
+    "fouls": TREND_ROLLING_MIN_RATIO,
+    "ht_goals": TREND_ROLLING_MIN_RATIO,
+    "double_chance": TREND_MODEL_DOUBLE_CHANCE_MIN,
+    "dnb": TREND_MODEL_DNB_MIN,
+    "exact_total": TREND_MODEL_MODAL_RATIO_MIN,
+    "win_margin": TREND_MODEL_MODAL_RATIO_MIN,
+}
 
 LEARNING_RATE = 0.05
 DEFAULT_WEIGHTS = {

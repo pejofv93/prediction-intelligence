@@ -36,12 +36,7 @@ from shared.config import (
     TELEGRAM_BOT_URL,
     TREND_MAX_FIXTURES_PER_RUN,
     TREND_MAX_FIXTURES_PER_TEAM,
-    TREND_MODEL_DNB_MIN,
-    TREND_MODEL_DOUBLE_CHANCE_MIN,
-    TREND_MODEL_MODAL_RATIO_MIN,
-    TREND_ROLLING_MIN_RATIO,
     TREND_ROLLING_MIN_SAMPLE,
-    TREND_SERIES_MIN_HIT_RATE,
     TREND_SERIES_MIN_SAMPLE,
     TREND_SERIES_WINDOW,
 )
@@ -137,6 +132,40 @@ def _league_averages(league: str) -> dict:
     return result
 
 
+_THRESHOLD_CACHE: dict[str, tuple[datetime, float]] = {}
+_THRESHOLD_CACHE_TTL_SECONDS = 3600
+
+
+def _effective_threshold(market: str) -> float:
+    """
+    Umbral de emisión para este mercado: el calibrado por
+    analyzers/trend_calibration.py si ya hay muestra suficiente
+    (trend_market_calibration/{market}), si no el fijo genérico de
+    shared/config.py — nunca None, TREND_MARKET_FIXED_THRESHOLD cubre los 14
+    mercados del feed. Cacheado 1h en memoria, mismo patrón que
+    _league_averages: evita releer el doc por cada candidato de la jornada.
+    """
+    from shared.config import TREND_MARKET_FIXED_THRESHOLD
+    fixed = TREND_MARKET_FIXED_THRESHOLD[market]
+
+    now = datetime.now(timezone.utc)
+    cached = _THRESHOLD_CACHE.get(market)
+    if cached and (now - cached[0]).total_seconds() < _THRESHOLD_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    from shared.firestore_client import col
+    value = fixed
+    try:
+        snap = col("trend_market_calibration").document(market).get()
+        if snap.exists:
+            value = (snap.to_dict() or {}).get("threshold_effective", fixed)
+    except Exception:
+        logger.error("trend_finder: error leyendo trend_market_calibration(%s)", market, exc_info=True)
+
+    _THRESHOLD_CACHE[market] = (now, value)
+    return value
+
+
 def _team_series(raw_matches: list[dict], team_id: int, window: int) -> list[dict]:
     """
     Serie del propio equipo (gf/ga por partido), más reciente primero.
@@ -177,7 +206,7 @@ def _series_candidates(team_name: str, team_id: int, side: str, opponent: str,
     for threshold in _GOAL_THRESHOLDS:
         hits = sum(1 for m in matches if m["gf"] >= threshold)
         rate = hits / n
-        if rate >= TREND_SERIES_MIN_HIT_RATE:
+        if rate >= _effective_threshold("team_goals_over"):
             candidates.append({
                 "market": "team_goals_over", "threshold": threshold,
                 "sample": n, "rate": round(rate, 4),
@@ -189,7 +218,7 @@ def _series_candidates(team_name: str, team_id: int, side: str, opponent: str,
 
     hits = sum(1 for m in matches if m["gf"] > 0 and m["ga"] > 0)
     rate = hits / n
-    if rate >= TREND_SERIES_MIN_HIT_RATE:
+    if rate >= _effective_threshold("btts"):
         candidates.append({
             "market": "btts", "threshold": None,
             "sample": n, "rate": round(rate, 4),
@@ -200,7 +229,7 @@ def _series_candidates(team_name: str, team_id: int, side: str, opponent: str,
 
     hits = sum(1 for m in matches if (m["gf"] - m["ga"]) >= _HANDICAP_MARGIN)
     rate = hits / n
-    if rate >= TREND_SERIES_MIN_HIT_RATE:
+    if rate >= _effective_threshold("handicap"):
         candidates.append({
             "market": "handicap", "threshold": _HANDICAP_MARGIN,
             "sample": n, "rate": round(rate, 4),
@@ -235,7 +264,7 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
 
     team_corners = corner_stats.get(f"{side}_corners", 0.0)
     league_corners = league_avg.get("corners", 0)
-    if league_corners > 0 and team_corners / league_corners >= TREND_ROLLING_MIN_RATIO:
+    if league_corners > 0 and team_corners / league_corners >= _effective_threshold("corners"):
         ratio = team_corners / league_corners
         n_line = max(1, math.floor(team_corners))
         candidates.append({
@@ -249,7 +278,7 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
 
     team_yellows = corner_stats.get(f"{side}_yellows", 0.0)
     league_yellows = league_avg.get("yellows", 0)
-    if league_yellows > 0 and team_yellows / league_yellows >= TREND_ROLLING_MIN_RATIO:
+    if league_yellows > 0 and team_yellows / league_yellows >= _effective_threshold("cards"):
         ratio = team_yellows / league_yellows
         n_line = max(1, math.floor(team_yellows))
         candidates.append({
@@ -267,7 +296,7 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
     # probable" con el promedio como respaldo, no un umbral entero.
     team_reds = corner_stats.get(f"{side}_reds", 0.0)
     league_reds = league_avg.get("reds", 0)
-    if league_reds > 0 and team_reds / league_reds >= TREND_ROLLING_MIN_RATIO:
+    if league_reds > 0 and team_reds / league_reds >= _effective_threshold("red_cards"):
         ratio = team_reds / league_reds
         candidates.append({
             "market": "red_cards", "threshold": None,
@@ -280,7 +309,7 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
 
     team_shots = corner_stats.get(f"{side}_shots", 0.0)
     league_shots = league_avg.get("shots", 0)
-    if league_shots > 0 and team_shots / league_shots >= TREND_ROLLING_MIN_RATIO:
+    if league_shots > 0 and team_shots / league_shots >= _effective_threshold("shots"):
         ratio = team_shots / league_shots
         n_line = max(1, math.floor(team_shots))
         candidates.append({
@@ -294,7 +323,7 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
 
     team_sot = corner_stats.get(f"{side}_shots_on_target", 0.0)
     league_sot = league_avg.get("shots_on_target", 0)
-    if league_sot > 0 and team_sot / league_sot >= TREND_ROLLING_MIN_RATIO:
+    if league_sot > 0 and team_sot / league_sot >= _effective_threshold("shots_on_target"):
         ratio = team_sot / league_sot
         n_line = max(1, math.floor(team_sot))
         candidates.append({
@@ -308,7 +337,7 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
 
     team_fouls = corner_stats.get(f"{side}_fouls", 0.0)
     league_fouls = league_avg.get("fouls", 0)
-    if league_fouls > 0 and team_fouls / league_fouls >= TREND_ROLLING_MIN_RATIO:
+    if league_fouls > 0 and team_fouls / league_fouls >= _effective_threshold("fouls"):
         ratio = team_fouls / league_fouls
         n_line = max(1, math.floor(team_fouls))
         candidates.append({
@@ -324,7 +353,7 @@ def _rolling_candidates(team_name: str, side: str, opponent: str, league: str,
     # suele ser <1, sin línea "N+" con sentido.
     team_ht_goals = corner_stats.get(f"{side}_ht_goals", 0.0)
     league_ht_goals = league_avg.get("ht_goals", 0)
-    if league_ht_goals > 0 and team_ht_goals / league_ht_goals >= TREND_ROLLING_MIN_RATIO:
+    if league_ht_goals > 0 and team_ht_goals / league_ht_goals >= _effective_threshold("ht_goals"):
         ratio = team_ht_goals / league_ht_goals
         candidates.append({
             "market": "ht_goals", "threshold": None,
@@ -371,7 +400,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
             ("12", p_home + p_away, f"{home_team} o {away_team} (no empate)"),
         )
         best_sel, best_prob, best_label = max(combos, key=lambda c: c[1])
-        if best_prob >= TREND_MODEL_DOUBLE_CHANCE_MIN:
+        if best_prob >= _effective_threshold("double_chance"):
             candidates.append({
                 "market": "double_chance", "threshold": None, "selection": best_sel,
                 "sample": None, "rate": round(best_prob, 4),
@@ -387,7 +416,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
                 ("home", home_dnb, home_team) if home_dnb >= (1 - home_dnb)
                 else ("away", 1 - home_dnb, away_team)
             )
-            if prob >= TREND_MODEL_DNB_MIN:
+            if prob >= _effective_threshold("dnb"):
                 candidates.append({
                     "market": "dnb", "threshold": None, "side": side,
                     "sample": None, "rate": round(prob, 4),
@@ -416,7 +445,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
                 margins[h - a] = margins.get(h - a, 0.0) + p
 
             tm = _modal_outcome(totals)
-            if tm and tm[2] >= TREND_MODEL_MODAL_RATIO_MIN:
+            if tm and tm[2] >= _effective_threshold("exact_total"):
                 total_v, prob, ratio = tm
                 candidates.append({
                     "market": "exact_total", "threshold": total_v,
@@ -427,7 +456,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
                 })
 
             mm = _modal_outcome(margins)
-            if mm and mm[2] >= TREND_MODEL_MODAL_RATIO_MIN:
+            if mm and mm[2] >= _effective_threshold("win_margin"):
                 margin_v, prob, ratio = mm
                 if margin_v > 0:
                     margin_label = f"{home_team} +{margin_v}"

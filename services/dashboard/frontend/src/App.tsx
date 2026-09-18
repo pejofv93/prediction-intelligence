@@ -3,8 +3,9 @@ import MatchedBetting from './components/MatchedBetting'
 import ModelStats from './components/ModelStats'
 import PolymarketCards from './components/PolymarketCards'
 import SportSignals from './components/SportSignals'
+import TrendCalibration from './components/TrendCalibration'
 
-type Tab = 'sports' | 'poly' | 'matched' | 'stats'
+type Tab = 'sports' | 'poly' | 'matched' | 'stats' | 'trends'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('sports')
@@ -14,6 +15,7 @@ export default function App() {
     { id: 'poly', label: '🔮 Polymarket' },
     { id: 'matched', label: '🧮 Matched Betting' },
     { id: 'stats', label: '📊 Estadísticas' },
+    { id: 'trends', label: '🧠 Tendencias' },
   ]
 
   return (
@@ -52,6 +54,7 @@ export default function App() {
         {tab === 'poly' && <PolymarketCards />}
         {tab === 'matched' && <MatchedBetting />}
         {tab === 'stats' && <ModelStats />}
+        {tab === 'trends' && <TrendCalibration />}
       </main>
     </div>
   )

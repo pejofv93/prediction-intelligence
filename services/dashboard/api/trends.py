@@ -82,27 +82,17 @@ async def trend_accuracy() -> dict:
     for m in markets:
         by_market[m] = _bucket([r for r in rows if r.get("market") == m])
 
-    # Aviso de "listo para normalización por percentil" — alternativa al score
-    # crudo (rate*log(n)) que suma rank_and_cap por partido (ver
-    # TREND_PERCENTILE_MIN_SAMPLE en shared/config.py) que necesita muestra
-    # por mercado para calibrar percentiles con sentido. Se avisa aquí para no
-    # depender de acordarse.
-    from shared.config import TREND_PERCENTILE_MIN_SAMPLE
-
-    markets_ready = sorted(
-        m for m, bucket in by_market.items() if bucket["n"] >= TREND_PERCENTILE_MIN_SAMPLE
-    )
-    percentile_readiness = {
-        "min_sample_per_market": TREND_PERCENTILE_MIN_SAMPLE,
-        "markets_ready": markets_ready,
-        "note": (
-            f"Ya hay {len(markets_ready)} mercado(s) con ≥{TREND_PERCENTILE_MIN_SAMPLE} señales "
-            "graduadas — hay muestra suficiente para normalizar su score por percentil "
-            "en vez del hit-rate/ratio crudo." if markets_ready else
-            f"Ningún mercado llega aún a {TREND_PERCENTILE_MIN_SAMPLE} señales graduadas — "
-            "el score crudo sigue siendo la opción razonable."
-        ),
-    }
+    # Auto-calibración por mercado (analyzers/trend_calibration.py) — un doc
+    # por mercado en trend_market_calibration, recalculado a diario al final
+    # de run_trend_grader(). Se lee tal cual, sin recalcular aquí: el estado
+    # que ve el dashboard debe ser el mismo que usa trend_finder para emitir.
+    calibration: list[dict] = []
+    try:
+        for d in col("trend_market_calibration").stream():
+            calibration.append(d.to_dict() or {})
+    except Exception as e:
+        logger.error("trend_accuracy: error leyendo trend_market_calibration — %s", e)
+    calibration.sort(key=lambda c: c.get("market", ""))
 
     by_team: dict[str, dict] = defaultdict(list)
     for r in rows:
@@ -124,6 +114,6 @@ async def trend_accuracy() -> dict:
         "by_pattern_type": by_pattern_type,
         "by_market": by_market,
         "team_ranking": team_ranking,
-        "percentile_readiness": percentile_readiness,
+        "calibration": calibration,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
