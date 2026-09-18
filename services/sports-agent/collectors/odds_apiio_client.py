@@ -98,6 +98,14 @@ _LEAGUE_SLUG_PREFIXES: dict[str, tuple[str, ...]] = {
     "CSUD": ("international-clubs-conmebol-sudamericana",),
     "BSA":  ("brazil-brasileiro-serie-a",),
     "ARG":  ("argentina-primera-lpf",),
+    # Añadidas 2026-09-18 — slugs verificados contra el catálogo real (GET /events?
+    # sport=football, 5.000 eventos), no adivinados. "netherlands-eredivisie-women"
+    # queda fuera solo, "women" ya está en _SLUG_VARIANT_DENY. Sin variante conflictiva
+    # para liga-portugal ni championship (comprobado en el catálogo, ninguna otra
+    # empieza por ese prefijo).
+    "DED":  ("netherlands-eredivisie",),
+    "PPL":  ("portugal-liga-portugal",),
+    "ELC":  ("england-championship",),
     # Mundial: SIN VERIFICAR — el torneo no está en el catálogo fuera de temporada.
     # Si el slug real difiere, el emparejamiento devuelve 0 y se registra un WARNING
     # (mismo resultado que hoy, pero explícito en vez de silencioso).
@@ -208,7 +216,8 @@ _SPORT_FALLBACK_SLUGS: dict[str, list[str]] = {
 
 # Ligas que son fútbol / baloncesto / tenis (para decidir qué sport slug buscar)
 _FOOTBALL_LEAGUES = {"PL","PD","BL1","SA","FL1",
-                     "CL","EL","ECL","TU1","ARG","CLI","BSA","CSUD","CAM","WC26","WC"}
+                     "CL","EL","ECL","TU1","ARG","CLI","BSA","CSUD","CAM","WC26","WC",
+                     "DED","PPL","ELC"}
 _BASKETBALL_LEAGUES = {"NBA","EUROLEAGUE","ACB"}
 # "ATP"/"WTA" (código de tour genérico, no de torneo concreto) son los que de verdad llega
 # a usar tennis_analyzer.py — ver match.get("league", "ATP") en tennis_analyzer.py:444. Sin

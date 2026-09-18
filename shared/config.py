@@ -144,6 +144,12 @@ SUPPORTED_FOOTBALL_LEAGUES = {
     "ECL": 2137,   # UEFA Conference League
     "EC":  2018,   # European Championship
     "WC":  2000,   # FIFA World Cup
+    # Añadidas 2026-09-18 — TIER_ONE confirmado en vivo contra GET /v4/competitions
+    # con la key real de producción (id y plan verificados, no de documentación).
+    "DED": 2003,   # Eredivisie
+    "PPL": 2017,   # Primeira Liga
+    "ELC": 2016,   # Championship
+    "BSA": 2013,   # Campeonato Brasileiro Série A
 }
 
 # Deportes adicionales — API-Sports (misma key FOOTBALL_RAPID_API_KEY) + Groq (analisis IA)

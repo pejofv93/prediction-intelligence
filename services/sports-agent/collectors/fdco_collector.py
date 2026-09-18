@@ -35,6 +35,17 @@ FDCO_LEAGUES: dict[str, tuple[str, str]] = {
     "BL1": ("D1",  "Bundesliga"),
     "SA":  ("I1",  "Serie A"),
     "FL1": ("F1",  "Ligue 1"),
+    # Reactivadas 2026-09-18 — llevaban abandonadas desde el 20/04 (fuera de este
+    # dict, nunca borradas de FDCO_LEAGUES; sus docs en team_corner_stats se quedaron
+    # congelados en esa fecha, ver _CORNER_STATS_MAX_AGE_DAYS en trend_finder.py).
+    # Verificado hoy contra la temporada en curso (mmz4281/2627/*.csv, HTTP 200,
+    # las 14 columnas de siempre incl. HS/AST/HF/HTHG) — no era un límite de la
+    # fuente, solo cobertura recortada sin documentar por qué.
+    "BL2": ("D2",  "2. Bundesliga"),
+    "DED": ("N1",  "Eredivisie"),
+    "PPL": ("P1",  "Primeira Liga"),
+    "SB":  ("I2",  "Serie B"),
+    "SD":  ("SP2", "Segunda División"),
 }
 
 # Número de partidos recientes a considerar para los promedios
