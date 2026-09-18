@@ -119,6 +119,32 @@ def _league_team_docs(league: str) -> list[dict]:
     return docs
 
 
+# collect_and_save (fdco_collector.py) hace un .set() completo cada día, pero
+# SOLO de los equipos que aparecen en el CSV de la temporada actual — un
+# equipo descendido (o de una liga fuera de FDCO_LEAGUES) se queda con el doc
+# congelado en su último valor para siempre, nadie lo purga. Diagnosticado
+# 2026-09-18: en las 5 ligas activas, el 100% de los docs con >45 días eran de
+# abril (anteriores a que existieran shots/shots_on_target/fouls/ht_goals como
+# campos) con esos valores en 0, mientras los refrescados el mismo día tenían
+# datos reales. Comparar una señal fósil contra el umbral de hoy no es "el
+# equipo promedia poco", es "no hay dato" — deben tratarse igual.
+_CORNER_STATS_MAX_AGE_DAYS = 45
+
+
+def _is_corner_stats_stale(doc: dict) -> bool:
+    updated_at = doc.get("updated_at")
+    if not updated_at:
+        return True  # sin fecha — más seguro tratarlo como no confiable
+    try:
+        updated_dt = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if updated_dt.tzinfo is None:
+        updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - updated_dt).days
+    return age_days > _CORNER_STATS_MAX_AGE_DAYS
+
+
 def _read_corner_stats(league: str, team_name: str) -> dict:
     from collectors.team_identity import normalize
 
@@ -130,7 +156,7 @@ def _read_corner_stats(league: str, team_name: str) -> dict:
     for doc in _league_team_docs(league):
         candidate = normalize(doc.get("team") or "")
         if candidate and (candidate == target or candidate in target or target in candidate):
-            return doc
+            return {} if _is_corner_stats_stale(doc) else doc
     return {}
 
 
