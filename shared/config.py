@@ -229,7 +229,15 @@ TREND_MODEL_DNB_MIN = 0.65            # draw no bet: prob mínima tras renormali
 # Total exacto / margen de victoria: no hay un "umbral de probabilidad" limpio
 # (la salida más probable de una Poisson rara vez supera el 30% en solitario) —
 # en su lugar exigimos que el resultado modal domine claramente al segundo.
-TREND_MODEL_MODAL_RATIO_MIN = 1.5
+# Umbrales separados (antes un único TREND_MODEL_MODAL_RATIO_MIN=1.5 para los
+# dos): con 85 partidos reales de producción el ratio de "total exacto" nunca
+# pasó de 1.35 (p95=1.21) — a 1.5 el mercado quedaba mudo por diseño, nunca
+# emitió ni una señal. El de "margen" sí llega a valores más altos (máx 1.91,
+# p85=1.30) porque el margen de victoria se concentra más que el total de
+# goles. Elegidos para una selectividad similar (~15-20% de los partidos),
+# no arbitrarios ni copiados del genérico de otro mercado.
+TREND_MODEL_TOTAL_RATIO_MIN = 1.15   # admite ~1 de cada 5 partidos reales (p85≈1.18)
+TREND_MODEL_MARGIN_RATIO_MIN = 1.30  # admite ~1 de cada 6 partidos reales (p85≈1.30)
 
 # ── Auto-calibración por mercado (analyzers/trend_calibration.py) ──────────────
 # Cada uno de los 14 mercados del feed acumula su propio hit-rate real en
@@ -260,8 +268,8 @@ TREND_MARKET_FIXED_THRESHOLD = {
     "ht_goals": TREND_ROLLING_MIN_RATIO,
     "double_chance": TREND_MODEL_DOUBLE_CHANCE_MIN,
     "dnb": TREND_MODEL_DNB_MIN,
-    "exact_total": TREND_MODEL_MODAL_RATIO_MIN,
-    "win_margin": TREND_MODEL_MODAL_RATIO_MIN,
+    "exact_total": TREND_MODEL_TOTAL_RATIO_MIN,
+    "win_margin": TREND_MODEL_MARGIN_RATIO_MIN,
 }
 
 LEARNING_RATE = 0.05

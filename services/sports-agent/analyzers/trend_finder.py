@@ -74,15 +74,64 @@ def _read_team_stats(team_id: int) -> dict:
         return {}
 
 
-def _read_corner_stats(league: str, team_name: str) -> dict:
+# team_corner_stats se puebla desde football-data.co.uk (nombres cortos:
+# "Augsburg", "Man City", "Rennes"), pero el team_name que llega aquí sale de
+# enriched_matches/football-data.org (nombres oficiales largos: "FC Augsburg",
+# "Manchester City FC", "Stade Rennais FC 1901"). team_identity.normalize()
+# (quita acentos/sufijos societarios/años) + subcadena resuelve la mayoría
+# (16/18 en Bundesliga, 20/20 en La Liga y Serie A comprobado) — el resto son
+# abreviaturas que ninguna heurística genérica adivina, cubiertas a mano.
+# Comprobado en BL1/PD/PL/SA/FL1 (96 equipos, 7 sin resolver, todos aquí).
+_CORNER_STATS_ALIASES = {
+    "borussia monchengladbach": "m gladbach",
+    "bayern munchen": "bayern munich",
+    "eintracht frankfurt": "ein frankfurt",
+    "stade rennais": "rennes",
+    "manchester city": "man city",
+    "manchester united": "man united",
+    "nottingham forest": "nott m forest",
+}
+
+_LEAGUE_TEAM_DOCS_CACHE: dict[str, tuple[datetime, list[dict]]] = {}
+_LEAGUE_TEAM_DOCS_TTL_SECONDS = 3600
+
+
+def _league_team_docs(league: str) -> list[dict]:
+    """
+    Todos los docs de team_corner_stats de una liga (~20-25 equipos), cacheados
+    1h — los reutilizan _league_averages() y _read_corner_stats() en vez de
+    hacer cada una su propia lectura de Firestore por partido de la jornada.
+    """
+    now = datetime.now(timezone.utc)
+    cached = _LEAGUE_TEAM_DOCS_CACHE.get(league)
+    if cached and (now - cached[0]).total_seconds() < _LEAGUE_TEAM_DOCS_TTL_SECONDS:
+        return cached[1]
+
     from shared.firestore_client import col
-    doc_id = f"{league}_{_slugify(team_name)}"
+    docs: list[dict] = []
     try:
-        snap = col("team_corner_stats").document(doc_id).get()
-        return (snap.to_dict() or {}) if snap.exists else {}
+        query = col("team_corner_stats").where(filter=FieldFilter("league", "==", league))
+        docs = [d.to_dict() or {} for d in query.stream()]
     except Exception:
-        logger.error("trend_finder: error leyendo team_corner_stats(%s)", doc_id, exc_info=True)
+        logger.error("trend_finder: error leyendo team_corner_stats(%s)", league, exc_info=True)
+
+    _LEAGUE_TEAM_DOCS_CACHE[league] = (now, docs)
+    return docs
+
+
+def _read_corner_stats(league: str, team_name: str) -> dict:
+    from collectors.team_identity import normalize
+
+    target = normalize(team_name)
+    if not target:
         return {}
+    target = _CORNER_STATS_ALIASES.get(target, target)
+
+    for doc in _league_team_docs(league):
+        candidate = normalize(doc.get("team") or "")
+        if candidate and (candidate == target or candidate in target or target in candidate):
+            return doc
+    return {}
 
 
 _LEAGUE_AVG_CACHE: dict[str, tuple[datetime, dict]] = {}
@@ -102,24 +151,18 @@ def _league_averages(league: str) -> dict:
     if cached and (now - cached[0]).total_seconds() < _LEAGUE_AVG_TTL_SECONDS:
         return cached[1]
 
-    from shared.firestore_client import col
     corners_sum, yellows_sum, reds_sum = 0.0, 0.0, 0.0
     shots_sum, shots_on_target_sum, fouls_sum, ht_goals_sum = 0.0, 0.0, 0.0, 0.0
     n = 0
-    try:
-        query = col("team_corner_stats").where(filter=FieldFilter("league", "==", league))
-        for d in query.stream():
-            doc = d.to_dict() or {}
-            corners_sum += (doc.get("home_corners", 0) + doc.get("away_corners", 0)) / 2
-            yellows_sum += (doc.get("home_yellows", 0) + doc.get("away_yellows", 0)) / 2
-            reds_sum += (doc.get("home_reds", 0) + doc.get("away_reds", 0)) / 2
-            shots_sum += (doc.get("home_shots", 0) + doc.get("away_shots", 0)) / 2
-            shots_on_target_sum += (doc.get("home_shots_on_target", 0) + doc.get("away_shots_on_target", 0)) / 2
-            fouls_sum += (doc.get("home_fouls", 0) + doc.get("away_fouls", 0)) / 2
-            ht_goals_sum += (doc.get("home_ht_goals", 0) + doc.get("away_ht_goals", 0)) / 2
-            n += 1
-    except Exception:
-        logger.error("trend_finder: error calculando medias de liga %s", league, exc_info=True)
+    for doc in _league_team_docs(league):
+        corners_sum += (doc.get("home_corners", 0) + doc.get("away_corners", 0)) / 2
+        yellows_sum += (doc.get("home_yellows", 0) + doc.get("away_yellows", 0)) / 2
+        reds_sum += (doc.get("home_reds", 0) + doc.get("away_reds", 0)) / 2
+        shots_sum += (doc.get("home_shots", 0) + doc.get("away_shots", 0)) / 2
+        shots_on_target_sum += (doc.get("home_shots_on_target", 0) + doc.get("away_shots_on_target", 0)) / 2
+        fouls_sum += (doc.get("home_fouls", 0) + doc.get("away_fouls", 0)) / 2
+        ht_goals_sum += (doc.get("home_ht_goals", 0) + doc.get("away_ht_goals", 0)) / 2
+        n += 1
 
     result = (
         {"corners": round(corners_sum / n, 2), "yellows": round(yellows_sum / n, 2),
@@ -646,7 +689,26 @@ def _format_fixture_message(fixture: dict) -> str:
     if date_str:
         header += f" — {date_str}"
     lines = [header]
-    for c in fixture["candidates"]:
+
+    # "Doble oportunidad" y "DNB" salen de los mismos poisson_home/draw/away_win
+    # y en producción coinciden en el 100% de los casos (13/13 partidos con DNB
+    # también tenían double_chance, y el mismo lado favorito en los dos —
+    # matemáticamente no pueden discrepar de dirección, ver docstring de
+    # _model_candidates) — dos líneas sueltas leen como afirmaciones distintas
+    # cuando es la misma lectura del partido. Se fusionan en una sola línea
+    # aquí, solo en el mensaje: trend_signals/trend_accuracy_log/calibración
+    # siguen tratándolos como dos mercados independientes, sin tocar eso.
+    candidates = list(fixture["candidates"])
+    dc = next((c for c in candidates if c["market"] == "double_chance"), None)
+    dnb = next((c for c in candidates if c["market"] == "dnb"), None)
+    if dc and dnb:
+        team = fixture["home_team"] if dnb.get("side") == "home" else fixture["away_team"]
+        lines.append(
+            f"📐 Modelo: {team} favorito — {dc['selection']} {dc['rate']*100:.0f}% · DNB {dnb['rate']*100:.0f}%"
+        )
+        candidates = [c for c in candidates if c is not dc and c is not dnb]
+
+    for c in candidates:
         tag = _PATTERN_TAG.get(c["pattern_type"], "📊")
         lines.append(f"{tag} {c['line']}")
     lines.append("")
