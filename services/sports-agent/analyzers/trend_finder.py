@@ -595,9 +595,57 @@ def rank_and_cap(candidates: list[dict]) -> list[dict]:
     return selected
 
 
+def _format_match_date_madrid(match_date) -> str:
+    """
+    Duplicado del de alert_manager.py (telegram-bot, ver nota de cabecera del
+    módulo) — mismo formato DD/MM a las HH:MM en hora de Madrid que ya usa el
+    canal de señales normal, incluido "Hoy"/"Mañana" cuando aplica. Sin el
+    "📅" ni el "Madrid" final: aquí va inline en la cabecera del mensaje, no
+    en su propia línea. Devuelve "" si match_date es None o no parseable.
+    """
+    from zoneinfo import ZoneInfo
+
+    madrid = ZoneInfo("Europe/Madrid")
+
+    if match_date is None:
+        return ""
+    if isinstance(match_date, str):
+        raw = match_date.strip()
+        if not raw or raw.lower() == "none":
+            return ""
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+    elif hasattr(match_date, "strftime"):
+        dt = match_date
+    else:
+        return ""
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    dt_madrid = dt.astimezone(madrid)
+    today_madrid = datetime.now(madrid).date()
+    match_day = dt_madrid.date()
+
+    time_str = dt_madrid.strftime("%H:%M")
+    date_str = dt_madrid.strftime("%d/%m")
+
+    if match_day == today_madrid:
+        return f"Hoy {date_str} a las {time_str}"
+    elif match_day == today_madrid + timedelta(days=1):
+        return f"Mañana {date_str} a las {time_str}"
+    return f"{date_str} a las {time_str}"
+
+
 def _format_fixture_message(fixture: dict) -> str:
     league_label = _LEAGUE_LABEL.get(fixture["league"], fixture["league"])
-    lines = [f"⚽ {fixture['home_team']} vs {fixture['away_team']} ({league_label})"]
+    header = f"⚽ {fixture['home_team']} vs {fixture['away_team']} ({league_label})"
+    date_str = _format_match_date_madrid(fixture.get("match_date"))
+    if date_str:
+        header += f" — {date_str}"
+    lines = [header]
     for c in fixture["candidates"]:
         tag = _PATTERN_TAG.get(c["pattern_type"], "📊")
         lines.append(f"{tag} {c['line']}")
