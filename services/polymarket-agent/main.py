@@ -17,6 +17,9 @@ from google.api_core.exceptions import DeadlineExceeded, ServiceUnavailable
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+# httpx loguea la URL completa (con apiKey en query string) a INFO → no exponer claves en logs.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # El parche de compatibilidad grpc/firestore (_UnaryStreamMultiCallable._retry) vive ahora

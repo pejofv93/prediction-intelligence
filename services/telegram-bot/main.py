@@ -25,6 +25,9 @@ from shared.config import (
 from fastapi.responses import JSONResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+# httpx loguea la URL completa (con apiKey en query string) a INFO → no exponer claves en logs.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).

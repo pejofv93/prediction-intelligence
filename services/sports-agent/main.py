@@ -22,6 +22,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
+# httpx/httpcore loguean a INFO la URL completa de cada request, y varias APIs
+# (odds-api.io, The Odds API) llevan la apiKey en el query string → la clave acababa
+# en claro en Cloud Logging. WARNING los silencia salvo errores reales.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Aplica el parche de compatibilidad grpc/firestore al arrancar (ver shared/firestore_client.py).

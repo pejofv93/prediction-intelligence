@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+# httpx loguea la URL completa (con apiKey en query string) a INFO → no exponer claves en logs.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 from fastapi import Depends, FastAPI, HTTPException, status

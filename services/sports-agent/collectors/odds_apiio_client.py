@@ -24,6 +24,9 @@ Sport slugs: se descubren via GET /sports (no requiere auth) y se
 """
 import asyncio
 import logging
+import re
+import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -35,6 +38,89 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://api.odds-api.io/v3"
 _HTTP_TIMEOUT = 15.0
+
+# ── Presupuesto HORARIO (límite duro de la API: 100 req/hora, 429 si se supera) ─────
+# Medido 2026-09-19: el tenis (ruta "otros deportes") disparaba 66-115 requests por
+# ejecución y dejaba sin presupuesto al pre-fetch de fútbol. El presupuesto tiene DOS
+# fuentes: el contador local de la última hora (por proceso) y la cabecera
+# x-ratelimit-remaining de la propia API (verdad global entre instancias de Cloud Run).
+# Dos prioridades: el fútbol puede gastar hasta _CAP_HIGH; tenis/baloncesto solo hasta
+# _CAP_LOW, de modo que siempre queda reserva para el fútbol.
+_HOURLY_LIMIT = 100
+_CAP_HIGH = 85
+_CAP_LOW = 45
+_REQ_TIMES: deque[float] = deque()      # epoch de cada request enviado en la última hora
+_HDR_REMAINING: int | None = None       # último x-ratelimit-remaining visto
+_HDR_RESET_AT: float = 0.0              # epoch en el que se renueva esa ventana
+
+
+def _budget_ok(low_priority: bool = False) -> bool:
+    """True si aún cabe un request de esta prioridad dentro de la hora en curso."""
+    now = time.time()
+    while _REQ_TIMES and now - _REQ_TIMES[0] > 3600:
+        _REQ_TIMES.popleft()
+    cap = _CAP_LOW if low_priority else _CAP_HIGH
+    if len(_REQ_TIMES) >= cap:
+        return False
+    if _HDR_REMAINING is not None and now < _HDR_RESET_AT:
+        if _HDR_REMAINING <= _HOURLY_LIMIT - cap:
+            return False
+    return True
+
+
+def _budget_reset_in() -> int:
+    """Segundos hasta que se libere presupuesto (para el TTL de un bloqueo local)."""
+    now = time.time()
+    waits = []
+    if _HDR_RESET_AT > now:
+        waits.append(_HDR_RESET_AT - now)
+    if _REQ_TIMES:
+        waits.append(3600 - (now - _REQ_TIMES[0]))
+    return max(60, int(min(waits))) if waits else 60
+
+
+_LAST_BUDGET_WARN: float = 0.0
+
+
+def _warn_budget(low_priority: bool, path: str) -> None:
+    """Un solo aviso por minuto: con presupuesto agotado cada llamada bloqueada lo repetiría."""
+    global _LAST_BUDGET_WARN
+    now = time.time()
+    if now - _LAST_BUDGET_WARN < 60:
+        return
+    _LAST_BUDGET_WARN = now
+    logger.warning("odds-api.io: presupuesto horario agotado (low=%s, %d req en la última hora, "
+                   "remaining cabecera=%s) — %s NO enviado, reintento en ~%ds",
+                   low_priority, len(_REQ_TIMES), _HDR_REMAINING, path, _budget_reset_in())
+
+
+def _note_request_sent() -> None:
+    _REQ_TIMES.append(time.time())
+
+
+def _note_response(resp: "httpx.Response") -> None:
+    """Actualiza el estado global de presupuesto con las cabeceras de rate limit."""
+    global _HDR_REMAINING, _HDR_RESET_AT
+    try:
+        rem = resp.headers.get("x-ratelimit-remaining")
+        if rem is not None:
+            _HDR_REMAINING = int(rem)
+            reset = resp.headers.get("x-ratelimit-reset")
+            if reset:
+                _HDR_RESET_AT = datetime.fromisoformat(reset.replace("Z", "+00:00")).timestamp()
+        if resp.status_code == 429:
+            _HDR_REMAINING = 0
+            if _HDR_RESET_AT <= time.time():
+                m = re.search(r"resets in (\d+) minutes? and (\d+) seconds?", resp.text[:500])
+                _HDR_RESET_AT = time.time() + (int(m.group(1)) * 60 + int(m.group(2)) if m else 900)
+    except Exception:
+        logger.debug("odds-api.io: no se pudo leer cabecera de rate limit", exc_info=True)
+
+
+def _parse_reset_ttl(body: str) -> int:
+    """Segundos hasta el reset según el cuerpo de un 429 (real o bloqueo local) + margen."""
+    m = re.search(r"resets in (\d+) minutes? and (\d+) seconds?", body or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) + 30 if m else 3600
 
 # Caché de sports disponibles: {slug: {name, category, ...}}
 _SPORTS_CACHE: dict[str, dict] = {}
@@ -233,18 +319,24 @@ _TENNIS_LEAGUES = {"ATP","WTA",
 
 # ── Internals ──────────────────────────────────────────────────────────────────
 
-async def _get(path: str, params: dict | None = None) -> dict | list | None:
+async def _get(path: str, params: dict | None = None,
+               low_priority: bool = False) -> dict | list | None:
     """Llamada GET autenticada a odds-api.io. Auth: ?apiKey=KEY (query param)."""
     if not ODDSAPIIO_KEY:
+        return None
+    if not _budget_ok(low_priority):
+        _warn_budget(low_priority, path)
         return None
     try:
         merged = {**(params or {}), "apiKey": ODDSAPIIO_KEY}
         quota.track_monthly("oddsapiio")
+        _note_request_sent()
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(
                 f"{_BASE}{path}",
                 params=merged,
             )
+        _note_response(resp)
         if resp.status_code == 429:
             logger.warning("odds-api.io: rate limit 429")
             return None
@@ -402,19 +494,29 @@ def _cache_hit(entry: dict | None, now: datetime) -> bool:
     return age < _cache_ttl(entry)
 
 
-async def _get_raw(path: str, params: dict | None = None) -> tuple[int, str, dict | list | None]:
+async def _get_raw(path: str, params: dict | None = None,
+                   low_priority: bool = False) -> tuple[int, str, dict | list | None]:
     """
     Versión diagnóstica de _get() que devuelve (status_code, body_text, parsed_json|None).
     Siempre loguea status + primeros 500 chars del body para diagnóstico.
+    Sin presupuesto horario devuelve 429 con un cuerpo "resets in X minutes and Y seconds"
+    (mismo formato que el real) para que los llamadores reutilicen su manejo de 429 y su
+    TTL sin enviar nada.
     """
     if not ODDSAPIIO_KEY:
         return 0, "NO_KEY", None
+    if not _budget_ok(low_priority):
+        wait = _budget_reset_in()
+        _warn_budget(low_priority, path)
+        return 429, f"LOCAL_BUDGET resets in {wait // 60} minutes and {wait % 60} seconds", None
     try:
         merged = {**(params or {}), "apiKey": ODDSAPIIO_KEY}
         url = f"{_BASE}{path}"
         quota.track_monthly("oddsapiio")
+        _note_request_sent()
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url, params=merged)
+        _note_response(resp)
         body = resp.text[:500]
         logger.info(
             "odds-api.io DIAG: GET %s params=%s → status=%d body=%s",
@@ -467,20 +569,23 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
         best_raw: list[dict] = []
         winning_slug: str = sport_slug
 
-        def _set_error(slugs: list[str]) -> None:
-            """Cachea error=True (TTL 60s) para todos los slugs dados."""
+        def _set_error(slugs: list[str], ttl: int | None = None) -> None:
+            """Cachea error=True (TTL 60s, o `ttl` s si es un 429) para todos los slugs."""
             err_entry = {"events": [], "error": True, "cached_at": now}
+            if ttl:
+                err_entry.update({"rate_limited": True, "ttl_override": ttl})
             for s in slugs:
                 _SPORT_EVENTS_CACHE[s] = err_entry
 
         for candidate in candidates:
             # Intento 1: sin filtro temporal
-            status, body, data = await _get_raw("/events", {"sport": candidate})
+            status, body, data = await _get_raw("/events", {"sport": candidate}, low_priority=True)
 
             if status == 429:
-                logger.warning("odds-api.io: 429 slug=%s body=%s — todos los slugs cacheados 60s",
-                               candidate, body[:200])
-                _set_error(list(set([candidate] + _FOOTBALL_SLUG_CANDIDATES)))
+                _ttl = _parse_reset_ttl(body)
+                logger.warning("odds-api.io: 429 slug=%s body=%s — todos los slugs cacheados %ds",
+                               candidate, body[:200], _ttl)
+                _set_error(list(set([candidate] + _FOOTBALL_SLUG_CANDIDATES)), _ttl)
                 return []
 
             if status == 401:
@@ -509,8 +614,13 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
 
             # Intento 2: con ventana temporal
             status2, body2, data2 = await _get_raw(
-                "/events", {"sport": candidate, "commenceTimeFrom": from_dt, "commenceTimeTo": to_dt}
+                "/events", {"sport": candidate, "commenceTimeFrom": from_dt, "commenceTimeTo": to_dt},
+                low_priority=True,
             )
+            if status2 == 429:
+                _ttl = _parse_reset_ttl(body2)
+                _set_error(list(set([candidate] + _FOOTBALL_SLUG_CANDIDATES)), _ttl)
+                return []
             if data2 is not None:
                 raw2 = data2 if isinstance(data2, list) else data2.get("data", data2.get("events", []))
                 if isinstance(raw2, list) and raw2:
@@ -547,40 +657,63 @@ async def _fetch_events(sport_slug: str) -> list[dict]:
         return pending
 
 
-async def _fetch_odds_batch(event_ids: list[str]) -> list[dict]:
+# Nombres de mercado TAL COMO los publica odds-api.io ("ML", "Totals", "Both Teams To Score"…).
+# El parámetro `markets` de /odds/multi se compara contra esos nombres. Hasta el 2026-09-15
+# se enviaban alias internos ("h2h,btts,total_goals,asian_handicap,corners,…") y la API los
+# toleraba; ese día dejó de hacerlo y solo casaba por subcadena con "corners" → cada evento
+# volvía con únicamente Corners Totals (mercado desactivado en _MARKETS_ENABLED) → "0 con
+# odds" en TODAS las ligas de fútbol. Verificado contra la API real 2026-09-19: con estos
+# nombres vuelven ML/Spread/Totals/BTTS/Correct Score de Bet365 y Unibet.
+# Corners y 1st half goals se quitan: están fuera de _MARKETS_ENABLED (sin grader).
+_ODDS_MARKETS_PARAM = "ML,Totals,Spread,Both Teams To Score,Correct Score"
+
+
+async def _fetch_odds_batch_ex(event_ids: list[str],
+                               low_priority: bool = False) -> tuple[list[dict], bool]:
     """
-    GET /odds/multi?eventIds={ids}&bookmakers={_DEFAULT_BOOKMAKERS}
+    GET /odds/multi?eventIds={ids}&bookmakers={_DEFAULT_BOOKMAKERS}&markets={_ODDS_MARKETS_PARAM}
     Máximo 10 IDs por llamada. El param 'bookmakers' es obligatorio (error "Missing bookmakers" sin él).
     En la primera llamada usa _get_raw para loguear el body si hay error.
+    Devuelve (items, aborted). aborted=True si se cortó por 429 o por falta de presupuesto
+    horario: los IDs no servidos NO deben darse por "sin cuotas".
     """
     if not event_ids:
-        return []
+        return [], False
     all_results = []
     _first_call = True
     for i in range(0, len(event_ids), 10):
+        if not _budget_ok(low_priority):
+            _warn_budget(low_priority, f"/odds/multi lote {i // 10 + 1}/{-(-len(event_ids) // 10)}")
+            return all_results, True
         batch = event_ids[i:i+10]
         params = {
             "eventIds": ",".join(batch),
             "bookmakers": _DEFAULT_BOOKMAKERS,
-            "markets": "h2h,btts,total_goals,asian_handicap,corners,correct_score,1st_half_goals",
+            "markets": _ODDS_MARKETS_PARAM,
         }
         if _first_call:
-            status, body, data = await _get_raw("/odds/multi", params)
+            status, body, data = await _get_raw("/odds/multi", params, low_priority=low_priority)
             _first_call = False
             if status != 200:
                 logger.warning("odds-api.io: /odds/multi HTTP %d body=%s", status, body[:300])
                 if status == 429:
-                    break  # rate limit — no seguir con más batches
+                    return all_results, True  # rate limit — no seguir con más batches
                 continue
         else:
-            data = await _get("/odds/multi", params)
+            data = await _get("/odds/multi", params, low_priority=low_priority)
         if data is None:
             continue
         items = data if isinstance(data, list) else data.get("data", data.get("odds", []))
         if isinstance(items, list):
             all_results.extend(items)
         # (el contador vive en _get/_get_raw: 1 apunte por request HTTP real)
-    return all_results
+    return all_results, False
+
+
+async def _fetch_odds_batch(event_ids: list[str], low_priority: bool = False) -> list[dict]:
+    """Igual que _fetch_odds_batch_ex pero solo devuelve los items."""
+    items, _aborted = await _fetch_odds_batch_ex(event_ids, low_priority)
+    return items
 
 
 async def _fetch_odds_map_for_events(event_ids: list[str]) -> dict[str, dict]:
@@ -642,6 +775,10 @@ def _normalise_event(raw_event: dict, odds_item: dict | None) -> dict | None:
         if isinstance(raw_bkms, dict):
             # odds-api.io v3 format: {"Bet365": [{name, odds:[{home,draw,away}]}], ...}
             for bkm_name, mkt_list in raw_bkms.items():
+                # "Bet365 (no latency)" es un feed duplicado de Bet365 que la API añade solo:
+                # duplicaría el mejor precio y aparecería como casa distinta en los avisos.
+                if "no latency" in bkm_name.lower():
+                    continue
                 bkm_key = bkm_name.lower().replace(" ", "_")
                 markets_out = []
                 if not isinstance(mkt_list, list):
@@ -1417,6 +1554,90 @@ async def _fetch_all_soccer_events() -> list[dict]:
         return []
 
 
+# ── Cuotas de deportes NO fútbol (tenis, baloncesto) ───────────────────────────────
+# Antes cada código de liga (ATP, WTA, NBA…) pedía /odds/multi de TODOS los eventos
+# pendientes del deporte sin caché de cuotas: con 550 eventos de tenis eran ~55 requests
+# POR LIGA, en paralelo (analyze lanza una coroutine por liga activa) → 66-115 requests por
+# ejecución y 429 horario (medido 2026-09-18/19). Ahora:
+#   · una caché de cuotas POR EVENTO compartida entre todas las ligas, bajo lock, de modo que
+#     ATP y WTA (mismos eventos) hacen la carga una sola vez;
+#   · solo se piden cuotas de lo jugable: kickoff dentro de _OTHER_ODDS_WINDOW, los más
+#     próximos primero, con tope _MAX_OTHER_ODDS_IDS (10 requests como máximo);
+#   · prioridad baja: nunca deja sin presupuesto horario al fútbol.
+_OTHER_ODDS_CACHE: dict[str, tuple[datetime, dict | None]] = {}
+_OTHER_ODDS_LOCK = asyncio.Lock()
+_OTHER_ODDS_WINDOW = timedelta(hours=72)
+_MAX_OTHER_ODDS_IDS = 100
+_TTL_OTHER_ODDS = timedelta(hours=2)
+
+
+def _event_kickoff(ev: dict) -> datetime | None:
+    """Kickoff del evento como datetime UTC, o None si falta/no se puede parsear."""
+    for field in ("commenceTime", "commence_time", "startTime", "start_time", "date", "kickoff"):
+        v = ev.get(field)
+        if not v:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    return None
+
+
+async def _fetch_other_sport_odds(events: list[dict], now: datetime) -> dict[str, dict]:
+    """
+    {event_id: odds_item} para los eventos jugables de un deporte no-fútbol.
+    Ver el bloque de comentarios de arriba. Los IDs que la API no devuelve se recuerdan
+    (None) durante _TTL_OTHER_ODDS para no volver a pedirlos; si el lote se aborta por
+    presupuesto/429 NO se marcan, así que se reintentarán cuando haya presupuesto.
+    """
+    window_end = now + _OTHER_ODDS_WINDOW
+    cands: list[tuple[datetime, str]] = []
+    for ev in events:
+        eid = str(ev.get("id") or ev.get("eventId") or "")
+        if not eid:
+            continue
+        kdt = _event_kickoff(ev)
+        if kdt is None:
+            kdt = window_end            # sin fecha: cola de la lista, pero no se descarta
+        elif kdt < now or kdt > window_end:
+            continue
+        cands.append((kdt, eid))
+    cands.sort(key=lambda t: t[0])
+    ids = [eid for _, eid in cands[:_MAX_OTHER_ODDS_IDS]]
+
+    async with _OTHER_ODDS_LOCK:
+        def _fresh(eid: str) -> bool:
+            hit = _OTHER_ODDS_CACHE.get(eid)
+            return bool(hit) and (now - hit[0]) < _TTL_OTHER_ODDS
+
+        missing = [eid for eid in ids if not _fresh(eid)]
+        if missing:
+            items, aborted = await _fetch_odds_batch_ex(missing, low_priority=True)
+            got: set[str] = set()
+            for item in items:
+                eid = str(item.get("eventId") or item.get("id") or "")
+                if eid:
+                    _OTHER_ODDS_CACHE[eid] = (now, item)
+                    got.add(eid)
+            if not aborted:
+                for eid in missing:
+                    if eid not in got:
+                        _OTHER_ODDS_CACHE[eid] = (now, None)
+            logger.info(
+                "odds-api.io: otros deportes — %d jugables (de %d eventos), %d pedidos (~%d req), "
+                "%d con cuotas, aborted=%s",
+                len(ids), len(events), len(missing), -(-len(missing) // 10), len(got), aborted,
+            )
+        out: dict[str, dict] = {}
+        for eid in ids:
+            hit = _OTHER_ODDS_CACHE.get(eid)
+            if hit and hit[1]:
+                out[eid] = hit[1]
+        return out
+
+
 async def get_league_odds(league: str) -> list[dict]:
     """
     Devuelve lista de eventos con cuotas normalizados al formato The Odds API.
@@ -1532,13 +1753,7 @@ async def get_league_odds(league: str) -> list[dict]:
         _EVENT_CACHE[league] = {"events": [], "error": True, "cached_at": now}
         return []
 
-    event_ids = [str(ev.get("id") or ev.get("eventId") or "") for ev in filtered
-                 if ev.get("id") or ev.get("eventId")]
-    odds_map = {}
-    for item in await _fetch_odds_batch(event_ids):
-        eid = str(item.get("eventId") or item.get("id") or "")
-        if eid:
-            odds_map[eid] = item
+    odds_map = await _fetch_other_sport_odds(filtered, now)
 
     normalised = []
     for ev in filtered:

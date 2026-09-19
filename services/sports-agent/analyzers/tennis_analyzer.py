@@ -153,8 +153,12 @@ async def _fetch_tennis_odds_oddsapiio() -> list:
                 logger.info("tennis_analyzer oddsapiio: %d eventos con odds h2h", len(events))
                 return events
         # Cachear 429/error como lista vacía 15 min — evita storm de requests por partido
-        logger.debug("tennis_analyzer oddsapiio odds: HTTP %d — cacheando vacío 15min", resp.status_code)
-        _ODDSAPIIO_ODDS_CACHE[cache_key] = (now - timedelta(hours=2) + timedelta(minutes=15), [])
+        # 400 = error permanente (este endpoint exige eventId; visto en producción en cada
+        # ejecución desde 2026-08-20): 6h en vez de reintentar y gastar presupuesto horario.
+        _retry_in = timedelta(hours=6) if resp.status_code == 400 else timedelta(minutes=15)
+        logger.debug("tennis_analyzer oddsapiio odds: HTTP %d — cacheando vacío %s",
+                     resp.status_code, _retry_in)
+        _ODDSAPIIO_ODDS_CACHE[cache_key] = (now - timedelta(hours=2) + _retry_in, [])
     except Exception:
         logger.debug("tennis_analyzer oddsapiio odds: error de red", exc_info=True)
         _ODDSAPIIO_ODDS_CACHE[cache_key] = (now - timedelta(hours=2) + timedelta(minutes=15), [])
