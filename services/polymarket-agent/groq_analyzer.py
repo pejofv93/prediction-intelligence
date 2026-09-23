@@ -523,6 +523,76 @@ def _set_groq_quota_exhausted() -> None:
         logger.error("groq_analyzer: error persistiendo quota state", exc_info=True)
 
 
+def _is_model_retired_error(err_str: str) -> bool:
+    """True si el error de Groq indica modelo retirado o inexistente (no cuota)."""
+    return (
+        "model_not_found" in err_str
+        or "decommissioned" in err_str
+        or "does not exist" in err_str
+        or "404" in err_str
+    )
+
+
+def _groq_call_kwargs(model: str, max_tokens: int) -> dict:
+    """
+    Parámetros por modelo. Los gpt-oss razonan antes de responder y el
+    razonamiento consume max_tokens: con 750 y el esfuerzo por defecto el JSON
+    salía cortado (120b) o vacío (20b). Con reasoning_effort=low usan ~400
+    tokens; se sube el techo a 1500 como margen. extra_body porque openai==1.51
+    no acepta reasoning_effort como argumento propio.
+    """
+    if model.startswith("openai/gpt-oss"):
+        return {"max_tokens": max(max_tokens, 1500), "extra_body": {"reasoning_effort": "low"}}
+    return {"max_tokens": max_tokens}
+
+
+_GROQ_ALERT_SENT: dict[str, str] = {}  # kind → fecha UTC de la última alerta enviada
+
+
+async def _alert_groq_unavailable(kind: str, detail: str) -> None:
+    """
+    Alerta Telegram (máx. 1 por tipo y día UTC) cuando ningún modelo Groq responde.
+    La deduplicación se persiste en agent_state/groq_alert porque Cloud Run
+    recicla instancias y la caché en memoria no basta.
+    """
+    from datetime import datetime, timezone
+    import httpx
+    from shared.config import TELEGRAM_BOT_URL, CLOUD_RUN_TOKEN
+    from shared.firestore_client import col
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _GROQ_ALERT_SENT.get(kind) == today:
+        return
+    try:
+        ref = col("agent_state").document("groq_alert")
+        doc = ref.get()
+        if doc.exists and (doc.to_dict() or {}).get(kind) == today:
+            _GROQ_ALERT_SENT[kind] = today
+            return
+        ref.set({kind: today}, merge=True)
+    except Exception:
+        logger.warning("groq_analyzer: no se pudo leer/escribir agent_state/groq_alert", exc_info=True)
+    _GROQ_ALERT_SENT[kind] = today
+
+    if not TELEGRAM_BOT_URL:
+        logger.error("groq_analyzer: TELEGRAM_BOT_URL no configurada — alerta Groq no enviada: %s", detail)
+        return
+    text = f"🚨 polymarket-agent: Groq no disponible\n{detail}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # type "matched": el único tipo de /send-alert que envía texto plano
+            # (parse_mode=None) al canal General; los nombres de modelo llevan
+            # "_" y "/" que rompen las entidades Markdown.
+            await client.post(
+                f"{TELEGRAM_BOT_URL}/send-alert",
+                json={"type": "matched", "data": {"text": text}},
+                headers={"x-cloud-token": CLOUD_RUN_TOKEN},
+            )
+        logger.error("groq_analyzer: alerta Telegram enviada (%s): %s", kind, detail)
+    except Exception:
+        logger.error("groq_analyzer: error enviando alerta Groq a Telegram", exc_info=True)
+
+
 def _get_poly_weights() -> dict:
     """Lee poly_model_weights/current con caché de 10 min."""
     global _WEIGHTS_CACHE, _WEIGHTS_CACHE_TS
@@ -3133,15 +3203,22 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         {"role": "user", "content": user_prompt},
     ]
 
+    # Un modelo RETIRADO (404/decommissioned) NO es cuota agotada. Antes ambos
+    # casos acababan en all_tpd=True → latch de cuota + fallback sin LLM en
+    # silencio: del 17-ago al 23-sep Groq había retirado toda la rotación y el
+    # agente analizó 1.417 mercados con conf 0.25 sin emitir una sola alerta.
+    retired_models: list[str] = []
+    quota_models: list[str] = []
+    quota_from_latch = False
+
     # Fix 3: si la cuota ya está persistida como agotada, ir directo al fallback
     if _is_groq_quota_exhausted():
         logger.info(
             "analyze_market(%s): Groq TPD agotado (agent_state) — usando fallback básico",
             market_id,
         )
-        all_tpd = True
+        quota_from_latch = True
     else:
-        all_tpd = True
         for attempt, model in enumerate(GROQ_MODEL_ROTATION):
             try:
                 if attempt > 0:
@@ -3149,25 +3226,58 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                 resp = groq_client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    max_tokens=750,
                     temperature=0.35,
+                    **_groq_call_kwargs(model, 750),
                 )
                 raw_response = resp.choices[0].message.content
-                all_tpd = False
                 break
             except Exception as e:
                 err_str = str(e).lower()
-                if "model_not_found" in err_str or "404" in err_str or "model_decommissioned" in err_str or "decommissioned" in err_str:
-                    logger.warning("analyze_market(%s): modelo %s no disponible — probando siguiente", market_id, model)
+                if _is_model_retired_error(err_str):
+                    retired_models.append(model)
+                    logger.error(
+                        "analyze_market(%s): modelo %s RETIRADO/inexistente en Groq — %s",
+                        market_id, model, e,
+                    )
                     continue
                 if "429" in err_str or "rate_limit" in err_str or "quota" in err_str or "daily" in err_str:
-                    logger.warning("analyze_market(%s): TPD agotado en %s — probando siguiente", market_id, model)
+                    quota_models.append(model)
+                    logger.warning("analyze_market(%s): TPD agotado en %s — %s", market_id, model, e)
                     continue
                 logger.error("analyze_market(%s): error Groq en %s — %s", market_id, model, e, exc_info=True)
                 return None
 
+    # Cuota agotada de verdad = latch activo o TODOS los modelos devolvieron 429.
+    all_tpd = quota_from_latch or (
+        not raw_response and len(quota_models) == len(GROQ_MODEL_ROTATION)
+    )
+
+    # Ningún modelo respondió y alguno está retirado → la rotación está obsoleta.
+    # Alertar y NO caer al análisis sin LLM (sus señales, conf 0.25, nunca se
+    # emiten: solo ensucian poly_predictions y ocultan la avería).
+    if not raw_response and not all_tpd:
+        await _alert_groq_unavailable(
+            "retired",
+            f"Ningún modelo Groq disponible. Retirados: {', '.join(retired_models) or '-'}. "
+            f"Cuota agotada: {', '.join(quota_models) or '-'}. "
+            f"Actualizar GROQ_MODEL_ROTATION en shared/config.py. "
+            f"Polymarket no está analizando mercados.",
+        )
+        logger.error(
+            "analyze_market(%s): sin modelo Groq disponible (retirados=%s, cuota=%s) — mercado omitido",
+            market_id, retired_models, quota_models,
+        )
+        return None
+
     # Fallback básico sin LLM cuando todos los modelos Groq están agotados
     if not raw_response and all_tpd:
+        if not quota_from_latch:
+            await _alert_groq_unavailable(
+                "quota",
+                f"Cuota diaria de Groq agotada en todos los modelos "
+                f"({', '.join(quota_models)}). Polymarket usa análisis básico sin LLM "
+                f"(conf 0.25, no emite alertas) hasta las 00:00 UTC.",
+            )
         _set_groq_quota_exhausted()
         logger.warning("analyze_market(%s): todos los modelos Groq agotados — usando análisis básico", market_id)
         orderbook_fb = enriched_market.get("orderbook", {})
@@ -3233,8 +3343,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                             {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + _json_strict},
                             {"role": "user", "content": user_prompt + "\n\n" + _json_strict},
                         ],
-                        max_tokens=750,
                         temperature=0.0,
+                        **_groq_call_kwargs(model, 750),
                     )
                     _raw = _r.choices[0].message.content
                     for _ext in [

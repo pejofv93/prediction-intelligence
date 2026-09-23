@@ -27,12 +27,13 @@ BETFAIR_APP_KEY  = os.environ.get("BETFAIR_APP_KEY",  "")  # Delayed Key (1.0-DE
 COLLECTION_PREFIX = os.environ.get("FIRESTORE_COLLECTION_PREFIX", "")
 
 # IA
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
+# Groq retiró toda la rotación Llama/Gemma (~17-ago-2026). Modelos de texto
+# vigentes verificados el 23-sep-2026 con GET /openai/v1/models.
 GROQ_MODEL_ROTATION = [
-    "llama-3.3-70b-versatile",   # principal
-    "mixtral-8x7b-32768",        # fallback 1
-    "gemma2-9b-it",              # fallback 2
-    "llama-3.1-8b-instant",      # fallback 3
+    "openai/gpt-oss-120b",       # principal
+    "qwen/qwen3.8-27b",          # fallback 1
+    "openai/gpt-oss-20b",        # fallback 2
 ]
 GROQ_FALLBACK_MODEL = GROQ_MODEL_ROTATION[1]  # backward compat
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"  # compatible con openai SDK
