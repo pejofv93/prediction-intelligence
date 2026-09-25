@@ -751,9 +751,17 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         logger.warning("basketball_analyzer(%s): error odds-api.io — %s", match_id, _oaio_err)
 
     if event is None:
-        sport_key = _SPORT_KEY_MAP.get(league, "basketball_nba")
-        events = await _fetch_basketball_odds(sport_key)
-        event = _find_event(events, home_name, away_name)
+        # Sin default: antes ACB caía a "basketball_nba" y compraba las cuotas NBA (3
+        # créditos) para buscar en ellas un partido de ACB que nunca iba a estar.
+        sport_key = _SPORT_KEY_MAP.get(league)
+        if sport_key:
+            events = await _fetch_basketball_odds(sport_key)
+            event = _find_event(events, home_name, away_name)
+        else:
+            logger.info(
+                "basketball_analyzer(%s): %s sin sport_key en The Odds API — sin fallback [%s vs %s]",
+                match_id, league, home_name, away_name,
+            )
 
     # Fallback final NBA: odds ESPN/Caesars embebidas en Firestore (guardadas en collect).
     if event is None and league in ("NBA", "NBA_GL"):

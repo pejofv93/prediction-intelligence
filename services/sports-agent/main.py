@@ -1813,6 +1813,21 @@ async def _bg_analyze() -> None:
                 from collectors.odds_apiio_client import get_league_odds as _get_oaio_odds
                 _oaio_coros = [_get_oaio_odds(lg) for lg in _active_leagues if lg]
 
+            # Baloncesto: The Odds API cobra 3 créditos por liga (h2h+spreads+totals) aunque no
+            # haya partidos — en pretemporada NBA eran ~6 créditos/día tirados. Solo se pide la
+            # liga que tenga algún partido en la misma ventana que analiza este run.
+            _BBALL_SPORT_KEYS = {"NBA": "basketball_nba", "NBA_GL": "basketball_nba",
+                                 "EUROLEAGUE": "basketball_euroleague"}
+            _bball_sks: set[str] = set()
+            for _d in upcoming_docs_raw:
+                _bd = _d.to_dict() or {}
+                if (_bd.get("sport") in ("nba", "basketball")
+                        and str(_bd.get("match_id", "")) in upcoming_ids_48h
+                        and _bd.get("league") in _BBALL_SPORT_KEYS):
+                    _bball_sks.add(_BBALL_SPORT_KEYS[_bd["league"]])
+            logger.info("analyze: pre-fetch baloncesto The Odds API → %s",
+                        sorted(_bball_sks) or "ninguna liga con partidos")
+
             from analyzers.value_bet_engine import _has_upcoming_matches_for_league as _has_upcoming
             _prefetch_coros = (
                 # odds-api.io: fuente primaria — pre-fetch todas las ligas activas
@@ -1826,10 +1841,9 @@ async def _bg_analyze() -> None:
                 # _fetch_fixtures_for_date reutiliza cualquier rango que contenga el
                 # pedido, así que las búsquedas por partido salen de esta misma carga.
                 + [_fetch_fixtures_for_date(_today, to_date=_week_end)]
-                # The Odds API: baloncesto (NBA + Euroleague)
+                # The Odds API: baloncesto (NBA + Euroleague), solo ligas con partidos
                 # ACB excluido: basketball_spain_acb no existe en The Odds API (HTTP 404)
-                + [_fetch_basketball_odds("basketball_nba"),
-                   _fetch_basketball_odds("basketball_euroleague")]
+                + [_fetch_basketball_odds(sk) for sk in sorted(_bball_sks)]
                 # The Odds API: torneos de tenis activos
                 + [_fetch_tennis_odds(sk, "prefetch") for sk in _tennis_sks]
             )
