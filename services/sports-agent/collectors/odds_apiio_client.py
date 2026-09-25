@@ -197,6 +197,16 @@ _LEAGUE_SLUG_PREFIXES: dict[str, tuple[str, ...]] = {
     # (mismo resultado que hoy, pero explícito en vez de silencioso).
     "WC":   ("international-fifa-world-cup",),
     "WC26": ("international-fifa-world-cup",),
+    # Nations League: un slug por grupo, "…-nations-league-league-a-gr-1" (verificado
+    # 2026-09-25 contra el catálogo real). Las letras de liga (b/c/d) y los números de grupo
+    # (2/3/4) chocan con _SLUG_VARIANT_DENY → usa la lista blanca de _SLUG_REST_ALLOW.
+    "NL":   ("international-uefa-nations-league",),
+}
+
+# Ligas cuyo resto de slug (tras el prefijo) se valida con un patrón exacto en vez de con
+# _SLUG_VARIANT_DENY: su nomenclatura normal usa tokens que la denylist toma por variante.
+_SLUG_REST_ALLOW: dict[str, "re.Pattern[str]"] = {
+    "NL": re.compile(r"^league-[a-d]-gr-\d+$"),
 }
 
 # Tokens que marcan una VARIANTE de la competición (otra categoría, otra división u otro
@@ -237,8 +247,13 @@ def _event_matches_league(ev: dict, league: str) -> bool:
             if slug == base:
                 return True
             if slug.startswith(base + "-"):
-                rest = slug[len(base) + 1:].split("-")
-                if not (set(rest) & _SLUG_VARIANT_DENY):
+                rest_str = slug[len(base) + 1:]
+                allow = _SLUG_REST_ALLOW.get(league)
+                if allow is not None:
+                    if allow.match(rest_str):
+                        return True
+                    continue
+                if not (set(rest_str.split("-")) & _SLUG_VARIANT_DENY):
                     return True
         return False
     keywords = _LEAGUE_KEYWORDS.get(league, [])
@@ -303,7 +318,7 @@ _SPORT_FALLBACK_SLUGS: dict[str, list[str]] = {
 # Ligas que son fútbol / baloncesto / tenis (para decidir qué sport slug buscar)
 _FOOTBALL_LEAGUES = {"PL","PD","BL1","SA","FL1",
                      "CL","EL","ECL","TU1","ARG","CLI","BSA","CSUD","CAM","WC26","WC",
-                     "DED","PPL","ELC"}
+                     "DED","PPL","ELC","NL"}
 _BASKETBALL_LEAGUES = {"NBA","EUROLEAGUE","ACB"}
 # "ATP"/"WTA" (código de tour genérico, no de torneo concreto) son los que de verdad llega
 # a usar tennis_analyzer.py — ver match.get("league", "ATP") en tennis_analyzer.py:444. Sin

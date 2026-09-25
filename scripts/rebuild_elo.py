@@ -480,7 +480,9 @@ def main() -> None:
     ap.add_argument("--prefix", default=os.environ["FIRESTORE_COLLECTION_PREFIX"])
     ap.add_argument("--account", default=os.environ.get("GCLOUD_ACCOUNT"))
     ap.add_argument("--no-uefa", action="store_true", help="solo recomputo, sin siembra UEFA")
-    ap.add_argument("--leagues", default="CL,EL,ECL")
+    # NL (Nations League) entra en el censo para que la siembra nocturna cubra a las
+    # selecciones con prioridad; sus partidos NO entran en el ELO (ver _es_de_seleccion).
+    ap.add_argument("--leagues", default="CL,EL,ECL,NL")
     ap.add_argument("--history-budget", type=int, default=80,
                     help="requests de historial por ejecución (cuota 100/día) — tope "
                          "superior: si allsportsapi2 reporta menos cuota real restante, "
@@ -642,7 +644,7 @@ def main() -> None:
     torneos: dict[str, dict[str, int]] = {}
     for m in club_hist:
         t = m.get("tournament") or ""
-        if not t:
+        if not t or m.get("home_national") or m.get("away_national"):
             continue
         for nombre, sid in ((m["home_team"], m["home_source_id"]),
                             (m["away_team"], m["away_source_id"])):
@@ -667,15 +669,26 @@ def main() -> None:
         return priors.get(team_id, DEFAULT_ELO)
 
     # ── 2. Universo de partidos, deduplicado por huella ──────────────────────
+    # Selecciones FUERA del ELO de clubes: su fuerza vive en el ELO FIFA (team_elo/wc_*),
+    # que data_enricher._resolve_elo solo consulta mientras team_elo/sf_<id> no exista.
+    # Un rebuild que las recomputase crearía sf_<id> desde 1500 y taparía el FIFA. Ids de
+    # selección: docs sembrados con national_team + los que el historial marca `national`.
+    selecciones = national_ids(team_stats, uefa_matches + club_hist, imap)
+    if selecciones:
+        print(f"   {len(selecciones)} selecciones excluidas del recomputo de ELO")
     universe: dict[str, dict] = {}
     src_count = {"raw_matches": 0, "match_results": 0, "uefa": 0}
 
     for t in team_stats:
+        if str(t.get("team_id")) in selecciones:
+            continue
         for m in t.get("raw_matches") or []:
             if m.get("goals_home") is None or m.get("goals_away") is None:
                 continue
             h, a = str(m.get("home_team_id")), str(m.get("away_team_id"))
             if not h or not a or h == "None" or a == "None":
+                continue
+            if h in selecciones or a in selecciones:
                 continue
             fp = match_fingerprint(m.get("date", ""), h, a)
             if fp not in universe:
@@ -692,6 +705,8 @@ def main() -> None:
         a = resolve(r.get("away_team", ""), f"res_{r.get('_id')}", imap)
         if h.startswith("res_") or a.startswith("res_"):
             continue                      # equipo desconocido: sin id canónico, se omite
+        if h in selecciones or a in selecciones or r.get("league") == "NL":
+            continue
         if r.get("goals_home") is None or r.get("goals_away") is None:
             continue
         fp = match_fingerprint(r.get("match_date", ""), h, a)
@@ -701,6 +716,8 @@ def main() -> None:
             src_count["match_results"] += 1
 
     for m in uefa_matches + club_hist:
+        if m.get("home_national") or m.get("away_national"):
+            continue
         norm = norm_uefa_match(m, imap)
         if not norm:
             continue
@@ -828,6 +845,18 @@ def main() -> None:
           f"(y contra la copia: --elo-collection {backup_col})")
 
 
+def national_ids(team_stats: list[dict], partidos: list[dict], imap: dict) -> set[str]:
+    """Ids canónicos de selecciones nacionales (docs marcados + flag `national` del evento)."""
+    out = {str(t.get("team_id")) for t in team_stats
+           if t.get("national_team") and t.get("team_id") is not None}
+    for m in partidos:
+        if m.get("home_national"):
+            out.add(resolve(m["home_team"], m["home_source_id"], imap))
+        if m.get("away_national"):
+            out.add(resolve(m["away_team"], m["away_source_id"], imap))
+    return out
+
+
 def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
                           team_stats: list[dict], imap: dict, names: dict) -> dict[str, dict]:
     """
@@ -835,13 +864,27 @@ def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
     (raw_matches + derivadas), fusionando con el histórico que ya hubiera guardado.
     """
     existing = {str(t.get("team_id")): t for t in team_stats if t.get("team_id") is not None}
+    # Docs sin team_id (las selecciones del Mundial, `sf_<id>` escritas por sofascore_wc):
+    # se localizan por el id del doc. Sin esto se sobrescribían enteros y perdían sus
+    # campos (league WC26, xG, sf_team_id) y el nombre salía como "Team_sf_<id>".
+    for t in team_stats:
+        if t.get("_id") and str(t["_id"]) not in existing:
+            existing[str(t["_id"])] = t
     por_equipo: dict[str, list[dict]] = {}
+    nombre_visto: dict[str, str] = {}
+    nacional: set[str] = set()
 
     for m in club_hist:
         if m.get("goals_home") is None or m.get("goals_away") is None:
             continue
         h = resolve(m["home_team"], m["home_source_id"], imap)
         a = resolve(m["away_team"], m["away_source_id"], imap)
+        nombre_visto.setdefault(h, m.get("home_team", ""))
+        nombre_visto.setdefault(a, m.get("away_team", ""))
+        if m.get("home_national"):
+            nacional.add(h)
+        if m.get("away_national"):
+            nacional.add(a)
         for tid in (h, a):
             por_equipo.setdefault(tid, []).append({
                 "match_id": m["match_id"],
@@ -871,9 +914,14 @@ def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
              "goals_conceded": (x["goals_away"] if x.get("was_home") else x["goals_home"])}
             for x in raw
         ]
+        # Se conservan los campos que ya tuviera el doc (merge) y se pisan solo los que
+        # esta función recalcula. "_id" es metadata de lectura; updated_at se renueva.
+        conservados = {k: v for k, v in prev.items() if k not in ("_id", "updated_at")}
         out[tid] = {
+            **conservados,
             "team_id": typed(tid),
-            "team_name": prev.get("team_name") or names.get(tid, f"Team_{tid}"),
+            "team_name": (prev.get("team_name") or names.get(tid)
+                          or nombre_visto.get(tid) or f"Team_{tid}"),
             "league": prev.get("league", ""),
             "last_10": last_10,
             "form_score": calculate_form_score(last_10),
@@ -885,6 +933,9 @@ def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
             "updated_at": now,
             "seeded_from": "allsportsapi2",
         }
+        if tid in nacional or prev.get("national_team"):
+            out[tid]["national_team"] = True
+            out[tid].setdefault("sport", "football")
     return out
 
 

@@ -1170,7 +1170,49 @@ async def _collect_wc2026_from_odds_api() -> list[dict]:
     return matches
 
 
-_UEFA_RESULTS_HOURS = {0, 12}   # horas UTC en las que se piden resultados (ver _collect_uefa)
+# Resultados UEFA: se piden si han pasado más de este intervalo desde la última lectura
+# buena (marca en api_meta/uefa_results). Antes era un conjunto de horas UTC {0, 12}, pero
+# GitHub Actions retrasa el cron de sports-collect (0 */6) y los ciclos reales caen hacia
+# las 02:50/11:00/16:20/21:00 → en 10 días (15-25 sep 2026) no se pidió ni un resultado y
+# CL/EL/ECL no graduaban por esta vía. Con 10 h salen ~2 lecturas al día pase lo que pase
+# con el horario del cron.
+_UEFA_RESULTS_MIN_INTERVAL = timedelta(hours=10)
+_UEFA_RESULTS_META_DOC = "uefa_results"
+
+# Ligas cuyos resultados NO actualizan el ELO. NL (selecciones): el ELO FIFA vive en
+# team_elo/wc_<nombre> y _resolve_elo solo lo usa mientras team_elo/sf_<id> no exista; el
+# primer resultado crearía sf_<id> desde 1500 y taparía para siempre el FIFA (Italia ~1850
+# → ~1500). Hasta tener un arranque del ELO de selecciones desde el FIFA, fuera.
+_UEFA_NO_ELO_LEAGUES = {"NL"}
+
+
+def _uefa_results_due() -> bool:
+    """True si toca pedir resultados UEFA (última lectura buena hace > intervalo)."""
+    try:
+        from shared.firestore_client import col
+        snap = col("api_meta").document(_UEFA_RESULTS_META_DOC).get()
+        last = (snap.to_dict() or {}).get("fetched_at") if snap.exists else None
+        if last is None:
+            return True
+        if isinstance(last, str):
+            last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - last >= _UEFA_RESULTS_MIN_INTERVAL
+    except Exception:
+        # Sin poder leer la marca: pedir (4 requests) antes que volver a quedarnos a ciegas.
+        logger.warning("collect.uefa: no se pudo leer la marca de resultados — se piden", exc_info=True)
+        return True
+
+
+def _mark_uefa_results_fetched() -> None:
+    try:
+        from shared.firestore_client import col
+        col("api_meta").document(_UEFA_RESULTS_META_DOC).set(
+            {"fetched_at": datetime.now(timezone.utc)}, merge=True,
+        )
+    except Exception:
+        logger.warning("collect.uefa: no se pudo guardar la marca de resultados", exc_info=True)
 
 # Solo se ingieren partidos UEFA que arrancan dentro de esta ventana. La fase de liga de
 # CL/EL/ECL tiene 8 jornadas repartidas de septiembre a enero y Sofascore las sirve TODAS
@@ -1182,7 +1224,9 @@ _UEFA_FIXTURE_HORIZON_DAYS = int(os.environ.get("UEFA_FIXTURE_HORIZON_DAYS", "30
 
 async def _collect_uefa() -> None:
     """
-    Fixtures y resultados de CL/EL/ECL desde allsportsapi2 (espejo de Sofascore).
+    Fixtures y resultados de CL/EL/ECL y Nations League (NL) desde allsportsapi2 (espejo
+    de Sofascore). NL: football-data free no la cubre; sus resultados no tocan el ELO
+    (ver _UEFA_NO_ELO_LEAGUES).
 
     football-data.org en plan free devuelve CL con 0 partidos (las previas y el playoff no
     entran), EL 403 y ECL 404, así que sin esto no entra ni un partido europeo en
@@ -1202,8 +1246,9 @@ async def _collect_uefa() -> None:
     Los clubes sin histórico sembrado no llegarán a emitir señal (DIAG_POISSON_GUARD los
     corta por falta de datos): es lo esperado hasta que la siembra los cubra.
 
-    Cuota: ~6 requests por ciclo para fixtures; los resultados solo en _UEFA_RESULTS_HOURS
-    para no gastar 4 veces al día lo que cambia una vez.
+    Cuota: ~8 requests por ciclo para fixtures (4 torneos); los resultados solo cuando han
+    pasado _UEFA_RESULTS_MIN_INTERVAL desde la última lectura buena (~2 veces al día), para
+    no gastar 4 veces al día lo que cambia una vez.
     """
     from collectors.allsports_uefa import UEFA_TOURNAMENTS, fetch_tournament_matches
     from collectors.team_identity import build_identity_map, match_fingerprint, resolve
@@ -1264,21 +1309,34 @@ async def _collect_uefa() -> None:
                 return True
         return False
 
-    hora = datetime.now(timezone.utc).hour
+    pedir_resultados = _uefa_results_due()
     horizonte = datetime.now(timezone.utc) + timedelta(days=_UEFA_FIXTURE_HORIZON_DAYS)
     proximos: list[dict] = []
     jugados: list[dict] = []
     ligas_leidas: set[str] = set()   # solo se poda lo que se ha podido releer
+    ligas_con_resultados: set[str] = set()
     for league in UEFA_TOURNAMENTS:
         try:
             got = await fetch_tournament_matches(league, "next")
             if got:
                 ligas_leidas.add(league)
             proximos += got
-            if hora in _UEFA_RESULTS_HOURS:
-                jugados += await fetch_tournament_matches(league, "last")
+            if pedir_resultados:
+                fin = await fetch_tournament_matches(league, "last")
+                if fin:
+                    ligas_con_resultados.add(league)
+                jugados += fin
         except Exception:
             logger.error("collect.uefa: error recogiendo %s", league, exc_info=True)
+    if pedir_resultados:
+        logger.info(
+            "collect.uefa: resultados pedidos — %d partidos jugados de %s",
+            len(jugados), sorted(ligas_con_resultados) or "ninguna liga",
+        )
+        # Solo se marca si alguna liga respondió: con 429/red caída se reintenta al
+        # siguiente ciclo en vez de esperar otras 10 h a ciegas.
+        if ligas_con_resultados:
+            _mark_uefa_results_fetched()
 
     def _canonizar(m: dict) -> dict:
         h = resolve(m["home_team"], m["home_source_id"], identity)
@@ -1397,7 +1455,8 @@ async def _collect_uefa() -> None:
             [{"home_team_id": m["home_team_id"], "away_team_id": m["away_team_id"],
               "result": ("HOME_WIN" if m["goals_home"] > m["goals_away"]
                          else "AWAY_WIN" if m["goals_away"] > m["goals_home"] else "DRAW"),
-              "date": m.get("date", "")} for m in terminados],
+              "date": m.get("date", "")} for m in terminados
+             if m.get("league") not in _UEFA_NO_ELO_LEAGUES],
             source="collect_uefa",
         )
     except Exception:

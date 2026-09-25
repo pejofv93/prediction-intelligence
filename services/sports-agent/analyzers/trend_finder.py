@@ -56,6 +56,7 @@ _LEAGUE_LABEL = {
     "PL": "Premier League", "PD": "La Liga", "BL1": "Bundesliga",
     "SA": "Serie A", "FL1": "Ligue 1",
     "CL": "Champions League", "EL": "Europa League", "ECL": "Conference League",
+    "NL": "Nations League",
 }
 
 _PATTERN_TAG = {"series": "🎯", "rolling": "📉", "model": "📐"}

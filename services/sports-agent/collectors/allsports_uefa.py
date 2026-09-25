@@ -31,7 +31,9 @@ _DELAY = 0.4          # cortesía entre llamadas
 _PAGE_SIZE = 30       # tamaño real de página observado
 
 # tournament ids (los mismos de Sofascore)
-UEFA_TOURNAMENTS: dict[str, int] = {"CL": 7, "EL": 679, "ECL": 17015}
+# NL = UEFA Nations League (selecciones). football-data free no la cubre; 26/27 verificada
+# 2026-09-25 (season 89945). Su campaña se etiqueta igual que la de clubes ("26/27").
+UEFA_TOURNAMENTS: dict[str, int] = {"CL": 7, "EL": 679, "ECL": 17015, "NL": 10783}
 
 # Caché en proceso del descubrimiento de temporada + TTL del doc en Firestore
 _SEASON_CACHE: dict[str, int] = {}
@@ -221,6 +223,10 @@ def parse_event(raw: dict, league: str) -> dict | None:
             "date": (datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""),
             "round": (raw.get("roundInfo") or {}).get("name", ""),
             "status": "FINISHED" if status_type == "finished" else "SCHEDULED",
+            # Selección nacional (flag `national` del equipo en Sofascore). La siembra lo usa
+            # para no meter partidos de selecciones en el ELO de clubes (ver rebuild_elo.py).
+            "home_national": bool(ht.get("national")),
+            "away_national": bool(at.get("national")),
         }
     except Exception:
         logger.error("allsports_uefa: error parseando evento", exc_info=True)
