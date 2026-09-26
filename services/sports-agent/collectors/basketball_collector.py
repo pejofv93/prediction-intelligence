@@ -69,6 +69,23 @@ _SOFASCORE_HEADERS = {
 }
 
 
+def _recent_first(matches: list[dict]) -> list[dict]:
+    """
+    Partidos del más reciente al más antiguo por match_date (los sin fecha, al final).
+
+    CONVENCIÓN de team_stats de baloncesto: raw_matches/last_10 van SIEMPRE más reciente
+    primero — es lo que asumen calculate_form_score/detect_streak (posición 0 = último
+    partido) y el analyzer. Cada fuente entrega un orden distinto (ESPN del más antiguo al
+    más reciente; Euroliga al revés; Sofascore por páginas), así que se normaliza aquí antes
+    de quedarse con los 10 últimos. Sin esto, con ESPN se guardaban los 10 PRIMEROS partidos
+    de la temporada y la forma daba el peso máximo al más antiguo.
+    """
+    con_fecha = [m for m in matches if str(m.get("match_date") or "")[:10]]
+    sin_fecha = [m for m in matches if not str(m.get("match_date") or "")[:10]]
+    con_fecha.sort(key=lambda m: str(m.get("match_date"))[:10], reverse=True)
+    return con_fecha + sin_fecha
+
+
 def _hash_team_id(code: str) -> int:
     """Convierte código de equipo en entero estable (para Euroleague)."""
     return int(hashlib.md5(code.encode()).hexdigest()[:8], 16) % 900_000 + 100_000
@@ -683,7 +700,7 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                             "basketball_collector: sin historial para team %d (%s)", team_id, source
                         )
                         continue
-                    raw_matches_fmt = team_matches[:10]
+                    raw_matches_fmt = _recent_first(team_matches)[:10]
                     results = [
                         "W" if (m["goals_home"] > m["goals_away"] and m["was_home"])
                              or (m["goals_away"] > m["goals_home"] and not m["was_home"])
@@ -711,7 +728,7 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                     }
                 elif source == "espn":
                     # ESPN schedule → raw_matches ya en formato correcto
-                    raw_matches_fmt = await get_nba_team_stats_espn(team_id)
+                    raw_matches_fmt = _recent_first(await get_nba_team_stats_espn(team_id))[:10]
                     if not raw_matches_fmt:
                         logger.debug("basketball_collector: ESPN sin partidos completados para team %d", team_id)
                         continue

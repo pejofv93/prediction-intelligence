@@ -561,8 +561,19 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     # --- Back-to-back detection ---
     yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
 
+    # ORDEN: estas tres funciones leen "los últimos partidos". Antes asumían raw_matches
+    # del más antiguo al más reciente ([-3:], reversed([-5:])), pero el colector los guarda
+    # del más reciente al más antiguo → leían los MÁS VIEJOS: descanso de 100+ días (caso
+    # ACB), back-to-back nunca detectado, rachas contadas desde el principio del historial.
+    # Con el historial de Euroliga mezclando dos temporadas, eso son partidos de la anterior.
+    # Se ordena aquí por fecha (no se confía en el orden guardado: los docs viejos siguen
+    # en Firestore hasta el próximo collect).
+    def _recent_first(raw_matches: list) -> list:
+        con_fecha = [m for m in raw_matches if str(m.get("match_date") or "")[:10]]
+        return sorted(con_fecha, key=lambda m: str(m.get("match_date"))[:10], reverse=True)
+
     def _played_yesterday(raw_matches: list) -> bool:
-        for m in raw_matches[-3:]:  # solo últimos 3 para evitar N lecturas
+        for m in _recent_first(raw_matches)[:3]:  # solo los 3 más recientes
             d = str(m.get("match_date", ""))[:10]
             if d == yesterday_iso:
                 return True
@@ -570,7 +581,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
 
     def _days_since_last_game(raw_matches: list) -> int | None:
         today_iso = datetime.now(timezone.utc).date().isoformat()
-        for m in reversed(raw_matches[-5:]):
+        for m in _recent_first(raw_matches)[:5]:
             d = str(m.get("match_date", ""))[:10]
             if d and d < today_iso:
                 try:
@@ -585,7 +596,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         # con normalización a str para evitar mismatch int/str según la fuente.
         team_id_str = str(team_id)
         streak = 0
-        for m in reversed(raw_matches[-10:]):
+        for m in _recent_first(raw_matches)[:10]:
             was_home = m.get("was_home")
             if was_home is None:
                 htid = m.get("home_team_id")
