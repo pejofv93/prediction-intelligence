@@ -28,10 +28,27 @@ from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
 
-_EUR_GAMES_URL = (
+# Temporada calculada por fecha (antes fija a E2025: en la 2026-27 el colector seguía leyendo
+# la temporada acabada). El feed devuelve los partidos del MÁS RECIENTE al más antiguo y
+# con limit=300 sobre 380 se perdían justo las primeras jornadas → se pagina con offset.
+_EUR_GAMES_BASE = (
     "https://feeds.incrowdsports.com/provider/euroleague-feeds/v2"
-    "/competitions/E/seasons/E2025/games?limit=300"
+    "/competitions/E/seasons/{season}/games"
 )
+_EUR_PAGE_SIZE = 100
+_EUR_MAX_PAGES = 10   # la fase regular son 380 partidos; tope de seguridad
+_EUR_FIXTURE_HORIZON_DAYS = 10
+
+
+def _eur_season_code(now: datetime | None = None, offset: int = 0) -> str:
+    """
+    Código de temporada del feed: "E2026" = 2026-27. La Euroliga arranca a finales de
+    septiembre y la Final Four es en mayo, así que de agosto a diciembre la temporada es
+    la del año en curso y de enero a julio la del anterior. offset=-1 → la temporada previa.
+    """
+    now = now or datetime.now(timezone.utc)
+    start = now.year if now.month >= 8 else now.year - 1
+    return f"E{start + offset}"
 _ACB_NEXT_URL = "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4408"
 _ACB_PREV_URL = "https://www.thesportsdb.com/api/v1/json/3/eventspastleague.php?id=4408"
 _HTTP_TIMEOUT = 15
@@ -74,6 +91,30 @@ def _http_get(url: str) -> dict | list | None:
     except Exception as e:
         logger.warning("_http_get(%s): %s", url, e)
         return None
+
+
+def _fetch_eur_season_games(season: str) -> list[dict]:
+    """
+    Todos los partidos de una temporada del feed de Euroliga, paginando con offset hasta
+    totalItems. Síncrono (urllib) — llamar vía run_in_executor.
+    """
+    games: list[dict] = []
+    total: int | None = None
+    for page in range(_EUR_MAX_PAGES):
+        url = (f"{_EUR_GAMES_BASE.format(season=season)}"
+               f"?limit={_EUR_PAGE_SIZE}&offset={page * _EUR_PAGE_SIZE}")
+        data = _http_get(url)
+        if not isinstance(data, dict):
+            break
+        batch = data.get("data") or []
+        games.extend(batch)
+        total = (data.get("metadata") or {}).get("totalItems", total)
+        if not batch or len(batch) < _EUR_PAGE_SIZE or (total is not None and len(games) >= total):
+            break
+    if total is not None and len(games) < total:
+        logger.warning("_fetch_eur_season_games(%s): %d de %d partidos (paginación incompleta)",
+                       season, len(games), total)
+    return games
 
 
 def _http_get_sofascore(url: str) -> dict | None:
@@ -182,14 +223,19 @@ async def _fetch_acb_games_sofascore() -> list[dict]:
 
 
 async def _fetch_euroleague_games() -> list[dict]:
-    """Partidos Euroleague desde la API oficial gratuita. Sin key."""
+    """Partidos Euroleague de la temporada en curso desde la API oficial gratuita. Sin key."""
     loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(None, _http_get, _EUR_GAMES_URL)
-    if not data:
+    season = _eur_season_code()
+    games = await loop.run_in_executor(None, _fetch_eur_season_games, season)
+    if not games:
+        logger.warning("_fetch_euroleague_games: feed vacío para %s", season)
         return []
 
-    games = data.get("data", []) if isinstance(data, dict) else []
     result: list[dict] = []
+    # El feed trae la temporada entera (380 partidos): sin horizonte, cada collect escribía
+    # en upcoming_matches partidos de abril. Misma ventana que el enrich (10 días).
+    horizonte = datetime.now(timezone.utc) + timedelta(days=_EUR_FIXTURE_HORIZON_DAYS)
+    fuera_ventana = 0
 
     for g in games:
         status = _eur_status(g.get("status", ""))
@@ -198,6 +244,14 @@ async def _fetch_euroleague_games() -> list[dict]:
         # Incluir: no terminados (upcoming/live) + siempre Final Four
         if status == "FINISHED" and phase != "FF":
             continue
+        if status != "FINISHED":
+            try:
+                kickoff = datetime.fromisoformat(str(g.get("date", "")).replace("Z", "+00:00"))
+                if kickoff > horizonte:
+                    fuera_ventana += 1
+                    continue
+            except ValueError:
+                pass   # sin fecha parseable: se deja pasar, como antes
 
         home = g.get("home", {})
         away = g.get("away", {})
@@ -218,7 +272,8 @@ async def _fetch_euroleague_games() -> list[dict]:
             "phase": phase,
         })
 
-    logger.info("_fetch_euroleague_games: %d partidos (no terminados + FF)", len(result))
+    logger.info("_fetch_euroleague_games(%s): %d partidos (no terminados + FF), %d fuera de "
+                "ventana (>%dd)", season, len(result), fuera_ventana, _EUR_FIXTURE_HORIZON_DAYS)
     return result
 
 
@@ -351,10 +406,22 @@ async def _fetch_acb_team_last_games(team_id: int) -> list[dict]:
 
 
 async def _fetch_euroleague_history() -> list[dict]:
-    """Partidos Euroleague terminados de la temporada actual. Sin key."""
+    """
+    Partidos Euroleague terminados de la temporada en curso + la anterior, del más reciente
+    al más antiguo. Sin key.
+
+    La anterior entra porque en las primeras jornadas cada equipo lleva 0-2 partidos: sin
+    ella el analyzer los salta por falta de raw_matches (o calcula forma con 1 partido).
+    collect_basketball_team_stats toma los 10 primeros → la temporada previa se va
+    desplazando sola a medida que se juega la nueva. También alimenta al grader (EUR).
+    """
     loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(None, _http_get, _EUR_GAMES_URL)
-    games = data.get("data", []) if isinstance(data, dict) else []
+    games: list[dict] = []
+    for season in (_eur_season_code(), _eur_season_code(offset=-1)):
+        try:
+            games += await loop.run_in_executor(None, _fetch_eur_season_games, season)
+        except Exception:
+            logger.warning("_fetch_euroleague_history: error leyendo %s", season, exc_info=True)
     result: list[dict] = []
     for g in games:
         if _eur_status(g.get("status", "")) != "FINISHED":
@@ -381,6 +448,9 @@ async def _fetch_euroleague_history() -> list[dict]:
             })
         except (ValueError, TypeError, KeyError):
             continue
+    # Más reciente primero — el mismo orden que daba el feed de una sola temporada, que es
+    # el que asume collect_basketball_team_stats al quedarse con los 10 primeros.
+    result.sort(key=lambda m: m.get("match_date", ""), reverse=True)
     logger.info("_fetch_euroleague_history: %d partidos Euroleague terminados", len(result))
     return result
 
