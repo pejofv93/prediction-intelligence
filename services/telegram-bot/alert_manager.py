@@ -523,6 +523,119 @@ def _claim_alert_slot(key: str, alert_type: str) -> bool:
         return True
 
 
+# ── Baloncesto: una alerta por partido y mercado ─────────────────────────────
+# La clave genérica (_alert_key) lleva equipo y línea y caduca a las 24h: con los partidos
+# de Euroliga visibles una semana antes y 3-4 análisis al día, cada señal se reenviaba a
+# diario, cada movimiento de línea (Over 167.5 → 178.5) contaba como señal nueva y un
+# cambio de lado del modelo (Barça → Besiktas) salía como alerta contraria.
+# Aquí la clave es partido+fecha+mercado y el slot vive hasta el inicio del partido
+# (la fecha va en la clave, así que el siguiente cruce de los mismos equipos es otro slot).
+# Con el slot tomado solo se reenvía por CAMBIO MATERIAL: mismo lado, misma línea, cuota
+# al menos un 5% mejor que la enviada y EV no inferior; un único reenvío por slot.
+# Cambio de lado, de línea o solo de tier → nunca.
+_BBALL_SPORTS = ("basketball", "nba")
+_BBALL_RESEND_MIN_ODDS_GAIN = 0.05
+_BBALL_MAX_RESENDS = 1
+_LINE_RE = re.compile(r"\s*([+-]?\d+(?:\.\d+)?)\s*(H1|Q1)?\s*$", re.IGNORECASE)
+_BBALL_DOC_SUFFIX_RE = re.compile(r"_(ml(_home|_away)?|spread|tot(_over|_under)?|h1_.*|q1_.*)$")
+
+
+def _bball_side_and_line(selection: str) -> tuple[str, float | None]:
+    """'Over 176.5' → ('over', 176.5) · 'Paris Basketball -4.5' → ('paris basketball', -4.5)
+    · 'Real Madrid' → ('real madrid', None) · 'Over 85.5 H1' → ('over', 85.5)."""
+    sel = str(selection or "").strip()
+    m = _LINE_RE.search(sel)
+    if not m:
+        return sel.lower(), None
+    return sel[:m.start()].strip().lower(), float(m.group(1))
+
+
+def _bball_slot_key(prediction: dict) -> str | None:
+    """bball_{home}_vs_{away}_{YYYY-MM-DD}_{mercado}. None si falta fecha o equipos."""
+    home = str(prediction.get("home_team") or "").lower().strip()
+    away = str(prediction.get("away_team") or "").lower().strip()
+    day = str(prediction.get("match_date") or "")[:10]
+    if not home or not away or len(day) != 10:
+        return None
+    market = prediction.get("market_type") or "h2h"
+    return f"bball_{home}_vs_{away}_{day}_{market}"
+
+
+def _bball_resend_decision(prev: dict, side: str, line: float | None,
+                           odds: float, ev: float) -> tuple[bool, str]:
+    """¿El slot ya tomado admite esta señal? Devuelve (reenviar, motivo)."""
+    if prev.get("side") != side:
+        return False, f"cambio de lado {prev.get('side')!r} → {side!r}"
+    if prev.get("line") != line:
+        return False, f"cambio de línea {prev.get('line')} → {line}"
+    if int(prev.get("resends") or 0) >= _BBALL_MAX_RESENDS:
+        return False, "reenvío ya usado"
+    prev_odds = prev.get("odds")
+    prev_ev = prev.get("ev")
+    if prev_odds is None or prev_ev is None:
+        return False, "sin cuota de referencia"
+    if odds < float(prev_odds) * (1 + _BBALL_RESEND_MIN_ODDS_GAIN):
+        return False, f"cuota {odds:.2f} sin mejora material sobre {float(prev_odds):.2f}"
+    if ev < float(prev_ev):
+        return False, f"EV {ev:.3f} inferior al enviado {float(prev_ev):.3f}"
+    return True, f"cuota {float(prev_odds):.2f} → {odds:.2f}"
+
+
+def _claim_bball_slot(prediction: dict) -> tuple[bool, float | None]:
+    """
+    Slot de baloncesto. Devuelve (enviar, cuota_previa): cuota_previa es None en el primer
+    envío y la cuota ya enviada en un reenvío por cuota mejorada. Escrituras con
+    precondición (create / update_time) para que dos analyze simultáneos no envíen los
+    dos. Fail-open ante error de Firestore, igual que _claim_alert_slot.
+    """
+    from google.api_core import exceptions as gexc
+    from shared.firestore_client import col, get_client
+
+    key = _bball_slot_key(prediction)
+    if key is None:  # sin fecha no hay slot por partido → dedup genérico de 24h
+        return _claim_alert_slot(_alert_key(prediction), "sports"), None
+
+    side, line = _bball_side_and_line(prediction.get("selection") or prediction.get("team_to_back"))
+    odds = float(prediction.get("odds") or 0)
+    _ev_raw = prediction.get("ev")
+    ev = float(_ev_raw) if _ev_raw is not None else float(prediction.get("edge") or 0)
+    now = datetime.now(timezone.utc)
+    record = {
+        "alert_key": key, "type": "sports_bball", "sent_at": now,
+        "side": side, "line": line, "odds": odds, "ev": ev,
+        "selection": prediction.get("selection"),
+        "match_date": str(prediction.get("match_date") or ""),
+    }
+    ref = col("alerts_sent").document(_safe_doc_id(key))
+    try:
+        snap = ref.get()
+        if not snap.exists:
+            try:
+                ref.create({**record, "resends": 0})
+            except gexc.Conflict:  # AlreadyExists hereda de Conflict
+                logger.info("_claim_bball_slot: carrera perdida → omitida (%s)", key)
+                return False, None
+            return True, None
+        prev = snap.to_dict() or {}
+        resend, why = _bball_resend_decision(prev, side, line, odds, ev)
+        if not resend:
+            logger.info("_claim_bball_slot: %s → omitida (%s)", why, key)
+            return False, None
+        try:
+            ref.update(
+                {**record, "resends": int(prev.get("resends") or 0) + 1},
+                option=get_client().write_option(last_update_time=snap.update_time),
+            )
+        except gexc.FailedPrecondition:
+            logger.info("_claim_bball_slot: carrera perdida en reenvío → omitida (%s)", key)
+            return False, None
+        logger.info("_claim_bball_slot: reenvío por %s (%s)", why, key)
+        return True, float(prev["odds"])
+    except Exception as exc:
+        logger.error("_claim_bball_slot(%s): error Firestore → fail-open: %s", key, exc)
+        return True, None
+
+
 async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) -> int:
     """
     Compara cuotas actuales vs cuotas en señales PENDIENTES de Firestore.
@@ -580,8 +693,9 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
                 continue
 
             match_id = str(pred.get("match_id") or doc.id)
-            # Extraer el match_id base (sin sufijos _ml_home, _spread, etc.)
-            base_id = match_id.split("_ml_")[0].split("_spread")[0].split("_tot_")[0].split("_h1_")[0].split("_q1_")[0]
+            # Extraer el match_id base (sin sufijos de mercado de baloncesto: _ml, _spread,
+            # _tot, _h1_*, _q1_* — y los antiguos _ml_home/_ml_away/_tot_over/_tot_under)
+            base_id = _BBALL_DOC_SUFFIX_RE.sub("", match_id)
 
             current_odds = current_odds_by_match.get(base_id) or current_odds_by_match.get(match_id)
             if current_odds is None:
@@ -705,10 +819,20 @@ async def send_sports_alert(prediction: dict) -> bool:
         return False
 
     # Dedup atómico: pre-escribe antes de enviar
-    if not _claim_alert_slot(key, "sports"):
+    _resend_from_odds = None
+    if str(prediction.get("sport", "")).lower() in _BBALL_SPORTS:
+        _ok, _resend_from_odds = _claim_bball_slot(prediction)
+        if not _ok:
+            return False
+    elif not _claim_alert_slot(key, "sports"):
         return False
 
     text = _format_alert_unified(prediction)
+    if _resend_from_odds is not None:
+        text = (
+            f"🔁 ACTUALIZACIÓN — misma señal, cuota mejorada "
+            f"{_resend_from_odds:.2f} → {float(prediction.get('odds') or 0):.2f}\n" + text
+        )
 
     # Calibración de confianza: muestra win rate histórico real cuando hay ≥10 señales en el bucket
     try:

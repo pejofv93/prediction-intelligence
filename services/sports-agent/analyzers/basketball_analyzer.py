@@ -274,10 +274,18 @@ def _get_spread_odds(event: dict) -> dict | None:
     The Odds API codifica spreads con signo opuesto por equipo:
       home outcome pt=-1.5, away outcome pt=+1.5 para el mismo handicap.
     Normalizamos home_line al punto del local (mismo patrón que football_markets FIX6).
+
+    Línea PRINCIPAL, no alternativa: el mercado `spreads` puede traer además las líneas
+    alternativas de la casa (odds-api.io mapea alternative_spread → spreads). Antes se
+    devolvía la línea más negativa de todas las casas juntas, que siempre es una
+    alternativa extrema con cuota larga (CB Breogan -3.5 @3.40 con EV +205%). Ahora,
+    casa por casa y en el mismo orden que el moneyline, se elige la línea con ambos lados
+    cuyas cuotas están más equilibradas, que es la principal. Sin pareja completa no hay
+    línea: un lado suelto no se puede validar contra el otro.
     """
     home_team = event.get("home_team", "")
-    collected: dict[float, dict] = {}
     for bk in event.get("bookmakers", []):
+        collected: dict[float, dict] = {}
         for mkt in bk.get("markets", []):
             if mkt.get("key") != "spreads":
                 continue
@@ -293,34 +301,31 @@ def _get_spread_odds(event: dict) -> dict | None:
                 is_home = _normalize(nm)[:6] == _normalize(home_team)[:6]
                 # Normalizar clave al punto home (negativo si home da puntos)
                 key = round(pt if is_home else -pt, 1)
-                if key not in collected:
-                    collected[key] = {"bookmaker": bk.get("key", "bet365")}
+                entry = collected.setdefault(key, {"bookmaker": bk.get("key", "bet365")})
                 if is_home:
-                    collected[key]["home_line"] = pt
-                    collected[key]["home_odds"] = pr
+                    entry["home_line"] = pt
+                    entry["home_odds"] = pr
                 else:
-                    collected[key]["away_line"] = pt
-                    collected[key]["away_odds"] = pr
-    # Preferir línea con ambos lados; fallback a solo home
-    for key in sorted(collected.keys()):
-        entry = collected[key]
-        if "home_odds" in entry and "away_odds" in entry:
-            entry.setdefault("home_line", key)
-            return entry
-    for key in sorted(collected.keys()):
-        entry = collected[key]
-        if "home_odds" in entry:
-            entry.setdefault("home_line", key)
-            return entry
+                    entry["away_line"] = pt
+                    entry["away_odds"] = pr
+        complete = [e for e in collected.values() if "home_odds" in e and "away_odds" in e]
+        if complete:
+            return min(complete, key=lambda e: abs(e["home_odds"] - e["away_odds"]))
     return None
 
 
 def _get_totals_odds(event: dict) -> dict | None:
+    """
+    Línea PRINCIPAL de totales: casa por casa, la pareja Over/Under del MISMO punto con
+    cuotas más equilibradas. Antes se quedaba con el último Over y el último Under que
+    aparecieran en la lista, cada uno de una línea distinta si la casa traía alternativas
+    (de ahí los "Over 186.5 @2.80" que se colaban como valor).
+    """
     for bk in event.get("bookmakers", []):
+        by_line: dict[float, dict] = {}
         for mkt in bk.get("markets", []):
             if mkt.get("key") != "totals":
                 continue
-            over = under = line = None
             for o in mkt.get("outcomes", []):
                 try:
                     pt = float(o.get("point") or o.get("description") or 0)
@@ -328,14 +333,14 @@ def _get_totals_odds(event: dict) -> dict | None:
                     continue
                 pr = float(o.get("price", 0))
                 nm = o.get("name", "").lower()
-                if nm == "over":
-                    over = pr
-                    line = pt
-                elif nm == "under":
-                    under = pr
-            if over and under and line:
-                return {"over_odds": over, "under_odds": under, "line": line,
-                        "bookmaker": bk.get("key", "pinnacle")}
+                if not pt or pr <= 1 or nm not in ("over", "under"):
+                    continue
+                by_line.setdefault(round(pt, 1), {})[nm] = pr
+        complete = [(pt, s) for pt, s in by_line.items() if "over" in s and "under" in s]
+        if complete:
+            line, sides = min(complete, key=lambda c: abs(c[1]["over"] - c[1]["under"]))
+            return {"over_odds": sides["over"], "under_odds": sides["under"], "line": line,
+                    "bookmaker": bk.get("key", "pinnacle")}
     return None
 
 
@@ -369,8 +374,46 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
     }
 
 
-async def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -> None:
+# Un doc por partido y mercado ({match_id}_{sufijo}). Antes cada lado tenía doc propio
+# (_ml_home/_ml_away, _tot_over/_tot_under) y los dos sobrevivían entre ejecuciones:
+# Besiktas–Barça acabó con Barça y Besiktas alertados, Hapoel–Real Madrid y Paris–ASVEL
+# con ambos lados guardados, y el grader copia el `correct` del primario al duplicado.
+_DOC_SUFFIXES = ("ml", "spread", "tot", "h1_spread", "h1_tot", "q1_tot")
+
+
+def _best_side(candidates: list[dict]) -> dict | None:
+    """El lado de mayor EV entre los que han pasado los filtros (igual que fútbol)."""
+    return max(candidates, key=lambda p: p["ev"]) if candidates else None
+
+
+async def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None,
+                          existing: dict | None = None) -> bool:
+    """
+    Guarda la señal en el doc único de su partido+mercado y la manda a Telegram.
+
+    Un doc ya alertado no se sobrescribe salvo que el bot entregue esta señal (reenvío
+    por cuota mejorada, misma selección). Si el modelo cambia de lado o de línea después
+    de alertar, el bot lo bloquea y el doc conserva lo que llegó al canal: lo que se
+    gradúa es lo que se vio. Devuelve True si el doc queda con esta señal.
+    """
     from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
+    locked = bool(existing and existing.get("alerted"))
+    sent = False
+    if pred.get("ev", pred["edge"]) > SPORTS_ALERT_EDGE:
+        try:
+            sent = await _send_telegram_alert(_build_alert_payload(pred, enriched))
+        except Exception:
+            logger.error("basketball_analyzer: error enviando alerta %s", doc_id, exc_info=True)
+    if locked and not sent:
+        if existing.get("selection") != pred.get("selection"):
+            logger.info(
+                "basketball_analyzer(%s): doc ya alertado con '%s' — se conserva, '%s' no se guarda",
+                doc_id, existing.get("selection"), pred.get("selection"),
+            )
+        return False
+    if sent:
+        pred["alerted"] = True
+        pred["alerted_at"] = datetime.now(timezone.utc)
     try:
         if batch is not None:
             batch.set(col("predictions").document(doc_id), pred)
@@ -378,11 +421,7 @@ async def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None) -
             col("predictions").document(doc_id).set(pred)
     except Exception:
         logger.error("basketball_analyzer: error guardando %s", doc_id, exc_info=True)
-    if pred.get("ev", pred["edge"]) > SPORTS_ALERT_EDGE:
-        try:
-            await _send_telegram_alert(_build_alert_payload(pred, enriched))
-        except Exception:
-            logger.error("basketball_analyzer: error enviando alerta %s", doc_id, exc_info=True)
+    return True
 
 
 async def _fetch_nba_injury_context(home_name: str, away_name: str) -> dict:
@@ -813,6 +852,26 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     from shared.firestore_client import get_client as _get_fs_client
     _fs_batch = _get_fs_client().batch()  # WriteBatch: todas las writes en 1 RPC
 
+    # Docs ya guardados de este partido (1 RPC): _save_and_alert no pisa uno alertado.
+    _existing: dict[str, dict] = {}
+    try:
+        _refs = [col("predictions").document(f"{match_id}_{sfx}") for sfx in _DOC_SUFFIXES]
+        for _snap in _get_fs_client().get_all(_refs):
+            if _snap.exists:
+                _existing[_snap.id] = _snap.to_dict() or {}
+    except Exception:
+        logger.warning("basketball_analyzer(%s): error leyendo docs previos", match_id, exc_info=True)
+
+    async def _emit(pred: dict, sfx: str) -> None:
+        doc_id = f"{match_id}_{sfx}"
+        pred["match_id"] = doc_id
+        if await _save_and_alert(pred, doc_id, game, batch=_fs_batch,
+                                 existing=_existing.get(doc_id)):
+            predictions.append(pred)
+
+    # Over/Under: se evalúan los dos y se emite solo el de mayor EV al final.
+    _side_cands: dict[str, list[dict]] = {"tot": [], "h1_tot": [], "q1_tot": []}
+
     # ── Moneyline ─────────────────────────────────────────────────────────────
     if event:
         ml = _get_moneyline_odds(event)
@@ -853,6 +912,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
             # check es DIRECCIONAL y per-lado dentro del bucle (solo underdogs, cuota>=frontera).
         if ml:
             _league_min_edge = _LEAGUE_MIN_EDGE.get(league, BASKETBALL_MIN_EDGE)
+            _ml_candidates: list[dict] = []
             for team, prob, odds, tag, team_seed, opp_seed in [
                 (home_name, rats["p_home_win"], ml["home_odds"], "home", home_seed, away_seed),
                 (away_name, 1.0 - rats["p_home_win"], ml["away_odds"], "away", away_seed, home_seed),
@@ -908,14 +968,15 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                         conf, SPORTS_MIN_CONFIDENCE,
                         team_seed, opp_seed, home_name, away_name,
                     )
+                    continue  # antes solo logueaba y _make_pred aplicaba el umbral genérico
                 pred = _make_pred(base, "h2h", team, odds, prob,
                                   sigs, conf, match_date, weights_version, ml["bookmaker"],
                                   edge_discount=edge_discount)
                 if pred:
-                    doc_id = f"{match_id}_ml_{tag}"
-                    pred["match_id"] = doc_id
-                    await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
-                    predictions.append(pred)
+                    _ml_candidates.append(pred)
+            _ml_pick = _best_side(_ml_candidates)
+            if _ml_pick:
+                await _emit(_ml_pick, "ml")
 
     # ── Spread ────────────────────────────────────────────────────────────────
     if event:
@@ -930,10 +991,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                               {**sigs, "expected_margin": round(margin, 2)},
                               conf * 0.9, match_date, weights_version, sp["bookmaker"])
             if pred:
-                doc_id = f"{match_id}_spread"
-                pred["match_id"] = doc_id
-                await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
-                predictions.append(pred)
+                await _emit(pred, "spread")
 
     # ── Totals ────────────────────────────────────────────────────────────────
     if event:
@@ -982,11 +1040,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                     conf * 0.9, match_date, weights_version, tot["bookmaker"]
                 )
                 if pred:
-                    tag = "over" if "Over" in sel else "under"
-                    doc_id = f"{match_id}_tot_{tag}"
-                    pred["match_id"] = doc_id
-                    await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
-                    predictions.append(pred)
+                    _side_cands["tot"].append(pred)
 
     # ── PRIMERA MITAD — SPREAD y TOTALS ──────────────────────────────────────
     # Modelo: H1 ≈ 48% del total esperado (NBA historical average)
@@ -1021,10 +1075,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
             conf * 0.85, match_date, weights_version, h1_sp.get("bookmaker", "bet365"),
         )
         if pred:
-            doc_id = f"{match_id}_h1_spread"
-            pred["match_id"] = doc_id
-            await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
-            predictions.append(pred)
+            await _emit(pred, "h1_spread")
 
     # H1 totals
     h1_tot = _get_market_odds_by_key(event, "h1_totals") if event and _h1_scale_ok else None
@@ -1044,11 +1095,7 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 conf * 0.85, match_date, weights_version, h1_tot.get("bookmaker", "pinnacle"),
             )
             if pred:
-                tag = "over" if "Over" in sel else "under"
-                doc_id = f"{match_id}_h1_tot_{tag}"
-                pred["match_id"] = doc_id
-                await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
-                predictions.append(pred)
+                _side_cands["h1_tot"].append(pred)
 
     # ── PRIMER CUARTO TOTALS ──────────────────────────────────────────────────
     # Q1 ≈ 12% del total (NBA: cada cuarto ~25% de FH que es ~48% del total → 12%)
@@ -1071,11 +1118,12 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 conf * 0.80, match_date, weights_version, q1_tot.get("bookmaker", "pinnacle"),
             )
             if pred:
-                tag = "over" if "Over" in sel else "under"
-                doc_id = f"{match_id}_q1_tot_{tag}"
-                pred["match_id"] = doc_id
-                await _save_and_alert(pred, doc_id, game, batch=_fs_batch)
-                predictions.append(pred)
+                _side_cands["q1_tot"].append(pred)
+
+    for _sfx, _cands in _side_cands.items():
+        _pick = _best_side(_cands)
+        if _pick:
+            await _emit(_pick, _sfx)
 
     try:
         _fs_batch.commit()
