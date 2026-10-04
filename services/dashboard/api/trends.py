@@ -29,6 +29,8 @@ async def trend_signals(pattern_type: str = "", limit: int = 100) -> dict:
     try:
         for d in col("trend_signals").stream():
             doc = (d.to_dict() or {}) | {"id": d.id}
+            if doc.get("shadow"):
+                continue  # variantes en sombra: no se envían, no se listan
             if pattern_type and doc.get("pattern_type") != pattern_type:
                 continue
             signals.append(doc)
@@ -59,7 +61,9 @@ async def trend_accuracy() -> dict:
     rows: list[dict] = []
     try:
         for d in col("trend_accuracy_log").stream():
-            rows.append(d.to_dict() or {})
+            row = d.to_dict() or {}
+            if not row.get("shadow"):  # las variantes en sombra no cuentan en el acierto
+                rows.append(row)
     except Exception as e:
         logger.error("trend_accuracy: error leyendo Firestore — %s", e)
         return {"error": "No se pudo leer la graduación", "by_pattern_type": {}, "by_market": {}}

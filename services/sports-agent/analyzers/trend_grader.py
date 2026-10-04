@@ -253,6 +253,7 @@ def _write_grade(doc_id: str, sig: dict, result: str, source: str, extra: dict |
         "signal_id": doc_id, "pattern_type": sig.get("pattern_type"), "market": sig.get("market"),
         # Señales anteriores a rule_id: todas salieron de la regla original (v1).
         "rule_id": sig.get("rule_id") or f"{sig.get('market')}.v1",
+        "shadow": bool(sig.get("shadow")),  # variante en sombra: fuera del acierto y la calibración
         "team": sig.get("team"), "league": sig.get("league"), "match_id": sig.get("match_id"),
         "sample_size": sig.get("sample_size"), "rate_or_ratio": sig.get("rate_or_ratio"),
         "model_prob": sig.get("model_prob"),
@@ -280,6 +281,15 @@ async def run_trend_grader() -> dict:
         logger.error("trend_grader: error en auto-calibración", exc_info=True)
         calibration_result = {"markets_updated": 0, "error": "unhandled"}
 
+    # Promoción de variantes en sombra (analyzers/trend_variants.py): marca las LISTAS y
+    # solo promueve las confirmadas. Antes del resumen para que este vea el estado nuevo.
+    try:
+        from analyzers.trend_variants import evaluate_promotions
+        promotion_result = await evaluate_promotions()
+    except Exception:
+        logger.error("trend_grader: error evaluando promociones", exc_info=True)
+        promotion_result = {"error": "unhandled"}
+
     # Resumen semanal al tema "Tendencias" (solo lunes, marca por semana) — tras
     # graduar y calibrar para que incluya el fin de semana. Aislado igual.
     try:
@@ -290,8 +300,8 @@ async def run_trend_grader() -> dict:
         weekly_result = {"sent": False, "reason": "unhandled"}
 
     logger.info(
-        "trend_grader: series+model=%s rolling=%s calibration=%s weekly=%s",
-        series_result, rolling_result, calibration_result, weekly_result,
+        "trend_grader: series+model=%s rolling=%s calibration=%s promotion=%s weekly=%s",
+        series_result, rolling_result, calibration_result, promotion_result, weekly_result,
     )
-    return {"series": series_result, "rolling": rolling_result,
-            "calibration": calibration_result, "weekly": weekly_result}
+    return {"series": series_result, "rolling": rolling_result, "calibration": calibration_result,
+            "promotion": promotion_result, "weekly": weekly_result}

@@ -88,6 +88,10 @@ async def run_trend_calibration() -> dict:
     mercados del feed) y escribe/actualiza un doc por mercado."""
     from shared.firestore_client import col
 
+    from analyzers.trend_variants import active_rules
+
+    # Con una variante promovida, el mercado se calibra solo con las graduadas de esa regla.
+    active = active_rules()
     by_market: dict[str, list[dict]] = {}
     try:
         for d in col("trend_accuracy_log").stream():
@@ -95,6 +99,10 @@ async def run_trend_calibration() -> dict:
             market = row.get("market")
             if not market or row.get("result") not in ("hit", "miss"):
                 continue  # "void" (DNB anulado por empate) fuera, igual que el dashboard
+            if row.get("shadow"):
+                continue  # variantes en sombra: se miden aparte (trend_variants)
+            if market in active and row.get("rule_id") != f"{market}.{active[market]}":
+                continue
             by_market.setdefault(market, []).append(row)
     except Exception:
         logger.error("trend_calibration: error leyendo trend_accuracy_log", exc_info=True)

@@ -281,6 +281,8 @@ TREND_MARKET_TARGET = {
 # Versión de la regla que genera cada mercado; va en trend_signals/trend_accuracy_log
 # como rule_id = "{mercado}.{versión}" para medir cada regla por separado si cambia.
 TREND_RULE_VERSION = "v1"
+# Graduadas en sombra que necesita una variante antes de poder estar LISTA para promoción.
+TREND_PROMOTION_MIN_SHADOW = 30
 
 # Umbral fijo de cada mercado — mismo valor que ya usa trend_finder.py hoy,
 # aquí como mapa para poder compararlo contra el umbral calibrado por mercado.

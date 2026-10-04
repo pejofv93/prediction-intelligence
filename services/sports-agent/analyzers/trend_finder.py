@@ -559,7 +559,9 @@ def _model_candidates(enriched: dict) -> list[dict]:
     return candidates
 
 
-async def _fixture_candidates(enriched: dict) -> list[dict]:
+async def _fixture_candidates(enriched: dict, shadow_out: list[dict] | None = None) -> list[dict]:
+    """Candidatos que se envían si el partido entra en el top. Las variantes en sombra
+    (analyzers/trend_variants.py) se añaden a shadow_out: nunca se envían."""
     match_id = enriched.get("match_id", "")
     league = enriched.get("league", "")
     home_team = enriched.get("home_team", "")
@@ -582,7 +584,21 @@ async def _fixture_candidates(enriched: dict) -> list[dict]:
     out += _rolling_candidates(away_team, "away", home_team, league, away_corner)
     out += _model_candidates(enriched)
 
-    for c in out:
+    # Variantes de las reglas de racha: en sombra, salvo la que esté promovida en su
+    # mercado, que sustituye a v1 en lo que se envía (v1 sigue en sombra para volver atrás).
+    from analyzers.trend_variants import active_rules, variant_candidates
+    active = active_rules()
+    variants = variant_candidates(enriched, home_stats, away_stats)
+    live_rules = {f"{m}.{v}" for m, v in active.items()}
+    if active:
+        out = [c for c in out if c["market"] not in active]
+    for vc in variants:
+        if vc["rule_id"] in live_rules:
+            out.append({**vc, "score": _score(vc["rate"], vc["sample"])})
+        elif shadow_out is not None:
+            shadow_out.append(vc)
+
+    for c in out + [vc for vc in (shadow_out or []) if "match_id" not in vc]:
         c.update({
             "match_id": match_id, "league": league, "match_date": str(match_date),
             "home_team": home_team, "away_team": away_team,
@@ -772,7 +788,7 @@ async def _persist_and_send(selected_fixtures: list[dict]) -> int:
                 "team": c.get("team"), "team_id": c.get("team_id"), "side": c.get("side"),
                 "opponent": c.get("opponent"), "selection": c.get("selection"),
                 "pattern_type": c["pattern_type"], "market": c["market"], "threshold": c.get("threshold"),
-                "rule_id": f"{c['market']}.{TREND_RULE_VERSION}",
+                "rule_id": c.get("rule_id") or f"{c['market']}.{TREND_RULE_VERSION}",
                 "label": c["label"], "detail": c["detail"],
                 "sample_size": c.get("sample"), "rate_or_ratio": c["rate"], "score": c["score"],
                 "model_prob": c.get("model_prob"),
@@ -799,6 +815,39 @@ async def _persist_and_send(selected_fixtures: list[dict]) -> int:
             logger.error("trend_finder: error enviando alerta %s", fx["match_id"], exc_info=True)
 
     return sent
+
+
+def _persist_shadow(shadow: list[dict]) -> int:
+    """Guarda las variantes en sombra en trend_signals (shadow=True): el grader las
+    gradúa como las demás, pero no se envían ni cuentan en el acierto, la calibración,
+    el dashboard ni el resumen (que las muestra aparte en "Probando")."""
+    from shared.firestore_client import col, get_client
+
+    now = datetime.now(timezone.utc).isoformat()
+    written = 0
+    try:
+        client = get_client()
+        for i in range(0, len(shadow), 400):
+            batch = client.batch()
+            for c in shadow[i:i + 400]:
+                team_key = c.get("team_id") or _slugify(c.get("team") or "") or "match"
+                doc_id = f"{c['match_id']}_{c['rule_id']}_{team_key}"
+                batch.set(col("trend_signals").document(doc_id), {
+                    "match_id": c["match_id"], "league": c["league"], "match_date": c["match_date"],
+                    "home_team": c["home_team"], "away_team": c["away_team"],
+                    "team": c.get("team"), "team_id": c.get("team_id"), "side": c.get("side"),
+                    "opponent": c.get("opponent"), "pattern_type": c["pattern_type"],
+                    "market": c["market"], "threshold": c.get("threshold"),
+                    "rule_id": c["rule_id"], "shadow": True,
+                    "label": c["label"], "detail": c["detail"],
+                    "sample_size": c.get("sample"), "rate_or_ratio": c["rate"],
+                    "generated_at": now, "graded": False, "result": None,
+                })
+            batch.commit()
+            written += len(shadow[i:i + 400])
+    except Exception:
+        logger.error("trend_finder: error guardando variantes en sombra", exc_info=True)
+    return written
 
 
 async def run_trend_finder() -> dict:
@@ -846,20 +895,26 @@ async def run_trend_finder() -> dict:
     enriched_docs = [e for e in enriched_docs if e]
 
     all_candidates: list[dict] = []
+    shadow: list[dict] = []
     for enriched in enriched_docs:
         if signal_is_too_late(enriched.get("match_date") or enriched.get("date")):
             continue
         try:
-            all_candidates += await _fixture_candidates(enriched)
+            fixture_shadow: list[dict] = []
+            all_candidates += await _fixture_candidates(enriched, fixture_shadow)
+            shadow += fixture_shadow
         except Exception:
             logger.error("trend_finder: error en fixture %s", enriched.get("match_id"), exc_info=True)
 
     selected_fixtures = rank_and_cap(all_candidates)
     sent = await _persist_and_send(selected_fixtures)
+    shadow_written = _persist_shadow(shadow)
     n_signals = sum(len(fx["candidates"]) for fx in selected_fixtures)
     logger.info(
-        "trend_finder: %d enriched, %d candidatos -> %d partidos (%d señales) -> %d mensajes enviados",
-        len(enriched_docs), len(all_candidates), len(selected_fixtures), n_signals, sent,
+        "trend_finder: %d enriched, %d candidatos -> %d partidos (%d señales) -> %d mensajes enviados"
+        " · %d en sombra",
+        len(enriched_docs), len(all_candidates), len(selected_fixtures), n_signals, sent, shadow_written,
     )
     return {"enriched": len(enriched_docs), "candidates": len(all_candidates),
-            "fixtures_selected": len(selected_fixtures), "signals": n_signals, "sent": sent}
+            "fixtures_selected": len(selected_fixtures), "signals": n_signals, "sent": sent,
+            "shadow": shadow_written}

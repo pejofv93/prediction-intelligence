@@ -81,10 +81,36 @@ def _fmt_day(d: datetime) -> str:
     return f"{d.day} {_MONTHS[d.month - 1]}"
 
 
+def _variant_lines(variants: list[dict]) -> list[str]:
+    """Sección "Probando": variantes en sombra frente a v1 en sombra (mismos partidos)."""
+    from shared.config import TREND_PROMOTION_MIN_SHADOW
+
+    lines = ["", "Probando (en sombra, no cuenta en el acierto)"]
+    alerts = []
+    for v in variants:
+        name = f"{_MARKET_LABEL.get(v['market'], v['market'])} {v['variant']}"
+        mine = _ratio(v["hits"], v["n"] - v["hits"])
+        base = _ratio(v["v1_hits"], v["v1_n"] - v["v1_hits"])
+        if v["status"] == "promoted":
+            lines.append(f"{name}: ✅ en uso · sombra {mine} · v1 {base}")
+            continue
+        lines.append(f"{name}: {mine} · v1 en sombra {base} · {min(v['n'], TREND_PROMOTION_MIN_SHADOW)}"
+                     f"/{TREND_PROMOTION_MIN_SHADOW} para decidir")
+        if v["status"] == "ready":
+            alerts.append(
+                f"🟢 LISTA para sustituir a la regla actual: {name} ({v['desc']}) — {mine} "
+                f"frente a v1 en sombra {base}, objetivo {v['target'] * 100:.0f}%. "
+                f"No se aplica hasta que la confirmes."
+            )
+    return lines + ([""] + alerts if alerts else [])
+
+
 def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
                          pending: list[dict], calibration: dict[str, dict],
-                         period_from: datetime, period_to: datetime) -> str:
-    """Texto plano del resumen. Función pura: todo lo que lee entra por parámetro."""
+                         period_from: datetime, period_to: datetime,
+                         variants: list[dict] | None = None) -> str:
+    """Texto plano del resumen. Función pura: todo lo que lee entra por parámetro.
+    log_rows/week_rows/pending ya vienen sin las variantes en sombra."""
     w_hit, w_miss, w_void = _tally(week_rows)
     t_hit, t_miss, _ = _tally(log_rows)
 
@@ -121,6 +147,9 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
             f" · {_ratio(th, tm)} · {pending_by_market.get(mk, 0)} pend."
             f" · {_calibration_label(calibration.get(mk), th + tm, target)}"
         )
+
+    if variants:
+        lines += _variant_lines(variants)
 
     lines += [
         "",
@@ -159,10 +188,12 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
     period_from_iso = prev_cutoff or (now - timedelta(days=7)).isoformat()
 
     try:
-        log_rows = [d.to_dict() or {} for d in col("trend_accuracy_log").stream()]
+        all_rows = [d.to_dict() or {} for d in col("trend_accuracy_log").stream()]
+        log_rows = [r for r in all_rows if not r.get("shadow")]
         pending = [
-            d.to_dict() or {}
-            for d in col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream()
+            s for s in (d.to_dict() or {} for d in
+                        col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream())
+            if not s.get("shadow")
         ]
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
     except Exception:
@@ -172,8 +203,10 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
     week_rows = [r for r in log_rows if str(r.get("graded_at") or "") > period_from_iso]
     cutoff = max((str(r.get("graded_at") or "") for r in log_rows), default=now.isoformat())
     period_from = datetime.fromisoformat(period_from_iso)
+    from analyzers.trend_variants import active_rules, promotion_status
+    variants = promotion_status([r for r in all_rows if r.get("shadow")], active_rules())
     text = build_weekly_summary(log_rows, week_rows, pending, calibration,
-                                period_from, now - timedelta(days=1))
+                                period_from, now - timedelta(days=1), variants)
 
     try:
         reports.document(week_key).create({
