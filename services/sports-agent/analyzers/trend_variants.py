@@ -14,9 +14,9 @@ que la comparación justa es variante frente a v1 en sombra.
 
 Promoción (evaluate_promotions, al final del grader): una variante queda LISTA con
 TREND_PROMOTION_MIN_SHADOW graduadas en sombra (y v1 en sombra también), acierto >=
-objetivo del mercado y mejor que v1 en sombra. Solo se promueve si el usuario la confirma (confirmed=True en
-trend_rule_promotions/{mercado}) o si ya confirmó una antes (auto=True en
-trend_promotion_settings/global, que se activa tras la primera promoción confirmada).
+objetivo del mercado y mejor que v1 en sombra. NUNCA se promueve sola: cada variante LISTA
+se avisa en el resumen semanal y solo se aplica cuando el usuario la confirma
+(confirmed=True en trend_rule_promotions/{mercado}), una por una.
 Promover = trend_market_rules/{mercado}.active_rule; borrar ese doc vuelve a v1.
 """
 import logging
@@ -214,14 +214,13 @@ def promotion_status(shadow_rows: list[dict], active: dict[str, str]) -> list[di
 
 
 async def evaluate_promotions() -> dict:
-    """Recalcula el estado de las variantes y promueve solo las LISTAS y confirmadas."""
+    """Recalcula el estado de las variantes y promueve solo las LISTAS que el usuario
+    ha confirmado una a una. No hay promoción automática."""
     from shared.firestore_client import col
 
     try:
         shadow_rows = [r for r in (d.to_dict() or {} for d in col("trend_accuracy_log").stream())
                        if r.get("shadow")]
-        settings_snap = col("trend_promotion_settings").document("global").get()
-        auto = bool(settings_snap.exists and (settings_snap.to_dict() or {}).get("auto"))
     except Exception:
         logger.error("trend_variants: error leyendo datos de promoción", exc_info=True)
         return {"error": "read_failed"}
@@ -242,7 +241,7 @@ async def evaluate_promotions() -> dict:
                 continue
             confirmed = bool(prev_d.get("confirmed")) and prev_d.get("variant") == st["variant"]
             doc = {**st, "confirmed": confirmed, "updated_at": now.isoformat()}
-            if st["status"] == "ready" and (confirmed or auto):
+            if st["status"] == "ready" and confirmed:
                 col("trend_market_rules").document(st["market"]).set({
                     "active_rule": st["variant"], "previous_rule": "v1", "promoted_at": now.isoformat(),
                     "evidence": {k: st[k] for k in ("hits", "n", "rate", "v1_hits", "v1_n", "v1_rate")},
@@ -250,15 +249,10 @@ async def evaluate_promotions() -> dict:
                 doc["status"] = "promoted"
                 doc["promoted_at"] = now.isoformat()
                 promoted.append(f"{st['market']}.{st['variant']}")
-                if not auto:  # primera promoción confirmada → las siguientes ya no esperan
-                    col("trend_promotion_settings").document("global").set(
-                        {"auto": True, "enabled_at": now.isoformat(),
-                         "enabled_by": f"confirmación de {st['market']}.{st['variant']}"})
-                    auto = True
                 logger.info("trend_variants: PROMOVIDA %s.%s (%d/%d)",
                             st["market"], st["variant"], st["hits"], st["n"])
             ref.set(doc)
         except Exception:
             logger.error("trend_variants: error evaluando promoción %s", st["market"], exc_info=True)
     _ACTIVE_CACHE = None
-    return {"promoted": promoted, "auto": auto}
+    return {"promoted": promoted}
