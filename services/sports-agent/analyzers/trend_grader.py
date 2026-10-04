@@ -277,8 +277,18 @@ async def run_trend_grader() -> dict:
         logger.error("trend_grader: error en auto-calibración", exc_info=True)
         calibration_result = {"markets_updated": 0, "error": "unhandled"}
 
+    # Resumen semanal al tema "Tendencias" (solo lunes, marca por semana) — tras
+    # graduar y calibrar para que incluya el fin de semana. Aislado igual.
+    try:
+        from analyzers.trend_weekly import run_trend_weekly_summary
+        weekly_result = await run_trend_weekly_summary()
+    except Exception:
+        logger.error("trend_grader: error en resumen semanal", exc_info=True)
+        weekly_result = {"sent": False, "reason": "unhandled"}
+
     logger.info(
-        "trend_grader: series+model=%s rolling=%s calibration=%s",
-        series_result, rolling_result, calibration_result,
+        "trend_grader: series+model=%s rolling=%s calibration=%s weekly=%s",
+        series_result, rolling_result, calibration_result, weekly_result,
     )
-    return {"series": series_result, "rolling": rolling_result, "calibration": calibration_result}
+    return {"series": series_result, "rolling": rolling_result,
+            "calibration": calibration_result, "weekly": weekly_result}
