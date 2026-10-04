@@ -386,6 +386,84 @@ def _best_side(candidates: list[dict]) -> dict | None:
     return max(candidates, key=lambda p: p["ev"]) if candidates else None
 
 
+def _cap_per_match(queued: list[tuple[dict, str]], existing: dict[str, dict],
+                   match_id: str) -> list[tuple[dict, str]]:
+    """
+    Máximo 2 señales por partido: la moneyline + el mejor mercado alternativo. Se aplica
+    ANTES de guardar y enviar: antes lo hacía main._dedup_signals_for_match después, y
+    Warriors–Lakers (401898390) llegó a Telegram con el hándicap y su doc se borró un
+    segundo después — alerta vista que nunca se gradúa.
+
+    Si un mercado alternativo ya se alertó en otra ejecución, él ocupa la plaza: solo
+    puede pasar una señal de ese mismo mercado (el bot decide si es reenvío legítimo).
+    """
+    ml = [(p, s) for p, s in queued if s == "ml"]
+    alt = [(p, s) for p, s in queued if s != "ml"]
+    alerted_alt = {
+        sfx for sfx in _DOC_SUFFIXES
+        if sfx != "ml" and existing.get(f"{match_id}_{sfx}", {}).get("alerted")
+    }
+    if alerted_alt:
+        alt = [(p, s) for p, s in alt if s in alerted_alt]
+    if len(alt) > 1:
+        alt = [max(alt, key=lambda ps: ps[0]["ev"])]
+    return ml + alt
+
+
+# Guarda de calidad de datos: con muestra corta o de la temporada pasada, off/def caen a
+# los valores por defecto (100 pts, _pts_per_game sin partidos) y la forma a 0, y el
+# modelo saca EV absurdos. Warriors–Lakers (oct-2026, pretemporada): Warriors sin
+# team_stats y Lakers con 9 partidos de mayo → Under 235.5 con EV +78.6%.
+_BBALL_MIN_GAMES = 5
+_BBALL_MAX_STALE_DAYS = 45  # mismo criterio de frescura que el feed de tendencias
+
+
+def _team_data_issue(stats: dict, tag: str) -> str | None:
+    """Motivo por el que los datos de un equipo no sirven, o None si sirven."""
+    raw = stats.get("raw_matches") or []
+    if len(raw) < _BBALL_MIN_GAMES:
+        return f"{tag}_pocos_partidos"
+    last = max((str(m.get("match_date", ""))[:10] for m in raw), default="")
+    try:
+        age = (datetime.now(timezone.utc).date() - datetime.fromisoformat(last).date()).days
+    except ValueError:
+        return f"{tag}_sin_fecha"
+    if age > _BBALL_MAX_STALE_DAYS:
+        return f"{tag}_datos_viejos"
+    return None
+
+
+def _log_quality_block(game: dict, match_id: str, reasons: list[str],
+                       home_stats: dict, away_stats: dict) -> None:
+    """
+    Registra el partido descartado en `bball_quality_blocks` (doc por partido) para
+    medir cuánto corta la guarda. No va a filter_blocks: grade_filter_blocks gradúa con
+    check_result, que es solo fútbol, y un id ESPN numérico se buscaría como partido de
+    fútbol.
+    """
+    def _last(stats: dict) -> str | None:
+        raw = stats.get("raw_matches") or []
+        return max((str(m.get("match_date", ""))[:10] for m in raw), default=None) or None
+
+    try:
+        col("bball_quality_blocks").document(match_id).set({
+            "match_id": match_id,
+            "league": game.get("league"),
+            "home_team": game.get("home_team_name", game.get("home_team", "")),
+            "away_team": game.get("away_team_name", game.get("away_team", "")),
+            "match_date": game.get("date") or game.get("match_date"),
+            "reasons": reasons,
+            "home_games": len(home_stats.get("raw_matches") or []),
+            "away_games": len(away_stats.get("raw_matches") or []),
+            "home_last_game": _last(home_stats),
+            "away_last_game": _last(away_stats),
+            "blocked_at": datetime.now(timezone.utc),
+        })
+    except Exception:
+        logger.warning("basketball_analyzer(%s): error registrando bloqueo de calidad",
+                       match_id, exc_info=True)
+
+
 async def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None,
                           existing: dict | None = None) -> bool:
     """
@@ -580,6 +658,19 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
             list(home_stats.keys()) if home_stats else "MISSING",
             list(away_stats.keys()) if away_stats else "MISSING",
         )
+        return []
+
+    _quality_reasons = [r for r in (_team_data_issue(home_stats, "home"),
+                                    _team_data_issue(away_stats, "away")) if r]
+    if _quality_reasons:
+        logger.info(
+            "basketball_analyzer(%s): BBALL_DATA_INSUFFICIENT %s — partidos %d/%d "
+            "(mín %d, frescura %dd) — sin señal [%s vs %s | %s]",
+            match_id, ",".join(_quality_reasons),
+            len(home_stats.get("raw_matches") or []), len(away_stats.get("raw_matches") or []),
+            _BBALL_MIN_GAMES, _BBALL_MAX_STALE_DAYS, home_name, away_name, league,
+        )
+        _log_quality_block(game, match_id, _quality_reasons, home_stats, away_stats)
         return []
 
     # Ratings
@@ -862,12 +953,11 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     except Exception:
         logger.warning("basketball_analyzer(%s): error leyendo docs previos", match_id, exc_info=True)
 
+    # Las señales se encolan y se guardan/envían al final, tras el tope por partido.
+    _queued: list[tuple[dict, str]] = []
+
     async def _emit(pred: dict, sfx: str) -> None:
-        doc_id = f"{match_id}_{sfx}"
-        pred["match_id"] = doc_id
-        if await _save_and_alert(pred, doc_id, game, batch=_fs_batch,
-                                 existing=_existing.get(doc_id)):
-            predictions.append(pred)
+        _queued.append((pred, sfx))
 
     # Over/Under: se evalúan los dos y se emite solo el de mayor EV al final.
     _side_cands: dict[str, list[dict]] = {"tot": [], "h1_tot": [], "q1_tot": []}
@@ -1124,6 +1214,20 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         _pick = _best_side(_cands)
         if _pick:
             await _emit(_pick, _sfx)
+
+    _kept = _cap_per_match(_queued, _existing, match_id)
+    if len(_kept) < len(_queued):
+        logger.info(
+            "basketball_analyzer(%s): tope por partido — %s fuera, quedan %s",
+            match_id, [s for p, s in _queued if not any(p is k for k, _ in _kept)],
+            [s for _, s in _kept],
+        )
+    for pred, sfx in _kept:
+        doc_id = f"{match_id}_{sfx}"
+        pred["match_id"] = doc_id
+        if await _save_and_alert(pred, doc_id, game, batch=_fs_batch,
+                                 existing=_existing.get(doc_id)):
+            predictions.append(pred)
 
     try:
         _fs_batch.commit()
