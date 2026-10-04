@@ -232,7 +232,11 @@ def run(matches: list[tuple]) -> dict:
 
     for date, home, away, gh, ga in matches:
         part = "dev" if date < SPLIT_DATE else "test"
-        hh, ah = hist[home], hist[away]
+        # Solo partidos de días ANTERIORES: hay ~300 equipos con dos partidos el mismo
+        # día (el mismo partido guardado con el rival bajo dos ids) y, sin este corte,
+        # la segunda copia veía el resultado de la primera.
+        hh = [h for h in hist[home] if h[0] < date]
+        ah = [h for h in hist[away] if h[0] < date]
         for mk, variants in MENU.items():
             if mk in MATCH_LEVEL:
                 cases = [(hh, ah, True, gh, ga)]
