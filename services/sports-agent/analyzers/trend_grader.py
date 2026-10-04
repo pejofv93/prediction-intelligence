@@ -61,9 +61,9 @@ def _grade_series_doc(sig: dict, result: dict) -> str | None:
     market = sig.get("market")
     threshold = sig.get("threshold")
 
-    if market in ("team_goals_over", "btts", "handicap"):
+    if market in ("team_goals_over", "team_goals_over_3", "btts", "handicap"):
         gf, ga_team = (gh, ga) if sig.get("side") == "home" else (ga, gh)
-        if market == "team_goals_over":
+        if market in ("team_goals_over", "team_goals_over_3"):
             return "hit" if gf >= threshold else "miss"
         if market == "btts":
             return "hit" if (gf > 0 and ga_team > 0) else "miss"
@@ -251,6 +251,8 @@ def _write_grade(doc_id: str, sig: dict, result: str, source: str, extra: dict |
 
     log_doc = {
         "signal_id": doc_id, "pattern_type": sig.get("pattern_type"), "market": sig.get("market"),
+        # Señales anteriores a rule_id: todas salieron de la regla original (v1).
+        "rule_id": sig.get("rule_id") or f"{sig.get('market')}.v1",
         "team": sig.get("team"), "league": sig.get("league"), "match_id": sig.get("match_id"),
         "sample_size": sig.get("sample_size"), "rate_or_ratio": sig.get("rate_or_ratio"),
         "result": result, "graded_at": now_iso, "grade_source": source,

@@ -25,13 +25,14 @@ from shared.config import (
     CLOUD_RUN_TOKEN,
     TELEGRAM_BOT_URL,
     TREND_CALIBRATION_MIN_SAMPLE,
-    TREND_TARGET_HIT_RATE,
+    TREND_MARKET_TARGET,
 )
 
 logger = logging.getLogger(__name__)
 
 _MARKET_LABEL = {
-    "team_goals_over": "Goles del equipo",
+    "team_goals_over": "Goles 2+ del equipo",
+    "team_goals_over_3": "Goles 3+ del equipo",
     "btts": "Ambos marcan",
     "handicap": "Hándicap",
     "corners": "Córners",
@@ -65,14 +66,14 @@ def _ratio(hits: int, misses: int, with_pct: bool = True) -> str:
     return f"{hits}/{n} ({hits / n * 100:.0f}%)" if with_pct else f"{hits}/{n}"
 
 
-def _calibration_label(cal: dict | None, graded: int) -> str:
+def _calibration_label(cal: dict | None, graded: int, target: float) -> str:
     status = (cal or {}).get("status")
     if status == "at_fixed":
         return "✅ cumple con umbral fijo"
     if status == "calibrated":
         return f"🎚️ calibrado (umbral {cal.get('threshold_effective')})"
     if status == "below_target":
-        return f"⚠️ por debajo del {TREND_TARGET_HIT_RATE * 100:.0f}%"
+        return f"⚠️ por debajo de su objetivo ({target * 100:.0f}%)"
     return f"fijo ({graded}/{TREND_CALIBRATION_MIN_SAMPLE})"
 
 
@@ -114,14 +115,16 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
     for mk in sorted(markets, key=lambda k: (-_graded(k), k)):
         wh, wm, _ = _tally([r for r in week_rows if r.get("market") == mk])
         th, tm, _ = _tally([r for r in log_rows if r.get("market") == mk])
+        target = TREND_MARKET_TARGET.get(mk, 0.70)
         lines.append(
-            f"{_MARKET_LABEL.get(mk, mk)}: {_ratio(wh, wm, with_pct=False)} · {_ratio(th, tm)}"
-            f" · {pending_by_market.get(mk, 0)} pend. · {_calibration_label(calibration.get(mk), th + tm)}"
+            f"{_MARKET_LABEL.get(mk, mk)} (obj. {target * 100:.0f}%): {_ratio(wh, wm, with_pct=False)}"
+            f" · {_ratio(th, tm)} · {pending_by_market.get(mk, 0)} pend."
+            f" · {_calibration_label(calibration.get(mk), th + tm, target)}"
         )
 
     lines += [
         "",
-        f"Objetivo {TREND_TARGET_HIT_RATE * 100:.0f}% · calibración a partir de "
+        f"Cada mercado con su objetivo · calibración a partir de "
         f"{TREND_CALIBRATION_MIN_SAMPLE} graduadas por mercado",
         _DISCLAIMER,
     ]

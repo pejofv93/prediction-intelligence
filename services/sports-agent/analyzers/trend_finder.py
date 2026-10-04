@@ -38,6 +38,7 @@ from shared.config import (
     TREND_MAX_FIXTURES_PER_TEAM,
     TREND_ROLLING_MIN_SAMPLE,
     TREND_SERIES_MIN_SAMPLE,
+    TREND_RULE_VERSION,
     TREND_SERIES_WINDOW,
 )
 
@@ -46,6 +47,9 @@ logger = logging.getLogger(__name__)
 # Umbrales de goles a probar de mayor a menor — se emite el más alto que aún
 # cumpla el hit-rate: es la afirmación más específica que se sostiene con los datos.
 _GOAL_THRESHOLDS = (3, 2)
+# 3+ es un mercado propio (objetivo y calibración aparte): su tasa base es la
+# mitad que la de 2+ y mezclarlos falseaba el acierto de los dos.
+_GOAL_MARKET = {3: "team_goals_over_3", 2: "team_goals_over"}
 _HANDICAP_MARGIN = 2  # "ganó por 2+"
 
 # Nombre legible por competición — solo para el mensaje, no afecta a la lógica.
@@ -276,9 +280,9 @@ def _series_candidates(team_name: str, team_id: int, side: str, opponent: str,
     for threshold in _GOAL_THRESHOLDS:
         hits = sum(1 for m in matches if m["gf"] >= threshold)
         rate = hits / n
-        if rate >= _effective_threshold("team_goals_over"):
+        if rate >= _effective_threshold(_GOAL_MARKET[threshold]):
             candidates.append({
-                "market": "team_goals_over", "threshold": threshold,
+                "market": _GOAL_MARKET[threshold], "threshold": threshold,
                 "sample": n, "rate": round(rate, 4),
                 "label": f"{threshold}+ goles",
                 "detail": f"Marcó {threshold}+ goles en {hits} de sus últimos {n} partidos ({rate*100:.0f}%)",
@@ -764,6 +768,7 @@ async def _persist_and_send(selected_fixtures: list[dict]) -> int:
                 "team": c.get("team"), "team_id": c.get("team_id"), "side": c.get("side"),
                 "opponent": c.get("opponent"), "selection": c.get("selection"),
                 "pattern_type": c["pattern_type"], "market": c["market"], "threshold": c.get("threshold"),
+                "rule_id": f"{c['market']}.{TREND_RULE_VERSION}",
                 "label": c["label"], "detail": c["detail"],
                 "sample_size": c.get("sample"), "rate_or_ratio": c["rate"], "score": c["score"],
                 "fixture_total_score": fx["total_score"],

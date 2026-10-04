@@ -258,12 +258,35 @@ TREND_MODEL_MARGIN_RATIO_MIN = 1.30  # admite ~1 de cada 6 partidos reales (p85�
 TREND_CALIBRATION_MIN_SAMPLE = 30      # graduadas mínimas para calibrar (antes TREND_PERCENTILE_MIN_SAMPLE)
 TREND_CALIBRATION_WINDOW = 200         # solo las N graduadas más recientes — la forma de los equipos cambia de temporada
 TREND_CALIBRATION_MIN_TAIL_SAMPLE = 10 # mínimo de señales en un corte para no calibrar con ruido de muestra pequeña
-TREND_TARGET_HIT_RATE = 0.70           # objetivo único de precisión para los 14 mercados
+
+# Objetivo de acierto PROPIO de cada mercado (antes un 70% único). Sale de lo que
+# el mercado puede alcanzar: tasa base del suceso y, en los del modelo, la
+# probabilidad que promete al emitir. Total exacto y margen tienen un techo
+# natural (la probabilidad del resultado más probable de una Poisson casi nunca
+# pasa del 35% / 50%), así que su objetivo es esa probabilidad, no el 70%.
+# Goles 3+ es un mercado aparte de 2+ (base 20% frente a 43%).
+TREND_MARKET_TARGET = {
+    "double_chance": 0.75,
+    "dnb": 0.70,
+    "team_goals_over": 0.70,     # goles 2+ del equipo
+    "team_goals_over_3": 0.50,   # goles 3+ del equipo
+    "handicap": 0.55,
+    "exact_total": 0.28,
+    "win_margin": 0.40,
+    "btts": 0.70,
+    # Promedios (rolling): sin graduadas suficientes para fijar uno propio.
+    "corners": 0.70, "cards": 0.70, "red_cards": 0.70, "shots": 0.70,
+    "shots_on_target": 0.70, "fouls": 0.70, "ht_goals": 0.70,
+}
+# Versión de la regla que genera cada mercado; va en trend_signals/trend_accuracy_log
+# como rule_id = "{mercado}.{versión}" para medir cada regla por separado si cambia.
+TREND_RULE_VERSION = "v1"
 
 # Umbral fijo de cada mercado — mismo valor que ya usa trend_finder.py hoy,
 # aquí como mapa para poder compararlo contra el umbral calibrado por mercado.
 TREND_MARKET_FIXED_THRESHOLD = {
     "team_goals_over": TREND_SERIES_MIN_HIT_RATE,
+    "team_goals_over_3": TREND_SERIES_MIN_HIT_RATE,
     "btts": TREND_SERIES_MIN_HIT_RATE,
     "handicap": TREND_SERIES_MIN_HIT_RATE,
     "corners": TREND_ROLLING_MIN_RATIO,

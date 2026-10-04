@@ -16,8 +16,8 @@ Algoritmo por mercado (>= TREND_CALIBRATION_MIN_SAMPLE graduadas, ventana de
 las TREND_CALIBRATION_WINDOW más recientes, "void" excluido igual que hace el
 dashboard):
   1. hit_rate_fixed = aciertos / n sobre TODO lo admitido por el umbral fijo.
-  2. Si hit_rate_fixed >= TREND_TARGET_HIT_RATE → el umbral fijo ya cumple el
-     objetivo, no hace falta apretar ("at_fixed").
+  2. Si hit_rate_fixed >= el objetivo propio del mercado (TREND_MARKET_TARGET)
+     → el umbral fijo ya cumple el objetivo, no hace falta apretar ("at_fixed").
   3. Si no, se busca el corte MÁS LAXO (para no sacrificar más volumen del
      necesario) dentro de lo observado: se ordena por rate_or_ratio
      descendente y se prueban prefijos de mayor a menor tamaño (mínimo
@@ -38,15 +38,16 @@ from shared.config import (
     TREND_CALIBRATION_MIN_TAIL_SAMPLE,
     TREND_CALIBRATION_WINDOW,
     TREND_MARKET_FIXED_THRESHOLD,
-    TREND_TARGET_HIT_RATE,
+    TREND_MARKET_TARGET,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _calibrate_one(rows: list[dict], fixed_threshold: float) -> dict:
+def _calibrate_one(rows: list[dict], fixed_threshold: float, target: float) -> dict:
     """rows: graduadas (hit/miss, sin void) de UN mercado, ya recortadas a la
-    ventana de recencia. No asume ningún orden de entrada."""
+    ventana de recencia. target: objetivo propio del mercado. No asume ningún
+    orden de entrada."""
     n = len(rows)
     if n < TREND_CALIBRATION_MIN_SAMPLE:
         return {"sample_n": n, "hit_rate_fixed": None,
@@ -55,7 +56,7 @@ def _calibrate_one(rows: list[dict], fixed_threshold: float) -> dict:
     hits = sum(1 for r in rows if r.get("result") == "hit")
     hit_rate_fixed = round(hits / n, 4)
 
-    if hit_rate_fixed >= TREND_TARGET_HIT_RATE:
+    if hit_rate_fixed >= target:
         return {"sample_n": n, "hit_rate_fixed": hit_rate_fixed,
                 "threshold_effective": fixed_threshold, "status": "at_fixed"}
 
@@ -69,7 +70,7 @@ def _calibrate_one(rows: list[dict], fixed_threshold: float) -> dict:
 
     for length in range(n - 1, TREND_CALIBRATION_MIN_TAIL_SAMPLE - 1, -1):
         prefix_hit_rate = prefix_hits[length] / length
-        if prefix_hit_rate >= TREND_TARGET_HIT_RATE:
+        if prefix_hit_rate >= target:
             return {
                 "sample_n": n, "hit_rate_fixed": hit_rate_fixed,
                 "threshold_effective": round(ranked[length - 1]["rate_or_ratio"], 4),
@@ -106,12 +107,13 @@ async def run_trend_calibration() -> dict:
         rows.sort(key=lambda r: r.get("graded_at") or "", reverse=True)
         rows = rows[:TREND_CALIBRATION_WINDOW]
 
-        result = _calibrate_one(rows, fixed_threshold)
+        target = TREND_MARKET_TARGET[market]
+        result = _calibrate_one(rows, fixed_threshold, target)
         doc = {
             "market": market,
             "pattern_type": rows[0].get("pattern_type") if rows else None,
             "threshold_fixed": fixed_threshold,
-            "target_hit_rate": TREND_TARGET_HIT_RATE,
+            "target_hit_rate": target,
             "updated_at": now_iso,
             **result,
         }
