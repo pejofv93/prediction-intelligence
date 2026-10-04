@@ -255,6 +255,7 @@ def _write_grade(doc_id: str, sig: dict, result: str, source: str, extra: dict |
         "rule_id": sig.get("rule_id") or f"{sig.get('market')}.v1",
         "team": sig.get("team"), "league": sig.get("league"), "match_id": sig.get("match_id"),
         "sample_size": sig.get("sample_size"), "rate_or_ratio": sig.get("rate_or_ratio"),
+        "model_prob": sig.get("model_prob"),
         "result": result, "graded_at": now_iso, "grade_source": source,
         **(extra or {}),
     }

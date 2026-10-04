@@ -477,6 +477,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
         if best_prob >= _effective_threshold("double_chance"):
             candidates.append({
                 "market": "double_chance", "threshold": None, "selection": best_sel,
+                "model_prob": round(best_prob, 4),
                 "sample": None, "rate": round(best_prob, 4),
                 "label": f"Doble oportunidad: {best_label}",
                 "detail": f"Probabilidad del modelo: {best_prob*100:.0f}% ({best_sel})",
@@ -493,6 +494,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
             if prob >= _effective_threshold("dnb"):
                 candidates.append({
                     "market": "dnb", "threshold": None, "side": side,
+                    "model_prob": round(prob, 4),
                     "sample": None, "rate": round(prob, 4),
                     "label": f"Sin empate: {team_label}",
                     "detail": f"Probabilidad del modelo descartando el empate: {prob*100:.0f}%",
@@ -523,6 +525,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
                 total_v, prob, ratio = tm
                 candidates.append({
                     "market": "exact_total", "threshold": total_v,
+                    "model_prob": round(prob, 4),  # rate guarda el ratio, no la probabilidad
                     "sample": None, "rate": round(ratio, 3),
                     "label": f"Total exacto: {total_v} goles",
                     "detail": f"Resultado más probable del modelo ({prob*100:.0f}%, {ratio:.1f}x el siguiente)",
@@ -540,6 +543,7 @@ def _model_candidates(enriched: dict) -> list[dict]:
                     margin_label = "Empate (margen 0)"
                 candidates.append({
                     "market": "win_margin", "threshold": margin_v,
+                    "model_prob": round(prob, 4),
                     "sample": None, "rate": round(ratio, 3),
                     "label": f"Margen de victoria: {margin_label}",
                     "detail": f"Resultado más probable del modelo ({prob*100:.0f}%, {ratio:.1f}x el siguiente)",
@@ -771,6 +775,7 @@ async def _persist_and_send(selected_fixtures: list[dict]) -> int:
                 "rule_id": f"{c['market']}.{TREND_RULE_VERSION}",
                 "label": c["label"], "detail": c["detail"],
                 "sample_size": c.get("sample"), "rate_or_ratio": c["rate"], "score": c["score"],
+                "model_prob": c.get("model_prob"),
                 "fixture_total_score": fx["total_score"],
                 "sent_at": now.isoformat(), "graded": False, "result": None,
             }
