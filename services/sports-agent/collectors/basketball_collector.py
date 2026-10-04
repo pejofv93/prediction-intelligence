@@ -751,7 +751,12 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                     }
                 elif source == "espn":
                     # ESPN schedule → raw_matches ya en formato correcto
-                    raw_matches_fmt = _recent_first(await get_nba_team_stats_espn(team_id))[:10]
+                    espn_matches = await get_nba_team_stats_espn(team_id)
+                    if espn_matches is None:
+                        # ESPN falló (HTTP/timeout): no se sabe nada nuevo → doc intacto,
+                        # sin marcarlo caducado por un fallo pasajero.
+                        continue
+                    raw_matches_fmt = _recent_first(espn_matches)[:10]
                     if not raw_matches_fmt:
                         logger.debug("basketball_collector: ESPN sin partidos completados para team %d", team_id)
                         _mark_team_stats_stale(team_id, "espn_0_completados")

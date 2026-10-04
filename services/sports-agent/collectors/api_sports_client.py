@@ -299,13 +299,15 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
         return []
 
 
-async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict]:
+async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict] | None:
     """
     Últimos partidos del equipo NBA desde el schedule ESPN (gratuito, sin clave).
     URL: /apis/site/v2/sports/basketball/nba/teams/{id}/schedule
     Devuelve raw_matches en formato basketball_collector:
       [{goals_home, goals_away, home_team_id, was_home, match_date}]
     Solo partidos completados (ambas puntuaciones > 0).
+    None si ESPN falla (HTTP != 200, timeout, JSON inválido) y [] si responde sin partidos
+    terminados: el colector solo marca el doc como caducado en el segundo caso.
     """
     url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{espn_team_id}/schedule"
     try:
@@ -313,11 +315,11 @@ async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict]:
             resp = await client.get(url)
         if resp.status_code != 200:
             logger.warning("ESPN NBA schedule team %d: HTTP %d", espn_team_id, resp.status_code)
-            return []
+            return None
         data = resp.json()
     except Exception:
         logger.error("ESPN NBA schedule team %d: error fetch", espn_team_id, exc_info=True)
-        return []
+        return None
 
     matches: list[dict] = []
     for event in data.get("events", []):
