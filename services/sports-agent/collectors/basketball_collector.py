@@ -630,6 +630,29 @@ async def get_basketball_result_by_teams(league: str, home_team: str, away_team:
     return None
 
 
+def _mark_team_stats_stale(team_id: int, reason: str) -> None:
+    """
+    Marca team_stats como caducado cuando la fuente no devuelve partidos terminados.
+    Sin esto el doc anterior seguía pareciendo válido: al cambiar de temporada, ESPN
+    (schedule sin season) da la pretemporada nueva con 0 terminados y el analizador
+    leía los partidos de mayo. No se completa con otras temporadas a propósito.
+    Solo escribe la primera vez, para que stale_since diga desde cuándo está caducado.
+    """
+    ref = col("team_stats").document(f"bball_{team_id}")
+    try:
+        snap = ref.get()
+        if not snap.exists or (snap.to_dict() or {}).get("stale"):
+            return
+        ref.update({
+            "stale": True,
+            "stale_reason": reason,
+            "stale_since": datetime.now(timezone.utc),
+        })
+        logger.info("basketball_collector: team_stats(%d) marcado caducado (%s)", team_id, reason)
+    except Exception:
+        logger.warning("basketball_collector: error marcando caducado team %d", team_id, exc_info=True)
+
+
 async def collect_basketball_team_stats(games: list[dict]) -> None:
     """
     Para cada equipo en la lista de partidos, recopila sus últimos partidos
@@ -731,6 +754,7 @@ async def collect_basketball_team_stats(games: list[dict]) -> None:
                     raw_matches_fmt = _recent_first(await get_nba_team_stats_espn(team_id))[:10]
                     if not raw_matches_fmt:
                         logger.debug("basketball_collector: ESPN sin partidos completados para team %d", team_id)
+                        _mark_team_stats_stale(team_id, "espn_0_completados")
                         continue
 
                     # Form score desde raw_matches ESPN — calculate_form_score espera "W"/"L"

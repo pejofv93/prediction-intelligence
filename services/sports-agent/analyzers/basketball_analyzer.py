@@ -420,6 +420,8 @@ _BBALL_MAX_STALE_DAYS = 45  # mismo criterio de frescura que el feed de tendenci
 
 def _team_data_issue(stats: dict, tag: str) -> str | None:
     """Motivo por el que los datos de un equipo no sirven, o None si sirven."""
+    if stats.get("stale"):  # el colector no encontró partidos terminados en la fuente
+        return f"{tag}_caducado"
     raw = stats.get("raw_matches") or []
     if len(raw) < _BBALL_MIN_GAMES:
         return f"{tag}_pocos_partidos"
