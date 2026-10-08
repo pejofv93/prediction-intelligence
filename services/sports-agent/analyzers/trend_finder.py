@@ -559,6 +559,40 @@ def _model_candidates(enriched: dict) -> list[dict]:
     return candidates
 
 
+def _poisson_at_least(xg, k: int) -> float:
+    """P(X >= k) para X ~ Poisson(xg). -1 sin xG (queda detrás en el desempate)."""
+    if xg is None:
+        return -1.0
+    lam = float(xg)
+    return 1.0 - sum(math.exp(-lam) * lam ** i / math.factorial(i) for i in range(k))
+
+
+def _one_goals_signal_per_fixture(candidates: list[dict], enriched: dict) -> list[dict]:
+    """
+    Como mucho UNA señal de goles 2+ y una de goles 3+ por partido: la de mayor racha,
+    con desempate por la P(marca k+) de Poisson con el xG de ese equipo. Antes salían
+    las dos ("Madrid 2+ 80%" y "Villarreal 2+ 70%" en el Bernabéu): cada racha se mira
+    sin el rival, y en 8 partidos graduados con las dos solo acertaron juntas 3.
+    """
+    xg = {"home": enriched.get("home_xg"), "away": enriched.get("away_xg")}
+    best: dict[str, tuple] = {}
+    for c in candidates:
+        if c["market"] not in _GOAL_MARKET.values():
+            continue
+        key = (c["rate"], _poisson_at_least(xg.get(c.get("side")), int(c.get("threshold") or 2)),
+               c.get("sample") or 0)
+        if c["market"] not in best or key > best[c["market"]][0]:
+            best[c["market"]] = (key, c)
+    keep = {id(c) for _, c in best.values()}
+    dropped = [c for c in candidates if c["market"] in _GOAL_MARKET.values() and id(c) not in keep]
+    if dropped:
+        logger.info(
+            "trend_finder(%s): una señal de goles por partido — fuera %s",
+            enriched.get("match_id"), [f"{c['team']} {c['market']} {c['rate']}" for c in dropped],
+        )
+    return [c for c in candidates if c["market"] not in _GOAL_MARKET.values() or id(c) in keep]
+
+
 async def _fixture_candidates(enriched: dict, shadow_out: list[dict] | None = None) -> list[dict]:
     """Candidatos que se envían si el partido entra en el top. Las variantes en sombra
     (analyzers/trend_variants.py) se añaden a shadow_out: nunca se envían."""
@@ -597,6 +631,7 @@ async def _fixture_candidates(enriched: dict, shadow_out: list[dict] | None = No
             out.append({**vc, "score": _score(vc["rate"], vc["sample"])})
         elif shadow_out is not None:
             shadow_out.append(vc)
+    out = _one_goals_signal_per_fixture(out, enriched)  # solo lo que se envía; la sombra no
 
     for c in out + [vc for vc in (shadow_out or []) if "match_id" not in vc]:
         c.update({
