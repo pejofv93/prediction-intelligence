@@ -76,6 +76,55 @@ K_FACTOR, HOME_ADVANTAGE, DEFAULT_ELO = 32, 100, 1500.0
 _RAW_MATCHES_KEEP = 20        # igual que firestore_writer
 _ELO_HISTORY_KEEP = 10        # igual que elo_rating
 
+# Amistosos: allsportsapi2 los trae con su propio uniqueTournament (853 "Club Friendly Games",
+# categoría World — comprobado 2026-10-08 con el historial del Augsburg; los de selecciones
+# se llaman "Int. Friendly Games"). Antes se guardaban como cualquier otro partido (SC Schwaz
+# 0-15 Augsburg) y contaminaban raw_matches, forma, xG y el ELO.
+_FRIENDLY_TOURNAMENT_IDS = {853}
+
+# Ligas de clubes que se siembran: uniqueTournament de Sofascore → código (verificados
+# 2026-10-08 contra /api/tournament/{id}/seasons). Junto con las competiciones UEFA son lo
+# único que se siembra: los rivales "de rebote" (copas, otras ligas, amistosos) ya no.
+_SEED_LEAGUE_TOURNAMENTS = {17: "PL", 8: "PD", 23: "SA", 35: "BL1", 34: "FL1",
+                            37: "DED", 238: "PPL", 18: "ELC"}
+_SEED_LEAGUE_CODES = set(_SEED_LEAGUE_TOURNAMENTS.values())
+
+
+def is_friendly(m: dict) -> bool:
+    return (m.get("tournament_id") in _FRIENDLY_TOURNAMENT_IDS
+            or "friendly" in str(m.get("tournament") or "").lower())
+
+
+def _seed_tournaments() -> set:
+    """uniqueTournament ids cuyos equipos se siembran: las 8 ligas + UEFA."""
+    return set(_SEED_LEAGUE_TOURNAMENTS) | set(UEFA_TOURNAMENTS.values())
+
+
+def _match_key(m: dict, team_id=None) -> tuple:
+    """Mismo partido aunque llegue con dos match_id (football-data y OTHER_SF_*).
+
+    Con team_id (historial de UN equipo) el rival no entra en la clave: un equipo no juega
+    dos partidos el mismo día, y el rival a veces llega con dos ids (Augsburg 3-1 del 9-may
+    guardado contra `18` y contra `sf_2527`)."""
+    day = str(m.get("date") or "")[:10]
+    if team_id is not None:
+        home = str(m.get("home_team_id")) == str(team_id)
+        return (day, home, m.get("goals_home"), m.get("goals_away"))
+    return (day, str(m.get("home_team_id")), str(m.get("away_team_id")),
+            m.get("goals_home"), m.get("goals_away"))
+
+
+def dedupe_raw(raw: list[dict], team_id=None) -> list[dict]:
+    """Una entrada por partido; si está repetido se queda la de id de football-data
+    (numérico), que es la que comparte el resto del pipeline (match_results, grader)."""
+    best: dict[tuple, dict] = {}
+    for m in raw:
+        k = _match_key(m, team_id)
+        if k not in best or (str(m.get("match_id", "")).isdigit()
+                             and not str(best[k].get("match_id", "")).isdigit()):
+            best[k] = m
+    return list(best.values())
+
 # team_stats mezcla deportes: hay 26 docs de baloncesto (NBA/ACB/Euroliga) conviviendo con
 # los de fútbol en el MISMO espacio de ids. El ELO guardado incluía por eso partidos de la
 # NBA (los Cavaliers estaban entre los "equipos" con más ELO). Se excluyen del recomputo y
@@ -307,6 +356,7 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
         prog[str(sid)]["name"] = prog[str(sid)].get("name") or nombre
 
     en_competicion = {str(s) for s in candidatos}
+    sembrables = _seed_tournaments()
 
     def _prioridad(sid: str, v: dict) -> int:
         if str(v.get("canonical", "")) in prioritarios or sid in en_competicion:
@@ -317,6 +367,9 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
         return sorted(
             (int(v.get("pages", 0)), _prioridad(sid, v), v.get("name", ""), sid)
             for sid, v in prog.items() if int(v.get("pages", 0)) < objetivo_paginas
+            # Solo clubes del censo (UEFA + clasificaciones) o vistos en las 8 ligas / UEFA:
+            # los rivales de rebote que quedaron en el progreso de antes ya no se piden.
+            and (sid in en_competicion or v.get("seed"))
         )
 
     gastados = 0
@@ -350,14 +403,19 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
                 continue
             torneo = ((e.get("tournament") or {}).get("uniqueTournament") or {})
             m["tournament"] = torneo.get("name", "")
-            out.append(m)
-            # Registrar a los dos equipos como candidatos: así el catálogo de clubes
-            # paginables crece solo hasta cubrir las ligas domésticas.
+            m["tournament_id"] = torneo.get("id")
+            m["friendly"] = is_friendly(m)
+            out.append(m)  # los amistosos van marcados: sirven para purgar copias viejas
+            if m["friendly"] or m["tournament_id"] not in sembrables:
+                continue
+            # Registrar a los dos equipos como candidatos solo si el partido es de una de las
+            # 8 ligas o de UEFA: así el catálogo crece hasta cubrir esas ligas y nada más.
             for nombre_eq, sid_eq in ((m["home_team"], m["home_source_id"]),
                                       (m["away_team"], m["away_source_id"])):
                 entrada = prog.setdefault(str(sid_eq), {"name": nombre_eq, "pages": 0})
                 entrada.setdefault("name", nombre_eq)
                 entrada["canonical"] = resolve(nombre_eq, sid_eq, imap)
+                entrada["seed"] = True
         prog[str(sid)]["pages"] = pagina + 1
         prog[str(sid)]["name"] = nombre
 
@@ -560,7 +618,8 @@ def main() -> None:
             standings, _ = get_previous_standings(
                 db, key, ["PL", "PD", "SA", "BL1", "FL1", "BSA"], now, args.confirm)
             de_tablas = {int(f["source_id"]): f["team_name"]
-                         for filas in standings.values() for f in filas if f.get("source_id")}
+                         for code, filas in standings.items() if code in _SEED_LEAGUE_CODES
+                         for f in filas if f.get("source_id")}
             if de_tablas:
                 clubs = {**de_tablas, **clubs}
                 print(f"   +{len(de_tablas)} clubes de las clasificaciones añadidos al censo")
@@ -644,7 +703,7 @@ def main() -> None:
     torneos: dict[str, dict[str, int]] = {}
     for m in club_hist:
         t = m.get("tournament") or ""
-        if not t or m.get("home_national") or m.get("away_national"):
+        if not t or m.get("friendly") or m.get("home_national") or m.get("away_national"):
             continue
         for nombre, sid in ((m["home_team"], m["home_source_id"]),
                             (m["away_team"], m["away_source_id"])):
@@ -678,6 +737,9 @@ def main() -> None:
         print(f"   {len(selecciones)} selecciones excluidas del recomputo de ELO")
     universe: dict[str, dict] = {}
     src_count = {"raw_matches": 0, "match_results": 0, "uefa": 0}
+    # Amistosos fuera del ELO: los marcados en el historial de esta tanda y, en raw_matches,
+    # los guardados con su torneo o con el match_id de un amistoso visto ahora.
+    friendly_ids = {m["match_id"] for m in club_hist if m.get("friendly")}
 
     for t in team_stats:
         if str(t.get("team_id")) in selecciones:
@@ -689,6 +751,8 @@ def main() -> None:
             if not h or not a or h == "None" or a == "None":
                 continue
             if h in selecciones or a in selecciones:
+                continue
+            if is_friendly(m) or m.get("match_id") in friendly_ids:
                 continue
             fp = match_fingerprint(m.get("date", ""), h, a)
             if fp not in universe:
@@ -716,7 +780,7 @@ def main() -> None:
             src_count["match_results"] += 1
 
     for m in uefa_matches + club_hist:
-        if m.get("home_national") or m.get("away_national"):
+        if m.get("home_national") or m.get("away_national") or m.get("friendly"):
             continue
         norm = norm_uefa_match(m, imap)
         if not norm:
@@ -874,8 +938,23 @@ def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
     nombre_visto: dict[str, str] = {}
     nacional: set[str] = set()
 
+    # Solo se escriben docs de equipos de las 8 ligas o de UEFA (doc con esa liga, club del
+    # censo, o visto en un partido de esas competiciones); no los rivales de rebote.
+    sembrables = _seed_tournaments()
+    permitidos = {tid for tid, t in existing.items() if t.get("league") in _SEED_LEAGUE_CODES}
+    permitidos |= {resolve(nombre, sid, imap) for sid, nombre in (clubs or {}).items()}
+    friendly_ids: set[str] = set()
+    for m in club_hist:
+        if m.get("friendly"):
+            friendly_ids.add(m["match_id"])
+        elif m.get("tournament_id") in sembrables:
+            permitidos.add(resolve(m["home_team"], m["home_source_id"], imap))
+            permitidos.add(resolve(m["away_team"], m["away_source_id"], imap))
+
     for m in club_hist:
         if m.get("goals_home") is None or m.get("goals_away") is None:
+            continue
+        if m.get("friendly"):
             continue
         h = resolve(m["home_team"], m["home_source_id"], imap)
         a = resolve(m["away_team"], m["away_source_id"], imap)
@@ -886,6 +965,8 @@ def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
         if m.get("away_national"):
             nacional.add(a)
         for tid in (h, a):
+            if tid not in permitidos:
+                continue
             por_equipo.setdefault(tid, []).append({
                 "match_id": m["match_id"],
                 "date": m.get("date", ""),
@@ -894,16 +975,18 @@ def build_uefa_team_stats(club_hist: list[dict], clubs: dict[int, str],
                 "goals_home": m["goals_home"],
                 "goals_away": m["goals_away"],
                 "was_home": typed(h) == typed(tid),
+                "tournament": m.get("tournament", ""),
             })
 
     out: dict[str, dict] = {}
     now = datetime.now(timezone.utc)
     for tid, fresh in por_equipo.items():
         prev = existing.get(tid, {})
-        merged = {str(x.get("match_id")): x for x in (prev.get("raw_matches") or [])}
+        merged = {str(x.get("match_id")): x for x in (prev.get("raw_matches") or [])
+                  if str(x.get("match_id")) not in friendly_ids}  # copia vieja de un amistoso
         for x in fresh:
             merged[str(x["match_id"])] = x
-        raw = sorted(merged.values(), key=lambda x: str(x.get("date", "")),
+        raw = sorted(dedupe_raw(list(merged.values()), tid), key=lambda x: str(x.get("date", "")),
                      reverse=True)[:_RAW_MATCHES_KEEP]
 
         results = build_results_list(raw, typed(tid))
