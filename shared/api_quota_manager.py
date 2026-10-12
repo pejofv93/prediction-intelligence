@@ -45,7 +45,7 @@ Uso:
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -76,6 +76,16 @@ _MONTHLY_LIMITS: dict[str, int] = {
     "opticodds":     1_000, # optic-odds.io free: 1000/mes (fallback cuaternario)
 }
 
+# ── Hora UTC del reinicio de la cuota diaria ────────────────────────────────
+# Por defecto medianoche UTC. allsportsapi2 (RapidAPI) reinicia a las 07:58 UTC:
+# X-RateLimit-Requests-Reset leído el 2026-10-12 a las 09:25 UTC daba 81.135 s →
+# 2026-10-13 07:58. Contar desde las 00:00 metía en el día las peticiones de antes del
+# reinicio y la siembra de las ~09:30 se recortaba a 3 clubes cuando la cuota real le
+# daba 19.
+_DAILY_RESET_UTC: dict[str, tuple[int, int]] = {
+    "allsports": (7, 58),
+}
+
 # ── Umbral de alerta (% del límite) ──────────────────────────────────────────
 _ALERT_THRESHOLD = 0.80
 
@@ -83,7 +93,7 @@ _ALERT_THRESHOLD = 0.80
 class QuotaManager:
     """
     Persiste contadores en Firestore.
-    Clave daily:   api_quotas/{api}_{YYYY-MM-DD}
+    Clave daily:   api_quotas/{api}_{YYYY-MM-DD}  (fecha del último reinicio, ver daily_period)
     Clave monthly: api_quotas/{api}_monthly_{YYYY-MM}
     """
 
@@ -121,8 +131,7 @@ class QuotaManager:
         limit = _DAILY_LIMITS.get(api_name)
         if limit is None:
             return True
-        today = _today()
-        doc = self._get_doc(f"{api_name}_{today}")
+        doc = self._get_doc(f"{api_name}_{daily_period(api_name)}")
         used = doc.get("used", 0)
         if used >= limit:
             logger.warning("QuotaManager: %s cuota diaria agotada (%d/%d)", api_name, used, limit)
@@ -141,8 +150,7 @@ class QuotaManager:
         return True
 
     def track_call(self, api_name: str, remaining: Optional[str | int] = None) -> None:
-        today = _today()
-        key = f"{api_name}_{today}"
+        key = f"{api_name}_{daily_period(api_name)}"
         doc = self._get_doc(key)
         doc["used"] = doc.get("used", 0) + 1
         doc["last_call"] = datetime.now(timezone.utc).isoformat()
@@ -159,7 +167,7 @@ class QuotaManager:
         if not limit:
             return
         if used >= int(limit * _ALERT_THRESHOLD):
-            key = f"{api_name}_{_today()}_daily"
+            key = f"{api_name}_{daily_period(api_name)}_daily"
             if key not in self._alerted:
                 self._alerted.add(key)
                 pct = int(used / limit * 100)
@@ -256,10 +264,9 @@ class QuotaManager:
 
     def get_quota_status(self) -> dict[str, dict]:
         """Estado de cuotas diarias para el endpoint /api/quota."""
-        today = _today()
         status: dict[str, dict] = {}
         for api_name, limit in _DAILY_LIMITS.items():
-            doc = self._get_doc(f"{api_name}_{today}")
+            doc = self._get_doc(f"{api_name}_{daily_period(api_name)}")
             used = doc.get("used", 0)
             remaining_rep = doc.get("remaining_reported")
             remaining = remaining_rep if remaining_rep is not None else max(0, limit - used)
@@ -346,6 +353,17 @@ class QuotaManager:
 
 def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def daily_period(api_name: str, now: datetime | None = None) -> str:
+    """
+    Fecha (YYYY-MM-DD) de la ventana de cuota diaria en curso de api_name: la del último
+    reinicio (_DAILY_RESET_UTC; medianoche UTC si no figura). Es el sufijo de su clave en
+    api_quotas — la comparten QuotaManager y la siembra (scripts/rebuild_elo.py).
+    """
+    now = now or datetime.now(timezone.utc)
+    h, m = _DAILY_RESET_UTC.get(api_name, (0, 0))
+    return (now - timedelta(hours=h, minutes=m)).strftime("%Y-%m-%d")
 
 
 def _this_month() -> str:

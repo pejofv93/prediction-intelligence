@@ -35,7 +35,7 @@ vía el contador api_quotas/allsports_{fecha} que mantiene QuotaManager: al arra
 para calcular el presupuesto, al terminar se suma lo que gastó la siembra para que el
 siguiente collect lo vea. `--history-budget` es el TOPE de la tanda; el gasto real se
 recorta a la señal de cuota MÁS PESIMISTA (cabecera X-RateLimit · límite - lo ya gastado
-por collect) menos `--collect-reserve` (40 por defecto). Si NO hay NINGUNA señal de cuota,
+por collect) menos `--collect-reserve` (60 por defecto). Si NO hay NINGUNA señal de cuota,
 se aplica un tope duro (HISTORY_BUDGET_HARD_CAP) en vez de dar por bueno `--history-budget`
 — ese fue el fallo del 429 que tumbó el cron el 2026-08-26: el recorte existía pero se
 saltaba en silencio al faltar la cabecera. El progreso de historial queda en
@@ -63,6 +63,7 @@ os.environ.setdefault("FIRESTORE_COLLECTION_PREFIX", "prod")
 from _fsrest import get_db                                              # noqa: E402
 from probe_uefa import _api_key, _get as _raw_uefa_get, _season_label   # noqa: E402
 from collectors.allsports_uefa import UEFA_TOURNAMENTS, parse_event     # noqa: E402
+from shared.api_quota_manager import daily_period                       # noqa: E402
 from collectors.team_identity import (                                  # noqa: E402
     build_identity_map, match_fingerprint, resolve,
 )
@@ -189,7 +190,7 @@ def _uefa_get(path: str, key: str) -> tuple[dict, dict]:
 def _read_allsports_used(db, now: datetime) -> int | None:
     """`used` del contador compartido api_quotas/allsports_{fecha}, o None si el doc no
     existe o no se puede leer. None NO es 0: significa "no sé lo que gastó collect hoy"."""
-    key = f"allsports_{now.strftime('%Y-%m-%d')}"
+    key = f"allsports_{daily_period('allsports', now)}"
     try:
         doc = next((d for d in db.read_collection("api_quotas") if d["_id"] == key), None)
     except Exception as e:
@@ -210,7 +211,7 @@ def _bump_allsports_used(db, now: datetime, n_requests: int, last_remaining: int
     colector es de milisegundos y ambos lados corren en horarios disjuntos."""
     if n_requests <= 0:
         return
-    key = f"allsports_{now.strftime('%Y-%m-%d')}"
+    key = f"allsports_{daily_period('allsports', now)}"
     if not confirm:
         print(f"   [dry-run] registraría +{n_requests} en {key} "
               f"(remaining~{last_remaining if last_remaining is not None else '?'})")
@@ -545,7 +546,12 @@ def main() -> None:
                     help="requests de historial por ejecución (cuota 100/día) — tope "
                          "superior: si allsportsapi2 reporta menos cuota real restante, "
                          "se recorta a eso menos --collect-reserve")
-    ap.add_argument("--collect-reserve", type=int, default=40,
+    # 60, no 40: medido en los logs de collect.uefa (27-sep → 11-oct, 15 ventanas de
+    # cuota), entre el final de la siembra y el reinicio de las 07:58 el collect gastó hasta
+    # 51 peticiones (media 42) y el 2-oct se quedó sin 3 pedidas (~57 de demanda). El
+    # máximo teórico son ~56 (4 ciclos × 8 de fixtures + 3 lecturas × 8 de resultados).
+    # Con 40 solo cuadraba porque el contador por fecha UTC frenaba la siembra.
+    ap.add_argument("--collect-reserve", type=int, default=60,
                     help="cuota que se deja sin tocar para sports-collect.yml (censo+"
                          "fixtures UEFA cada 6h), que consume del mismo pool 100/día y "
                          "no se coordina con este script más que por esta reserva")
