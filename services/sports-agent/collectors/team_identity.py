@@ -32,6 +32,62 @@ _GENERIC_WORDS = {
 }
 
 
+# Alias por id de Sofascore/allsportsapi2 → team_id de football-data, para clubes cuyo nombre
+# no casa con el emparejamiento estricto ("Fiorentina" vs "ACF Fiorentina") o, peor, casa con
+# otro club ("FC Barcelona" → Barcelona SC de Ecuador, 2026-10-11). Se consulta antes que el
+# nombre. Cada id está verificado contra la API (2026-10-11/12), no solo por nombre: los de las
+# 8 ligas, en la clasificación 26/27 de su liga; los UEFA, por /api/team/{id} (país y liga).
+SOFASCORE_ALIASES: dict[str, str] = {
+    # LaLiga (España)
+    "2817": "81",     # FC Barcelona
+    "2816": "90",     # Real Betis
+    "2832": "560",    # Deportivo de A Coruña
+    "2825": "77",     # Athletic Club
+    "2814": "80",     # Espanyol
+    "2818": "87",     # Rayo Vallecano
+    "2820": "79",     # Osasuna
+    "2835": "5335",   # Real Racing Club
+    # Liga Portugal Betclic (Portugal)
+    "3001": "498",    # Sporting CP
+    "3006": "1903",   # Benfica
+    "2999": "5613",   # Sporting Braga
+    "3035": "9136",   # CF Estrela Amadora
+    "4500": "582",    # Estoril Praia
+    # Serie A (Italia)
+    "2697": "108",    # Inter
+    "2686": "102",    # Atalanta
+    "2713": "107",    # Genoa
+    "2693": "99",     # Fiorentina
+    # Ligue 1 (Francia)
+    "1646": "519",    # Auxerre
+    "1643": "521",    # Lille
+    "1661": "522",    # Nice
+    "1658": "529",    # Stade Rennais
+    "1652": "531",    # Troyes
+    "1684": "532",    # Angers
+    "1648": "546",    # RC Lens
+    "1659": "576",    # RC Strasbourg
+    # Eredivisie (Países Bajos)
+    "2970": "1909",   # SC Cambuur
+    "2962": "1915",   # NEC Nijmegen
+    "2967": "670",    # Excelsior
+    "2952": "674",    # PSV Eindhoven
+    "2959": "675",    # Feyenoord
+    "2950": "682",    # AZ Alkmaar
+    # Bundesliga (Alemania) y Championship (Inglaterra)
+    "2527": "18",     # Borussia M'gladbach
+    "3": "76",        # Wolverhampton
+    # Clubes UEFA de otras ligas: verificados por /api/team/{id} (país + liga principal)
+    "3250": "1899",   # AEK Athens (Grecia)
+    "2058": "2016",   # LASK (Austria)
+    "1164": "5720",   # Viking FK (Noruega)
+    "656": "5721",    # Bodø/Glimt (Noruega)
+    "3061": "610",    # Galatasaray (Turquía)
+    "2404": "7509",   # ŠK Slovan Bratislava (Eslovaquia)
+    "2216": "930",    # SK Slavia Praha (Chequia)
+}
+
+
 def normalize(name: str) -> str:
     """
     Minúsculas, sin acentos, sin puntuación, sin palabras genéricas y SIN tokens
@@ -84,8 +140,10 @@ def resolve(team_name: str, source_id: int | str, identity_map: dict[str, str],
             prefix: str = "sf") -> str:
     """
     Id canónico del club. Devuelve el team_id ya existente si el nombre coincide;
-    si no, acuña f"{prefix}_{source_id}".
+    si no, acuña f"{prefix}_{source_id}". Los ids de SOFASCORE_ALIASES ganan al nombre.
     """
+    if prefix == "sf" and str(source_id) in SOFASCORE_ALIASES:
+        return SOFASCORE_ALIASES[str(source_id)]
     key = normalize(team_name)
     if key:
         hit = identity_map.get(key)
