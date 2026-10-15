@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 
 from shared.firestore_client import col
+from shared.shadow_engine import poly_alerted_metrics
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -17,9 +18,11 @@ router = APIRouter()
 async def get_poly_stats() -> dict:
     """
     Lee poly_model_weights/current.
-    Devuelve umbrales por dirección, accuracy, sample_size, version, updated_at.
+    Devuelve umbrales por dirección, accuracy, sample_size, version, updated_at,
+    y "emitted": emitido real desde alerts_sent (1u por alerta).
     """
     try:
+        emitted = poly_alerted_metrics()
         doc = col("poly_model_weights").document("current").get()
         if not doc.exists:
             return {
@@ -35,6 +38,7 @@ async def get_poly_stats() -> dict:
                 "sample_size": 0,
                 "sample_buy_yes": 0,
                 "sample_buy_no": 0,
+                "emitted": emitted,
             }
 
         data = doc.to_dict()
@@ -57,6 +61,7 @@ async def get_poly_stats() -> dict:
             "sample_size": int(data.get("sample_size", 0)),
             "sample_buy_yes": int(data.get("sample_buy_yes", 0)),
             "sample_buy_no": int(data.get("sample_buy_no", 0)),
+            "emitted": emitted,
         }
     except Exception:
         logger.error("get_poly_stats: error", exc_info=True)

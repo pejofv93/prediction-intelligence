@@ -22,6 +22,13 @@ interface PolyStats {
   sample_size: number
   sample_buy_yes: number
   sample_buy_no: number
+  emitted?: {
+    roi: number
+    win_rate: number
+    n: number
+    pending: number
+    by_direction: Record<'BUY_YES' | 'BUY_NO', { n: number; wins: number; roi: number }>
+  }
 }
 
 const LEAGUE_NAMES: Record<string, string> = {
@@ -174,6 +181,26 @@ function PolyModelSection() {
           </div>
         </div>
       </div>
+
+      {data.emitted && (
+        <div style={{ background: '#1e1e1e', border: '1px solid #2e2e2e', borderRadius: 6, padding: '10px 14px', marginBottom: 16 }}>
+          <div style={{ color: '#555', fontSize: 10, marginBottom: 4 }}>EMITIDO REAL (ALERTADO · 1u/ALERTA)</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 12 }}>
+            <span style={{ color: data.emitted.roi >= 0 ? '#00C853' : '#FF5252', fontSize: 24, fontWeight: 'bold', lineHeight: 1 }}>
+              {data.emitted.roi >= 0 ? '+' : ''}{(data.emitted.roi * 100).toFixed(1)}%
+            </span>
+            <span style={{ color: '#888', fontSize: 12 }}>
+              acierto {(data.emitted.win_rate * 100).toFixed(0)}% · {data.emitted.n} resueltas · {data.emitted.pending} pendientes
+            </span>
+          </div>
+          <div style={{ color: '#444', fontSize: 10, marginTop: 4 }}>
+            {(['BUY_YES', 'BUY_NO'] as const).map(d => {
+              const b = data.emitted!.by_direction[d]
+              return `${d.replace('_', ' ')} ${b.roi >= 0 ? '+' : ''}${(b.roi * 100).toFixed(1)}% (${b.n})`
+            }).join(' · ')}
+          </div>
+        </div>
+      )}
 
       <div style={{ color: '#444', fontSize: 11, borderTop: '1px solid #222', paddingTop: 10 }}>
         Umbrales ajustados automáticamente por poly_learning_engine tras cada resolución.

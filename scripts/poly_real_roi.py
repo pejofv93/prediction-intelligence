@@ -4,12 +4,13 @@ scripts/poly_real_roi.py
 Mide el ROI REAL de Polymarket separando:
   - LEDGER CRUDO  : todos los shadow_trades source=polymarket resueltos
                     (incluye señales legacy nunca alertadas → contaminación)
-  - EMITIDO REAL  : solo las realmente alertadas (poly_predictions.alerted == True)
-                    join por shadow_trade.signal_id == poly_predictions doc id
+  - EMITIDO REAL  : TODAS las alertas enviadas (alerts_sent, type=polymarket,
+                    status sent/sent_archived) graduadas por polymarket_resolver,
+                    1u por alerta al precio del envío. Antes se usaba
+                    poly_predictions.alerted, que se pisaba al reanalizar.
 
-Y simula el efecto de des-contaminar el LEARNING: muestra accuracy por dirección
-y el min_edge que `poly_learning_engine._new_threshold` produciría con el ledger
-crudo vs solo-alertadas, para ver si los umbrales aprendidos se reajustan.
+Y simula el min_edge que `poly_learning_engine._new_threshold` produciría con el
+ledger crudo vs lo emitido de verdad.
 
 Solo lectura. No escribe nada en Firestore.
 
@@ -141,18 +142,36 @@ def _sim_min_edge(rows):
     return acc, n, (min(win_edges) if win_edges else None), None
 
 
-def main():
-    print("Cargando Firestore (prodshadow_trades + prodpoly_predictions)...", file=sys.stderr)
-    # Alertados autoritativos
-    pp = _list("prodpoly_predictions")
-    alerted_ids = set()
-    for d in pp:
-        f = _fields(d)
-        if f.get("alerted") is True:
-            alerted_ids.add(d["name"].split("/")[-1])
+def _alert_selection(a):
+    for k in ("graded_selection", "recommendation", "direction"):
+        v = str(a.get(k) or "").upper()
+        if v in ("BUY_YES", "BUY_NO"):
+            return v
+    try:
+        return "BUY_YES" if float(str(a.get("alert_key") or "").rsplit("_", 1)[1]) >= 0 else "BUY_NO"
+    except (IndexError, ValueError):
+        return None
 
+
+def _alert_edge(a):
+    if a.get("edge") is not None:
+        return float(a["edge"])
+    try:
+        return float(str(a.get("alert_key") or "").rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _poly_odds(sel, mp):
+    if mp is None or not (0 < mp < 1):
+        return 2.0
+    return round(1 / (1 - mp), 2) if sel == "BUY_NO" else round(1 / mp, 2)
+
+
+def main():
+    print("Cargando Firestore (prodshadow_trades + prodalerts_sent)...", file=sys.stderr)
     st = _list("prodshadow_trades")
-    rows = []
+    crudo = []
     for d in st:
         t = _fields(d)
         if t.get("source") != "polymarket" or t.get("result") not in ("win", "loss"):
@@ -161,44 +180,67 @@ def main():
         sd = t.get("signal_data") or {}
         if edge is None:
             edge = sd.get("edge")
-        rows.append({
+        crudo.append({
             "sel": (t.get("selection") or "").upper(),
             "result": t.get("result"),
             "pnl": float(t.get("pnl_virtual") or 0),
             "stake": float(t.get("virtual_stake") or 0.5),
             "mp": _mp_yes(t),
             "edge": float(edge) if edge is not None else None,
-            "alerted": t.get("signal_id") in alerted_ids,
         })
 
-    crudo = rows
-    real = [r for r in rows if r["alerted"]]
-    no_alert = [r for r in rows if not r["alerted"]]
+    real, pending, ungraded_sel = [], 0, 0
+    for d in _list("prodalerts_sent"):
+        a = _fields(d)
+        if a.get("type") != "polymarket" or a.get("status") not in ("sent", "sent_archived"):
+            continue
+        if a.get("result") not in ("win", "loss"):
+            pending += 1
+            continue
+        sel = _alert_selection(a)
+        if sel is None:
+            ungraded_sel += 1
+            continue
+        mp = a.get("market_price_yes", a.get("last_price"))
+        mp = float(mp) if mp is not None else None
+        odds = _poly_odds(sel, mp)
+        real.append({
+            "sel": sel,
+            "result": a["result"],
+            "pnl": (odds - 1) if a["result"] == "win" else -1.0,
+            "stake": 1.0,
+            "mp": mp,
+            "edge": _alert_edge(a),
+        })
 
-    print("\n" + "=" * 80)
+    print()
+    print("=" * 80)
     print("POLYMARKET — ROI REAL (ledger crudo vs emitido real)   [solo lectura]")
     print("=" * 80)
-    print(f"poly_predictions.alerted=True: {len(alerted_ids)} | shadow_trades resueltos: {len(crudo)}")
+    print(f"alerts_sent graduadas: {len(real)} | pendientes de resolver: {pending}"
+          f" | sin dirección: {ungraded_sel} | shadow_trades resueltos: {len(crudo)}")
     print()
-    _line("LEDGER CRUDO (todo)", crudo)
-    _line("EMITIDO REAL (alertado)", real)
-    _line("contaminación (no alertado)", no_alert)
+    _line("LEDGER CRUDO (shadow, Kelly)", crudo)
+    _line("EMITIDO REAL (alerts_sent, 1u)", real)
 
-    print("\n--- Emitido real por dirección ---")
+    print()
+    print("--- Emitido real por dirección ---")
     for s in ("BUY_YES", "BUY_NO"):
-        _line(s, [r for r in real if s in r["sel"]])
+        _line(s, [r for r in real if r["sel"] == s])
 
-    print("\n--- Simulación umbrales learning (crudo vs des-contaminado) ---")
-    print("  ¿Cambian los min_edge aprendidos al quitar las fantasma?\n")
+    print()
+    print("--- Simulación umbrales learning (crudo vs emitido real) ---")
+    print()
     for s in ("BUY_YES", "BUY_NO"):
         cr = _sim_min_edge([r for r in crudo if s in r["sel"]])
-        rl = _sim_min_edge([r for r in real if s in r["sel"]])
+        rl = _sim_min_edge([r for r in real if r["sel"] == s])
         print(f"  [{s}]")
-        print(f"    CRUDO          : acc={cr[0]*100:5.1f}% n={cr[1]:3d} "
+        print(f"    CRUDO       : acc={cr[0]*100:5.1f}% n={cr[1]:3d} "
               f"min_win_edge={cr[2]} -> min_edge={cr[3]}")
-        print(f"    DES-CONTAMINADO: acc={rl[0]*100:5.1f}% n={rl[1]:3d} "
+        print(f"    EMITIDO REAL: acc={rl[0]*100:5.1f}% n={rl[1]:3d} "
               f"min_win_edge={rl[2]} -> min_edge={rl[3]}")
-    print("\n[fin]")
+    print()
+    print("[fin]")
 
 
 if __name__ == "__main__":

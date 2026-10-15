@@ -235,6 +235,7 @@ def format_daily_report(
     roi_poly_alerted = float(shadow_metrics.get("roi_poly_alerted") or 0.0)
     wr_poly_alerted = float(shadow_metrics.get("win_rate_poly_alerted") or 0.0)
     n_poly_alerted = int(shadow_metrics.get("n_poly_alerted") or 0)
+    pending_poly_alerted = int(shadow_metrics.get("pending_poly_alerted") or 0)
 
     # Estado del modelo basado en win rate real (no en pesos internos)
     if closed_trades < 10:
@@ -288,7 +289,10 @@ def format_daily_report(
     lines.append(f"📈 ROI total: {roi_total:+.1%}")
     lines.append(f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports:.0%}, {n_sports} señales)")
     lines.append(f"  🔮 Polymarket — ledger crudo: {roi_poly:+.1%} (win rate {wr_poly:.0%}, {n_poly} señales)")
-    lines.append(f"  🔮 Polymarket — emitido real (alertado): {roi_poly_alerted:+.1%} (win rate {wr_poly_alerted:.0%}, {n_poly_alerted} señales)")
+    lines.append(
+        f"  🔮 Polymarket — emitido real (alertado, 1u/alerta): {roi_poly_alerted:+.1%} "
+        f"(win rate {wr_poly_alerted:.0%}, {n_poly_alerted} resueltas, {pending_poly_alerted} pendientes)"
+    )
 
     if avg_clv != 0.0:
         lines.append(f"📐 CLV medio: {avg_clv:+.1%}")

@@ -371,28 +371,72 @@ async def update_trade_result(trade_id: str, result: str, odds_final: float = No
         logger.error("shadow: error en update_trade_result: %s", e)
 
 
-def _alerted_poly_ids() -> set:
-    """Set de market_ids REALMENTE alertados (poly_predictions.alerted == True).
+# Envíos Polymarket en alerts_sent: "sent" = vigente; "sent_archived" = envío anterior
+# con el mismo alert_key, archivado por check_and_alert al re-alertar.
+_POLY_SENT_STATUSES = ("sent", "sent_archived")
 
-    Fuente autoritativa de "qué emite el sistema". OJO: el campo
-    shadow_trade.signal_data.alerted es un snapshot tomado en el análisis
-    (antes de decidir la alerta) y queda en False casi siempre — NO es fiable.
-    El join correcto es shadow_trade.signal_id == poly_predictions doc id.
 
-    Paginado igual que _iter_all_shadow_trades (ver shared.firestore_client.iter_all):
-    esta llamada era un único .stream() sin límite sobre poly_predictions completo
-    (4.168 docs y creciendo); es exactamente el mismo patrón que causó el 504 original
-    en shadow_trades, solo que en la otra colección — reproducido en producción el
-    2026-09-11 (calculate_metrics volvió a caer en 504 Deadline Exceeded).
-
-    Devuelve set vacío si falla (las métricas "alertadas" quedan a 0 sin romper
-    el resto del cálculo).
-    """
+def _poly_alert_selection(alert: dict) -> Optional[str]:
+    """BUY_YES/BUY_NO ENVIADO: recommendation (alertas nuevas) → direction (antiguas)
+    → signo del edge en alert_key "{market_id}_{edge}" (unas pocas de abril)."""
+    for key in ("graded_selection", "recommendation", "direction"):
+        v = str(alert.get(key) or "").upper()
+        if v in ("BUY_YES", "BUY_NO"):
+            return v
     try:
-        return {doc.id for doc in iter_all("poly_predictions", where=("alerted", "==", True))}
+        return "BUY_YES" if float(str(alert.get("alert_key") or "").rsplit("_", 1)[1]) >= 0 else "BUY_NO"
+    except (IndexError, ValueError):
+        return None
+
+
+def poly_alerted_metrics(resolved_from: datetime = None, resolved_to: datetime = None) -> dict:
+    """
+    Polymarket "emitido real": TODAS las alertas enviadas (alerts_sent) graduadas por
+    polymarket_resolver, a 1u por alerta y al precio del momento del envío.
+
+    Sustituye al join con poly_predictions.alerted, que se pisaba en cada reanálisis
+    y dejaba solo un subconjunto sesgado (224 de 892 envíos a 2026-10-15).
+    Un mercado alertado varias veces cuenta una vez por envío. Sin stake Kelly: las
+    líneas de bankroll siguen saliendo de shadow_trades.
+
+    resolved_from/resolved_to acotan por resolved_at (p. ej. resueltas esta semana).
+    """
+    out = {"roi": 0.0, "win_rate": 0.0, "n": 0, "wins": 0, "pnl": 0.0, "pending": 0,
+           "by_direction": {"BUY_YES": {"n": 0, "wins": 0, "pnl": 0.0, "roi": 0.0},
+                            "BUY_NO": {"n": 0, "wins": 0, "pnl": 0.0, "roi": 0.0}}}
+    try:
+        for doc in iter_all("alerts_sent", where=("type", "==", "polymarket")):
+            a = doc.to_dict() or {}
+            if a.get("status") not in _POLY_SENT_STATUSES or not a.get("market_id"):
+                continue
+            result = a.get("result")
+            if result not in ("win", "loss"):
+                if resolved_from is None and resolved_to is None:
+                    out["pending"] += 1
+                continue
+            res_at = _as_utc_dt(a.get("resolved_at"))
+            if resolved_from is not None and (res_at is None or res_at < resolved_from):
+                continue
+            if resolved_to is not None and (res_at is None or res_at >= resolved_to):
+                continue
+            sel = _poly_alert_selection(a)
+            if sel is None:
+                continue
+            mp = a.get("market_price_yes", a.get("last_price"))
+            odds = _poly_decimal_odds(sel, float(mp)) if mp is not None else 2.0
+            pnl = (odds - 1.0) if result == "win" else -1.0
+            for bucket in (out, out["by_direction"][sel]):
+                bucket["n"] += 1
+                bucket["pnl"] += pnl
+                if result == "win":
+                    bucket["wins"] += 1
+        for bucket in (out, *out["by_direction"].values()):
+            bucket["pnl"] = round(bucket["pnl"], 4)
+            bucket["roi"] = round(bucket["pnl"] / bucket["n"], 4) if bucket["n"] else 0.0
+        out["win_rate"] = round(out["wins"] / out["n"], 4) if out["n"] else 0.0
     except Exception as e:
-        logger.error("shadow: error cargando alerted poly ids: %s", e)
-        return set()
+        logger.error("shadow: error calculando emitido real desde alerts_sent: %s", e)
+    return out
 
 
 def calculate_metrics(trades: list = None) -> dict:
@@ -431,29 +475,9 @@ def calculate_metrics(trades: list = None) -> dict:
                 "wins": len(s_wins),
             }
 
-        # ROI "emitido real": solo trades de polymarket REALMENTE alertados.
-        # El ledger crudo (_roi_for) incluye señales que el sistema nunca alertó
-        # (alerted=False, legacy pre-gating) y que jamás se apostarían → contaminan
-        # el ROI. Esto separa "lo que el modelo de verdad emite" del ledger completo.
-        _alerted_ids = _alerted_poly_ids()
-
-        def _roi_for_poly_alerted():
-            src_trades = [
-                t for t in closed
-                if t.get("source") == "polymarket"
-                and t.get("signal_id") in _alerted_ids
-            ]
-            s_pnl = sum(float(t.get("pnl_virtual") or 0) for t in src_trades)
-            s_stake = sum(float(t.get("virtual_stake") or _MIN_STAKE) for t in src_trades)
-            s_wins = [t for t in src_trades if t.get("result") == "win"]
-            return {
-                "roi": round(s_pnl / s_stake, 4) if s_stake > 0 else 0.0,
-                "win_rate": round(len(s_wins) / len(src_trades), 4) if src_trades else 0.0,
-                "n": len(src_trades),
-                "pnl": round(s_pnl, 4),
-                "stake": round(s_stake, 4),
-                "wins": len(s_wins),
-            }
+        # ROI "emitido real": todas las alertas enviadas (alerts_sent), 1u por alerta.
+        # El ledger crudo (_roi_for) mezcla señales legacy nunca alertadas.
+        _emitted = poly_alerted_metrics()
 
         # Win rate
         win_rate = round(len(wins) / len(closed), 4) if closed else 0.0
@@ -507,7 +531,7 @@ def calculate_metrics(trades: list = None) -> dict:
         by_source = {
             "sports": _roi_for("sports"),
             "polymarket": _roi_for("polymarket"),
-            "polymarket_alerted": _roi_for_poly_alerted(),
+            "polymarket_alerted": _emitted,
         }
 
         # By category
@@ -566,12 +590,13 @@ def calculate_metrics(trades: list = None) -> dict:
             "n_poly": by_source["polymarket"]["n"],
             "pnl_sports": by_source["sports"]["pnl"],
             "pnl_poly": by_source["polymarket"]["pnl"],
-            # Polymarket "emitido real" — solo señales realmente alertadas.
+            # Polymarket "emitido real" — alerts_sent graduado, 1u por alerta (pnl en u).
             # roi_poly arriba es el LEDGER CRUDO (incluye no-alertadas contaminantes).
             "roi_poly_alerted": by_source["polymarket_alerted"]["roi"],
             "win_rate_poly_alerted": by_source["polymarket_alerted"]["win_rate"],
             "n_poly_alerted": by_source["polymarket_alerted"]["n"],
             "pnl_poly_alerted": by_source["polymarket_alerted"]["pnl"],
+            "pending_poly_alerted": by_source["polymarket_alerted"]["pending"],
             "roi_last20": roi_last20,
             "last_20_win_rate": last_20_win_rate,
             "avg_edge": avg_edge,

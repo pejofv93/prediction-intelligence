@@ -473,29 +473,20 @@ async def send_weekly_report() -> JSONResponse:
         # siempre un conjunto vacío por diseño — daba 0/0 casi todas las semanas
         # aunque sí hubiera resoluciones reales esa semana (bug descubierto 2026-09-12).
         # Fix: query propia por resolved_at en la ventana de la semana.
-        resolved_poly: list[dict] = []
-        try:
-            resolved_docs = list(
-                col("poly_predictions")
-                .where(filter=FieldFilter("resolved_at", ">=", week_start))
-                .where(filter=FieldFilter("resolved_at", "<", week_end))
-                .stream()
-            )
-            _resolved_dicts = [d.to_dict() for d in resolved_docs]
-            resolved_poly = [
-                p for p in _resolved_dicts
-                if p.get("result") in ("win", "loss") and p.get("alerted") is True
-            ]
-        except Exception:
-            logger.warning("send-weekly-report: error en query resolved_at", exc_info=True)
-
-        poly_buy_yes = [p for p in resolved_poly if p.get("recommendation") == "BUY_YES"]
-        poly_buy_no = [p for p in resolved_poly if p.get("recommendation") == "BUY_NO"]
-        poly_buy_yes_correct = sum(1 for p in poly_buy_yes if p.get("result") == "win")
-        poly_buy_no_correct = sum(1 for p in poly_buy_no if p.get("result") == "win")
-        if not resolved_poly:
+        # Fuente: alerts_sent graduado por polymarket_resolver (cada envío cuenta, con
+        # la dirección ENVIADA). poly_predictions.alerted/recommendation no sirven: la
+        # marca se pisaba al reanalizar y la recomendación cambia tras el envío.
+        from shared.shadow_engine import poly_alerted_metrics
+        _wk = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: poly_alerted_metrics(resolved_from=week_start, resolved_to=week_end)
+        )
+        poly_buy_yes_correct = _wk["by_direction"]["BUY_YES"]["wins"]
+        poly_buy_no_correct = _wk["by_direction"]["BUY_NO"]["wins"]
+        poly_buy_yes_total = _wk["by_direction"]["BUY_YES"]["n"]
+        poly_buy_no_total = _wk["by_direction"]["BUY_NO"]["n"]
+        if not _wk["n"]:
             logger.info(
-                "send-weekly-report: 0 mercados poly resueltos (resolved_at) en ventana %s "
+                "send-weekly-report: 0 alertas poly resueltas (resolved_at) en ventana %s "
                 "(BUY_YES/BUY_NO 0/0 legítimo, no bug de conteo)", prev_week,
             )
 
@@ -573,9 +564,9 @@ async def send_weekly_report() -> JSONResponse:
             "poly_alerts": poly_alerts,
             "poly_avg_edge": poly_avg_edge,
             "poly_buy_yes_correct": poly_buy_yes_correct,
-            "poly_buy_yes_total": len(poly_buy_yes),
+            "poly_buy_yes_total": poly_buy_yes_total,
             "poly_buy_no_correct": poly_buy_no_correct,
-            "poly_buy_no_total": len(poly_buy_no),
+            "poly_buy_no_total": poly_buy_no_total,
             "poly_best_market": poly_best_market,
             "poly_best_edge": poly_best_edge,
             "avg_signal_confidence": avg_signal_confidence,
@@ -596,6 +587,7 @@ async def send_weekly_report() -> JSONResponse:
             "win_rate_poly_alerted": shadow_metrics.get("win_rate_poly_alerted", 0.0),
             "n_poly_alerted": shadow_metrics.get("n_poly_alerted", 0),
             "pnl_poly_alerted": shadow_metrics.get("pnl_poly_alerted", 0.0),
+            "pending_poly_alerted": shadow_metrics.get("pending_poly_alerted", 0),
             "closed_trades": shadow_metrics.get("closed_trades", 0),
             "streak": shadow_metrics.get("streak", 0),
         }
