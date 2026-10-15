@@ -911,11 +911,13 @@ async def _bg_resolve() -> dict:
 
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         logger.info(
-            "resolve: completado en %.1fs — resolved=%d skipped_no_pred=%d skipped_unresolved=%d errors=%d",
+            "resolve: completado en %.1fs — resolved=%d skipped_unresolved=%d "
+            "shadow_synced=%d shadow_deferred=%d errors=%d",
             elapsed,
             result.get("resolved", 0),
-            result.get("skipped_no_pred", 0),
             result.get("skipped_unresolved", 0),
+            result.get("shadow_synced", 0),
+            result.get("shadow_deferred", 0),
             result.get("errors", 0),
         )
         result["elapsed_s"] = round(elapsed, 1)

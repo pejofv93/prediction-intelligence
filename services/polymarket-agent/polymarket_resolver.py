@@ -1,33 +1,46 @@
 """
-polymarket_resolver.py — Resuelve shadow_trades de Polymarket con resultado real.
+polymarket_resolver.py — Gradúa las alertas Polymarket enviadas con el resultado real.
+
+Fuente de verdad de "qué se alertó": alerts_sent (type=polymarket, status sent), NO
+poly_predictions.alerted — esa marca se pisaba en cada reanálisis y dejaba alertas
+reales sin resolver nunca.
 
 Flujo:
-  1. GET gamma-api /markets?closed=true  → top-100 por volumen
-  2. GET gamma-api /markets/{id}         → lookup directo para alertados sin resultado
-     que no aparecieron en el top-100 (mercados con poco volumen al cierre)
-  → determina outcome (outcomePrices[0] > 0.9 → YES, < 0.1 → NO)
-  → compara recommendation vs outcome → win/loss
-  → update_trade_result(shadow_trade_id, win|loss)
-  → actualiza poly_predictions con result + resolved_at
+  1. alerts_sent sin result (o sin enlazar a su shadow_trade)
+  2. GET gamma-api /markets/{id} por mercado
+  → solo si closed=True y outcomePrices decidido (>0.9 → YES, <0.1 → NO)
+  → compara lo ENVIADO (recommendation/direction de la alerta) vs outcome → win/loss
+  → guarda result/outcome en el doc de alerts_sent
+  → update_trade_result(shadow_trade de esa alerta)
+  → poly_predictions.result con la última alerta del mercado (dashboard)
 
 Se ejecuta diariamente a las 03:00 UTC via polymarket-resolve.yml.
 """
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import time as _time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.firestore_client import col
+from shared.firestore_client import col, iter_all
 from shared.shadow_engine import update_trade_result
 
 logger = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 _HTTP_TIMEOUT = 20.0
-_MAX_DIRECT_LOOKUPS = 20
+_GAMMA_CONCURRENCY = 8
+# /run-resolve es síncrono y el workflow corta a 300s.
+_SHADOW_TIME_BUDGET_S = 200
+_SHADOW_MATCH_WINDOW_S = 15 * 60
+_NOTIFY_MAX_AGE_H = 48
+# "sent" = envío vigente; "sent_archived" = envío anterior con el mismo alert_key que
+# check_and_alert archiva antes de sobrescribir el doc al re-alertar.
+_SENT_STATUSES = ("sent", "sent_archived")
 
 _YES_THRESHOLD = 0.9
 _NO_THRESHOLD = 0.1
@@ -39,7 +52,7 @@ async def _send_resolution_notification(pred_data: dict, outcome: str, result: s
     if not TELEGRAM_BOT_URL:
         return
 
-    question = pred_data.get("question", "Mercado desconocido")
+    question = pred_data.get("question") or "Mercado desconocido"
     recommendation = pred_data.get("recommendation", "")
     edge = float(pred_data.get("edge") or 0)
     end_date_iso = str(pred_data.get("end_date_iso") or "")
@@ -98,82 +111,208 @@ def _trade_result(recommendation: str, outcome: str) -> str | None:
     return None  # WATCH, PASS o vacío → no se apostó
 
 
-async def _resolve_market(market_id: str, raw: dict, now: datetime) -> tuple[int, int, int, int]:
-    """
-    Procesa un mercado ya obtenido de Gamma API.
-    Returns (resolved, skipped_no_pred, skipped_unresolved, errors).
-    """
+def _alert_edge_from_key(alert: dict) -> float | None:
+    """alert_key = "{market_id}_{round(edge, 2)}"."""
     try:
-        try:
-            pred_doc = col("poly_predictions").document(market_id).get()
-            if not pred_doc.exists:
-                return 0, 1, 0, 0
-            pred_data = pred_doc.to_dict()
-        except Exception:
-            logger.error("POLY_RESOLVE: error leyendo poly_predictions/%s", market_id, exc_info=True)
-            return 0, 0, 0, 1
+        return float(str(alert.get("alert_key") or "").rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
 
-        if not pred_data.get("alerted"):
-            return 0, 1, 0, 0
 
-        if pred_data.get("result") in ("win", "loss"):
-            return 0, 0, 0, 0  # ya resuelto en ejecución anterior
+def _alert_selection(alert: dict) -> str | None:
+    """BUY_YES / BUY_NO de lo que se ENVIÓ. Las alertas nuevas guardan recommendation;
+    las antiguas solo direction, y unas pocas de abril ni eso: entonces el signo del
+    edge del alert_key (check_and_alert usa edge >= 0 → BUY_YES)."""
+    for key in ("recommendation", "direction"):
+        v = str(alert.get(key) or "").upper()
+        if v in ("BUY_YES", "BUY_NO"):
+            return v
+    edge = _alert_edge_from_key(alert)
+    if edge is None:
+        return None
+    return "BUY_YES" if edge >= 0 else "BUY_NO"
 
-        recommendation = str(pred_data.get("recommendation") or "")
-        if not recommendation or recommendation in ("WATCH", "PASS"):
-            return 0, 1, 0, 0
 
-        outcome_prices_raw = raw.get("outcomePrices") or []
-        if isinstance(outcome_prices_raw, str):
+def _load_pending_alerts() -> list[tuple[str, dict]]:
+    """Alertas Polymarket enviadas aún sin graduar o sin enlazar a su shadow_trade."""
+    out = []
+    for doc in iter_all("alerts_sent", where=("type", "==", "polymarket")):
+        a = doc.to_dict() or {}
+        if a.get("status") not in _SENT_STATUSES or not a.get("market_id"):
+            continue
+        if a.get("result") in ("win", "loss") and a.get("shadow_synced"):
+            continue
+        out.append((doc.id, a))
+    return out
+
+
+async def _fetch_gamma_markets(market_ids: list[str]) -> dict[str, dict | None]:
+    """GET /markets/{id} con concurrencia limitada. None si Gamma no responde."""
+    sem = asyncio.Semaphore(_GAMMA_CONCURRENCY)
+    out: dict[str, dict | None] = {}
+
+    async def _one(client: httpx.AsyncClient, mid: str) -> None:
+        async with sem:
             try:
-                outcome_prices_raw = json.loads(outcome_prices_raw)
+                resp = await client.get(f"{GAMMA_API}/markets/{mid}")
+                if resp.status_code != 200:
+                    out[mid] = None
+                    return
+                raw = resp.json()
+                out[mid] = (raw[0] if raw else None) if isinstance(raw, list) else raw
             except Exception:
-                outcome_prices_raw = []
+                out[mid] = None
 
-        outcome = _determine_outcome(outcome_prices_raw)
-        if outcome is None:
-            logger.debug(
-                "POLY_RESOLVE: %s — outcomePrices sin resolver aun (%s)",
-                market_id, outcome_prices_raw,
-            )
-            return 0, 0, 1, 0
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        await asyncio.gather(*(_one(client, m) for m in market_ids))
+    return out
 
-        result = _trade_result(recommendation, outcome)
-        if result is None:
-            return 0, 1, 0, 0
 
-        logger.info(
-            "POLY_RESOLVE: %s — rec=%s vs outcome=%s → %s",
-            market_id, recommendation, outcome, result,
-        )
+def _match_shadow_trade(trades: list, sent_at) -> tuple[str, dict] | None:
+    """shadow_trade creado por esta alerta: track_new_signal corre justo después del
+    envío, así que es el de opened_at más cercano a sent_at (±15 min)."""
+    if not sent_at:
+        return None
+    best = None
+    for doc in trades:
+        t = doc.to_dict() or {}
+        opened = t.get("opened_at")
+        if not opened:
+            continue
+        if hasattr(opened, "tzinfo") and opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        gap = abs((opened - sent_at).total_seconds())
+        if gap <= _SHADOW_MATCH_WINDOW_S and (best is None or gap < best[0]):
+            best = (gap, doc.id, t)
+    return (best[1], best[2]) if best else None
 
+
+async def resolve_closed_markets() -> dict:
+    """
+    Gradúa TODAS las alertas Polymarket enviadas contra el resultado real de Gamma y
+    sincroniza su shadow_trade. Cada envío cuenta por separado (un mercado alertado
+    3 veces = 3 alertas).
+
+    Devuelve {resolved, skipped_unresolved, shadow_synced, shadow_deferred, errors}.
+    """
+    started = _time.monotonic()
+    now = datetime.now(timezone.utc)
+    resolved = skipped_unresolved = shadow_synced = shadow_deferred = errors = 0
+
+    try:
+        pending = _load_pending_alerts()
+    except Exception:
+        logger.error("POLY_RESOLVE: error leyendo alerts_sent", exc_info=True)
+        return {"resolved": 0, "skipped_unresolved": 0, "shadow_synced": 0,
+                "shadow_deferred": 0, "errors": 1}
+
+    market_ids = sorted({
+        str(a["market_id"]) for _, a in pending if a.get("result") not in ("win", "loss")
+    })
+    logger.info(
+        "POLY_RESOLVE: %d alertas pendientes (%d mercados por consultar en Gamma)",
+        len(pending), len(market_ids),
+    )
+    gamma = await _fetch_gamma_markets(market_ids) if market_ids else {}
+
+    # Última alerta graduada por mercado → result en poly_predictions (dashboard).
+    latest_by_market: dict[str, tuple] = {}
+    shadow_cache: dict[str, list] = {}
+
+    for alert_id, alert in pending:
+        market_id = str(alert["market_id"])
+        sent_at = alert.get("sent_at")
+        if sent_at is not None and hasattr(sent_at, "tzinfo") and sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        selection = _alert_selection(alert)
         try:
-            shadow_docs = list(
-                col("shadow_trades")
-                .where(filter=FieldFilter("signal_id", "==", market_id))
-                .where(filter=FieldFilter("source", "==", "polymarket"))
-                .limit(1)
-                .stream()
-            )
-        except Exception:
-            logger.error("POLY_RESOLVE: error buscando shadow_trade para %s", market_id, exc_info=True)
-            return 0, 0, 0, 1
-
-        if shadow_docs:
-            trade_id = shadow_docs[0].id
-            try:
-                await update_trade_result(trade_id, result)
-            except Exception:
-                logger.error(
-                    "POLY_RESOLVE: error en update_trade_result trade_id=%s", trade_id, exc_info=True,
+            result = alert.get("result")
+            outcome = alert.get("outcome")
+            if result not in ("win", "loss"):
+                raw = gamma.get(market_id)
+                # Solo mercados cerrados: un mercado vivo a 0.95 NO está resuelto.
+                if not raw or raw.get("closed") is not True:
+                    skipped_unresolved += 1
+                    continue
+                op = raw.get("outcomePrices") or []
+                if isinstance(op, str):
+                    try:
+                        op = json.loads(op)
+                    except Exception:
+                        op = []
+                outcome = _determine_outcome(op)
+                result = _trade_result(selection or "", outcome) if outcome else None
+                if result is None:
+                    skipped_unresolved += 1
+                    continue
+                col("alerts_sent").document(alert_id).update({
+                    "result": result,
+                    "outcome": outcome,
+                    "graded_selection": selection,
+                    "resolved_at": now,
+                    "market_closed_time": raw.get("closedTime"),
+                })
+                resolved += 1
+                logger.info(
+                    "POLY_RESOLVE: alerta %s (%s) — %s vs outcome=%s → %s",
+                    alert_id, market_id, selection, outcome, result,
                 )
-                return 0, 0, 0, 1
-        else:
-            logger.warning(
-                "POLY_RESOLVE: %s — sin shadow_trade pendiente, solo actualizando prediccion",
-                market_id,
-            )
+                prev = latest_by_market.get(market_id)
+                if prev is None or (sent_at and (prev[0] is None or sent_at > prev[0])):
+                    latest_by_market[market_id] = (sent_at, result, outcome)
 
+                # Notificar solo cierres recientes: el primer pase gradúa cientos de
+                # alertas atrasadas y no deben llegar todas a Telegram de golpe.
+                try:
+                    from scanner import _parse_gamma_ts
+                    _ct = _parse_gamma_ts(raw.get("closedTime"))
+                    if _ct is not None and now - _ct <= timedelta(hours=_NOTIFY_MAX_AGE_H):
+                        _edge = alert.get("edge")
+                        await _send_resolution_notification(
+                            {
+                                "question": alert.get("question") or raw.get("question"),
+                                "recommendation": selection,
+                                "edge": _edge if _edge is not None else _alert_edge_from_key(alert),
+                                "end_date_iso": alert.get("end_date_iso") or raw.get("endDate"),
+                            },
+                            outcome, result, now,
+                        )
+                except Exception:
+                    logger.warning("POLY_RESOLVE: error notificando %s", alert_id, exc_info=True)
+
+            # Sincronizar el shadow_trade de esta alerta (ledger de ROI y aprendizaje).
+            # update_trade_result recalcula el bankroll leyendo todo shadow_trades, así
+            # que va con presupuesto de tiempo; el resto se sincroniza en la siguiente
+            # ejecución (la alerta ya queda graduada).
+            if _time.monotonic() - started > _SHADOW_TIME_BUDGET_S:
+                shadow_deferred += 1
+                continue
+            if market_id not in shadow_cache:
+                shadow_cache[market_id] = [
+                    d for d in col("shadow_trades")
+                    .where(filter=FieldFilter("signal_id", "==", market_id))
+                    .stream()
+                    if str((d.to_dict() or {}).get("source", "")).startswith("polymarket")
+                ]
+            match = _match_shadow_trade(shadow_cache[market_id], sent_at)
+            shadow_id = None
+            if match:
+                shadow_id, trade = match
+                trade_result = _trade_result(str(trade.get("selection") or ""), outcome) or result
+                # Pendiente → se gradúa. Ya resuelto con otro resultado → el resolver
+                # antiguo lo graduó con la recomendación actual, no la enviada: se corrige.
+                if trade.get("result") != "void" and trade.get("result") != trade_result:
+                    await update_trade_result(shadow_id, trade_result)
+            col("alerts_sent").document(alert_id).update({
+                "shadow_synced": True,
+                "shadow_trade_id": shadow_id,
+            })
+            shadow_synced += 1
+        except Exception:
+            logger.error("POLY_RESOLVE: error procesando alerta %s", alert_id, exc_info=True)
+            errors += 1
+
+    for market_id, (_sent, result, outcome) in latest_by_market.items():
         try:
             col("poly_predictions").document(market_id).update({
                 "result": result,
@@ -181,136 +320,18 @@ async def _resolve_market(market_id: str, raw: dict, now: datetime) -> tuple[int
                 "resolved_at": now,
             })
         except Exception:
-            logger.error(
-                "POLY_RESOLVE: error actualizando poly_predictions/%s", market_id, exc_info=True,
-            )
-            return 0, 0, 0, 1
-
-        # MEJORA 4: notificación de resolución a Telegram topic Polymarket
-        try:
-            await _send_resolution_notification(pred_data, outcome, result, now)
-        except Exception:
-            logger.warning("POLY_RESOLVE: error en notificación de resolución para %s", market_id, exc_info=True)
-
-        return 1, 0, 0, 0
-
-    except Exception:
-        logger.error("POLY_RESOLVE: error inesperado procesando %s", market_id, exc_info=True)
-        return 0, 0, 0, 1
-
-
-async def resolve_closed_markets() -> dict:
-    """
-    Resuelve shadow_trades pendientes de Polymarket contra resultados reales.
-
-    Paso 1: top-100 mercados cerrados por volumen (cubre mercados populares).
-    Paso 2: lookup directo por ID para alertados que no aparecen en el top-100
-            (mercados con poco volumen al cerrarse, como BTC April dips).
-
-    Devuelve {resolved, skipped_no_pred, skipped_unresolved, errors}.
-    """
-    now = datetime.now(timezone.utc)
-    resolved = skipped_no_pred = skipped_unresolved = errors = 0
-    processed_ids: set[str] = set()
-
-    # --- Paso 1: Top-100 cerrados por volumen ---
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.get(
-                f"{GAMMA_API}/markets",
-                params={
-                    "closed": "true",
-                    "order": "volume24hr",
-                    "ascending": "false",
-                    "limit": "100",
-                },
-            )
-        if resp.status_code != 200:
-            logger.error("POLY_RESOLVE: Gamma API respondio %d", resp.status_code)
-            return {"resolved": 0, "skipped_no_pred": 0, "skipped_unresolved": 0, "errors": 1}
-        raw_data = resp.json()
-        raw_markets = (
-            raw_data if isinstance(raw_data, list)
-            else raw_data.get("markets", raw_data.get("data", []))
-        )
-    except Exception:
-        logger.error("POLY_RESOLVE: error de red", exc_info=True)
-        return {"resolved": 0, "skipped_no_pred": 0, "skipped_unresolved": 0, "errors": 1}
-
-    logger.info("POLY_RESOLVE: %d mercados cerrados obtenidos de Gamma API", len(raw_markets))
-
-    for raw in raw_markets:
-        try:
-            market_id = str(raw.get("id") or raw.get("market_id") or "")
-            if not market_id:
-                continue
-            processed_ids.add(market_id)
-            r, sn, su, e = await _resolve_market(market_id, raw, now)
-            resolved += r
-            skipped_no_pred += sn
-            skipped_unresolved += su
-            errors += e
-        except Exception:
-            logger.error("POLY_RESOLVE: error procesando mercado %s", raw.get("id"), exc_info=True)
-            errors += 1
-
-    # --- Paso 2: Lookup directo para alertados no encontrados en top-100 ---
-    try:
-        pending_docs = list(col("poly_predictions").where(filter=FieldFilter("alerted", "==", True)).stream())
-    except Exception:
-        logger.error("POLY_RESOLVE: error consultando poly_predictions pendientes", exc_info=True)
-        pending_docs = []
-
-    missing_ids = [
-        doc.id for doc in pending_docs
-        if doc.id not in processed_ids
-        and doc.to_dict().get("result") not in ("win", "loss")
-    ][:_MAX_DIRECT_LOOKUPS]
-
-    if missing_ids:
-        logger.info(
-            "POLY_RESOLVE: %d mercados alertados sin resultado no estaban en top-100 — lookup directo",
-            len(missing_ids),
-        )
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            for market_id in missing_ids:
-                try:
-                    resp = await client.get(f"{GAMMA_API}/markets/{market_id}")
-                    if resp.status_code == 404:
-                        logger.debug(
-                            "POLY_RESOLVE: %s — 404 en Gamma (mercado aún activo o eliminado)",
-                            market_id,
-                        )
-                        skipped_unresolved += 1
-                        continue
-                    if resp.status_code != 200:
-                        logger.warning(
-                            "POLY_RESOLVE: %s — Gamma respondio %d en lookup directo",
-                            market_id, resp.status_code,
-                        )
-                        errors += 1
-                        continue
-                    raw = resp.json()
-                    if isinstance(raw, list):
-                        raw = raw[0] if raw else {}
-                    r, sn, su, e = await _resolve_market(market_id, raw, now)
-                    resolved += r
-                    skipped_no_pred += sn
-                    skipped_unresolved += su
-                    errors += e
-                except Exception:
-                    logger.error(
-                        "POLY_RESOLVE: error en lookup directo %s", market_id, exc_info=True,
-                    )
-                    errors += 1
+            # El doc puede no existir (purgado por mantenimiento) — no es error.
+            logger.debug("POLY_RESOLVE: poly_predictions/%s no actualizado", market_id)
 
     logger.info(
-        "POLY_RESOLVE: completado — resolved=%d skipped_no_pred=%d skipped_unresolved=%d errors=%d",
-        resolved, skipped_no_pred, skipped_unresolved, errors,
+        "POLY_RESOLVE: completado — resolved=%d skipped_unresolved=%d shadow_synced=%d "
+        "shadow_deferred=%d errors=%d",
+        resolved, skipped_unresolved, shadow_synced, shadow_deferred, errors,
     )
     return {
         "resolved": resolved,
-        "skipped_no_pred": skipped_no_pred,
         "skipped_unresolved": skipped_unresolved,
+        "shadow_synced": shadow_synced,
+        "shadow_deferred": shadow_deferred,
         "errors": errors,
     }

@@ -4169,12 +4169,20 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "slug": market_data.get("slug") or enriched_market.get("slug", ""),
         "volume_24h": volume_24h,
         "analyzed_at": datetime.now(timezone.utc),
-        "alerted": False,
         "data_quality": data_quality,
     }
 
     try:
-        col("poly_predictions").document(market_id).set(prediction)
+        # Reanalizar nunca borra la marca alerted: en un doc existente no se escribe
+        # (merge la conserva); solo un doc nuevo nace con alerted=False.
+        _pred_ref = col("poly_predictions").document(market_id)
+        _prev = _pred_ref.get()
+        if _prev.exists:
+            prediction["alerted"] = bool((_prev.to_dict() or {}).get("alerted"))
+            _pred_ref.set({k: v for k, v in prediction.items() if k != "alerted"}, merge=True)
+        else:
+            prediction["alerted"] = False
+            _pred_ref.set(prediction)
         logger.info(
             "analyze_market(%s): guardado — edge=%.3f conf=%.2f rec=%s cat=%s",
             market_id, edge, confidence, recommendation, category,

@@ -375,6 +375,13 @@ async def check_and_alert(analysis: dict) -> bool:
                 "check_and_alert(%s): re-alerta permitida — precio cambió %.1f%% o >7d [tx]",
                 market_id, price_chg * 100,
             )
+            # El doc se va a sobrescribir: conservar el envío anterior para que el
+            # resolver lo gradúe. status distinto de "sent" → los dedup no lo ven.
+            if data.get("status") == "sent" and sent_at:
+                transaction.set(
+                    col("alerts_sent").document(f"{alert_key}__{int(sent_at.timestamp())}"),
+                    {**data, "status": "sent_archived", "archived_from": alert_key},
+                )
 
         # Reclamar el slot atómicamente — status="pending" hasta confirmar el POST
         transaction.set(dedup_ref, {
@@ -451,7 +458,18 @@ async def check_and_alert(analysis: dict) -> bool:
 
     # --- Confirmar: status pending → sent ---
     try:
-        dedup_ref.update({"status": "sent"})
+        # Foto de lo ENVIADO: alerts_sent es la fuente de verdad para graduar.
+        dedup_ref.update({
+            "status": "sent",
+            "recommendation": rec,
+            "market_price_yes": current_price,
+            "real_prob": analysis.get("real_prob"),
+            "edge": edge,
+            "confidence": confidence,
+            "category": analysis.get("category"),
+            "question": analysis.get("question"),
+            "end_date_iso": analysis.get("end_date_iso"),
+        })
     except Exception:
         logger.warning(
             "check_and_alert(%s): no se pudo marcar status=sent (no crítico)", market_id,
