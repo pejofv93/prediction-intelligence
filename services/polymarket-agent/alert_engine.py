@@ -252,6 +252,18 @@ async def check_and_alert(analysis: dict) -> bool:
         logger.warning("check_and_alert: market_id vacío — alerta omitida sin guardar dedup")
         return False
 
+    # Última comprobación justo antes de enviar: el mercado sigue abierto y el partido
+    # no ha empezado. analyze_market ya lo mira, pero entre el análisis y el envío pasan
+    # la llamada al LLM, ballenas y wallets. Sin respuesta de Gamma → no se envía.
+    from scanner import fetch_market_state
+    _state = await fetch_market_state(market_id)
+    if _state is None or not _state["open"]:
+        logger.warning(
+            "check_and_alert(%s): SKIP_MARKET_NOT_OPEN reason=%s — omitida",
+            market_id, (_state or {}).get("reason", "gamma_unavailable"),
+        )
+        return False
+
     logger.info(
         "check_and_alert(%s): pasa thresholds %s edge=%.3f>=%.3f conf=%.2f>=%.2f vol_spike=%s sm=%s",
         market_id, direction,

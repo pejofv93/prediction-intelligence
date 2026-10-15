@@ -2448,6 +2448,32 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         )
         return None
 
+    # Estado real del mercado en Gamma. enriched_markets/poly_markets guardan una foto
+    # de hasta 7 días y end_date en deportes cae días después del partido, así que sin
+    # esto se analizaban (y alertaban) mercados ya cerrados con precio desfasado.
+    # Si Gamma no responde no se analiza: mejor perder un ciclo que alertar a ciegas.
+    from scanner import fetch_market_state
+    _state = await fetch_market_state(market_id)
+    if _state is None:
+        logger.warning(
+            "analyze_market(%s): MARKET_STATE_UNKNOWN — Gamma sin respuesta, omitido", market_id,
+        )
+        return None
+    if not _state["open"]:
+        logger.info(
+            "analyze_market(%s): MARKET_NOT_OPEN reason=%s closed_time=%s — omitido",
+            market_id, _state["reason"], _state.get("closed_time"),
+        )
+        try:
+            col("poly_markets").document(market_id).update({
+                "closed": True,
+                "closed_reason": _state["reason"],
+                "closed_checked_at": now_utc,
+            })
+        except Exception:
+            logger.warning("analyze_market(%s): no se pudo marcar poly_markets cerrado", market_id)
+        return None
+
     question = market_data.get("question", "mercado desconocido")
     # Preferir precio del enriched_market (más reciente) sobre el guardado en Firestore,
     # que puede tener el bug de 0.5 por defecto si el scanner falló al leer outcomePrices.

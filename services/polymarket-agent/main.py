@@ -615,6 +615,21 @@ async def _bg_analyze() -> dict:
             _mid = _m.get("market_id", "")
             _poly = _poly_cache.get(_mid, {})
 
+            # Pre-filtro 0: ya marcado cerrado (analyze_market lo marca al ver Gamma)
+            # o partido ya empezado según gameStartTime guardado por el scanner.
+            if _poly.get("closed") is True:
+                _skipped_prefilter += 1
+                logger.debug("analyze: %s pre-filtrado — cerrado (%s)", _mid, _poly.get("closed_reason"))
+                continue
+            _gst = _poly.get("game_start_time")
+            if _gst:
+                if hasattr(_gst, "tzinfo") and _gst.tzinfo is None:
+                    _gst = _gst.replace(tzinfo=timezone.utc)
+                if _gst <= _now_utc:
+                    _skipped_prefilter += 1
+                    logger.debug("analyze: %s pre-filtrado — partido empezado (%s)", _mid, _gst)
+                    continue
+
             # Pre-filtro 1: end_date < now + 24h (expiran pronto o ya expirados)
             _end = _m.get("end_date") or _poly.get("end_date")
             if _end:

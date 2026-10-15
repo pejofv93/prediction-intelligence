@@ -4,6 +4,7 @@ Guarda en Firestore poly_markets.
 IMPORTANTE: guardar "conditionId" como "condition_id" — necesario para CLOB orderbook.
 """
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -388,6 +389,8 @@ def _parse_market(raw: dict) -> dict | None:
             "price_yes": price_yes,
             "price_no": price_no,
             "active": bool(raw.get("active", not raw.get("closed", False))),
+            "closed": bool(raw.get("closed", False)),
+            "game_start_time": _parse_gamma_ts(raw.get("gameStartTime")),
             "updated_at": datetime.now(timezone.utc),
         }
     except Exception:
@@ -540,6 +543,83 @@ async def fetch_diverse_markets(min_volume: float = 500) -> list[dict]:
         len(bucket_new), len(combined), saved,
     )
     return combined
+
+
+def _parse_gamma_ts(value) -> datetime | None:
+    """Parsea timestamps de Gamma ("2026-10-11 13:30:00+00", "...Z", ISO) a datetime UTC."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        s = str(value).strip().replace("Z", "+00:00").replace(" ", "T", 1)
+        if re.search(r"[+-]\d\d$", s):
+            s += ":00"
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def market_closed_reason(raw: dict, now: datetime | None = None) -> str | None:
+    """
+    Motivo por el que un mercado de Gamma ya NO es apostable, o None si sigue abierto.
+
+    endDate no sirve para esto: en deportes Polymarket lo pone ~5-7 días después del
+    partido, y en "Will X win the World Series?" el mercado se cierra antes al quedar
+    eliminado. Se mira el estado real (closed / active / acceptingOrders / closedTime /
+    resolución UMA) y, en deportes, la hora de inicio del partido (gameStartTime):
+    con el partido empezado el precio corre en vivo y el análisis ya no vale.
+    """
+    now = now or datetime.now(timezone.utc)
+    if raw.get("closed") is True:
+        return "closed"
+    if raw.get("active") is False:
+        return "inactive"
+    if raw.get("acceptingOrders") is False:
+        return "not_accepting_orders"
+    if raw.get("closedTime"):
+        return "closed_time_set"
+    if str(raw.get("umaResolutionStatus") or "").lower() in ("proposed", "resolved", "disputed"):
+        return "resolution_" + str(raw.get("umaResolutionStatus")).lower()
+    _gst = _parse_gamma_ts(raw.get("gameStartTime"))
+    if _gst is not None and _gst <= now:
+        return "event_started"
+    _end = _parse_gamma_ts(raw.get("endDate"))
+    if _end is not None and _end <= now:
+        return "end_date_passed"
+    return None
+
+
+async def fetch_market_state(market_id: str) -> dict | None:
+    """
+    Estado en vivo de un mercado: GET gamma /markets/{id}.
+    Devuelve {"open": bool, "reason": str|None, "closed_time": str|None,
+    "game_start_time": datetime|None}, o None si Gamma no responde (el llamante decide).
+    """
+    if not market_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.get(f"{GAMMA_API}/markets/{market_id}")
+        if resp.status_code == 404:
+            return {"open": False, "reason": "not_found", "closed_time": None, "game_start_time": None}
+        if resp.status_code != 200:
+            logger.warning("fetch_market_state(%s): Gamma respondio %d", market_id, resp.status_code)
+            return None
+        raw = resp.json()
+        if isinstance(raw, list):
+            raw = raw[0] if raw else {}
+        reason = market_closed_reason(raw)
+        return {
+            "open": reason is None,
+            "reason": reason,
+            "closed_time": raw.get("closedTime"),
+            "game_start_time": _parse_gamma_ts(raw.get("gameStartTime")),
+        }
+    except Exception as e:
+        logger.warning("fetch_market_state(%s): error de red — %s", market_id, e)
+        return None
 
 
 async def fetch_market_orderbook(condition_id: str) -> dict:

@@ -39,3 +39,19 @@ for _mod in (
     "grpc",
 ):
     sys.modules.setdefault(_mod, _gcloud_mock)
+
+
+# ── 4. Estado de mercado en Gamma ─────────────────────────────────────────────
+# analyze_market y check_and_alert consultan Gamma (scanner.fetch_market_state)
+# antes de analizar/enviar. En tests no hay red: por defecto el mercado está
+# abierto; los tests que prueban el cierre parchean su propio estado.
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _gamma_market_open(monkeypatch):
+    async def _open(market_id):
+        return {"open": True, "reason": None, "closed_time": None, "game_start_time": None}
+
+    import scanner
+    monkeypatch.setattr(scanner, "fetch_market_state", _open)
