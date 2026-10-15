@@ -510,6 +510,8 @@ async def _bg_analyze() -> dict:
         from datetime import datetime, timezone
         start = datetime.now(timezone.utc)
         logger.info("analyze: iniciando pipeline")
+        from scanner import record_gamma_cycle, reset_gamma_calls
+        reset_gamma_calls()
 
         from groq_analyzer import analyze_market, run_maintenance
         from alert_engine import check_and_alert
@@ -880,8 +882,11 @@ async def _bg_analyze() -> dict:
         except Exception:
             logger.error("analyze: error en run_maintenance", exc_info=True)
 
+        _gamma = await record_gamma_cycle("analyze")
+
         return {
             "status": "ok",
+            "gamma": _gamma,
             "total": len(docs_balanced),
             "analyzed": predictions_generated,
             "alerts": alerts_sent,

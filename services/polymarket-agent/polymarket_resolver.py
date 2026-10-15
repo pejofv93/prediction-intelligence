@@ -151,16 +151,27 @@ async def _fetch_gamma_markets(market_ids: list[str]) -> dict[str, dict | None]:
     sem = asyncio.Semaphore(_GAMMA_CONCURRENCY)
     out: dict[str, dict | None] = {}
 
+    from scanner import note_gamma_call
+
     async def _one(client: httpx.AsyncClient, mid: str) -> None:
         async with sem:
             try:
                 resp = await client.get(f"{GAMMA_API}/markets/{mid}")
+                if resp.status_code == 404:
+                    note_gamma_call(True)
+                    out[mid] = None
+                    return
                 if resp.status_code != 200:
+                    note_gamma_call(False)
+                    logger.error("POLY_RESOLVE: GAMMA_FAIL %s — Gamma respondio %d", mid, resp.status_code)
                     out[mid] = None
                     return
                 raw = resp.json()
+                note_gamma_call(True)
                 out[mid] = (raw[0] if raw else None) if isinstance(raw, list) else raw
-            except Exception:
+            except Exception as e:
+                note_gamma_call(False)
+                logger.error("POLY_RESOLVE: GAMMA_FAIL %s — %s", mid, e)
                 out[mid] = None
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
@@ -213,7 +224,10 @@ async def resolve_closed_markets() -> dict:
         "POLY_RESOLVE: %d alertas pendientes (%d mercados por consultar en Gamma)",
         len(pending), len(market_ids),
     )
+    from scanner import record_gamma_cycle, reset_gamma_calls
+    reset_gamma_calls()
     gamma = await _fetch_gamma_markets(market_ids) if market_ids else {}
+    gamma_health = await record_gamma_cycle("resolve")
 
     # Última alerta graduada por mercado → result en poly_predictions (dashboard).
     latest_by_market: dict[str, tuple] = {}
@@ -334,4 +348,5 @@ async def resolve_closed_markets() -> dict:
         "shadow_synced": shadow_synced,
         "shadow_deferred": shadow_deferred,
         "errors": errors,
+        "gamma": gamma_health,
     }

@@ -591,6 +591,21 @@ def market_closed_reason(raw: dict, now: datetime | None = None) -> str | None:
     return None
 
 
+# Contadores de llamadas a Gamma /markets/{id} del ciclo en curso (analyze o resolve).
+# record_gamma_cycle() los evalúa al final del ciclo y los pone a cero.
+_GAMMA_CALLS = {"ok": 0, "fail": 0}
+# Ciclos seguidos con Gamma caída antes de avisar por Telegram.
+_GAMMA_ALERT_AFTER_CYCLES = 3
+
+
+def reset_gamma_calls() -> None:
+    _GAMMA_CALLS["ok"] = _GAMMA_CALLS["fail"] = 0
+
+
+def note_gamma_call(ok: bool) -> None:
+    _GAMMA_CALLS["ok" if ok else "fail"] += 1
+
+
 async def fetch_market_state(market_id: str) -> dict | None:
     """
     Estado en vivo de un mercado: GET gamma /markets/{id}.
@@ -603,13 +618,16 @@ async def fetch_market_state(market_id: str) -> dict | None:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(f"{GAMMA_API}/markets/{market_id}")
         if resp.status_code == 404:
+            note_gamma_call(True)
             return {"open": False, "reason": "not_found", "closed_time": None, "game_start_time": None}
         if resp.status_code != 200:
-            logger.warning("fetch_market_state(%s): Gamma respondio %d", market_id, resp.status_code)
+            note_gamma_call(False)
+            logger.error("fetch_market_state(%s): GAMMA_FAIL Gamma respondio %d", market_id, resp.status_code)
             return None
         raw = resp.json()
         if isinstance(raw, list):
             raw = raw[0] if raw else {}
+        note_gamma_call(True)
         reason = market_closed_reason(raw)
         return {
             "open": reason is None,
@@ -618,8 +636,78 @@ async def fetch_market_state(market_id: str) -> dict | None:
             "game_start_time": _parse_gamma_ts(raw.get("gameStartTime")),
         }
     except Exception as e:
-        logger.warning("fetch_market_state(%s): error de red — %s", market_id, e)
+        note_gamma_call(False)
+        logger.error("fetch_market_state(%s): GAMMA_FAIL error de red — %s", market_id, e)
         return None
+
+
+async def record_gamma_cycle(source: str) -> dict:
+    """
+    Cierra el ciclo de llamadas a Gamma: ciclo caído si falló la mitad o más.
+    Lleva la racha en agent_state/gamma_health (Cloud Run recicla instancias) y avisa
+    por Telegram al llegar a _GAMMA_ALERT_AFTER_CYCLES ciclos caídos seguidos (una vez
+    por racha) y cuando se recupera. Nunca lanza.
+    """
+    ok, fail = _GAMMA_CALLS["ok"], _GAMMA_CALLS["fail"]
+    _GAMMA_CALLS["ok"] = _GAMMA_CALLS["fail"] = 0
+    if ok + fail == 0:
+        return {"ok": 0, "fail": 0, "streak": None}
+    failed = fail >= ok
+    now = datetime.now(timezone.utc)
+    streak = 0
+    text = None
+    try:
+        ref = col("agent_state").document("gamma_health")
+        snap = ref.get()
+        prev = (snap.to_dict() or {}) if snap.exists else {}
+        alerted = bool(prev.get("alerted"))
+        if failed:
+            streak = int(prev.get("failed_cycles") or 0) + 1
+            logger.error(
+                "GAMMA_CYCLE_FAILED (%s): %d/%d llamadas fallidas — racha %d ciclo(s)",
+                source, fail, ok + fail, streak,
+            )
+            if streak >= _GAMMA_ALERT_AFTER_CYCLES and not alerted:
+                text = (
+                    f"🚨 polymarket-agent: la API de Polymarket (Gamma) no responde\n"
+                    f"{streak} ciclos seguidos con la mayoría de llamadas fallidas "
+                    f"(último: {source}, {fail}/{ok + fail}). Sin estado del mercado no se "
+                    f"analiza ni se alerta."
+                )
+                alerted = True
+        else:
+            if fail:
+                logger.warning("GAMMA_PARTIAL (%s): %d/%d llamadas fallidas", source, fail, ok + fail)
+            if alerted:
+                text = f"✅ polymarket-agent: la API de Polymarket (Gamma) vuelve a responder ({source})"
+            alerted = False
+        ref.set({
+            "failed_cycles": streak,
+            "alerted": alerted,
+            "last_cycle_at": now,
+            "last_source": source,
+            "last_ok": ok,
+            "last_fail": fail,
+            **({"last_ok_at": now} if not failed else {}),
+        }, merge=True)
+    except Exception:
+        logger.error("record_gamma_cycle: error leyendo/escribiendo agent_state/gamma_health", exc_info=True)
+    if text:
+        try:
+            from shared.config import TELEGRAM_BOT_URL, CLOUD_RUN_TOKEN
+            if TELEGRAM_BOT_URL:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    # type "matched": texto plano (parse_mode=None) al canal General.
+                    await client.post(
+                        f"{TELEGRAM_BOT_URL}/send-alert",
+                        json={"type": "matched", "data": {"text": text}},
+                        headers={"x-cloud-token": CLOUD_RUN_TOKEN},
+                    )
+            else:
+                logger.error("record_gamma_cycle: TELEGRAM_BOT_URL no configurada — aviso no enviado")
+        except Exception:
+            logger.error("record_gamma_cycle: error enviando aviso a Telegram", exc_info=True)
+    return {"ok": ok, "fail": fail, "streak": streak}
 
 
 async def fetch_market_orderbook(condition_id: str) -> dict:
