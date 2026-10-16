@@ -125,6 +125,12 @@ POLY_MIN_VOLUME = 5_000   # volumen 24h mínimo para analizar — por debajo el 
 # habría aplicado. Para reactivarla: cambiar el valor por defecto aquí (deploy.yml reescribe
 # las variables de entorno en cada despliegue, así que una variable puesta a mano no dura).
 POLY_CATEGORY_BIAS_ENABLED = os.environ.get("POLY_CATEGORY_BIAS_ENABLED", "false").lower() in ("1", "true", "yes")
+# Parámetros aprendidos congelados 2026-10-16 (misma lista sesgada): ajuste de edge por
+# categoría (by_category), buy_no_sports_min_edge, tope de confianza por tramo
+# (accuracy_by_bucket) y umbrales por dirección. Congelados, el aprendizaje nocturno guarda
+# lo medido en <campo>_measured sin cambiar el valor aplicado, y alert_engine usa siempre
+# los umbrales base por dirección aunque el acierto global pase del 50 %.
+POLY_LEARNED_PARAMS_FROZEN = os.environ.get("POLY_LEARNED_PARAMS_FROZEN", "true").lower() in ("1", "true", "yes")
 
 # Thresholds por liga — calibrados por backtest histórico (prodmatch_results)
 # Ligas con ROI positivo en backtest → umbral más bajo (más señales)

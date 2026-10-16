@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.config import POLY_CATEGORY_BIAS_ENABLED, POLY_MIN_EDGE, POLY_MIN_CONFIDENCE
+from shared.config import (
+    POLY_CATEGORY_BIAS_ENABLED, POLY_LEARNED_PARAMS_FROZEN, POLY_MIN_CONFIDENCE, POLY_MIN_EDGE,
+)
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,13 @@ _CONF_MIN = 0.60
 _CONF_MAX = 0.90
 # Mínimo de trades resueltos por dirección para ajustar su umbral
 _MIN_SAMPLE = 5
+# Campos que no cambian con POLY_LEARNED_PARAMS_FROZEN (lo medido va a <campo>_measured)
+_FROZEN_KEYS = (
+    "min_edge", "min_confidence",
+    "buy_yes_min_edge", "buy_yes_min_confidence",
+    "buy_no_min_edge", "buy_no_min_confidence",
+    "buy_no_sports_min_edge", "by_category", "accuracy_by_bucket",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +376,13 @@ def run_poly_learning() -> dict:
         _bns["total"], _bns["accuracy"] * 100,
     )
 
-    # 3. Cargar pesos actuales
+    # 3. Cargar pesos actuales. Congelados, el ajuste incremental parte de lo medido la
+    # noche anterior, no del valor aplicado, para que la medición siga su propio curso.
     current = _load_current_weights()
+    applied = current
+    if POLY_LEARNED_PARAMS_FROZEN:
+        current = {**current, **{k: current[f"{k}_measured"] for k in _FROZEN_KEYS
+                                 if f"{k}_measured" in current}}
 
     # 4. Ajustar por dirección
     new_yes_edge, new_yes_conf = _new_threshold(
@@ -451,6 +465,20 @@ def run_poly_learning() -> dict:
         "llm_bias_by_category_measured": llm_bias,
         "category_bias_enabled": POLY_CATEGORY_BIAS_ENABLED,
     }
+
+    if POLY_LEARNED_PARAMS_FROZEN:
+        for k in _FROZEN_KEYS:
+            doc[f"{k}_measured"] = doc[k]
+            if k in applied:
+                doc[k] = applied[k]
+        logger.info(
+            "run_poly_learning: parámetros aprendidos CONGELADOS — aplicado BUY_YES(%.3f/%.2f) "
+            "BUY_NO(%.3f/%.2f) sports_no=%.3f | medido BUY_YES(%.3f/%.2f) BUY_NO(%.3f/%.2f) sports_no=%.3f",
+            doc["buy_yes_min_edge"], doc["buy_yes_min_confidence"],
+            doc["buy_no_min_edge"], doc["buy_no_min_confidence"], doc["buy_no_sports_min_edge"],
+            new_yes_edge, new_yes_conf, new_no_edge, new_no_conf, new_no_sports_edge,
+        )
+    doc["learned_params_frozen"] = POLY_LEARNED_PARAMS_FROZEN
 
     # 6. Guardar
     try:

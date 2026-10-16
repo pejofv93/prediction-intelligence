@@ -9,7 +9,9 @@ import logging
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, TELEGRAM_BOT_URL
+from shared.config import (
+    POLY_LEARNED_PARAMS_FROZEN, POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, TELEGRAM_BOT_URL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,15 @@ def _load_learned_thresholds() -> dict:
                 _LEARNED_THRESHOLDS = dict(_BASE_THRESHOLDS)
                 return _LEARNED_THRESHOLDS
             accuracy = float(data.get("accuracy_overall", 0))
+            if POLY_LEARNED_PARAMS_FROZEN:
+                # Umbrales por dirección dormidos: aprendidos de la lista sesgada y con
+                # accuracy_overall de esa misma lista. Base siempre, pase lo que pase con el acierto.
+                logger.info(
+                    "_load_learned_thresholds: umbral_mode=base (congelado; acc=%.1f%% n=%d v%s)",
+                    accuracy * 100, sample_size, data.get("version", "?"),
+                )
+                _LEARNED_THRESHOLDS = dict(_BASE_THRESHOLDS)
+                return _LEARNED_THRESHOLDS
             if accuracy < 0.50:
                 # Accuracy below chance — learned thresholds are unreliable, use base
                 logger.warning(

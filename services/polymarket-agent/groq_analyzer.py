@@ -3876,6 +3876,13 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # Solo aplicar con >= 50 outcomes resueltos por bucket — con menos, la muestra
     # no es representativa y caps agresivos bloquean todas las señales.
     # Floor de 0.55 garantiza que el cap nunca destruya señales legítimas.
+    # EFECTO CONOCIDO (2026-10-16, decisión pendiente, NO cambiar sin OK): con
+    # accuracy_by_bucket congelado en v171 (high: n=113, acc=44%) el tope del tramo alto es
+    # 0.44+0.15 = 0.5925, por debajo del mínimo base de BUY_YES (0.60 en alert_engine).
+    # Resultado: todo BUY_YES con |edge| >= 0.15 sale como SKIP_CONF salvo volume_spike
+    # (que baja el mínimo a 0.55). BUY_NO no se ve afectado (mínimo 0.55). Si el tramo
+    # medio llegara a n>=50 con acc~41% su tope (~0.56) bloquearía también BUY_YES 0.12-0.15;
+    # congelado, no llega a aplicarse (sigue en n=34).
     try:
         _weights = _get_poly_weights()
         _by_bucket = _weights.get("accuracy_by_bucket", {})
