@@ -341,10 +341,11 @@ async def update_trade_result(trade_id: str, result: str, odds_final: float = No
         virtual_stake = float(data.get("virtual_stake") or _MIN_STAKE)
 
         # Cuota efectiva del lado realmente apostado.
-        # Para Polymarket la dirección importa: BUY_NO paga a 1/(1-mp_yes), no a 1/mp_yes.
+        # Para Polymarket (también polymarket_movement) la dirección importa: BUY_NO paga
+        # a 1/(1-mp_yes), no a 1/mp_yes.
         if odds_final is not None:
             effective_odds = odds_final
-        elif data.get("source") == "polymarket":
+        elif str(data.get("source") or "").startswith("polymarket"):
             mp_yes = (data.get("signal_data") or {}).get("market_price_yes")
             if mp_yes is not None:
                 effective_odds = _poly_decimal_odds(data.get("selection"), float(mp_yes))
