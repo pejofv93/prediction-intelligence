@@ -328,8 +328,17 @@ async def update_trade_clv(trade_id: str, closing_odds: float) -> None:
         logger.error("update_trade_clv: error para trade_id=%s: %s", trade_id, e)
 
 
-async def update_trade_result(trade_id: str, result: str, odds_final: float = None) -> None:
-    """Actualiza resultado de un trade. result: 'win'|'loss'|'void'"""
+async def update_trade_result(
+    trade_id: str, result: str, odds_final: float = None, bankroll_state: dict | None = None,
+) -> None:
+    """Actualiza resultado de un trade. result: 'win'|'loss'|'void'
+
+    bankroll_state: para quien gradúa muchos trades seguidos (resolver). Sin él, cada
+    llamada relee todo shadow_trades para calcular bankroll_after. Con él, se lee una
+    sola vez (la primera llamada guarda el total en bankroll_state["running"]) y se
+    acumula: running += pnl nuevo − pnl previo del trade (si ya estaba cerrado), que es
+    exactamente lo que daría releer la colección tras cada escritura.
+    """
     try:
         doc_ref = col("shadow_trades").document(trade_id)
         doc = doc_ref.get()
@@ -355,7 +364,12 @@ async def update_trade_result(trade_id: str, result: str, odds_final: float = No
             effective_odds = float(data.get("odds") or 2.0)
 
         pnl = _calc_pnl(result, virtual_stake, effective_odds)
-        bankroll = _calc_bankroll_after()
+        if bankroll_state is None:
+            bankroll = _calc_bankroll_after()
+        else:
+            if "running" not in bankroll_state:
+                bankroll_state["running"] = _calc_bankroll_after()
+            bankroll = bankroll_state["running"]
         # Añadir este trade al bankroll final
         if pnl is not None:
             bankroll = round(bankroll + pnl, 4)
@@ -368,6 +382,12 @@ async def update_trade_result(trade_id: str, result: str, odds_final: float = No
         })
         logger.info("shadow: trade_id=%s actualizado result=%s pnl=%.2f bankroll=%.2f",
                     trade_id, result, pnl or 0, bankroll)
+        if bankroll_state is not None:
+            prev_pnl = data.get("pnl_virtual")
+            prev_closed = data.get("result") in ("win", "loss", "void") and prev_pnl is not None
+            bankroll_state["running"] = round(
+                bankroll_state["running"] + (pnl or 0.0) - (float(prev_pnl) if prev_closed else 0.0), 4
+            )
     except Exception as e:
         logger.error("shadow: error en update_trade_result: %s", e)
 

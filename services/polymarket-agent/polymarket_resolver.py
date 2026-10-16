@@ -232,6 +232,8 @@ async def resolve_closed_markets() -> dict:
     # Última alerta graduada por mercado → result en poly_predictions (dashboard).
     latest_by_market: dict[str, tuple] = {}
     shadow_cache: dict[str, list] = {}
+    # Bankroll leído una sola vez por ejecución y acumulado trade a trade.
+    bankroll_state: dict = {}
 
     for alert_id, alert in pending:
         market_id = str(alert["market_id"])
@@ -295,8 +297,7 @@ async def resolve_closed_markets() -> dict:
                     logger.warning("POLY_RESOLVE: error notificando %s", alert_id, exc_info=True)
 
             # Sincronizar el shadow_trade de esta alerta (ledger de ROI y aprendizaje).
-            # update_trade_result recalcula el bankroll leyendo todo shadow_trades, así
-            # que va con presupuesto de tiempo; el resto se sincroniza en la siguiente
+            # Va con presupuesto de tiempo; el resto se sincroniza en la siguiente
             # ejecución (la alerta ya queda graduada).
             if _time.monotonic() - started > _SHADOW_TIME_BUDGET_S:
                 shadow_deferred += 1
@@ -316,7 +317,7 @@ async def resolve_closed_markets() -> dict:
                 # Pendiente → se gradúa. Ya resuelto con otro resultado → el resolver
                 # antiguo lo graduó con la recomendación actual, no la enviada: se corrige.
                 if trade.get("result") != "void" and trade.get("result") != trade_result:
-                    await update_trade_result(shadow_id, trade_result)
+                    await update_trade_result(shadow_id, trade_result, bankroll_state=bankroll_state)
             col("alerts_sent").document(alert_id).update({
                 "shadow_synced": True,
                 "shadow_trade_id": shadow_id,
@@ -339,8 +340,9 @@ async def resolve_closed_markets() -> dict:
 
     logger.info(
         "POLY_RESOLVE: completado — resolved=%d skipped_unresolved=%d shadow_synced=%d "
-        "shadow_deferred=%d errors=%d",
+        "shadow_deferred=%d errors=%d bankroll=%s",
         resolved, skipped_unresolved, shadow_synced, shadow_deferred, errors,
+        bankroll_state.get("running", "sin cambios"),
     )
     return {
         "resolved": resolved,
