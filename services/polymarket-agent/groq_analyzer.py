@@ -6,7 +6,9 @@ import logging
 import re
 import time as _time
 
-from shared.config import POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, POLY_MIN_VOLUME
+from shared.config import (
+    POLY_CATEGORY_BIAS_ENABLED, POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, POLY_MIN_VOLUME,
+)
 from shared.groq_client import GROQ_CALL_DELAY
 
 # ---------------------------------------------------------------------------
@@ -3463,19 +3465,40 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         real_prob = blended
         edge = round(real_prob - price_yes, 4)
 
-    # Fix 7: corrección de sesgo LLM por categoría (calibración histórica)
+    # Fix 7: corrección de sesgo LLM por categoría (calibración histórica).
+    # Detrás de POLY_CATEGORY_BIAS_ENABLED. Apagada: no toca real_prob, solo registra la
+    # corrección que habría salido con el sesgo que mide el aprendizaje nocturno.
+    _category_bias_shadow = None
     try:
         _weights = _get_poly_weights()
-        _llm_bias = _weights.get("llm_bias_by_category", {})
+        if POLY_CATEGORY_BIAS_ENABLED:
+            _llm_bias = _weights.get("llm_bias_by_category", {})
+        else:
+            _llm_bias = _weights.get("llm_bias_by_category_measured",
+                                     _weights.get("llm_bias_by_category", {}))
         _bd = _llm_bias.get(category, {})
         if int(_bd.get("n", 0)) >= 5 and abs(float(_bd.get("bias", 0.0))) > 0.03:
             _bias_val = float(_bd["bias"])
-            real_prob = round(max(0.05, min(0.95, real_prob - _bias_val)), 4)
-            edge = round(real_prob - price_yes, 4)
-            logger.debug(
-                "analyze_market(%s): bias LLM cat=%s bias=%.3f n=%d → real_prob=%.3f",
-                market_id, category, _bias_val, int(_bd["n"]), real_prob,
-            )
+            _prob_corr = round(max(0.05, min(0.95, real_prob - _bias_val)), 4)
+            if POLY_CATEGORY_BIAS_ENABLED:
+                real_prob = _prob_corr
+                edge = round(real_prob - price_yes, 4)
+                logger.debug(
+                    "analyze_market(%s): bias LLM cat=%s bias=%.3f n=%d → real_prob=%.3f",
+                    market_id, category, _bias_val, int(_bd["n"]), real_prob,
+                )
+            else:
+                _category_bias_shadow = {
+                    "category": category, "bias": _bias_val, "n": int(_bd["n"]),
+                    "real_prob": real_prob, "real_prob_if_on": _prob_corr,
+                    "edge": edge, "edge_if_on": round(_prob_corr - price_yes, 4),
+                }
+                logger.info(
+                    "analyze_market(%s): CATEGORY_BIAS_OFF cat=%s bias=%.3f n=%d — habría "
+                    "real_prob %.3f→%.3f edge %.3f→%.3f (no aplicado)",
+                    market_id, category, _bias_val, int(_bd["n"]), real_prob, _prob_corr,
+                    edge, _category_bias_shadow["edge_if_on"],
+                )
     except Exception:
         pass
 
@@ -4170,6 +4193,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "volume_24h": volume_24h,
         "analyzed_at": datetime.now(timezone.utc),
         "data_quality": data_quality,
+        "category_bias_shadow": _category_bias_shadow,
     }
 
     try:

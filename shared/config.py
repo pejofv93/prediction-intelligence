@@ -118,6 +118,13 @@ BASKETBALL_MIN_EDGE = 0.04   # NBA/EURO más eficientes que fútbol → umbral m
 POLY_MIN_EDGE = 0.08
 POLY_MIN_CONFIDENCE = 0.65
 POLY_MIN_VOLUME = 5_000   # volumen 24h mínimo para analizar — por debajo el spread es inejecutable
+# Corrección de sesgo del LLM por categoría (llm_bias_by_category en poly_model_weights).
+# Desactivada 2026-10-16: se aprendió de la lista de alertadas sesgada (poly_predictions.alerted)
+# y con categorías mal asignadas. Apagada, el aprendizaje nocturno no toca el valor guardado
+# (lo nuevo va a llm_bias_by_category_measured) y el análisis solo registra la corrección que
+# habría aplicado. Para reactivarla: cambiar el valor por defecto aquí (deploy.yml reescribe
+# las variables de entorno en cada despliegue, así que una variable puesta a mano no dura).
+POLY_CATEGORY_BIAS_ENABLED = os.environ.get("POLY_CATEGORY_BIAS_ENABLED", "false").lower() in ("1", "true", "yes")
 
 # Thresholds por liga — calibrados por backtest histórico (prodmatch_results)
 # Ligas con ROI positivo en backtest → umbral más bajo (más señales)

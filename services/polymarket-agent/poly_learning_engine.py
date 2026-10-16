@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.config import POLY_MIN_EDGE, POLY_MIN_CONFIDENCE
+from shared.config import POLY_CATEGORY_BIAS_ENABLED, POLY_MIN_EDGE, POLY_MIN_CONFIDENCE
 from shared.firestore_client import col
 
 logger = logging.getLogger(__name__)
@@ -401,6 +401,18 @@ def run_poly_learning() -> dict:
         _prev_sports_no_edge, new_no_sports_edge, _bns["accuracy"] * 100, _bns["total"],
     )
 
+    # Sesgo LLM por categoría: se mide siempre (llm_bias_by_category_measured), pero con
+    # POLY_CATEGORY_BIAS_ENABLED apagado el valor que lee el análisis se conserva tal cual.
+    if POLY_CATEGORY_BIAS_ENABLED:
+        applied_llm_bias = llm_bias
+    else:
+        applied_llm_bias = current.get("llm_bias_by_category", {})
+        logger.info(
+            "run_poly_learning: corrección de sesgo por categoría DESACTIVADA — "
+            "llm_bias_by_category congelado, medido=%s",
+            {c: (v["bias"], v["n"]) for c, v in llm_bias.items()},
+        )
+
     # Umbral global = el más restrictivo de los dos (conservador)
     new_global_edge = round(max(new_yes_edge, new_no_edge), 4)
     new_global_conf = round(max(new_yes_conf, new_no_conf), 4)
@@ -435,7 +447,9 @@ def run_poly_learning() -> dict:
         "prev_min_confidence": current.get("min_confidence", POLY_MIN_CONFIDENCE),
         # Calibración: accuracy por bucket de edge + sesgo LLM por categoría
         "accuracy_by_bucket": bucket_stats,
-        "llm_bias_by_category": llm_bias,
+        "llm_bias_by_category": applied_llm_bias,
+        "llm_bias_by_category_measured": llm_bias,
+        "category_bias_enabled": POLY_CATEGORY_BIAS_ENABLED,
     }
 
     # 6. Guardar
