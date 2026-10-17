@@ -478,6 +478,7 @@ async def check_and_alert(analysis: dict) -> bool:
             "edge": edge,
             "confidence": confidence,
             "category": analysis.get("category"),
+            "categorizer_version": analysis.get("categorizer_version"),
             "question": analysis.get("question"),
             "end_date_iso": analysis.get("end_date_iso"),
         })

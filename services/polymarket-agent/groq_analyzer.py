@@ -593,7 +593,7 @@ def _get_poly_weights() -> dict:
 
 logger = logging.getLogger(__name__)
 
-from categories import CATEGORY_KEYWORDS, categorize_market  # noqa: E402,F401
+from categories import CATEGORIZER_VERSION, CATEGORY_KEYWORDS, categorize_market  # noqa: E402,F401
 
 
 def market_analysis_priority(enriched_market: dict) -> int:
@@ -4152,6 +4152,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "volume_spike": bool(enriched_market.get("volume_spike", False)),
         "smart_money_detected": bool(smart_money.get("is_smart_money", False)),
         "category": category,
+        "categorizer_version": CATEGORIZER_VERSION,
         "fear_greed_index": fear_greed.get("value") if fear_greed else None,
         "fear_greed_label": fear_greed.get("label") if fear_greed else None,
         "end_date_iso": end_date.isoformat() if end_date else None,
