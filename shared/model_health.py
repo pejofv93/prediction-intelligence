@@ -7,7 +7,8 @@ ledger crudo de shadow_trades (Sports y Polymarket mezclados, incluidas señales
 alertadas), y el aviso decía "threshold subido" / "Liga suspendida" aunque nada
 leía ese resultado. Ahora hay un grupo por fuente, cada uno sobre lo realmente
 enviado:
-  - Sports:     predictions con alerted=True y correct graduado, por match_date.
+  - Sports:     fútbol/tenis desde alerts_sent (type=sports_sent) graduado, con la
+                marca predictions.alerted mientras no junte 20; baloncesto por la marca.
   - Polymarket: alerts_sent (type=polymarket, status sent/sent_archived) graduadas
                 por polymarket_resolver (result win/loss), por resolved_at.
 """
@@ -37,18 +38,42 @@ def _now_utc() -> datetime:
 
 
 def _sports_alerted_graded() -> list[dict]:
-    """[{correct, odds, at}] de las predicciones sports alertadas y graduadas."""
-    out = []
+    """
+    [{correct, odds, at}] de lo enviado en Sports y ya graduado.
+
+    Fútbol/tenis: alerts_sent type=sports_sent (registro por envío, graduado por
+    learning_engine.grade_sent_alerts) en cuanto junta _MIN_SAMPLE graduadas; hasta
+    entonces, la marca predictions.alerted de siempre (incompleta: el análisis la borra
+    al reescribir el doc). Baloncesto sigue por la marca: su doc no se reescribe.
+    """
+    sent = []
+    for doc in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
+        a = doc.to_dict() or {}
+        if a.get("correct") not in (True, False):
+            continue  # pendiente o push
+        sent.append({
+            "correct": a["correct"], "odds": a.get("odds"),
+            "at": _as_utc_dt(a.get("match_date")) or _as_utc_dt(a.get("sent_at")),
+        })
+    use_sent = len(sent) >= _MIN_SAMPLE
+
+    out = sent if use_sent else []
     docs = col("predictions").where(filter=FieldFilter("alerted", "==", True)).stream()
     for doc in docs:
         p = doc.to_dict() or {}
         if p.get("correct") not in (True, False):
+            continue
+        if use_sent and str(p.get("sport") or "").lower() not in ("basketball", "nba"):
             continue
         out.append({
             "correct": p["correct"],
             "odds": p.get("odds"),
             "at": _as_utc_dt(p.get("match_date")) or _as_utc_dt(p.get("created_at")),
         })
+    logger.info(
+        "check_model_health(sports): fuente fútbol/tenis = %s (%d graduadas en alerts_sent)",
+        "alerts_sent" if use_sent else "marca alerted", len(sent),
+    )
     return out
 
 

@@ -3342,7 +3342,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                             logger.error("generate_signal(%s): error guardando totals prediction", match_id, exc_info=True)
 
                         if sel_ev_t > SPORTS_ALERT_EDGE:
-                            totals_payload = {**totals_pred, "match_date": str(totals_pred.get("match_date", "")[:16] if totals_pred.get("match_date") else "?")}
+                            totals_payload = {**totals_pred, "match_date": str(totals_pred.get("match_date", "")[:16] if totals_pred.get("match_date") else "?"),
+                                              "prediction_id": f"{match_id}_totals", "base_match_id": match_id}
                             actually_sent = await _send_telegram_alert(totals_payload)
                             if actually_sent:
                                 try:
@@ -3537,6 +3538,12 @@ def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:
     _ev     = float(_ev_raw) if _ev_raw is not None else float(prediction.get("edge", 0))
     return {
         **prediction,
+        # alerts_sent guarda qué predicción y qué partido se enviaron (fuente de verdad
+        # de lo alertado). En mercados alternativos match_id ya es el id del doc
+        # ("{match}_btts"...); quien guarde con otro id lo pasa en prediction_id.
+        "prediction_id": prediction.get("prediction_id") or prediction.get("match_id"),
+        "base_match_id": (prediction.get("base_match_id") or enriched_match.get("match_id")
+                          or prediction.get("match_id")),
         "home_team":    prediction.get("home_team", ""),
         "away_team":    prediction.get("away_team", ""),
         "match_date":   str(prediction.get("match_date", ""))[:16],

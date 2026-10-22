@@ -1122,6 +1122,10 @@ async def run_daily_learning() -> None:
         except Exception:
             logger.error("run_daily_learning: error graduando bloqueos de filtro", exc_info=True)
         try:
+            await grade_sent_alerts()
+        except Exception:
+            logger.error("run_daily_learning: error graduando alertas enviadas", exc_info=True)
+        try:
             await _maybe_evaluate_filters(now)
         except Exception:
             logger.error("run_daily_learning: error evaluando filtros", exc_info=True)
@@ -1340,6 +1344,12 @@ async def run_daily_learning() -> None:
         await grade_filter_blocks()
     except Exception:
         logger.error("run_daily_learning: error graduando bloqueos de filtro", exc_info=True)
+
+    # Lo realmente enviado (alerts_sent) — mismo motivo: match_results se limpia a las 48h.
+    try:
+        await grade_sent_alerts()
+    except Exception:
+        logger.error("run_daily_learning: error graduando alertas enviadas", exc_info=True)
 
     try:
         await _maybe_evaluate_filters(now)
@@ -1565,6 +1575,97 @@ async def grade_filter_blocks(max_age_days: int = 30, max_docs: int = 3000) -> d
         summary["pendientes"], summary["graduados"], summary["aciertos"], _wr * 100,
         summary["sin_resultado"], summary["sin_emparejar"],
     )
+    return summary
+
+
+# Mercados que grade_sent_alerts sabe graduar: 1X2 por nombre del equipo enviado y los
+# de marcador. El resto (doble oportunidad, DNB, hándicap europeo...) queda pendiente en
+# vez de contar como fallo: evaluate_prediction los daría por perdidos al no casar nombre.
+_SENT_GRADABLE_MARKETS: frozenset[str] = frozenset({"h2h"}) | _SCORE_GRADED_MARKETS
+
+
+async def grade_sent_alerts(max_age_days: int = 30) -> dict:
+    """
+    Gradúa lo REALMENTE enviado en fútbol (alerts_sent, type=sports_sent): la selección
+    enviada contra el resultado del partido, sin pasar por el doc de predictions (que el
+    análisis reescribe y puede haber cambiado de lado). Escribe en el doc:
+      result  — "win" | "loss" | "push"
+      correct — True | False | None (push)
+      graded_at
+    Un reenvío no es apuesta nueva: es el mismo doc (campo resends).
+    Tenis queda pendiente: no hay fuente de resultados de tenis (match_results es fútbol).
+    Devuelve un resumen. Nunca lanza.
+    """
+    from shared.firestore_client import iter_all
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_age_days)
+    summary = {"pendientes": 0, "graduados": 0, "aciertos": 0, "sin_resultado": 0,
+               "mercado_no_graduable": 0, "sin_fuente": 0}
+
+    pending: list[tuple[str, dict]] = []
+    try:
+        for doc in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
+            data = doc.to_dict() or {}
+            if data.get("result") is not None:
+                continue
+            if str(data.get("sport") or "football").lower() != "football":
+                summary["sin_fuente"] += 1
+                continue
+            if str(data.get("market_type") or "h2h").lower() not in _SENT_GRADABLE_MARKETS:
+                summary["mercado_no_graduable"] += 1
+                continue
+            try:
+                md = datetime.fromisoformat(str(data.get("match_date") or "").replace("Z", "+00:00"))
+                md = md if md.tzinfo else md.replace(tzinfo=timezone.utc)
+            except ValueError:
+                md = None
+            if md is not None and (md > now - _FILTER_BLOCK_GRADE_DELAY or md < cutoff):
+                continue  # aún no ha terminado, o demasiado antiguo para tener resultado
+            pending.append((doc.id, data))
+    except Exception:
+        logger.error("grade_sent_alerts: error leyendo alerts_sent", exc_info=True)
+        return summary
+
+    summary["pendientes"] = len(pending)
+    if not pending:
+        logger.info("grade_sent_alerts: nada que graduar (%s)", summary)
+        return summary
+
+    sem = asyncio.Semaphore(8)
+
+    async def _fetch(data: dict):
+        mid = str(data.get("match_id") or "")
+        needs_score = str(data.get("market_type") or "").lower() in _SCORE_GRADED_MARKETS
+        async with sem:
+            try:
+                actual = await check_result(mid)
+                score = await check_score(mid) if needs_score and actual else None
+                return actual, score, needs_score
+            except Exception:
+                return None, None, needs_score
+
+    fetched = await asyncio.gather(*[_fetch(d) for _, d in pending])
+    for (doc_id, data), (actual, score, needs_score) in zip(pending, fetched):
+        if actual is None or (needs_score and score is None):
+            summary["sin_resultado"] += 1
+            continue
+        graded = evaluate_prediction(data, actual, score)
+        correct = graded.get("correct")
+        result = "push" if correct is None else ("win" if correct else "loss")
+        try:
+            col("alerts_sent").document(doc_id).update({
+                "result": result, "correct": correct, "actual_result": actual,
+                "score": list(score) if score else None, "graded_at": now,
+            })
+        except Exception:
+            logger.error("grade_sent_alerts: error escribiendo %s", doc_id, exc_info=True)
+            continue
+        summary["graduados"] += 1
+        if correct:
+            summary["aciertos"] += 1
+
+    logger.info("grade_sent_alerts: %s", summary)
     return summary
 
 

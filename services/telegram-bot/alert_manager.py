@@ -811,6 +811,55 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
     return sent_count
 
 
+def _record_sports_sent(prediction: dict) -> None:
+    """
+    Registro de lo REALMENTE enviado (fútbol, tenis) en alerts_sent, type=sports_sent.
+    Fuente de verdad de "qué se alertó", como en Polymarket: predictions.alerted se pierde
+    cuando el análisis reescribe el doc, y tenis nunca lo marca. Un doc por predicción y
+    selección: un reenvío suma resends y guarda la última cuota/EV, sin crear apuesta nueva;
+    odds/ev son los del primer envío. La graduación (result/correct) la escribe
+    learning_engine.grade_sent_alerts con la selección enviada y el resultado del partido.
+    Nunca lanza: un fallo aquí no debe afectar al envío ya hecho.
+    """
+    from shared.firestore_client import col
+
+    selection = prediction.get("team_to_back") or prediction.get("selection") or ""
+    prediction_id = str(prediction.get("prediction_id") or prediction.get("match_id") or "")
+    if not prediction_id:
+        logger.warning("_record_sports_sent: alerta sin prediction_id — no registrada")
+        return
+    now = datetime.now(timezone.utc)
+    _ev_raw = prediction.get("ev")
+    odds = float(prediction.get("odds") or 0) or None
+    ev = float(_ev_raw) if _ev_raw is not None else float(prediction.get("edge") or 0)
+    ref = col("alerts_sent").document(_safe_doc_id(f"sent_{prediction_id}_{selection}"))
+    try:
+        snap = ref.get()
+        if snap.exists:
+            prev = snap.to_dict() or {}
+            ref.update({
+                "resends": int(prev.get("resends") or 0) + 1,
+                "last_sent_at": now, "last_odds": odds, "last_ev": ev,
+            })
+            return
+        ref.set({
+            "type": "sports_sent", "status": "sent",
+            "prediction_id": prediction_id,
+            "match_id": str(prediction.get("base_match_id") or prediction.get("match_id") or ""),
+            "sport": prediction.get("sport"), "league": prediction.get("league"),
+            "market_type": prediction.get("market_type") or "h2h",
+            "selection": selection, "team_to_back": prediction.get("team_to_back"),
+            "line": prediction.get("line"),
+            "home_team": prediction.get("home_team"), "away_team": prediction.get("away_team"),
+            "odds": odds, "ev": ev,
+            "match_date": str(prediction.get("match_date") or ""),
+            "sent_at": now, "last_sent_at": now, "last_odds": odds, "last_ev": ev,
+            "resends": 0, "result": None, "correct": None,
+        })
+    except Exception as exc:
+        logger.error("_record_sports_sent(%s): error Firestore — %s", prediction_id, exc)
+
+
 async def send_sports_alert(prediction: dict) -> bool:
     """
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
@@ -879,6 +928,9 @@ async def send_sports_alert(prediction: dict) -> bool:
     if not sent:
         logger.error("send_sports_alert: fallo al enviar (%s)", key)
         return False
+
+    if str(prediction.get("sport", "")).lower() not in _BBALL_SPORTS:
+        _record_sports_sent(prediction)  # baloncesto ya tiene su slot por partido
 
     await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
     logger.info("send_sports_alert: alerta enviada para %s (edge=%.3f)", key, edge)

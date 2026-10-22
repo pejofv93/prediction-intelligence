@@ -793,6 +793,7 @@ async def _save_and_alert(pred: dict, doc_id: str, base: dict, enriched: dict,
         logger.error("tennis_analyzer: error guardando %s", doc_id, exc_info=True)
     if pred["edge"] > SPORTS_ALERT_EDGE:
         try:
-            await _send_telegram_alert(_build_alert_payload(pred, enriched))
+            await _send_telegram_alert(_build_alert_payload(
+                {**pred, "prediction_id": doc_id, "base_match_id": pred.get("match_id")}, enriched))
         except Exception:
             logger.error("tennis_analyzer: error enviando alerta %s", doc_id, exc_info=True)
