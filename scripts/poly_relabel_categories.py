@@ -8,7 +8,7 @@ las nuevas: by_category y llm_bias_by_category se calculan por categoría.
 
 Qué toca (solo los campos de categoría, con updateMask; el resto del doc no se reescribe):
   - shadow_trades (source polymarket*): category y signal_data.category
-  - alerts_sent (type polymarket) que tengan category
+  - alerts_sent (type polymarket) que tengan category (solo con --alerts)
   - poly_predictions: category (solo con --predictions)
 y guarda el valor anterior en category_v1 para poder deshacerlo (--revert).
 
@@ -67,8 +67,8 @@ def _s(v) -> dict:
     return {"stringValue": v} if v is not None else {"nullValue": None}
 
 
-def _plan(include_predictions: bool) -> list[tuple]:
-    """(colección, doc_id, cat_vieja, cat_nueva, pregunta, tiene_signal_data)"""
+def _plan(include_alerts: bool, include_predictions: bool) -> list[tuple]:
+    """(colección, doc_id, cat_vieja, cat_nueva, pregunta, signal_data o None)"""
     plan = []
     for d in p._list(_PREFIX + "shadow_trades"):
         t = p._fields(d)
@@ -76,8 +76,8 @@ def _plan(include_predictions: bool) -> list[tuple]:
             continue
         sd = t.get("signal_data") or {}
         q = sd.get("question") or t.get("market") or ""
-        plan.append(("shadow_trades", d["name"].split("/")[-1], t.get("category"), categorize_market(q), q, bool(sd)))
-    for d in p._list(_PREFIX + "alerts_sent"):
+        plan.append(("shadow_trades", d["name"].split("/")[-1], t.get("category"), categorize_market(q), q, sd or None))
+    for d in (p._list(_PREFIX + "alerts_sent") if include_alerts else []):
         a = p._fields(d)
         if a.get("type") != "polymarket" or not a.get("question"):
             continue
@@ -96,6 +96,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--revert", action="store_true")
+    ap.add_argument("--alerts", action="store_true")
     ap.add_argument("--predictions", action="store_true")
     args = ap.parse_args()
 
@@ -109,15 +110,16 @@ def main() -> None:
                 fields = {"category": _s(f["category_v1"])}
                 mask = ["category", "category_v1"]
                 if coll == "shadow_trades" and f.get("signal_data"):
-                    fields["signal_data"] = {"mapValue": {"fields": {"category": _s(f["category_v1"])}}}
-                    mask.append("signal_data.category")
+                    sd_old = f["signal_data"].get("category_v1", f["category_v1"])
+                    fields["signal_data"] = {"mapValue": {"fields": {"category": _s(sd_old)}}}
+                    mask += ["signal_data.category", "signal_data.category_v1"]
                 writes.append(_write(coll, d["name"].split("/")[-1], fields, mask))
         print(f"revert: {len(writes)} docs")
         if writes:
             _post_batch(writes)
         return
 
-    plan = _plan(args.predictions)
+    plan = _plan(args.alerts, args.predictions)
     changes = [x for x in plan if (x[2] or "other") != x[3]]
     by_coll = collections.Counter(x[0] for x in plan)
     ch_coll = collections.Counter(x[0] for x in changes)
@@ -133,12 +135,14 @@ def main() -> None:
         return
 
     writes = []
-    for coll, doc_id, old, new, _q, has_sd in changes:
+    for coll, doc_id, old, new, _q, sd in changes:
         fields = {"category": _s(new), "category_v1": _s(old)}
         mask = ["category", "category_v1"]
-        if has_sd:
-            fields["signal_data"] = {"mapValue": {"fields": {"category": _s(new)}}}
-            mask.append("signal_data.category")
+        if sd:
+            # el de signal_data puede no coincidir con el de arriba: se guarda aparte
+            fields["signal_data"] = {"mapValue": {"fields": {
+                "category": _s(new), "category_v1": _s(sd.get("category"))}}}
+            mask += ["signal_data.category", "signal_data.category_v1"]
         writes.append(_write(coll, doc_id, fields, mask))
     _post_batch(writes)
     print(f"\nescritos {len(writes)} docs (valor anterior en category_v1)")

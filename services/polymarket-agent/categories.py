@@ -13,7 +13,8 @@ _TENNIS_RE = re.compile(
     r'us open|australian open|masters 1000|davis cup|indian wells|miami open|'
     r'monte.?carlo|madrid open|qualification|qualifier|tennis'
     # Torneos ITF femeninos ("W50 Heraklion: A vs B")
-    r'|w(?:15|35|50|75|100))\b',
+    # y masculinos ("M25 Monastir: A vs B")
+    r'|w(?:15|35|50|75|100)|m(?:15|25))\b',
     re.I,
 )
 _CRICKET_RE = re.compile(
@@ -33,7 +34,7 @@ _CRICKET_RE = re.compile(
 
 CATEGORY_KEYWORDS = {
     "crypto": ["btc", "bitcoin", "eth", "ethereum", "crypto", "solana", "defi", "blockchain", "halving", "altcoin", "xrp", "bnb", "doge", "dogecoin", "stablecoin", "nft", "web3", "layer 2", "base chain", "token", "fdv", "airdrop", "tge", "memecoin", "megaeth", "pump.fun", "hyperliquid"],
-    "politics": ["election", "president", "vote", "congress", "senate", "minister", "parliament", "poll", "referendum", "prime minister", "chancellor", "governor", "ballot", "trump", "biden", "harris", "democrat", "democratic", "republican", "nominee", "nomination", "primary", "runoff", "house seat", "mayor", "mayoral", "gubernatorial", "speaker", "impeach", "impeachment", "cabinet"],
+    "politics": ["election", "president", "presidential", "presidency", "vote", "congress", "senate", "minister", "parliament", "poll", "referendum", "prime minister", "chancellor", "governor", "ballot", "trump", "biden", "harris", "democrat", "democratic", "republican", "nominee", "nomination", "primary", "runoff", "house seat", "mayor", "mayoral", "gubernatorial", "speaker", "impeach", "impeachment", "cabinet"],
     "economy": ["fed", "interest rate", "inflation", "cpi", "gdp", "recession", "unemployment", "federal reserve", "rate hike", "rate cut", "jerome powell", "tariff", "trade war", "crude oil", "wti", "brent", "oil price", "gold price", "s&p", "nasdaq", "dow jones"],
     "sports": ["world cup", "champions league", "nba", "wnba", "nfl", "mlb", "nhl", "mls", "ncaa", "ncaaf", "ncaab", "super bowl", "world series", "stanley cup", "final", "tournament", "championship", "league", "wimbledon", "olympic", "olympics", "football", "soccer", "formula 1", "f1", "motogp", "tennis", "golf", "pga", "lpga", "boxing", "ufc", "mma", "playoffs", "copa", "euro", "roland garros", "french open", "italian open", "us open", "australian open", "masters", "nascar", "basketball", "baseball", "hockey", "cricket", "rugby", "atp", "wta", "itf", "challenger", "fifa", "uefa", "premier league", "la liga", "bundesliga", "serie a", "ligue 1", "grand prix", "ballon d'or", "mvp", "cy young", "heisman", "relegated", "top scorer", "darts", "snooker", "cycling", "tour de france", "esports", "counter-strike", "valorant", "dota", "fight", "knockout", "submission"],
     "geopolitics": ["war", "ceasefire", "conflict", "nato", "military", "invasion", "sanctions", "treaty", "diplomacy", "nuclear", "iran", "hormuz", "strait", "ukraine", "russia", "china", "taiwan", "israel", "gaza", "hamas", "hezbollah", "korea", "missile", "drone", "coup", "regime", "peace deal", "cease fire", "truce", "embargo", "iranian", "israeli", "russian", "ukrainian", "chinese", "airspace", "blockade", "strike", "airstrike", "troops", "annex", "venezuela", "kharg", "invade"],
