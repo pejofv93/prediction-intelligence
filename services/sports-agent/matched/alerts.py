@@ -34,24 +34,30 @@ logger = logging.getLogger(__name__)
 _ALLOWED_CONFIDENCE = {c.strip() for c in MATCHED_ALERT_CONFIDENCE.split(",") if c.strip()}
 
 
-def should_alert(sig: MatchedSignal) -> bool:
-    """True si la señal cumple umbral, confianza, cuota y proxies de liquidez para alertar."""
+def alert_cut_reason(sig: MatchedSignal) -> str | None:
+    """None si la señal se alerta; si no, el primer filtro que la corta (para el registro
+    por escaneo en matched_scan_runs). El orden es el de siempre: no cambia qué se alerta."""
     if sig.confidence not in _ALLOWED_CONFIDENCE:
-        return False
+        return "confidence"
     # Longshots: cuota alta → liquidez de exchange ínfima → surebet no ejecutable.
     if max(sig.back_odds, sig.lay_odds) > MATCHED_ALERT_MAX_ODDS:
-        return False
+        return "max_odds"
     # Fase 3 — proxy de liquidez: lay muy por encima del back = mercado fino o cuota stale.
     if sig.back_odds > 0 and sig.lay_odds > sig.back_odds * MATCHED_MAX_BACK_LAY_RATIO:
-        return False
+        return "lay_back_ratio"
     if sig.signal_type == "surebet":
         # Surebet solo con lay recién actualizado: mercado activo = hay dinero real.
         if sig.confidence != "high":
-            return False
-        return sig.qualifying_rating >= MATCHED_ALERT_SUREBET_MIN_RATING
+            return "surebet_not_high"
+        return None if sig.qualifying_rating >= MATCHED_ALERT_SUREBET_MIN_RATING else "surebet_rating"
     if sig.signal_type == "coverage":
-        return sig.qualifying_rating >= MATCHED_ALERT_COVERAGE_MIN_RATING
-    return False
+        return None if sig.qualifying_rating >= MATCHED_ALERT_COVERAGE_MIN_RATING else "coverage_rating"
+    return "unknown_type"
+
+
+def should_alert(sig: MatchedSignal) -> bool:
+    """True si la señal cumple umbral, confianza, cuota y proxies de liquidez para alertar."""
+    return alert_cut_reason(sig) is None
 
 
 def format_alert(sig: MatchedSignal, back_stake: float = MATCHED_ALERT_BASE_STAKE) -> str:

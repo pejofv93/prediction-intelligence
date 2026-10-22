@@ -12,6 +12,7 @@ Flujo por ejecución:
 Reemplaza collectors/arbitrage_detector.py (roto). Sin alertas Telegram (Fase 2).
 """
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -25,7 +26,7 @@ from shared.firestore_client import col
 
 from .odds_lay import fetch_event_quotes, budget_ok
 from .engine import classify
-from .alerts import should_alert, send_matched_alert
+from .alerts import alert_cut_reason, send_matched_alert
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,13 @@ def _is_liquid_key(key: str) -> bool:
     return key in _LIQUID_SOCCER or key in _LIQUID_OTHER
 
 _COLL = "matched_signals"
+# Registro por escaneo: un doc por ejecución (id = fecha-hora UTC) + "latest". Los logs de
+# Cloud Run solo duran 30 días; esto no cambia qué se alerta, solo lo deja anotado.
+_RUNS_COLL = "matched_scan_runs"
+_QUOTA_APIS = ("the_odds_api", "the_odds_api_matched")
+
+# Selección de keys del último _active_sport_keys (para el registro del escaneo).
+_KEY_STATS: dict = {}
 
 
 async def _active_sport_keys() -> list[str]:
@@ -77,6 +85,7 @@ async def _active_sport_keys() -> list[str]:
         return []
 
     cand = []
+    not_liquid = []
     for s in sports:
         key = s.get("key", "")
         group = s.get("group", "")
@@ -87,11 +96,17 @@ async def _active_sport_keys() -> list[str]:
         if any(sub in key for sub in _EXCLUDE_SUBSTR):
             continue
         if not _is_liquid_key(key):
+            not_liquid.append(key)
             continue        # Fase 3 — fuera competiciones sin fondo de lay en Betfair
         cand.append((_GROUP_PRIORITY[group], key))
 
     cand.sort(key=lambda t: (t[0], t[1]))
     keys = [k for _, k in cand][:MATCHED_MAX_KEYS_PER_SCAN]
+    _KEY_STATS.clear()
+    _KEY_STATS.update({
+        "keys_excluded_whitelist": sorted(not_liquid),
+        "keys_over_cap": [k for _, k in cand][MATCHED_MAX_KEYS_PER_SCAN:],
+    })
     logger.info("matched.scanner: %d keys activas seleccionadas (de %d deportes): %s",
                 len(keys), len(sports), keys)
     return keys
@@ -110,11 +125,13 @@ def _too_close(commence_time: str, now: datetime) -> bool:
     return dt <= now + timedelta(minutes=SIGNAL_MIN_MINUTES_BEFORE_KICKOFF)
 
 
-def _persist(signals: list, now: datetime) -> tuple[int, list]:
+def _persist(signals: list, now: datetime) -> tuple[int, list, dict]:
     """
     Escribe señales (idempotente por signal_id) preservando el flag `alerted` de
-    ejecuciones previas (dedup), limpia expiradas y devuelve (nº escritas, a_alertar).
-    `a_alertar` = señales que cumplen umbral y NO habían sido alertadas todavía.
+    ejecuciones previas (dedup), limpia expiradas y devuelve (nº escritas, a_alertar,
+    recuento). `a_alertar` = señales que cumplen umbral y NO habían sido alertadas todavía.
+    recuento = señales nuevas/re-detectadas y cortadas por filtro (alert_cut_reason, o
+    "already_alerted" si ya salió en un escaneo anterior).
     """
     now_iso = now.isoformat()
 
@@ -127,18 +144,24 @@ def _persist(signals: list, now: datetime) -> tuple[int, list]:
 
     written = 0
     to_alert: list = []
+    stats = {"new": 0, "redetected": 0, "cut": Counter(), "cut_written_fail": 0}
     for sig in signals:
         prev = existing.get(sig.signal_id)
         prev_alerted = bool(prev and prev.get("alerted"))
+        stats["redetected" if prev else "new"] += 1
+        reason = "already_alerted" if prev_alerted else alert_cut_reason(sig)
+        if reason:
+            stats["cut"][reason] += 1
         doc = sig.to_doc()
         doc["alerted"] = prev_alerted            # preservar dedup entre escaneos
         doc["alerted_at"] = (prev or {}).get("alerted_at", "") if prev_alerted else ""
         try:
             col(_COLL).document(sig.signal_id).set(doc)
             written += 1
-            if not prev_alerted and should_alert(sig):
+            if reason is None:
                 to_alert.append(sig)
         except Exception:
+            stats["cut_written_fail"] += 1
             logger.warning("matched.scanner: error persistiendo %s", sig.signal_id, exc_info=True)
 
     # Limpieza acotada de expiradas (usa la lectura ya hecha, sin índice)
@@ -152,45 +175,79 @@ def _persist(signals: list, now: datetime) -> tuple[int, list]:
     except Exception:
         logger.warning("matched.scanner: error limpiando expiradas", exc_info=True)
 
-    return written, to_alert
+    stats["cut"] = dict(stats["cut"])
+    return written, to_alert, stats
 
 
-async def _dispatch_alerts(to_alert: list, now: datetime) -> int:
-    """Envía alertas a Telegram y marca alerted=True en Firestore. Devuelve nº enviadas."""
+async def _dispatch_alerts(to_alert: list, now: datetime) -> tuple[int, list]:
+    """Envía alertas a Telegram y marca alerted=True en Firestore.
+    Devuelve (nº enviadas, signal_ids cuyo envío falló)."""
     sent = 0
+    failed: list = []
     for sig in to_alert:
-        if await send_matched_alert(sig):
-            try:
-                col(_COLL).document(sig.signal_id).set(
-                    {"alerted": True, "alerted_at": now.isoformat()}, merge=True)
-            except Exception:
-                logger.warning("matched.scanner: alerta enviada pero no se marcó %s",
-                               sig.signal_id, exc_info=True)
-            sent += 1
-    return sent
+        if not await send_matched_alert(sig):
+            failed.append(sig.signal_id)
+            continue
+        try:
+            col(_COLL).document(sig.signal_id).set(
+                {"alerted": True, "alerted_at": now.isoformat()}, merge=True)
+        except Exception:
+            logger.warning("matched.scanner: alerta enviada pero no se marcó %s",
+                           sig.signal_id, exc_info=True)
+        sent += 1
+    return sent, failed
+
+
+def _quota_snapshot() -> dict:
+    """Créditos mensuales usados/restantes de The Odds API (pool y reserva matched)."""
+    try:
+        from shared.api_quota_manager import quota
+        st = quota.get_monthly_status()
+        return {a: {"used": st[a]["used"], "remaining": st[a]["remaining"], "limit": st[a]["limit"]}
+                for a in _QUOTA_APIS if a in st}
+    except Exception:
+        logger.warning("matched.scanner: no se pudo leer la cuota para el registro", exc_info=True)
+        return {}
+
+
+def _save_run(summary: dict, now: datetime, detail: dict) -> None:
+    """Guarda el escaneo: doc por ejecución (histórico) y "latest" (como antes). Nunca lanza."""
+    doc = {**summary, **detail, "at": now.isoformat()}
+    try:
+        col(_RUNS_COLL).document(now.strftime("%Y%m%dT%H%M%SZ")).set(doc)
+        col(_RUNS_COLL).document("latest").set(doc)
+    except Exception:
+        logger.warning("matched.scanner: no se pudo guardar el registro del escaneo", exc_info=True)
 
 
 async def run_matched_scan() -> dict:
     """Punto de entrada del escáner. Devuelve resumen para el endpoint/logs."""
     now = datetime.now(timezone.utc)
+    quota_before = _quota_snapshot()
 
     ok, reason = budget_ok()
     if not ok:
         logger.warning("matched.scanner: abortado — %s", reason)
-        return {"status": "skipped", "reason": reason, "signals": 0}
+        summary = {"status": "skipped", "reason": reason, "signals": 0}
+        _save_run(summary, now, {"quota_before": quota_before})
+        return summary
 
     keys = await _active_sport_keys()
     if not keys:
-        return {"status": "no_sports", "signals": 0}
+        summary = {"status": "no_sports", "signals": 0}
+        _save_run(summary, now, {"quota_before": quota_before, **_KEY_STATS})
+        return summary
 
     all_signals = []
     scanned_keys = 0
     skipped_timing = 0
+    budget_cut = ""
 
     for key in keys:
         ok, reason = budget_ok()
         if not ok:
             logger.info("matched.scanner: corte de presupuesto tras %d keys — %s", scanned_keys, reason)
+            budget_cut = reason
             break
         events = await fetch_event_quotes(key)
         scanned_keys += 1
@@ -210,8 +267,8 @@ async def run_matched_scan() -> dict:
                 if sig is not None:
                     all_signals.append(sig)
 
-    written, to_alert = _persist(all_signals, now)
-    alerts_sent = await _dispatch_alerts(to_alert, now)
+    written, to_alert, sig_stats = _persist(all_signals, now)
+    alerts_sent, alerts_failed = await _dispatch_alerts(to_alert, now)
     n_sure = sum(1 for s in all_signals if s.signal_type == "surebet")
     n_cov = sum(1 for s in all_signals if s.signal_type == "coverage")
 
@@ -225,10 +282,20 @@ async def run_matched_scan() -> dict:
         "written": written,
         "alerts_new": len(to_alert),
         "alerts_sent": alerts_sent,
+        "signals_new": sig_stats["new"],
+        "signals_redetected": sig_stats["redetected"],
+        "cut": sig_stats["cut"],
     }
     logger.info("matched.scanner: %s", summary)
-    try:
-        col("matched_scan_runs").document("latest").set({**summary, "at": now.isoformat()})
-    except Exception:
-        logger.warning("matched.scanner: no se pudo guardar el resumen de scan", exc_info=True)
+    _save_run(summary, now, {
+        "keys": keys[:scanned_keys],
+        "keys_not_scanned": keys[scanned_keys:],
+        "budget_cut": budget_cut,
+        **_KEY_STATS,
+        "signals_write_failed": sig_stats["cut_written_fail"],
+        "alerted_ids": [s.signal_id for s in to_alert if s.signal_id not in alerts_failed],
+        "alert_failed_ids": alerts_failed,
+        "quota_before": quota_before,
+        "quota_after": _quota_snapshot(),
+    })
     return summary
