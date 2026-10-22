@@ -537,7 +537,11 @@ def _claim_alert_slot(key: str, alert_type: str) -> bool:
         return True
 
 
-# ── Baloncesto: una alerta por partido y mercado ─────────────────────────────
+# ── Una alerta por partido y mercado (baloncesto, fútbol, tenis) ─────────────
+# Nació para baloncesto y desde 2026-10-22 cubre también fútbol y tenis: con el dedup
+# genérico de 24h la misma señal de fútbol salía cada día hasta el partido (82 de 145
+# envíos del 26-sep al 22-oct eran reenvíos). Baloncesto conserva su prefijo de clave
+# y su type (sports_bball) para no perder los slots ya tomados.
 # La clave genérica (_alert_key) lleva equipo y línea y caduca a las 24h: con los partidos
 # de Euroliga visibles una semana antes y 3-4 análisis al día, cada señal se reenviaba a
 # diario, cada movimiento de línea (Over 167.5 → 178.5) contaba como señal nueva y un
@@ -548,6 +552,7 @@ def _claim_alert_slot(key: str, alert_type: str) -> bool:
 # al menos un 5% mejor que la enviada y EV no inferior; un único reenvío por slot.
 # Cambio de lado, de línea o solo de tier → nunca.
 _BBALL_SPORTS = ("basketball", "nba")
+_SLOT_SPORTS = _BBALL_SPORTS + ("football", "tennis")
 _BBALL_RESEND_MIN_ODDS_GAIN = 0.05
 _BBALL_MAX_RESENDS = 1
 _LINE_RE = re.compile(r"\s*([+-]?\d+(?:\.\d+)?)\s*(H1|Q1)?\s*$", re.IGNORECASE)
@@ -565,40 +570,51 @@ def _bball_side_and_line(selection: str) -> tuple[str, float | None]:
 
 
 def _bball_slot_key(prediction: dict) -> str | None:
-    """bball_{home}_vs_{away}_{YYYY-MM-DD}_{mercado}. None si falta fecha o equipos."""
+    """{bball|slot}_{home}_vs_{away}_{YYYY-MM-DD}_{mercado}. None si falta fecha o equipos."""
     home = str(prediction.get("home_team") or "").lower().strip()
     away = str(prediction.get("away_team") or "").lower().strip()
     day = str(prediction.get("match_date") or "")[:10]
     if not home or not away or len(day) != 10:
         return None
     market = prediction.get("market_type") or "h2h"
-    return f"bball_{home}_vs_{away}_{day}_{market}"
+    prefix = "bball" if _is_bball(prediction) else "slot"
+    return f"{prefix}_{home}_vs_{away}_{day}_{market}"
+
+
+def _is_bball(prediction: dict) -> bool:
+    return str(prediction.get("sport", "")).lower() in _BBALL_SPORTS
 
 
 def _bball_resend_decision(prev: dict, side: str, line: float | None,
                            odds: float, ev: float) -> tuple[bool, str]:
-    """¿El slot ya tomado admite esta señal? Devuelve (reenviar, motivo)."""
+    """¿El slot ya tomado admite esta señal? Devuelve (reenviar, motivo).
+    El motivo empieza por un código fijo (cambio_lado, cambio_linea, reenvio_usado,
+    sin_referencia, cuota_sin_mejora, ev_baja) para poder contar en logs qué corta.
+    Un cambio de lado nunca se reenvía: un envío erróneo se corrige a mano con un
+    mensaje de anulación."""
     if prev.get("side") != side:
-        return False, f"cambio de lado {prev.get('side')!r} → {side!r}"
+        return False, f"cambio_lado {prev.get('side')!r} → {side!r}"
     if prev.get("line") != line:
-        return False, f"cambio de línea {prev.get('line')} → {line}"
+        return False, f"cambio_linea {prev.get('line')} → {line}"
     if int(prev.get("resends") or 0) >= _BBALL_MAX_RESENDS:
-        return False, "reenvío ya usado"
+        return False, "reenvio_usado"
     prev_odds = prev.get("odds")
     prev_ev = prev.get("ev")
     if prev_odds is None or prev_ev is None:
-        return False, "sin cuota de referencia"
+        return False, "sin_referencia"
     if odds < float(prev_odds) * (1 + _BBALL_RESEND_MIN_ODDS_GAIN):
-        return False, f"cuota {odds:.2f} sin mejora material sobre {float(prev_odds):.2f}"
+        return False, f"cuota_sin_mejora {odds:.2f} sobre {float(prev_odds):.2f}"
     if ev < float(prev_ev):
-        return False, f"EV {ev:.3f} inferior al enviado {float(prev_ev):.3f}"
+        return False, f"ev_baja {ev:.3f} bajo el enviado {float(prev_ev):.3f}"
     return True, f"cuota {float(prev_odds):.2f} → {odds:.2f}"
 
 
-def _claim_bball_slot(prediction: dict) -> tuple[bool, float | None]:
+def _claim_match_slot(prediction: dict) -> tuple[bool, float | None]:
     """
-    Slot de baloncesto. Devuelve (enviar, cuota_previa): cuota_previa es None en el primer
-    envío y la cuota ya enviada en un reenvío por cuota mejorada. Escrituras con
+    Slot por partido+fecha+mercado (baloncesto, fútbol, tenis), vivo hasta el inicio.
+    Devuelve (enviar, cuota_previa): cuota_previa es None en el primer envío y la cuota
+    ya enviada en un reenvío por cuota mejorada. Cada señal bloqueada deja en el log
+    "BLOQUEADA motivo=<código>". Escrituras con
     precondición (create / update_time) para que dos analyze simultáneos no envíen los
     dos. Fail-open ante error de Firestore, igual que _claim_alert_slot.
     """
@@ -610,12 +626,17 @@ def _claim_bball_slot(prediction: dict) -> tuple[bool, float | None]:
         return _claim_alert_slot(_alert_key(prediction), "sports"), None
 
     side, line = _bball_side_and_line(prediction.get("selection") or prediction.get("team_to_back"))
+    # Fútbol/tenis: línea en campo aparte si la selección no la lleva. Baloncesto no: la
+    # lleva siempre en la selección y sus slots ya tomados guardan line=None en ML.
+    if line is None and not _is_bball(prediction) and prediction.get("line") is not None:
+        line = float(prediction["line"])
     odds = float(prediction.get("odds") or 0)
     _ev_raw = prediction.get("ev")
     ev = float(_ev_raw) if _ev_raw is not None else float(prediction.get("edge") or 0)
     now = datetime.now(timezone.utc)
     record = {
-        "alert_key": key, "type": "sports_bball", "sent_at": now,
+        "alert_key": key, "type": "sports_bball" if _is_bball(prediction) else "sports_slot",
+        "sport": prediction.get("sport"), "sent_at": now,
         "side": side, "line": line, "odds": odds, "ev": ev,
         "selection": prediction.get("selection"),
         "match_date": str(prediction.get("match_date") or ""),
@@ -627,13 +648,13 @@ def _claim_bball_slot(prediction: dict) -> tuple[bool, float | None]:
             try:
                 ref.create({**record, "resends": 0})
             except gexc.Conflict:  # AlreadyExists hereda de Conflict
-                logger.info("_claim_bball_slot: carrera perdida → omitida (%s)", key)
+                logger.info("_claim_match_slot: BLOQUEADA motivo=carrera_perdida (%s)", key)
                 return False, None
             return True, None
         prev = snap.to_dict() or {}
         resend, why = _bball_resend_decision(prev, side, line, odds, ev)
         if not resend:
-            logger.info("_claim_bball_slot: %s → omitida (%s)", why, key)
+            logger.info("_claim_match_slot: BLOQUEADA motivo=%s (%s)", why, key)
             return False, None
         try:
             ref.update(
@@ -641,12 +662,12 @@ def _claim_bball_slot(prediction: dict) -> tuple[bool, float | None]:
                 option=get_client().write_option(last_update_time=snap.update_time),
             )
         except gexc.FailedPrecondition:
-            logger.info("_claim_bball_slot: carrera perdida en reenvío → omitida (%s)", key)
+            logger.info("_claim_match_slot: BLOQUEADA motivo=carrera_perdida_reenvio (%s)", key)
             return False, None
-        logger.info("_claim_bball_slot: reenvío por %s (%s)", why, key)
+        logger.info("_claim_match_slot: REENVÍO por %s (%s)", why, key)
         return True, float(prev["odds"])
     except Exception as exc:
-        logger.error("_claim_bball_slot(%s): error Firestore → fail-open: %s", key, exc)
+        logger.error("_claim_match_slot(%s): error Firestore → fail-open: %s", key, exc)
         return True, None
 
 
@@ -863,7 +884,8 @@ def _record_sports_sent(prediction: dict) -> None:
 async def send_sports_alert(prediction: dict) -> bool:
     """
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
-    Dedup 24h via _claim_alert_slot (pre-write con document ID → sin race conditions).
+    Baloncesto/fútbol/tenis: un envío por partido+fecha+mercado (_claim_match_slot).
+    Resto, o sin fecha: dedup 24h via _claim_alert_slot.
     Devuelve True si envio.
     """
     edge = float(prediction.get("edge") or 0)
@@ -883,8 +905,8 @@ async def send_sports_alert(prediction: dict) -> bool:
 
     # Dedup atómico: pre-escribe antes de enviar
     _resend_from_odds = None
-    if str(prediction.get("sport", "")).lower() in _BBALL_SPORTS:
-        _ok, _resend_from_odds = _claim_bball_slot(prediction)
+    if str(prediction.get("sport", "")).lower() in _SLOT_SPORTS:
+        _ok, _resend_from_odds = _claim_match_slot(prediction)
         if not _ok:
             return False
     elif not _claim_alert_slot(key, "sports"):
