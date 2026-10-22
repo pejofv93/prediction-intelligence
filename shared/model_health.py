@@ -1,200 +1,156 @@
 """
-Model health monitor — detecta degradacion y auto-ajusta thresholds.
+Model health monitor — aviso de acierto bajo en las últimas señales ENVIADAS.
+
+Solo avisa: no sube ningún umbral ni suspende ninguna liga/categoría. Antes este
+módulo calculaba un "recommended_edge" y una lista de "ligas suspendidas" sobre el
+ledger crudo de shadow_trades (Sports y Polymarket mezclados, incluidas señales no
+alertadas), y el aviso decía "threshold subido" / "Liga suspendida" aunque nada
+leía ese resultado. Ahora hay un grupo por fuente, cada uno sobre lo realmente
+enviado:
+  - Sports:     predictions con alerted=True y correct graduado, por match_date.
+  - Polymarket: alerts_sent (type=polymarket, status sent/sent_archived) graduadas
+                por polymarket_resolver (result win/loss), por resolved_at.
 """
 import logging
 from datetime import datetime, timezone
-from statistics import mean
 from typing import Optional
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.firestore_client import col
+from shared.firestore_client import col, iter_all
+from shared.shadow_engine import (
+    _POLY_SENT_STATUSES, _as_utc_dt, _poly_alert_selection, _poly_decimal_odds,
+)
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SPORTS_MIN_EDGE = 0.08
+_LAST_N = 20
+_MIN_SAMPLE = 20
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+_GROUP_LABELS = {"sports": "⚽ Sports", "polymarket": "🔮 Polymarket"}
 
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def check_model_health(trades: Optional[list[dict]] = None) -> dict:
-    """
-    Analiza ultimas 20 senales cerradas y evalua salud del modelo.
+def _sports_alerted_graded() -> list[dict]:
+    """[{correct, odds, at}] de las predicciones sports alertadas y graduadas."""
+    out = []
+    docs = col("predictions").where(filter=FieldFilter("alerted", "==", True)).stream()
+    for doc in docs:
+        p = doc.to_dict() or {}
+        if p.get("correct") not in (True, False):
+            continue
+        out.append({
+            "correct": p["correct"],
+            "odds": p.get("odds"),
+            "at": _as_utc_dt(p.get("match_date")) or _as_utc_dt(p.get("created_at")),
+        })
+    return out
 
-    Si trades=None: leer col("shadow_trades") filtrado por result in [win,loss],
-    ordenado por closed_at DESC, limit 20.
+
+def _poly_alerted_graded() -> list[dict]:
+    """[{correct, odds, at}] de las alertas Polymarket enviadas y resueltas."""
+    out = []
+    for doc in iter_all("alerts_sent", where=("type", "==", "polymarket")):
+        a = doc.to_dict() or {}
+        if a.get("status") not in _POLY_SENT_STATUSES or a.get("result") not in ("win", "loss"):
+            continue
+        sel = _poly_alert_selection(a)
+        mp = a.get("market_price_yes", a.get("last_price"))
+        odds = _poly_decimal_odds(sel, float(mp)) if sel and mp is not None else None
+        out.append({
+            "correct": a["result"] == "win",
+            "odds": odds,
+            "at": _as_utc_dt(a.get("resolved_at")),
+        })
+    return out
+
+
+def _evaluate_group(signals: list[dict]) -> dict:
+    """Acierto de las últimas _LAST_N señales graduadas de un grupo."""
+    last = sorted(signals, key=lambda s: s.get("at") or _EPOCH, reverse=True)[:_LAST_N]
+    n = len(last)
+    if n < _MIN_SAMPLE:
+        return {
+            "status": "SIN MUESTRA", "n": n, "win_rate_last_20": 0.0,
+            "expected_win_rate": None, "degraded": False,
+        }
+    win_rate = round(sum(1 for s in last if s["correct"]) / n, 4)
+    # Acierto que implican las cuotas de esas mismas señales (1/cuota), como referencia:
+    # un 35% de acierto a cuota media 3.0 no es lo mismo que a 1.5.
+    implied = [1.0 / float(s["odds"]) for s in last if s.get("odds") and float(s["odds"]) > 1.0]
+    expected = round(sum(implied) / len(implied), 4) if implied else None
+    if win_rate < 0.35:
+        status = "CRITICO"
+    elif win_rate < 0.45:
+        status = "DEGRADADO"
+    else:
+        status = "SALUDABLE"
+    return {
+        "status": status, "n": n, "win_rate_last_20": win_rate,
+        "expected_win_rate": expected, "degraded": status != "SALUDABLE",
+    }
+
+
+def check_model_health(
+    sports_signals: Optional[list[dict]] = None,
+    poly_signals: Optional[list[dict]] = None,
+) -> dict:
+    """
+    Evalúa Sports y Polymarket por separado sobre las señales realmente enviadas.
 
     Returns:
     {
-      status: "SALUDABLE"|"DEGRADADO"|"CRITICO",
-      win_rate_last_20: float,
-      recommended_edge: float,
-      blacklisted_leagues: list,
-      degraded: bool,
-      message: str
+      "groups": {"sports": {...}, "polymarket": {...}},
+         cada grupo: status ("SALUDABLE"|"DEGRADADO"|"CRITICO"|"SIN MUESTRA"|"ERROR"),
+                     n, win_rate_last_20, expected_win_rate, degraded
+      "degraded": bool  (algún grupo degradado),
+      "checked_at": datetime
     }
     """
-    try:
-        # Guard: sin muestra suficiente no ajustar thresholds
+    loaders = {"sports": (sports_signals, _sports_alerted_graded),
+               "polymarket": (poly_signals, _poly_alerted_graded)}
+    groups = {}
+    for name, (signals, loader) in loaders.items():
         try:
-            weights_doc = col("model_weights").document("current").get()
-            data = weights_doc.to_dict() if weights_doc.exists else {}
-            total_closed = int(data.get("total_predictions", 0))
+            groups[name] = _evaluate_group(signals if signals is not None else loader())
         except Exception as e:
-            logger.warning("check_model_health: no se pudo leer total_predictions — %s", e)
-            total_closed = 0
-
-        if total_closed < 20:
-            logger.info("check_model_health: omitido — %d/20 trades mínimos", total_closed)
-            return {
-                "status": "skipped",
-                "win_rate_last_20": 0.0,
-                "recommended_edge": _DEFAULT_SPORTS_MIN_EDGE,
-                "blacklisted_leagues": [],
-                "degraded": False,
-                "message": f"Health check omitido: {total_closed}/20 trades cerrados mínimos.",
-                "checked_at": _now_utc(),
-            }
-
-        if trades is None:
-            try:
-                docs = (
-                    col("shadow_trades")
-                    .where(filter=FieldFilter("result", "in", ["win", "loss"]))
-                    .order_by("closed_at", direction="DESCENDING")
-                    .limit(20)
-                    .stream()
-                )
-                trades = [d.to_dict() for d in docs]
-            except Exception as e:
-                logger.error("check_model_health: error leyendo shadow_trades: %s", e)
-                trades = []
-
-        # Filtrar solo trades cerrados con resultado valido
-        closed = [t for t in trades if t.get("result") in ("win", "loss")]
-        wins = [t for t in closed if t.get("result") == "win"]
-
-        win_rate = round(len(wins) / len(closed), 4) if closed else 0.0
-
-        # Sin suficiente muestra estadistica: no ajustar threshold
-        if len(closed) < 20:
-            result = {
-                "status": "SALUDABLE",
-                "win_rate_last_20": win_rate,
-                "recommended_edge": _DEFAULT_SPORTS_MIN_EDGE,
-                "blacklisted_leagues": [],
-                "degraded": False,
-                "message": f"Muestra insuficiente ({len(closed)} trades cerrados < 20). Threshold fijo en {_DEFAULT_SPORTS_MIN_EDGE:.0%}.",
-                "checked_at": _now_utc(),
-            }
-            try:
-                col("model_weights").document("health_check").set(result)
-            except Exception as e:
-                logger.error("check_model_health: error guardando health_check: %s", e)
-            logger.info("check_model_health: muestra insuficiente (%d < 20), threshold=%.1f%%", len(closed), _DEFAULT_SPORTS_MIN_EDGE * 100)
-            return result
-
-        recommended_edge = _DEFAULT_SPORTS_MIN_EDGE
-
-        # Determinar status y ajustar threshold
-        if win_rate < 0.35:
-            status = "CRITICO"
-            recommended_edge = round(_DEFAULT_SPORTS_MIN_EDGE * 1.4, 4)
-            degraded = True
-        elif win_rate < 0.45:
-            status = "DEGRADADO"
-            recommended_edge = round(_DEFAULT_SPORTS_MIN_EDGE * 1.2, 4)
-            degraded = True
-        elif win_rate > 0.65:
-            status = "SALUDABLE"
-            recommended_edge = round(_DEFAULT_SPORTS_MIN_EDGE * 0.95, 4)
-            degraded = False
-        else:
-            status = "SALUDABLE"
-            recommended_edge = _DEFAULT_SPORTS_MIN_EDGE
-            degraded = False
-
-        # Blacklist por liga: win_rate < 40% en >= 10 senales
-        league_stats: dict[str, dict] = {}
-        for t in closed:
-            league = t.get("category") or t.get("league") or "unknown"
-            if league not in league_stats:
-                league_stats[league] = {"wins": 0, "n": 0}
-            league_stats[league]["n"] += 1
-            if t.get("result") == "win":
-                league_stats[league]["wins"] += 1
-
-        blacklisted_leagues = []
-        for league, stats in league_stats.items():
-            if stats["n"] >= 10:
-                league_wr = stats["wins"] / stats["n"]
-                if league_wr < 0.40:
-                    blacklisted_leagues.append(league)
-
-        message = (
-            f"Modelo {status} — Win rate ultimas {len(closed)} senales: {win_rate:.0%}. "
-            f"Edge recomendado: {recommended_edge:.1%}."
-        )
-        if blacklisted_leagues:
-            message += f" Ligas en blacklist: {', '.join(blacklisted_leagues)}."
-
-        result = {
-            "status": status,
-            "win_rate_last_20": win_rate,
-            "recommended_edge": recommended_edge,
-            "blacklisted_leagues": blacklisted_leagues,
-            "degraded": degraded,
-            "message": message,
-            "checked_at": _now_utc(),
-        }
-
-        # Guardar en Firestore
-        try:
-            col("model_weights").document("health_check").set(result)
-        except Exception as e:
-            logger.error("check_model_health: error guardando health_check: %s", e)
-
+            logger.error("check_model_health(%s): error — %s", name, e)
+            groups[name] = {"status": "ERROR", "n": 0, "win_rate_last_20": 0.0,
+                            "expected_win_rate": None, "degraded": False}
         logger.info(
-            "check_model_health: status=%s win_rate=%.0f%% edge=%.1f%%",
-            status, win_rate * 100, recommended_edge * 100,
+            "check_model_health(%s): status=%s n=%d win_rate=%.0f%%",
+            name, groups[name]["status"], groups[name]["n"],
+            groups[name]["win_rate_last_20"] * 100,
         )
-        return result
 
+    result = {
+        "groups": groups,
+        "degraded": any(g["degraded"] for g in groups.values()),
+        "checked_at": _now_utc(),
+    }
+    try:
+        col("model_weights").document("health_check").set(result)
     except Exception as e:
-        logger.error("check_model_health: error general: %s", e)
-        return {
-            "status": "SALUDABLE",
-            "win_rate_last_20": 0.0,
-            "recommended_edge": _DEFAULT_SPORTS_MIN_EDGE,
-            "blacklisted_leagues": [],
-            "degraded": False,
-            "message": "Error al evaluar salud del modelo.",
-            "checked_at": _now_utc(),
-        }
+        logger.error("check_model_health: error guardando health_check: %s", e)
+    return result
 
 
-def format_health_alert(health: dict) -> str:
-    """
-    Formato Telegram para alerta de degradacion.
-    """
-    win_rate = float(health.get("win_rate_last_20") or 0)
-    recommended_edge = float(health.get("recommended_edge") or _DEFAULT_SPORTS_MIN_EDGE)
-    degraded = health.get("degraded", False)
-    blacklisted = health.get("blacklisted_leagues") or []
-
-    action_word = "subido" if degraded else "ajustado"
+def format_health_alert(group_name: str, group: dict) -> str:
+    """Aviso Telegram de un grupo degradado. Sin acción automática."""
+    label = _GROUP_LABELS.get(group_name, group_name)
     lines = [
-        "🚨 ALERTA MODELO",
-        f"Win rate ultimas 20 senales: {win_rate:.0%}",
-        f"Accion: threshold {action_word} a {recommended_edge:.1%}",
+        f"⚠️ AVISO MODELO — {label} (sin acción automática)",
+        f"Acierto últimas {group.get('n', 0)} señales enviadas: "
+        f"{float(group.get('win_rate_last_20') or 0):.0%} ({group.get('status')})",
     ]
-
-    # Obtener wins/n para cada liga en blacklist si estan disponibles en el health dict
-    for league in blacklisted:
-        lines.append(f"Liga suspendida: {league}")
-
+    expected = group.get("expected_win_rate")
+    if expected is not None:
+        lines.append(f"Acierto esperado por cuota de esas señales: {expected:.0%}")
+    lines.append("No se cambia ningún umbral ni se suspende nada: solo informativo.")
     return "\n".join(lines)
 
 

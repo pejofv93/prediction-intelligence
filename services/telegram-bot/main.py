@@ -241,7 +241,7 @@ async def _bg_daily_report() -> None:
     3. Contar predictions sports directamente (result=None/correct) para estadísticas reales
     4. Buscar top signal en predictions (result==None, unified_score DESC)
     5. format_daily_report(health, shadow_metrics, top_signal, pred_stats)
-    6. Si health.degraded: send_message(format_health_alert(health))
+    6. Por cada grupo degradado (sports / polymarket): send_message(format_health_alert(...))
     """
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter
@@ -335,8 +335,13 @@ async def _bg_daily_report() -> None:
         )
         await send_message(report, message_thread_id=TELEGRAM_DAILY_THREAD_ID)
 
-        if health.get("degraded"):
-            await send_message(format_health_alert(health), message_thread_id=TELEGRAM_DAILY_THREAD_ID)
+        # Un aviso por grupo (Sports / Polymarket), nunca mezclados
+        for _group_name, _group in (health.get("groups") or {}).items():
+            if _group.get("degraded"):
+                await send_message(
+                    format_health_alert(_group_name, _group),
+                    message_thread_id=TELEGRAM_DAILY_THREAD_ID,
+                )
 
         logger.info("daily-report: enviado correctamente")
     except Exception as e:
