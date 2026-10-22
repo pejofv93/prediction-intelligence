@@ -885,10 +885,13 @@ async def _bg_analyze() -> dict:
             logger.error("analyze: error en run_maintenance", exc_info=True)
 
         _gamma = await record_gamma_cycle("analyze")
+        from alert_engine import record_slot_cycle
+        _slot = await record_slot_cycle("analyze")
 
         return {
             "status": "ok",
             "gamma": _gamma,
+            "slot_history": _slot,
             "total": len(docs_balanced),
             "analyzed": predictions_generated,
             "alerts": alerts_sent,

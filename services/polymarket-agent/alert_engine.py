@@ -49,6 +49,87 @@ _SLOT_MIN_GAP_H = 24
 _SLOT_MIN_PRICE_GAIN = 0.05   # absoluto, a favor de nuestro lado
 
 
+# Lecturas del historial del slot en el ciclo en curso. Si falla, check_and_alert NO
+# envía (fail-closed); record_slot_cycle() lleva la racha de ciclos con fallos y avisa.
+_SLOT_READS = {"ok": 0, "fail": 0}
+_SLOT_ALERT_AFTER_CYCLES = 2
+# Racha en memoria por si Firestore (que es lo que falla) tampoco deja guardarla.
+_SLOT_STREAK_MEM = {"failed_cycles": 0, "alerted": False}
+
+
+async def record_slot_cycle(source: str) -> dict:
+    """
+    Cierra el ciclo de lecturas del historial de alerts_sent (mismo esquema que
+    scanner.record_gamma_cycle). Ciclo fallido = al menos una lectura fallida, porque
+    cada una es una alerta que no salió. Racha en agent_state/poly_slot_health (o en
+    memoria si Firestore no responde); aviso por Telegram al llegar a
+    _SLOT_ALERT_AFTER_CYCLES ciclos seguidos (una vez por racha) y al recuperarse.
+    Nunca lanza.
+    """
+    import httpx
+    from shared.firestore_client import col
+
+    ok, fail = _SLOT_READS["ok"], _SLOT_READS["fail"]
+    _SLOT_READS["ok"] = _SLOT_READS["fail"] = 0
+    if ok + fail == 0:
+        return {"ok": 0, "fail": 0, "streak": None}
+    failed = fail > 0
+    now = datetime.now(timezone.utc)
+    ref = None
+    prev = dict(_SLOT_STREAK_MEM)
+    try:
+        ref = col("agent_state").document("poly_slot_health")
+        snap = ref.get()
+        if snap.exists:
+            prev = snap.to_dict() or prev
+    except Exception:
+        logger.error("record_slot_cycle: no se pudo leer agent_state/poly_slot_health — racha en memoria",
+                     exc_info=True)
+    alerted = bool(prev.get("alerted"))
+    streak = int(prev.get("failed_cycles") or 0) + 1 if failed else 0
+    text = None
+    if failed:
+        logger.error(
+            "SLOT_HISTORY_CYCLE_FAILED (%s): %d/%d lecturas del historial fallidas (alertas no enviadas) "
+            "— racha %d ciclo(s)", source, fail, ok + fail, streak,
+        )
+        if streak >= _SLOT_ALERT_AFTER_CYCLES and not alerted:
+            text = (
+                f"🚨 polymarket-agent: no se puede leer el historial de alertas (alerts_sent)\n"
+                f"{streak} ciclos seguidos con lecturas fallidas (último: {source}, {fail}/{ok + fail}). "
+                f"Sin historial el dedup no envía: esas alertas de Polymarket no han salido."
+            )
+            alerted = True
+    else:
+        if alerted:
+            text = f"✅ polymarket-agent: el historial de alertas vuelve a leerse ({source})"
+        alerted = False
+    _SLOT_STREAK_MEM.update(failed_cycles=streak, alerted=alerted)
+    try:
+        if ref is not None:
+            ref.set({"failed_cycles": streak, "alerted": alerted, "last_cycle_at": now,
+                     "last_source": source, "last_ok": ok, "last_fail": fail,
+                     **({"last_ok_at": now} if not failed else {})}, merge=True)
+    except Exception:
+        logger.error("record_slot_cycle: no se pudo guardar agent_state/poly_slot_health", exc_info=True)
+    if text:
+        try:
+            if TELEGRAM_BOT_URL:
+                import os
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    # type "matched": texto plano (parse_mode=None) al canal General.
+                    await client.post(
+                        f"{TELEGRAM_BOT_URL}/send-alert",
+                        json={"type": "matched", "data": {"text": text}},
+                        headers={"x-cloud-token": os.environ.get("CLOUD_RUN_TOKEN", "")},
+                    )
+            else:
+                logger.error("record_slot_cycle: TELEGRAM_BOT_URL no configurada — aviso no enviado: %s", text)
+        except Exception:
+            logger.error("record_slot_cycle: error enviando aviso a Telegram", exc_info=True)
+    return {"ok": ok, "fail": fail, "streak": streak}
+
+
 def _as_utc(ts):
     if ts is not None and getattr(ts, "tzinfo", 1) is None:
         return ts.replace(tzinfo=timezone.utc)
@@ -376,9 +457,11 @@ async def check_and_alert(analysis: dict) -> bool:
             .limit(50)
             .stream()
         ]
+        _SLOT_READS["ok"] += 1
     except Exception:
-        logger.error("check_and_alert(%s): error leyendo historial del slot — omitida",
-                     market_id, exc_info=True)
+        _SLOT_READS["fail"] += 1
+        logger.error("check_and_alert(%s): SLOT_HISTORY_READ_FAILED — omitida (sin historial no se "
+                     "envía)", market_id, exc_info=True)
         return False
     action, why, prev = _slot_decision(_history, direction, current_price, edge, now)
     if action == "skip":
