@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _LAST_N = 20
 _MIN_SAMPLE = 20
+_MIN_GAP_VS_EXPECTED = 0.10  # Sports: puntos por debajo del acierto esperado por cuota
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
 _GROUP_LABELS = {"sports": "⚽ Sports", "polymarket": "🔮 Polymarket"}
@@ -69,8 +70,13 @@ def _poly_alerted_graded() -> list[dict]:
     return out
 
 
-def _evaluate_group(signals: list[dict]) -> dict:
-    """Acierto de las últimas _LAST_N señales graduadas de un grupo."""
+def _evaluate_group(signals: list[dict], vs_expected: bool = False) -> dict:
+    """Acierto de las últimas _LAST_N señales graduadas de un grupo.
+
+    vs_expected=True (Sports): solo degradado si el acierto queda al menos
+    _MIN_GAP_VS_EXPECTED por debajo del esperado por cuota. False (Polymarket):
+    umbrales fijos 35% / 45%.
+    """
     last = sorted(signals, key=lambda s: s.get("at") or _EPOCH, reverse=True)[:_LAST_N]
     n = len(last)
     if n < _MIN_SAMPLE:
@@ -83,7 +89,15 @@ def _evaluate_group(signals: list[dict]) -> dict:
     # un 35% de acierto a cuota media 3.0 no es lo mismo que a 1.5.
     implied = [1.0 / float(s["odds"]) for s in last if s.get("odds") and float(s["odds"]) > 1.0]
     expected = round(sum(implied) / len(implied), 4) if implied else None
-    if win_rate < 0.35:
+    if vs_expected:
+        # Contra la cuota: un 40% a cuota media 2.4 es lo esperable, no una degradación.
+        if expected is None:
+            status = "SIN CUOTAS"
+        elif round(expected - win_rate, 4) >= _MIN_GAP_VS_EXPECTED:  # round: 0.5-0.4 = 0.0999…
+            status = "POR DEBAJO DE CUOTA"
+        else:
+            status = "SALUDABLE"
+    elif win_rate < 0.35:
         status = "CRITICO"
     elif win_rate < 0.45:
         status = "DEGRADADO"
@@ -91,7 +105,8 @@ def _evaluate_group(signals: list[dict]) -> dict:
         status = "SALUDABLE"
     return {
         "status": status, "n": n, "win_rate_last_20": win_rate,
-        "expected_win_rate": expected, "degraded": status != "SALUDABLE",
+        "expected_win_rate": expected,
+        "degraded": status not in ("SALUDABLE", "SIN CUOTAS"),
     }
 
 
@@ -105,18 +120,21 @@ def check_model_health(
     Returns:
     {
       "groups": {"sports": {...}, "polymarket": {...}},
-         cada grupo: status ("SALUDABLE"|"DEGRADADO"|"CRITICO"|"SIN MUESTRA"|"ERROR"),
+         cada grupo: status ("SALUDABLE"|"DEGRADADO"|"CRITICO"|"POR DEBAJO DE CUOTA"|
+                             "SIN CUOTAS"|"SIN MUESTRA"|"ERROR"),
                      n, win_rate_last_20, expected_win_rate, degraded
       "degraded": bool  (algún grupo degradado),
       "checked_at": datetime
     }
     """
-    loaders = {"sports": (sports_signals, _sports_alerted_graded),
-               "polymarket": (poly_signals, _poly_alerted_graded)}
+    loaders = {"sports": (sports_signals, _sports_alerted_graded, True),
+               "polymarket": (poly_signals, _poly_alerted_graded, False)}
     groups = {}
-    for name, (signals, loader) in loaders.items():
+    for name, (signals, loader, vs_expected) in loaders.items():
         try:
-            groups[name] = _evaluate_group(signals if signals is not None else loader())
+            groups[name] = _evaluate_group(
+                signals if signals is not None else loader(), vs_expected=vs_expected,
+            )
         except Exception as e:
             logger.error("check_model_health(%s): error — %s", name, e)
             groups[name] = {"status": "ERROR", "n": 0, "win_rate_last_20": 0.0,
@@ -149,7 +167,8 @@ def format_health_alert(group_name: str, group: dict) -> str:
     ]
     expected = group.get("expected_win_rate")
     if expected is not None:
-        lines.append(f"Acierto esperado por cuota de esas señales: {expected:.0%}")
+        _gap = (float(group.get("win_rate_last_20") or 0) - expected) * 100
+        lines.append(f"Acierto esperado por cuota de esas señales: {expected:.0%} ({_gap:+.0f} puntos)")
     lines.append("No se cambia ningún umbral ni se suspende nada: solo informativo.")
     return "\n".join(lines)
 
