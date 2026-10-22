@@ -431,6 +431,19 @@ def _format_poly_alert(analysis: dict) -> str:
     data_quality = str(analysis.get("data_quality") or "")
     data_quality_line = "⚠️ Sin datos externos verificables — ancla: precio mercado ±15%\n" if data_quality == "improvised" else ""
 
+    # Reenvío del mismo mercado+dirección (alert_engine: 1 como máximo, con mejora de precio)
+    resend_line = ""
+    _rs = analysis.get("alert_resend")
+    if isinstance(_rs, dict) and _rs.get("prev_price") is not None:
+        try:
+            _rs_day = datetime.fromisoformat(str(_rs.get("prev_sent_at"))).strftime("%d/%m")
+        except Exception:
+            _rs_day = "?"
+        resend_line = (
+            f"🔁 REENVÍO — ya enviada el {_rs_day} con YES {float(_rs['prev_price']):.0%}; "
+            f"ahora precio mejor para esta apuesta. No cuenta como apuesta nueva.\n"
+        )
+
     high_edge_line = (
         "⚠️ Edge alto — posible sobreestimación del modelo (edge no validado con histórico).\n"
         if abs_edge > 0.20 else ""
@@ -439,6 +452,7 @@ def _format_poly_alert(analysis: dict) -> str:
     return (
         f"🔮 OPORTUNIDAD POLYMARKET — {intensity}\n"
         f"{cat_line}"
+        f"{resend_line}"
         f"\n❓ {question}\n\n"
         f"{action_line}"
         f"💰 Precio YES: *{market_price_yes:.0%}* → IA: *{real_prob:.0%}* (*{edge:+.0%}* edge)\n"

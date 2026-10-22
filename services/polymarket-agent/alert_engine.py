@@ -6,6 +6,7 @@ edge positivo → BUY_YES; edge negativo → BUY_NO.
 volume_spike y smart_money son señales bonus (no requisito).
 """
 import logging
+from datetime import datetime, timezone
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -39,6 +40,84 @@ _BUY_YES_MIN_MP_YES = 0.40
 # sacrificadas). Las BUY_NO buenas (divergencia alta) están todas en mp_yes < 0.75.
 # Conservador en 0.85 (no 0.80, que ya costaría 2 ganadoras). Solo afecta a BUY_NO.
 _BUY_NO_MAX_MP_YES = 0.85
+
+
+# Slot por mercado + dirección (ver check_and_alert).
+_SLOT_STATUSES = ("sent", "sent_archived", "resent")
+_SLOT_MAX_RESENDS = 1
+_SLOT_MIN_GAP_H = 24
+_SLOT_MIN_PRICE_GAIN = 0.05   # absoluto, a favor de nuestro lado
+
+
+def _as_utc(ts):
+    if ts is not None and getattr(ts, "tzinfo", 1) is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def _sent_price(doc: dict):
+    """Precio YES enviado. Docs anteriores a la "foto de lo enviado" solo tienen last_price."""
+    v = doc.get("market_price_yes", doc.get("last_price"))
+    return float(v) if v is not None else None
+
+
+def _sent_edge(doc: dict):
+    """Edge enviado. Docs antiguos no lo guardan, pero su clave era market_id_edge."""
+    if doc.get("edge") is not None:
+        return float(doc["edge"])
+    try:
+        return float(str(doc.get("alert_key") or "").rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _doc_direction(doc: dict):
+    d = doc.get("direction") or doc.get("recommendation")
+    if d in ("BUY_YES", "BUY_NO"):
+        return d
+    e = _sent_edge(doc)
+    return None if e is None else ("BUY_YES" if e >= 0 else "BUY_NO")
+
+
+def _sent_docs(history: list[dict]) -> list[dict]:
+    return [h for h in history if h.get("status") in _SLOT_STATUSES and h.get("sent_at")]
+
+
+def _same_direction_count(history: list[dict], direction: str) -> int:
+    return sum(1 for h in _sent_docs(history) if _doc_direction(h) == direction)
+
+
+def _slot_decision(history: list[dict], direction: str, price: float, edge: float,
+                   now: datetime) -> tuple[str, str, dict | None]:
+    """("first" | "resend" | "skip", motivo, envío previo) para mercado+dirección.
+
+    history: docs de alerts_sent del mercado (incluye los de la clave antigua
+    market_id+edge, así que los mercados ya repetidos no ganan reenvíos nuevos).
+    """
+    sent = _sent_docs(history)
+    opposite = [h for h in sent if _doc_direction(h) not in (None, direction)]
+    if opposite:
+        last_opp = max(opposite, key=lambda h: _as_utc(h["sent_at"]))
+        return ("skip", f"cambio de dirección {_doc_direction(last_opp)} → {direction} "
+                        f"(enviado {_as_utc(last_opp['sent_at']):%d/%m}; solo se registra)", None)
+    same = [h for h in sent if _doc_direction(h) == direction]
+    if not same:
+        return "first", "primer envío", None
+    prev = max(same, key=lambda h: _as_utc(h["sent_at"]))
+    if len(same) > _SLOT_MAX_RESENDS:
+        return "skip", f"reenvío ya usado ({len(same)} envíos)", prev
+    gap_h = (now - _as_utc(prev["sent_at"])).total_seconds() / 3600
+    if gap_h < _SLOT_MIN_GAP_H:
+        return "skip", f"último envío hace {gap_h:.1f}h < {_SLOT_MIN_GAP_H}h", prev
+    prev_price, prev_edge = _sent_price(prev), _sent_edge(prev)
+    if prev_price is None or prev_edge is None:
+        return "skip", "sin precio/edge de referencia", prev
+    gain = (prev_price - price) if direction == "BUY_YES" else (price - prev_price)
+    if gain < _SLOT_MIN_PRICE_GAIN:
+        return "skip", f"precio YES {prev_price:.3f} → {price:.3f} sin mejora ≥{_SLOT_MIN_PRICE_GAIN}", prev
+    if abs(edge) < abs(float(prev_edge)):
+        return "skip", f"|edge| {abs(edge):.3f} < enviado {abs(float(prev_edge)):.3f}", prev
+    return "resend", f"precio YES {prev_price:.3f} → {price:.3f}, edge {float(prev_edge):+.3f} → {edge:+.3f}", prev
 
 
 def _load_learned_thresholds() -> dict:
@@ -283,117 +362,49 @@ async def check_and_alert(analysis: dict) -> bool:
     )
 
     current_price = float(analysis.get("market_price_yes", 0.5))
-    # ID determinista: misma señal (mismo mercado + misma magnitud de edge) = mismo doc.
-    alert_key = f"{market_id}_{round(edge, 2)}"
     now = datetime.now(timezone.utc)
-    cutoff_24h = now - timedelta(hours=24)
-    cutoff_7d = now - timedelta(days=7)
 
-    # --- Guard: contradicción con alerta opuesta en las últimas 6h ---
-    _opposite = "BUY_NO" if direction == "BUY_YES" else "BUY_YES"
+    # --- Slot por mercado + dirección (criterio de baloncesto, _bball_resend_decision) ---
+    # Antes: clave market_id + edge redondeado y bloqueo solo con precio RELATIVO ≤5% en
+    # 7 días → el mismo mercado salía hasta 9 veces persiguiendo el precio, y cada envío
+    # abría su shadow_trade. Ahora: un envío por mercado y dirección, 1 reenvío como
+    # máximo y solo con mejora material; el cambio de dirección no se alerta.
     try:
-        _cutoff_6h = now - timedelta(hours=6)
-        _opp_docs = list(
-            col("alerts_sent")
+        _history = [
+            d.to_dict() for d in col("alerts_sent")
             .where(filter=FieldFilter("market_id", "==", market_id))
-            .where(filter=FieldFilter("direction", "==", _opposite))
-            .where(filter=FieldFilter("status", "==", "sent"))
-            .limit(1)
+            .limit(50)
             .stream()
-        )
-        if _opp_docs:
-            _opp_sent_at = _opp_docs[0].to_dict().get("sent_at")
-            if _opp_sent_at:
-                if hasattr(_opp_sent_at, "tzinfo") and _opp_sent_at.tzinfo is None:
-                    _opp_sent_at = _opp_sent_at.replace(tzinfo=timezone.utc)
-                if _opp_sent_at >= _cutoff_6h:
-                    logger.warning(
-                        "check_and_alert(%s): CONTRADICCIÓN detectada — alertamos %s hace %.0fmin, "
-                        "ahora %s — omitida",
-                        market_id, _opposite,
-                        (now - _opp_sent_at).total_seconds() / 60,
-                        direction,
-                    )
-                    return False
+        ]
     except Exception:
-        logger.warning("check_and_alert(%s): error en guard contradicción — continuando", market_id, exc_info=True)
-
-    # MEJORA 3: dedup reforzado por market_id — si ya alertamos este mercado en 24h
-    # con precio sin cambio >5%, no volver a alertar aunque el alert_key sea distinto.
-    # Filtra por market_id solo (un campo) para evitar índice compuesto Firestore.
-    try:
-        _mid_docs = list(
-            col("alerts_sent")
-            .where(filter=FieldFilter("market_id", "==", market_id))
-            .limit(10)
-            .stream()
-        )
-        # Filtrar sent + recientes en Python
-        _sent_docs = [d.to_dict() for d in _mid_docs if d.to_dict().get("status") == "sent"]
-        if _sent_docs:
-            _last = max(
-                _sent_docs,
-                key=lambda d: d.get("sent_at") or datetime.min.replace(tzinfo=timezone.utc),
-            )
-            _last_sent = _last.get("sent_at")
-            _last_price_mid = float(_last.get("last_price", current_price))
-            if _last_sent:
-                if hasattr(_last_sent, "tzinfo") and _last_sent.tzinfo is None:
-                    _last_sent = _last_sent.replace(tzinfo=timezone.utc)
-                _pchg = abs(current_price - _last_price_mid) / max(_last_price_mid, 0.001)
-                if _last_sent > cutoff_24h and _pchg <= 0.05:
-                    logger.info(
-                        "check_and_alert(%s): SKIP_DEDUP_24H price_chg=%.1f%% <24h — omitida",
-                        market_id, _pchg * 100,
-                    )
-                    return False
-                if _last_sent > cutoff_7d and _pchg <= 0.05:
-                    logger.info(
-                        "check_and_alert(%s): SKIP_DEDUP_7D price_chg=%.1f%% <7d — omitida",
-                        market_id, _pchg * 100,
-                    )
-                    return False
-    except Exception:
-        logger.warning("check_and_alert(%s): error en dedup reforzado — continuando", market_id, exc_info=True)
+        logger.error("check_and_alert(%s): error leyendo historial del slot — omitida",
+                     market_id, exc_info=True)
+        return False
+    action, why, prev = _slot_decision(_history, direction, current_price, edge, now)
+    if action == "skip":
+        logger.info("check_and_alert(%s): SKIP_SLOT %s %s — omitida", market_id, direction, why)
+        return False
+    is_resend = action == "resend"
+    _n_same = _same_direction_count(_history, direction)
+    alert_key = f"{market_id}_{direction}" + (f"_r{_n_same}" if _n_same else "")
 
     db = get_client()
     dedup_ref = col("alerts_sent").document(alert_key)
 
     # --- Transacción atómica: check-and-claim ---
-    # Si dos requests concurrentes llegan aquí simultáneamente, solo uno ganará.
-    # El perdedor recibe Aborted/contention y no envía.
+    # El doc id es determinista (mercado+dirección+nº de reenvío): si dos requests
+    # concurrentes llegan aquí, solo uno lo crea.
     @_firestore.transactional
     def _claim(transaction: _firestore.Transaction) -> bool:
-        snap = dedup_ref.get(transaction=transaction)
-        if snap.exists:
-            data = snap.to_dict()
-            sent_at = data.get("sent_at")
-            if sent_at and hasattr(sent_at, "tzinfo") and sent_at.tzinfo is None:
-                sent_at = sent_at.replace(tzinfo=timezone.utc)
-            last_price = float(data.get("last_price", current_price))
-            price_chg = abs(current_price - last_price) / max(last_price, 0.001)
-
-            if sent_at and sent_at > cutoff_24h:
-                logger.info("check_and_alert(%s): SKIP_DEDUP_TX_24H (<24h) — omitida [tx]", market_id)
-                return False
-            if price_chg <= 0.05 and sent_at and sent_at > cutoff_7d:
-                logger.info(
-                    "check_and_alert(%s): SKIP_DEDUP_TX_7D price_chg=%.1f%% <7d — omitida [tx]",
-                    market_id, price_chg * 100,
-                )
-                return False
-            logger.info(
-                "check_and_alert(%s): re-alerta permitida — precio cambió %.1f%% o >7d [tx]",
-                market_id, price_chg * 100,
-            )
-            # El doc se va a sobrescribir: conservar el envío anterior para que el
-            # resolver lo gradúe. status distinto de "sent" → los dedup no lo ven.
-            if data.get("status") == "sent" and sent_at:
-                transaction.set(
-                    col("alerts_sent").document(f"{alert_key}__{int(sent_at.timestamp())}"),
-                    {**data, "status": "sent_archived", "archived_from": alert_key},
-                )
-
+        _snap = dedup_ref.get(transaction=transaction)
+        _cur = (_snap.to_dict() or {}) if _snap.exists else {}
+        # Un "pending" de más de 10 min es un envío que murió a medias: se reclama.
+        _stale = (_cur.get("status") == "pending" and _cur.get("sent_at") is not None
+                  and now - _as_utc(_cur["sent_at"]) > timedelta(minutes=10))
+        if _snap.exists and not _stale:
+            logger.info("check_and_alert(%s): SKIP_SLOT_TX %s ya reclamado — omitida [tx]",
+                        market_id, alert_key)
+            return False
         # Reclamar el slot atómicamente — status="pending" hasta confirmar el POST
         transaction.set(dedup_ref, {
             "alert_key": alert_key,
@@ -417,6 +428,16 @@ async def check_and_alert(analysis: dict) -> bool:
 
     if not should_send:
         return False
+
+    if is_resend:
+        # El telegram-bot lo marca como reenvío y main.py no abre otro shadow_trade.
+        analysis["alert_resend"] = {
+            "prev_price": _sent_price(prev),
+            "prev_edge": _sent_edge(prev),
+            "prev_sent_at": _as_utc(prev.get("sent_at")).isoformat(),
+            "reason": why,
+        }
+        logger.info("check_and_alert(%s): REENVÍO %s — %s", market_id, direction, why)
 
     # --- POST Telegram ---
     if not TELEGRAM_BOT_URL:
@@ -470,8 +491,11 @@ async def check_and_alert(analysis: dict) -> bool:
     # --- Confirmar: status pending → sent ---
     try:
         # Foto de lo ENVIADO: alerts_sent es la fuente de verdad para graduar.
+        # Un reenvío queda como "resent": el resolver solo gradúa sent/sent_archived,
+        # así que el mercado+dirección cuenta como una sola apuesta.
         dedup_ref.update({
-            "status": "sent",
+            "status": "resent" if is_resend else "sent",
+            **({"resend_of": prev.get("alert_key"), "resend_reason": why} if is_resend else {}),
             "recommendation": rec,
             "market_price_yes": current_price,
             "real_prob": analysis.get("real_prob"),

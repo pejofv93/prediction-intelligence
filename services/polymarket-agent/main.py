@@ -817,10 +817,12 @@ async def _bg_analyze() -> dict:
                     if alerted:
                         alerts_sent += 1
                         cat_counters[_mcat]["alerted"] += 1
-                        # Registrar señal en shadow trading
+                        # Registrar señal en shadow trading (un reenvío del mismo
+                        # mercado+dirección no abre otra apuesta)
                         try:
-                            from shared.shadow_engine import track_new_signal
-                            await track_new_signal(prediction, "polymarket")
+                            if not prediction.get("alert_resend"):
+                                from shared.shadow_engine import track_new_signal
+                                await track_new_signal(prediction, "polymarket")
                         except Exception as _se:
                             logger.error("analyze: error en track_new_signal — %s", _se)
                     else:
@@ -1001,7 +1003,7 @@ async def _bg_analyze_urgent(market_id: str) -> None:
             return
 
         alerted = await check_and_alert(prediction)
-        if alerted:
+        if alerted and not prediction.get("alert_resend"):
             try:
                 from shared.shadow_engine import track_new_signal
                 await track_new_signal(prediction, "polymarket")
