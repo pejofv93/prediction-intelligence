@@ -625,11 +625,17 @@ def _claim_match_slot(prediction: dict) -> tuple[bool, float | None]:
     if key is None:  # sin fecha no hay slot por partido → dedup genérico de 24h
         return _claim_alert_slot(_alert_key(prediction), "sports"), None
 
-    side, line = _bball_side_and_line(prediction.get("selection") or prediction.get("team_to_back"))
-    # Fútbol/tenis: línea en campo aparte si la selección no la lleva. Baloncesto no: la
-    # lleva siempre en la selección y sus slots ya tomados guardan line=None en ML.
-    if line is None and not _is_bball(prediction) and prediction.get("line") is not None:
-        line = float(prediction["line"])
+    selection = prediction.get("selection") or prediction.get("team_to_back")
+    if (prediction.get("market_type") or "h2h") == "h2h":
+        # 1X2/ML no tiene línea: el número final es parte del nombre ("Stade Brestois 29",
+        # "SC Paderborn 07"), no una línea que separar.
+        side, line = str(selection or "").strip().lower(), None
+    else:
+        side, line = _bball_side_and_line(selection)
+        # Fútbol/tenis: línea en campo aparte si la selección no la lleva. Baloncesto no:
+        # la lleva siempre en la selección.
+        if line is None and not _is_bball(prediction) and prediction.get("line") is not None:
+            line = float(prediction["line"])
     odds = float(prediction.get("odds") or 0)
     _ev_raw = prediction.get("ev")
     ev = float(_ev_raw) if _ev_raw is not None else float(prediction.get("edge") or 0)
