@@ -600,9 +600,10 @@ def _bball_resend_decision(prev: dict, side: str, line: float | None,
         return False, "reenvio_usado"
     prev_odds = prev.get("odds")
     prev_ev = prev.get("ev")
-    if prev_odds is None or prev_ev is None:
+    if prev_odds is None or prev_ev is None or float(prev_odds) <= 0:
         return False, "sin_referencia"
-    if odds < float(prev_odds) * (1 + _BBALL_RESEND_MIN_ODDS_GAIN):
+    # round: 2.20 → 2.31 es +5% justo, pero 2.2*1.05 = 2.3100000000000005 lo bloqueaba
+    if round(odds / float(prev_odds) - 1, 4) < _BBALL_RESEND_MIN_ODDS_GAIN:
         return False, f"cuota_sin_mejora {odds:.2f} sobre {float(prev_odds):.2f}"
     if ev < float(prev_ev):
         return False, f"ev_baja {ev:.3f} bajo el enviado {float(prev_ev):.3f}"
