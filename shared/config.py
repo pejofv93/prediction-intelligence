@@ -236,6 +236,11 @@ TREND_ROLLING_MIN_RATIO = 1.30    # promedio del equipo >= 1.3x la media de la l
 # tope era por señal suelta, no por partido).
 TREND_MAX_FIXTURES_PER_RUN = 10
 TREND_MAX_FIXTURES_PER_TEAM = 2
+# Un envío por partido (2026-10-23): un partido ya enviado solo vuelve con un mercado
+# nuevo. Apagado (opción A): se descartan los ya enviados DESPUÉS de elegir los 10
+# mejores → ~3,4-3,9 mensajes/día. Encendido (opción B): se descartan ANTES y el hueco
+# lo llenan los siguientes del ranking → ~10/día, de menor puntuación.
+TREND_DEDUP_BEFORE_CAP = os.environ.get("TREND_DEDUP_BEFORE_CAP", "false").lower() in ("1", "true", "yes")
 # Reparto de mercados: descartado el round-robin (tenía sentido cuando cada
 # mensaje era 1 señal suelta; con el mensaje agrupado por partido la variedad
 # de mercados ya sale sola dentro de cada mensaje).

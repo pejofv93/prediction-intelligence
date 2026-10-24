@@ -7,7 +7,7 @@ estado de la calibración de cada mercado y las señales pendientes.
 
 Se llama al final de trend_grader.run_trend_grader() los lunes, ya con lo del
 fin de semana graduado y la calibración recalculada. Solo lee trend_accuracy_log,
-trend_market_calibration y trend_signals; escribe únicamente su marca semanal en
+trend_market_calibration, trend_signals y trend_runs; escribe únicamente su marca semanal en
 trend_weekly_reports. Nunca toca accuracy_log/predictions/shadow_trades ni el
 reporte semanal del sistema de valor (/send-weekly-report).
 
@@ -105,10 +105,27 @@ def _variant_lines(variants: list[dict]) -> list[str]:
     return lines + ([""] + alerts if alerts else [])
 
 
+def _zero_days_line(runs: dict[str, dict], period_from: datetime, period_to: datetime) -> str | None:
+    """Días del periodo con 0 mensajes (un envío por partido desde 2026-10-23: un día en que
+    los 10 mejores ya habían salido se queda vacío). runs = trend_runs por fecha UTC. Los días
+    sin fila son días en que el feed no corrió (o anteriores al registro): se cuentan aparte."""
+    days = [(period_from + timedelta(days=i)).date().isoformat()
+            for i in range((period_to.date() - period_from.date()).days + 1)]
+    logged = [d for d in days if d in runs]
+    if not logged:
+        return None
+    zero = sum(1 for d in logged if int(runs[d].get("sent") or 0) == 0)
+    line = f"Días sin mensajes: {zero} de {len(logged)}"
+    if len(logged) < len(days):
+        line += f" · {len(days) - len(logged)} sin ejecución registrada"
+    return line
+
+
 def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
                          pending: list[dict], calibration: dict[str, dict],
                          period_from: datetime, period_to: datetime,
-                         variants: list[dict] | None = None) -> str:
+                         variants: list[dict] | None = None,
+                         runs: dict[str, dict] | None = None) -> str:
     """Texto plano del resumen. Función pura: todo lo que lee entra por parámetro.
     log_rows/week_rows/pending ya vienen sin las variantes en sombra."""
     w_hit, w_miss, w_void = _tally(week_rows)
@@ -120,6 +137,9 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
         week_line += f" · {w_void} anulada{'s' if w_void != 1 else ''}"
     lines.append(week_line)
     lines.append(f"Total desde el inicio: {_ratio(t_hit, t_miss)} · {len(pending)} pendientes")
+    zero_line = _zero_days_line(runs or {}, period_from, period_to)
+    if zero_line:
+        lines.append(zero_line)
 
     lines += ["", "Por tipo (total)"]
     for ptype, label in _TYPE_LABEL:
@@ -196,6 +216,7 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
             if not s.get("shadow")
         ]
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
+        runs = {d.id: d.to_dict() or {} for d in col("trend_runs").stream()}
     except Exception:
         logger.error("trend_weekly: error leyendo datos de tendencias", exc_info=True)
         return {"sent": False, "reason": "read_failed"}
@@ -206,7 +227,7 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
     from analyzers.trend_variants import active_rules, promotion_status
     variants = promotion_status([r for r in all_rows if r.get("shadow")], active_rules())
     text = build_weekly_summary(log_rows, week_rows, pending, calibration,
-                                period_from, now - timedelta(days=1), variants)
+                                period_from, now - timedelta(days=1), variants, runs)
 
     try:
         reports.document(week_key).create({

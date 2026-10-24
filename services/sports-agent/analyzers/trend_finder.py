@@ -25,6 +25,7 @@ mensaje y graduados por separado (pattern_type en trend_signals):
 """
 import logging
 import math
+import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -34,6 +35,7 @@ from collectors.fdco_collector import _slugify
 from shared.config import (
     CLOUD_RUN_TOKEN,
     TELEGRAM_BOT_URL,
+    TREND_DEDUP_BEFORE_CAP,
     TREND_MAX_FIXTURES_PER_RUN,
     TREND_MAX_FIXTURES_PER_TEAM,
     TREND_ROLLING_MIN_SAMPLE,
@@ -775,6 +777,8 @@ def _format_fixture_message(fixture: dict) -> str:
     if date_str:
         header += f" — {date_str}"
     lines = [header]
+    if fixture.get("new_markets"):
+        lines.append("🆕 Ya enviado antes — vuelve por un mercado nuevo")
 
     # "Doble oportunidad" y "DNB" salen de los mismos poisson_home/draw/away_win
     # y en producción coinciden en el 100% de los casos (13/13 partidos con DNB
@@ -846,10 +850,122 @@ async def _persist_and_send(selected_fixtures: list[dict]) -> int:
                 )
             if resp.status_code in (200, 202) and resp.json().get("sent"):
                 sent += 1
+                _record_fixture_send(fx, now)
         except Exception:
             logger.error("trend_finder: error enviando alerta %s", fx["match_id"], exc_info=True)
 
     return sent
+
+
+# ── Un envío por partido (2026-10-23) ───────────────────────────────────────────
+# Antes el mismo partido salía cada día mientras siguiera entre los 10 mejores de la
+# ventana de 7 días (~2,7 envíos por partido). Ahora un partido ya enviado solo se
+# repite si trae un mercado que no salió en ningún envío anterior. El registro vive en
+# trend_fixture_sends (un doc por partido físico) con contador e historial de envíos;
+# nunca se borra.
+_FIXTURE_SENDS = "trend_fixture_sends"
+
+
+def _fixture_key_of(match_date, home_team: str, away_team: str, match_id) -> str:
+    from collectors.team_identity import physical_fixture_key
+    return physical_fixture_key(match_date, home_team, away_team) or f"_nokey_{match_id}"
+
+
+def _fixture_key(fx: dict) -> str:
+    return _fixture_key_of(fx.get("match_date"), fx.get("home_team", ""),
+                           fx.get("away_team", ""), fx.get("match_id", ""))
+
+
+def _fixture_doc_id(key: str) -> str:
+    return "fx_" + re.sub(r"[^A-Za-z0-9_-]", "_", key)[:480]
+
+
+def _market_keys(candidates: list[dict]) -> set[str]:
+    """Mercados de un partido con la misma clave que _group_by_fixture (mercado,
+    o mercado+equipo para series/rolling)."""
+    return {"|".join(str(x) for x in _candidate_key(c)) for c in candidates}
+
+
+def _load_fixture_sends(keys: set[str]) -> dict[str, dict]:
+    """{fixture_key: doc} de los partidos ya enviados. Error de lectura → {} (se
+    envía como antes: preferible un repetido a callar el feed)."""
+    from shared.firestore_client import col, get_client
+    if not keys:
+        return {}
+    try:
+        refs = [col(_FIXTURE_SENDS).document(_fixture_doc_id(k)) for k in keys]
+        out = {}
+        for d in get_client().get_all(refs):
+            if d.exists:
+                data = d.to_dict() or {}
+                out[data.get("fixture_key")] = data
+        return out
+    except Exception:
+        logger.error("trend_finder: error leyendo %s — se envía sin filtrar", _FIXTURE_SENDS, exc_info=True)
+        return {}
+
+
+def _new_markets(candidates: list[dict], prev: dict | None) -> set[str] | None:
+    """None si el partido no se había enviado; si no, los mercados que no salieron nunca."""
+    if prev is None:
+        return None
+    return _market_keys(candidates) - set(prev.get("markets_sent") or [])
+
+
+def _split_already_sent(fixtures: list[dict], sends: dict[str, dict]) -> tuple[list[dict], list[dict]]:
+    """(a enviar, descartados). Un partido ya enviado pasa solo si trae un mercado
+    nuevo; en ese caso fx["new_markets"] lista los mercados nuevos."""
+    keep, skipped = [], []
+    for fx in fixtures:
+        new = _new_markets(fx["candidates"], sends.get(_fixture_key(fx)))
+        if new is None:
+            keep.append(fx)
+        elif new:
+            keep.append({**fx, "new_markets": sorted(new)})
+        else:
+            skipped.append(fx)
+    return keep, skipped
+
+
+def _record_fixture_send(fx: dict, now: datetime) -> None:
+    """Suma un envío al partido: contador, mercados enviados (unión) e historial."""
+    from google.cloud import firestore
+    from shared.firestore_client import col
+    key = _fixture_key(fx)
+    markets = sorted(_market_keys(fx["candidates"]))
+    ref = col(_FIXTURE_SENDS).document(_fixture_doc_id(key))
+    try:
+        payload = {
+            "fixture_key": key, "match_id": fx["match_id"], "league": fx["league"],
+            "match_date": fx["match_date"], "home_team": fx["home_team"], "away_team": fx["away_team"],
+            "sends": firestore.Increment(1),
+            "markets_sent": firestore.ArrayUnion(markets),
+            "history": firestore.ArrayUnion([{"sent_at": now.isoformat(), "markets": markets,
+                                              "new_markets": fx.get("new_markets") or []}]),
+            "last_sent_at": now.isoformat(),
+        }
+        if not fx.get("new_markets"):
+            payload["first_sent_at"] = now.isoformat()
+        ref.set(payload, merge=True)
+    except Exception:
+        logger.error("trend_finder: error guardando %s %s", _FIXTURE_SENDS, key, exc_info=True)
+
+
+def _record_run(now: datetime, sent: int, ranked: int, skipped: int, repeats: int) -> None:
+    """Una fila por día UTC en trend_runs: el resumen semanal cuenta los días a 0."""
+    from google.cloud import firestore
+    from shared.firestore_client import col
+    try:
+        col("trend_runs").document(now.date().isoformat()).set({
+            "date": now.date().isoformat(), "last_run_at": now.isoformat(),
+            "runs": firestore.Increment(1), "sent": firestore.Increment(sent),
+            "ranked": firestore.Increment(ranked),
+            "skipped_already_sent": firestore.Increment(skipped),
+            "new_market_repeats": firestore.Increment(repeats),
+            "dedup_before_cap": TREND_DEDUP_BEFORE_CAP,
+        }, merge=True)
+    except Exception:
+        logger.error("trend_finder: error guardando trend_runs", exc_info=True)
 
 
 def _persist_shadow(shadow: list[dict]) -> int:
@@ -892,7 +1008,8 @@ async def run_trend_finder() -> dict:
     candidatos, agrupa por partido, rankea, capa el volumen y envía un mensaje
     por partido al tema Telegram "Tendencias".
     Solo LECTURA de upcoming_matches/enriched_matches/team_stats/team_corner_stats
-    — no escribe nada fuera de trend_signals.
+    — escribe solo en trend_signals, trend_fixture_sends (envíos por partido) y
+    trend_runs (resumen por día).
     """
     from shared.config import COLLECTION_PREFIX
     from shared.firestore_client import col, get_client
@@ -941,8 +1058,30 @@ async def run_trend_finder() -> dict:
         except Exception:
             logger.error("trend_finder: error en fixture %s", enriched.get("match_id"), exc_info=True)
 
-    selected_fixtures = rank_and_cap(all_candidates)
+    # Un envío por partido: los ya enviados solo vuelven con un mercado nuevo.
+    # Opción A (por defecto): se eligen los 10 mejores como siempre y después se
+    # descartan los ya enviados → menos mensajes, misma calidad. Opción B
+    # (TREND_DEDUP_BEFORE_CAP): se descartan ANTES de elegir y el hueco lo llenan los
+    # siguientes del ranking → ~10 mensajes, de menor puntuación.
+    groups = _group_by_fixture(all_candidates)
+    sends = _load_fixture_sends(set(groups))
+    if TREND_DEDUP_BEFORE_CAP:
+        drop = {k for k, g in groups.items()
+                if _new_markets(list(g["by_candidate_key"].values()), sends.get(k)) == set()}
+        all_candidates = [c for c in all_candidates
+                          if _fixture_key_of(c.get("match_date"), c.get("home_team", ""),
+                                             c.get("away_team", ""), c.get("match_id", "")) not in drop]
+    ranked = rank_and_cap(all_candidates)
+    selected_fixtures, skipped = _split_already_sent(ranked, sends)
+    repeats = sum(1 for fx in selected_fixtures if fx.get("new_markets"))
+    logger.info(
+        "trend_finder: un envío por partido (%s) — de los %d mejores, %d descartados por ya "
+        "enviados, %d a enviar (%d repetidos por mercado nuevo)",
+        "antes del tope" if TREND_DEDUP_BEFORE_CAP else "tras el tope",
+        len(ranked), len(skipped), len(selected_fixtures), repeats,
+    )
     sent = await _persist_and_send(selected_fixtures)
+    _record_run(now, sent, len(ranked), len(skipped), repeats)
     shadow_written = _persist_shadow(shadow)
     n_signals = sum(len(fx["candidates"]) for fx in selected_fixtures)
     logger.info(
