@@ -263,6 +263,12 @@ TREND_MODEL_DNB_MIN = 0.65            # draw no bet: prob mínima tras renormali
 # no arbitrarios ni copiados del genérico de otro mercado.
 TREND_MODEL_TOTAL_RATIO_MIN = 1.15   # admite ~1 de cada 5 partidos reales (p85≈1.18)
 TREND_MODEL_MARGIN_RATIO_MIN = 1.30  # admite ~1 de cada 6 partidos reales (p85≈1.30)
+# Total exacto EN SOMBRA (2026-10-25: 6/36 = 17% frente a su objetivo del 28%): se sigue
+# generando y graduando (trend_signals shadow=True, rule_id exact_total.v1) pero no se envía
+# y no cuenta en el acierto global, el diario, el semanal ni el dashboard — ni sus graduadas
+# de antes —, que lo muestran aparte con su objetivo. TREND_EXACT_TOTAL_LIVE=true lo reactiva.
+TREND_EXACT_TOTAL_LIVE = os.environ.get("TREND_EXACT_TOTAL_LIVE", "false").lower() in ("1", "true", "yes")
+TREND_SHADOW_MARKETS: frozenset[str] = frozenset() if TREND_EXACT_TOTAL_LIVE else frozenset({"exact_total"})
 
 # ── Auto-calibración por mercado (analyzers/trend_calibration.py) ──────────────
 # Cada uno de los 14 mercados del feed acumula su propio hit-rate real en

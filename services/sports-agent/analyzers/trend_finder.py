@@ -42,6 +42,7 @@ from shared.config import (
     TREND_SERIES_MIN_SAMPLE,
     TREND_RULE_VERSION,
     TREND_SERIES_WINDOW,
+    TREND_SHADOW_MARKETS,
 )
 
 logger = logging.getLogger(__name__)
@@ -633,6 +634,12 @@ async def _fixture_candidates(enriched: dict, shadow_out: list[dict] | None = No
             out.append({**vc, "score": _score(vc["rate"], vc["sample"])})
         elif shadow_out is not None:
             shadow_out.append(vc)
+    # Mercados en sombra (TREND_SHADOW_MARKETS, hoy Total exacto): se gradúan, no se envían.
+    if TREND_SHADOW_MARKETS:
+        for c in out:
+            if c["market"] in TREND_SHADOW_MARKETS and shadow_out is not None:
+                shadow_out.append({**c, "rule_id": f"{c['market']}.{TREND_RULE_VERSION}"})
+        out = [c for c in out if c["market"] not in TREND_SHADOW_MARKETS]
     out = _one_goals_signal_per_fixture(out, enriched)  # solo lo que se envía; la sombra no
 
     for c in out + [vc for vc in (shadow_out or []) if "match_id" not in vc]:
@@ -992,6 +999,7 @@ def _persist_shadow(shadow: list[dict]) -> int:
                     "rule_id": c["rule_id"], "shadow": True,
                     "label": c["label"], "detail": c["detail"],
                     "sample_size": c.get("sample"), "rate_or_ratio": c["rate"],
+                    "model_prob": c.get("model_prob"),
                     "generated_at": now, "graded": False, "result": None,
                 })
             batch.commit()

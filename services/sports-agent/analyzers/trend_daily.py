@@ -21,7 +21,9 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from analyzers.trend_weekly import _MARKET_LABEL, _calibration_label, _ratio, _tally
+from analyzers.trend_weekly import (
+    _MARKET_LABEL, _calibration_label, _ratio, _tally, counts_in_feed, shadow_market_lines,
+)
 from shared.config import (
     CLOUD_RUN_TOKEN,
     TELEGRAM_BOT_URL,
@@ -46,7 +48,8 @@ def _sends_line(run: dict | None) -> str:
 
 
 def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: list[dict],
-                        calibration: dict[str, dict], run: dict | None, day: datetime) -> str:
+                        calibration: dict[str, dict], run: dict | None, day: datetime,
+                        shadow_lines: list[str] | None = None) -> str:
     """Texto plano del diario. Función pura: todo entra por parámetro, ya sin sombra."""
     d_hit, d_miss, d_void = _tally(day_rows)
     t_hit, t_miss, _ = _tally(log_rows)
@@ -94,6 +97,7 @@ def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: lis
         lines += ["", f"Sin muestra suficiente (<{TREND_CALIBRATION_MIN_SAMPLE} graduadas): "
                       + ", ".join(parts)]
 
+    lines += shadow_lines or []
     lines += ["", "Las variantes en sombra no cuentan en estas cifras.",
               "📈 Tendencia estadística, no consejo de inversión."]
     return "\n".join(lines)
@@ -118,13 +122,11 @@ async def run_trend_daily_summary(force: bool = False) -> dict:
     period_from_iso = prev_cutoff or (now - timedelta(days=1)).isoformat()
 
     try:
-        log_rows = [r for r in (d.to_dict() or {} for d in col("trend_accuracy_log").stream())
-                    if not r.get("shadow")]
-        pending = [
-            s for s in (d.to_dict() or {} for d in
-                        col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream())
-            if not s.get("shadow")
-        ]
+        all_rows = [d.to_dict() or {} for d in col("trend_accuracy_log").stream()]
+        log_rows = [r for r in all_rows if counts_in_feed(r)]
+        all_pending = [d.to_dict() or {} for d in
+                       col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream()]
+        pending = [s for s in all_pending if counts_in_feed(s)]
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
         run_snap = col("trend_runs").document((now - timedelta(days=1)).date().isoformat()).get()
         run = run_snap.to_dict() if run_snap.exists else None
@@ -134,7 +136,8 @@ async def run_trend_daily_summary(force: bool = False) -> dict:
 
     day_rows = [r for r in log_rows if str(r.get("graded_at") or "") > period_from_iso]
     cutoff = max((str(r.get("graded_at") or "") for r in log_rows), default=now.isoformat())
-    text = build_daily_summary(log_rows, day_rows, pending, calibration, run, now)
+    text = build_daily_summary(log_rows, day_rows, pending, calibration, run, now,
+                               shadow_market_lines(all_rows, all_pending))
 
     try:
         reports.document(day_key).create({

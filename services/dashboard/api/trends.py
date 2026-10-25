@@ -56,13 +56,17 @@ async def trend_accuracy() -> dict:
     dos) y desglosado por mercado y por equipo, para poder comparar los tres
     sin que se mezclen.
     """
+    from shared.config import TREND_MARKET_TARGET, TREND_SHADOW_MARKETS
     from shared.firestore_client import col
 
     rows: list[dict] = []
+    shadow_market_rows: list[dict] = []
     try:
         for d in col("trend_accuracy_log").stream():
             row = d.to_dict() or {}
-            if not row.get("shadow"):  # las variantes en sombra no cuentan en el acierto
+            if row.get("market") in TREND_SHADOW_MARKETS:
+                shadow_market_rows.append(row)  # mercado en sombra: aparte, también lo enviado antes
+            elif not row.get("shadow"):  # las variantes en sombra no cuentan en el acierto
                 rows.append(row)
     except Exception as e:
         logger.error("trend_accuracy: error leyendo Firestore — %s", e)
@@ -113,8 +117,17 @@ async def trend_accuracy() -> dict:
         reverse=True,
     )
 
+    shadow_markets = {
+        m: {"target": TREND_MARKET_TARGET.get(m),
+            "shadow": _bucket([r for r in shadow_market_rows if r.get("market") == m and r.get("shadow")]),
+            "sent_before": _bucket([r for r in shadow_market_rows
+                                    if r.get("market") == m and not r.get("shadow")])}
+        for m in sorted(TREND_SHADOW_MARKETS)
+    }
+
     return {
         "total_graded": len(rows),
+        "shadow_markets": shadow_markets,
         "by_pattern_type": by_pattern_type,
         "by_market": by_market,
         "team_ranking": team_ranking,

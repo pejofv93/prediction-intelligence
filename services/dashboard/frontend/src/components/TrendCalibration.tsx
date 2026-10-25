@@ -14,9 +14,16 @@ interface MarketCalibration {
   updated_at?: string
 }
 
+interface Bucket {
+  n: number
+  hits: number
+  hit_rate: number | null
+}
+
 interface TrendAccuracy {
   total_graded: number
   calibration: MarketCalibration[]
+  shadow_markets?: Record<string, { target: number | null; shadow: Bucket; sent_before: Bucket }>
 }
 
 const MARKET_LABEL: Record<string, string> = {
@@ -70,7 +77,8 @@ export default function TrendCalibration() {
   if (error) return <p style={{ color: '#F7931A', padding: 24 }}>Error: {error}</p>
   if (!data || !data.calibration?.length) return <p style={{ color: '#888', padding: 24 }}>Sin mercados de tendencias todavía.</p>
 
-  const rows = data.calibration
+  const shadowMarkets = data.shadow_markets ?? {}
+  const rows = data.calibration.filter(r => !(r.market in shadowMarkets))
   const targetPct = (rows[0]?.target_hit_rate ?? 0.70) * 100
   const nCalibrated = rows.filter(r => r.status === 'calibrated' || r.status === 'at_fixed').length
   const nBelowTarget = rows.filter(r => r.status === 'below_target').length
@@ -141,6 +149,16 @@ export default function TrendCalibration() {
             })}
           </tbody>
         </table>
+
+        {Object.entries(shadowMarkets).map(([market, s]) => {
+          const pct = (b: Bucket) => (b.n ? `${b.hits}/${b.n} (${((b.hit_rate ?? 0) * 100).toFixed(0)}%)` : '—')
+          return (
+            <div key={market} style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #222', color: '#888', fontSize: 12 }}>
+              🌘 <span style={{ color: '#fff' }}>{MARKET_LABEL[market] ?? market}</span> en sombra (se gradúa, no se envía ni cuenta)
+              · objetivo {((s.target ?? 0) * 100).toFixed(0)}% · en sombra {pct(s.shadow)} · enviadas antes {pct(s.sent_before)}
+            </div>
+          )
+        })}
 
         <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #222', color: '#555', fontSize: 11 }}>
           🔒 Fijo: menos de 30 señales graduadas, usa el umbral genérico de siempre · 🎯 Calibrado: ≥30 graduadas,

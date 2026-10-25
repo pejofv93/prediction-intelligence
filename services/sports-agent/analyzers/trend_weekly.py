@@ -26,6 +26,7 @@ from shared.config import (
     TELEGRAM_BOT_URL,
     TREND_CALIBRATION_MIN_SAMPLE,
     TREND_MARKET_TARGET,
+    TREND_SHADOW_MARKETS,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,29 @@ def _calibration_label(cal: dict | None, graded: int, target: float) -> str:
     return f"fijo ({graded}/{TREND_CALIBRATION_MIN_SAMPLE})"
 
 
+def counts_in_feed(r: dict) -> bool:
+    """Fila/señal que cuenta en el acierto: ni variante en sombra ni de un mercado en sombra
+    (TREND_SHADOW_MARKETS — tampoco sus graduadas de cuando se enviaba)."""
+    return not r.get("shadow") and r.get("market") not in TREND_SHADOW_MARKETS
+
+
+def shadow_market_lines(all_rows: list[dict], all_pending: list[dict]) -> list[str]:
+    """Mercados en sombra aparte, con su objetivo propio: lo graduado en sombra y lo que se
+    llegó a enviar antes de pasar a sombra."""
+    if not TREND_SHADOW_MARKETS:
+        return []
+    lines = ["", "En sombra (se gradúa, no se envía ni cuenta en el acierto)"]
+    for mk in sorted(TREND_SHADOW_MARKETS):
+        rows = [r for r in all_rows if r.get("market") == mk]
+        sh_h, sh_m, _ = _tally([r for r in rows if r.get("shadow")])
+        old_h, old_m, _ = _tally([r for r in rows if not r.get("shadow")])
+        pend = sum(1 for p in all_pending if p.get("market") == mk)
+        target = TREND_MARKET_TARGET.get(mk, 0.70)
+        lines.append(f"{_MARKET_LABEL.get(mk, mk)} (obj. {target * 100:.0f}%): en sombra {_ratio(sh_h, sh_m)}"
+                     f" · enviadas antes {_ratio(old_h, old_m)} · {pend} pend.")
+    return lines
+
+
 def _fmt_day(d: datetime) -> str:
     return f"{d.day} {_MONTHS[d.month - 1]}"
 
@@ -129,9 +153,10 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
                          pending: list[dict], calibration: dict[str, dict],
                          period_from: datetime, period_to: datetime,
                          variants: list[dict] | None = None,
-                         runs: dict[str, dict] | None = None) -> str:
+                         runs: dict[str, dict] | None = None,
+                         shadow_lines: list[str] | None = None) -> str:
     """Texto plano del resumen. Función pura: todo lo que lee entra por parámetro.
-    log_rows/week_rows/pending ya vienen sin las variantes en sombra."""
+    log_rows/week_rows/pending ya vienen sin las variantes ni los mercados en sombra."""
     w_hit, w_miss, w_void = _tally(week_rows)
     t_hit, t_miss, _ = _tally(log_rows)
 
@@ -174,6 +199,7 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
 
     if variants:
         lines += _variant_lines(variants)
+    lines += shadow_lines or []
 
     lines += [
         "",
@@ -213,12 +239,10 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
 
     try:
         all_rows = [d.to_dict() or {} for d in col("trend_accuracy_log").stream()]
-        log_rows = [r for r in all_rows if not r.get("shadow")]
-        pending = [
-            s for s in (d.to_dict() or {} for d in
-                        col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream())
-            if not s.get("shadow")
-        ]
+        log_rows = [r for r in all_rows if counts_in_feed(r)]
+        all_pending = [d.to_dict() or {} for d in
+                       col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream()]
+        pending = [s for s in all_pending if counts_in_feed(s)]
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
         runs = {d.id: d.to_dict() or {} for d in col("trend_runs").stream()}
     except Exception:
@@ -231,7 +255,8 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
     from analyzers.trend_variants import active_rules, promotion_status
     variants = promotion_status([r for r in all_rows if r.get("shadow")], active_rules())
     text = build_weekly_summary(log_rows, week_rows, pending, calibration,
-                                period_from, now - timedelta(days=1), variants, runs)
+                                period_from, now - timedelta(days=1), variants, runs,
+                                shadow_market_lines(all_rows, all_pending))
 
     try:
         reports.document(week_key).create({
