@@ -299,9 +299,19 @@ async def run_trend_grader() -> dict:
         logger.error("trend_grader: error en resumen semanal", exc_info=True)
         weekly_result = {"sent": False, "reason": "unhandled"}
 
+    # Resumen diario al mismo tema (todos los días menos el lunes, que sale el semanal;
+    # marca por día). Aislado igual.
+    try:
+        from analyzers.trend_daily import run_trend_daily_summary
+        daily_result = await run_trend_daily_summary()
+    except Exception:
+        logger.error("trend_grader: error en resumen diario", exc_info=True)
+        daily_result = {"sent": False, "reason": "unhandled"}
+
     logger.info(
-        "trend_grader: series+model=%s rolling=%s calibration=%s promotion=%s weekly=%s",
+        "trend_grader: series+model=%s rolling=%s calibration=%s promotion=%s weekly=%s daily=%s",
         series_result, rolling_result, calibration_result, promotion_result, weekly_result,
+        daily_result,
     )
     return {"series": series_result, "rolling": rolling_result, "calibration": calibration_result,
-            "promotion": promotion_result, "weekly": weekly_result}
+            "promotion": promotion_result, "weekly": weekly_result, "daily": daily_result}
