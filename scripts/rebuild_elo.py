@@ -49,8 +49,9 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -64,7 +65,7 @@ os.environ.setdefault("FIRESTORE_COLLECTION_PREFIX", "prod")
 from _fsrest import get_db                                              # noqa: E402
 from probe_uefa import _api_key, _get as _raw_uefa_get, _season_label   # noqa: E402
 from collectors.allsports_uefa import UEFA_TOURNAMENTS, parse_event     # noqa: E402
-from shared.api_quota_manager import daily_period                       # noqa: E402
+from shared.api_quota_manager import _DAILY_RESET_UTC, daily_period     # noqa: E402
 from collectors.team_identity import (                                  # noqa: E402
     build_identity_map, match_fingerprint, resolve,
 )
@@ -358,6 +359,27 @@ def fetch_uefa_matches(key: str, leagues: list[str]) -> tuple[list[dict], dict[i
 
 
 SEED_PROGRESS_DOC = "uefa_seed_progress"
+SEEDED_PERIOD_FIELD = "seeded_period"   # ventana de cuota allsports en la que sembró la última tanda
+
+# El cron de las 03:00 lo lanza GitHub entre las 07:28 y las 08:24: si arranca antes del
+# reinicio de allsports (07:58) cae en la ventana que la siembra del día anterior ya gastó y
+# sale con presupuesto 0 (15-18 y 24-oct). Con el reinicio a ≤75 min se espera a 3 min
+# después de él; nunca más de 80 min.
+RESET_WAIT_WINDOW_MIN = 75
+RESET_WAIT_MARGIN_MIN = 3
+RESET_WAIT_MAX_MIN = 80
+
+
+def reset_wait_seconds(now: datetime) -> float:
+    """Segundos a esperar hasta 3 min después del próximo reinicio de allsports, o 0 si falta más de 75 min."""
+    h, m = _DAILY_RESET_UTC["allsports"]
+    reset = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if reset <= now:
+        reset += timedelta(days=1)
+    if reset - now > timedelta(minutes=RESET_WAIT_WINDOW_MIN):
+        return 0.0
+    wait = (reset + timedelta(minutes=RESET_WAIT_MARGIN_MIN) - now).total_seconds()
+    return min(wait, RESET_WAIT_MAX_MIN * 60)
 
 
 def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
@@ -611,10 +633,40 @@ def main() -> None:
                          "NO toca model_weights/elo_rebuild ni accuracy_log. Es el modo del cron "
                          "nocturno: el reset de pesos y el movimiento de la frontera de época "
                          "solo deben ocurrir en un dispatch manual explícito.")
+    ap.add_argument("--wait-for-reset", action="store_true",
+                    help="(cron) si el reinicio de cuota allsports está a ≤75 min, esperar a "
+                         "3 min después de él antes de pedir nada (máx. 80 min)")
+    ap.add_argument("--allow-same-window", action="store_true",
+                    help="sembrar aunque ya se sembrara en esta ventana de cuota allsports")
     args = ap.parse_args()
 
     if args.seed_only and args.no_uefa:
         ap.error("--seed-only con --no-uefa no tiene sentido: no habría nada que sembrar")
+
+    if args.wait_for_reset and not args.no_uefa:
+        inicio = datetime.now(timezone.utc)
+        periodo_antes = daily_period("allsports", inicio)
+        espera = reset_wait_seconds(inicio)
+        if espera > 0:
+            print(f"esperando al reinicio de cuota allsports: {espera / 60:.1f} min desde "
+                  f"{inicio:%H:%M:%S} UTC", flush=True)
+            try:
+                time.sleep(espera)
+            except BaseException as e:
+                print(f"espera interrumpida ({type(e).__name__}) tras "
+                      f"{(datetime.now(timezone.utc) - inicio).total_seconds() / 60:.1f} min — "
+                      f"salgo sin sembrar", flush=True)
+                return
+            fin = datetime.now(timezone.utc)
+            print(f"esperé {(fin - inicio).total_seconds() / 60:.1f} min (hasta {fin:%H:%M:%S} UTC)",
+                  flush=True)
+            if daily_period("allsports", fin) == periodo_antes:
+                print(f"sigo en la ventana de cuota {periodo_antes} tras esperar — salgo sin "
+                      f"sembrar", flush=True)
+                return
+        else:
+            print(f"sin espera: el reinicio de cuota allsports está a más de "
+                  f"{RESET_WAIT_WINDOW_MIN} min ({inicio:%H:%M} UTC)", flush=True)
 
     db = get_db(args.transport, args.project, args.prefix, args.account)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -649,6 +701,14 @@ def main() -> None:
     clubs: dict[int, str] = {}
     standings: dict[str, list[dict]] = {}
     progreso: dict = {}
+    periodo = daily_period("allsports", now)
+    if args.seed_only and not args.allow_same_window:
+        previo = next((d for d in db.read_collection("api_meta") if d["_id"] == SEED_PROGRESS_DOC), {})
+        if previo.get(SEEDED_PERIOD_FIELD) == periodo:
+            print(f"ya se sembró en la ventana de cuota allsports {periodo} — salgo sin pedir "
+                  f"nada para no gastar la cuota del collect (--allow-same-window para forzar)")
+            return
+
     if not args.no_uefa:
         key = _api_key()
         leagues = [x.strip().upper() for x in args.leagues.split(",") if x.strip()]
@@ -739,9 +799,10 @@ def main() -> None:
                 return
             if stats_docs:
                 db.write_docs("team_stats", stats_docs)
-            db.write_docs("api_meta", {SEED_PROGRESS_DOC: {**progreso, "updated_at": now}})
+            db.write_docs("api_meta", {SEED_PROGRESS_DOC: {
+                **progreso, "updated_at": now, SEEDED_PERIOD_FIELD: periodo}})
             print(f"[seed-only] hecho: {len(stats_docs)} team_stats + progreso de siembra "
-                  f"guardados.")
+                  f"guardados (ventana de cuota {periodo}).")
             return
 
     # ── 1b. Prior de fuerza: de dónde arranca cada club ──────────────────────

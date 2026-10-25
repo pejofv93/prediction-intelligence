@@ -15,7 +15,10 @@ name: rebuild-elo
 # convive con el collect de cada 6h (sports-collect.yml) sin coordinación explícita —
 # en el peor caso esa tanda gasta menos y sigue al día siguiente. 03:00 UTC para no
 # solaparse con las horas exactas del collect (0/6/12/18) ni con la petición de
-# resultados UEFA (_UEFA_RESULTS_HOURS = {0, 12}).
+# resultados UEFA (_UEFA_RESULTS_HOURS = {0, 12}). GitHub lo retrasa a las ~07:30-08:30:
+# con --wait-for-reset, si el reinicio de cuota allsports (07:58) está a ≤75 min, el script
+# espera a las 08:01 (máx. 80 min; de ahí el timeout de 120) y no siembra dos veces en la
+# misma ventana (api_meta/uefa_seed_progress.seeded_period).
 on:
   workflow_dispatch:
     inputs:
@@ -63,7 +66,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -92,6 +95,7 @@ jobs:
             echo "history_pages=1" >> "$GITHUB_OUTPUT"
             echo "no_uefa=false" >> "$GITHUB_OUTPUT"
             echo "skip_backup=true" >> "$GITHUB_OUTPUT"
+            echo "wait_for_reset=true" >> "$GITHUB_OUTPUT"
           else
             echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
             echo "confirm=${{ inputs.confirm }}" >> "$GITHUB_OUTPUT"
@@ -100,6 +104,7 @@ jobs:
             echo "history_pages=${{ inputs.history_pages }}" >> "$GITHUB_OUTPUT"
             echo "no_uefa=${{ inputs.no_uefa }}" >> "$GITHUB_OUTPUT"
             echo "skip_backup=${{ inputs.skip_backup }}" >> "$GITHUB_OUTPUT"
+            echo "wait_for_reset=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Diagnóstico de desviación del ELO
@@ -122,6 +127,7 @@ jobs:
           if [ "${{ steps.params.outputs.no_uefa }}" = "true" ]; then ARGS="$ARGS --no-uefa"; fi
           if [ "${{ steps.params.outputs.skip_backup }}" = "true" ]; then ARGS="$ARGS --skip-backup"; fi
           if [ "${{ steps.params.outputs.seed_only }}" = "true" ]; then ARGS="$ARGS --seed-only"; fi
+          if [ "${{ steps.params.outputs.wait_for_reset }}" = "true" ]; then ARGS="$ARGS --wait-for-reset"; fi
           python scripts/rebuild_elo.py $ARGS
 
       - name: Verificación posterior
