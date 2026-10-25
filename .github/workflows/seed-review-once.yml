@@ -8,11 +8,16 @@ name: seed-review-once
 # escribe en Firestore y no hace ninguna petición a allsportsapi2. Envía el resumen al canal
 # General de Telegram en texto plano (sin parse_mode ni message_thread_id).
 # El cron solo envía el 26-10-2026 (el script sale sin enviar cualquier otro día: un cron con
-# día y mes fijos volvería a dispararse el año que viene). workflow_dispatch: send=false
-# (por defecto) solo imprime el mensaje en el log, en seco.
+# día y mes fijos volvería a dispararse el año que viene). Segundo disparo a las 13:15 UTC: no
+# envía si un disparo anterior de ese día ya envió con la siembra encontrada (lo mira en el
+# log de ese run, sin escribir nada). workflow_dispatch: send=false (por defecto) solo
+# imprime el mensaje en el log, en seco.
+# El token de Telegram no se imprime: GitHub lo enmascara y el script nunca muestra la URL
+# del bot ni el texto de una excepción de httpx (que la llevaría).
 on:
   schedule:
     - cron: '15 10 26 10 *'   # 26-oct 10:15 UTC (11:15 Madrid)
+    - cron: '15 13 26 10 *'   # 26-oct 13:15 UTC: solo si el de las 10:15 no encontró la siembra
   workflow_dispatch:
     inputs:
       date:
@@ -29,6 +34,10 @@ on:
 permissions:
   actions: read
   contents: read
+
+concurrency:
+  group: seed-review-once
+  cancel-in-progress: false
 
 jobs:
   review:
@@ -53,6 +62,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
           EVENT: ${{ github.event_name }}
           REVIEW_DATE: ${{ inputs.date }}
           SEND: ${{ github.event_name == 'schedule' && 'true' || inputs.send }}
@@ -62,7 +72,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'EOF'
-          import json, os, re, subprocess, sys
+          import json, os, re, sys
           from datetime import datetime, timedelta, timezone
 
           sys.path.insert(0, "scripts")
@@ -85,11 +95,30 @@ jobs:
                      "64": "Wrexham", "3": "Wolverhampton (alias)",
                      "2404": "ŠK Slovan Bratislava (alias)"}
 
+          SENT_MARK = "MARCA-REVISION: enviado con la siembra encontrada"
+
           def gh(path):
-              out = subprocess.run(["gh", "api", f"repos/{os.environ['REPO']}/{path}"],
-                                   capture_output=True, text=True, encoding="utf-8",
-                                   errors="replace", check=True).stdout
-              return out
+              # httpx sigue la redirección de /logs y quita la cabecera Authorization al
+              # cambiar de dominio (gh api fallaba en Actions con esa redirección).
+              r = httpx.get(f"https://api.github.com/repos/{os.environ['REPO']}/{path}",
+                            headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                                     "Accept": "application/vnd.github+json"},
+                            follow_redirects=True, timeout=60)
+              if r.status_code != 200:
+                  raise RuntimeError(f"API de GitHub {path.split('?')[0]}: HTTP {r.status_code}")
+              return r.content.decode("utf-8", errors="replace")
+
+          # Segundo disparo del cron: no repetir si otro run de hoy ya envió con la siembra.
+          if os.environ["EVENT"] == "schedule":
+              mine = json.loads(gh("actions/workflows/seed-review-once.yml/runs?per_page=20"))["workflow_runs"]
+              for r_ in mine:
+                  if (str(r_["id"]) == os.environ["RUN_ID"] or r_["event"] != "schedule"
+                          or r_["created_at"][:10] != now.date().isoformat() or r_["status"] != "completed"):
+                      continue
+                  j_ = json.loads(gh(f"actions/runs/{r_['id']}/jobs"))["jobs"]
+                  if j_ and SENT_MARK in gh(f"actions/jobs/{j_[0]['id']}/logs"):
+                      print(f"El run {r_['id']} ya envió la revisión con la siembra encontrada: no se repite")
+                      sys.exit(0)
 
           def ts(x):
               if not x:
@@ -140,12 +169,12 @@ jobs:
               if m_done:
                   L.append(f"Espera: SÍ, {m_done.group(1)} min (desde {m_wait.group(2) if m_wait else '?'} "
                            f"hasta {m_done.group(2)} UTC)")
-                  L.append(f"Primera petición a la API: después de las {m_done.group(2)} UTC "
-                           f"(tras leer Firestore; el log no fecha cada línea)")
+                  L.append(f"Primera petición a la API (estimada): después de las {m_done.group(2)} UTC "
+                           f"— el log no fecha cada línea; antes lee Firestore")
               elif m_none:
                   L.append(f"Espera: NO (a las {m_none.group(1)} UTC el reinicio quedaba a más de 75 min)")
-                  L.append(f"Primera petición a la API: poco después de las {m_none.group(1)} UTC "
-                           f"(tras leer Firestore; el log no fecha cada línea)")
+                  L.append(f"Primera petición a la API (estimada): poco después de las {m_none.group(1)} UTC "
+                           f"— el log no fecha cada línea; antes lee Firestore")
               elif "--wait-for-reset" not in log:
                   L.append("Espera: el job no llevaba --wait-for-reset (código anterior a b490d77)")
               else:
@@ -218,9 +247,9 @@ jobs:
                       dup.append(f"{t.get('team_name')} ({extra})")
               L.append("")
               m_docs = grab(r"\[seed-only\] hecho: (\d+) team_stats")
-              L.append(f"Documentos escritos por la siembra: {m_docs.group(1) if m_docs else '?'} según el log · "
-                       f"revisados {len(written)} (los que aún tienen la fecha de la siembra; el resto "
-                       f"lo ha reescrito después otro proceso)")
+              L.append(f"Documentos: {m_docs.group(1) if m_docs else '? (no aparece en el log)'} escritos "
+                       f"según el log · {len(written)} revisados (los que aún tienen la fecha de la "
+                       f"siembra; si son menos, el resto lo reescribió después otro proceso)")
               L.append(f"Amistosos colados: {len(fr)}" + (" — " + "; ".join(fr[:8]) if fr else " ✅"))
               L.append(f"Duplicados: {len(dup)} docs" + (" — " + ", ".join(dup[:8]) if dup else " ✅"))
 
@@ -248,9 +277,18 @@ jobs:
           if os.environ.get("SEND") != "true":
               print("\n[en seco] no se envía a Telegram")
               sys.exit(0)
-          r = httpx.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_TOKEN']}/sendMessage",
-                         json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text,
-                               "disable_web_page_preview": True}, timeout=20)
-          print("Telegram:", r.status_code, r.text[:200])
-          r.raise_for_status()
+          try:
+              r = httpx.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_TOKEN']}/sendMessage",
+                             json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text,
+                                   "disable_web_page_preview": True}, timeout=20)
+          except Exception as e:  # sin str(e): llevaría la URL con el token
+              print(f"Telegram: error de red ({type(e).__name__})")
+              sys.exit(1)
+          ok = r.status_code == 200 and r.json().get("ok")
+          print(f"Telegram: HTTP {r.status_code} · ok={ok} · message_id={(r.json().get('result') or {}).get('message_id')}")
+          if not ok:
+              print(f"Telegram: {r.json().get('description')}")
+              sys.exit(1)
+          if run:
+              print(SENT_MARK)
           EOF
