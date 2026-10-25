@@ -1,0 +1,256 @@
+name: seed-review-once
+
+# UN SOLO USO (revisión de la siembra del 26-oct-2026, primera con la espera al reinicio de
+# cuota allsports, b490d77, y del primer aprendizaje con league_record, 6e8a800). Borrar el
+# archivo después.
+# Solo lectura: lee el log del job de rebuild-elo de ese día (API de GitHub) y Firestore
+# (api_meta, api_quotas, team_stats, model_weights, accuracy_log). No lanza la siembra, no
+# escribe en Firestore y no hace ninguna petición a allsportsapi2. Envía el resumen al canal
+# General de Telegram en texto plano (sin parse_mode ni message_thread_id).
+# El cron solo envía el 26-10-2026 (el script sale sin enviar cualquier otro día: un cron con
+# día y mes fijos volvería a dispararse el año que viene). workflow_dispatch: send=false
+# (por defecto) solo imprime el mensaje en el log, en seco.
+on:
+  schedule:
+    - cron: '15 10 26 10 *'   # 26-oct 10:15 UTC (11:15 Madrid)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Día de la siembra a revisar (YYYY-MM-DD, UTC). Vacío = 2026-10-26'
+        required: false
+        default: ''
+      send:
+        description: 'true = enviar a Telegram General · false = solo imprimir (en seco)'
+        required: true
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx
+
+      - name: Revisión de la siembra
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REVIEW_DATE: ${{ inputs.date }}
+          SEND: ${{ github.event_name == 'schedule' && 'true' || inputs.send }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'EOF'
+          import json, os, re, subprocess, sys
+          from datetime import datetime, timedelta, timezone
+
+          sys.path.insert(0, "scripts")
+          sys.path.insert(0, ".")
+          sys.path.insert(0, "services/sports-agent")
+          import httpx
+          from _fsrest import get_db
+          from rebuild_elo import dedupe_raw, is_football, is_friendly, ocho_ligas_ids, SEED_PROGRESS_DOC
+
+          now = datetime.now(timezone.utc)
+          day = os.environ.get("REVIEW_DATE") or "2026-10-26"
+          if os.environ["EVENT"] == "schedule" and now.date().isoformat() != "2026-10-26":
+              print(f"cron fuera del 26-10-2026 ({now.date()}): no se revisa ni se envía")
+              sys.exit(0)
+
+          # Los 12 clubes pendientes (sid de Sofascore en api_meta/uefa_seed_progress, 25-oct).
+          PENDING = {"2968": "FC Volendam", "2977": "Heracles Almelo", "31": "Leicester City",
+                     "2947": "NAC Breda", "95": "Oxford United", "12": "Sheffield Wednesday",
+                     "38396": "Tondela", "3009": "Vitória SC", "2961": "Willem II Tilburg",
+                     "64": "Wrexham", "3": "Wolverhampton (alias)",
+                     "2404": "ŠK Slovan Bratislava (alias)"}
+
+          def gh(path):
+              out = subprocess.run(["gh", "api", f"repos/{os.environ['REPO']}/{path}"],
+                                   capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", check=True).stdout
+              return out
+
+          def ts(x):
+              if not x:
+                  return None
+              if isinstance(x, datetime):
+                  return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+              try:
+                  d = datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+                  return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+              except ValueError:
+                  return None
+
+          hm = lambda d: d.strftime("%H:%M:%S") if d else "?"
+          L = [f"REVISIÓN DE LA SIEMBRA — {day} (solo lectura)", ""]
+
+          # ── 1. Job de rebuild-elo de ese día ─────────────────────────────────────
+          runs = json.loads(gh(f"actions/workflows/rebuild-elo.yml/runs?per_page=30"))["workflow_runs"]
+          runs = [r for r in runs if r["created_at"][:10] == day]
+          run = sorted(runs, key=lambda r: r["created_at"])[-1] if runs else None
+          log, step = "", None
+          if not run:
+              L.append(f"⏳ La siembra del {day} aún no ha corrido (ningún job de rebuild-elo ese día).")
+          elif run["status"] != "completed":
+              L.append(f"⏳ La siembra del {day} está en curso ({run['status']}, lanzada "
+                       f"{hm(ts(run['created_at']))} UTC). Revisar más tarde.")
+              run = None
+          else:
+              job = json.loads(gh(f"actions/runs/{run['id']}/jobs"))["jobs"][0]
+              step = next((s for s in job["steps"] if s["name"] == "Reconstrucción del ELO"), None)
+              log = gh(f"actions/jobs/{job['id']}/logs")
+              L.append(f"Job {run['id']} ({run['event']}): lanzado {hm(ts(run['created_at']))} UTC · "
+                       f"arranque {hm(ts(job['started_at']))} · resultado {run['conclusion']}")
+              if step:
+                  L.append(f"Paso de siembra: {hm(ts(step['started_at']))} → {hm(ts(step['completed_at']))} UTC")
+
+          def grab(pattern):
+              m = re.search(pattern, log)
+              return m
+
+          seeded = []
+          if run:
+              m_wait = grab(r"esperando al reinicio de cuota allsports: ([\d.]+) min desde (\d\d:\d\d:\d\d)")
+              m_done = grab(r"esperé ([\d.]+) min \(hasta (\d\d:\d\d:\d\d) UTC\)")
+              m_none = grab(r"sin espera: el reinicio de cuota allsports está a más de \d+ min \((\d\d:\d\d) UTC\)")
+              m_int = grab(r"espera interrumpida \((\w+)\) tras ([\d.]+) min")
+              m_same = grab(r"sigo en la ventana de cuota (\S+) tras esperar")
+              m_mark = grab(r"ya se sembró en la ventana de cuota allsports (\S+)")
+              if m_done:
+                  L.append(f"Espera: SÍ, {m_done.group(1)} min (desde {m_wait.group(2) if m_wait else '?'} "
+                           f"hasta {m_done.group(2)} UTC)")
+                  L.append(f"Primera petición a la API: después de las {m_done.group(2)} UTC "
+                           f"(tras leer Firestore; el log no fecha cada línea)")
+              elif m_none:
+                  L.append(f"Espera: NO (a las {m_none.group(1)} UTC el reinicio quedaba a más de 75 min)")
+                  L.append(f"Primera petición a la API: poco después de las {m_none.group(1)} UTC "
+                           f"(tras leer Firestore; el log no fecha cada línea)")
+              elif "--wait-for-reset" not in log:
+                  L.append("Espera: el job no llevaba --wait-for-reset (código anterior a b490d77)")
+              else:
+                  L.append("Espera: no aparece en el log")
+              if m_int:
+                  L.append(f"⚠️ Espera interrumpida ({m_int.group(1)}) tras {m_int.group(2)} min: salió sin sembrar")
+              if m_same:
+                  L.append(f"⚠️ Tras esperar seguía en la ventana {m_same.group(1)}: salió sin sembrar")
+              if m_mark:
+                  L.append(f"ℹ️ Ya se había sembrado en la ventana {m_mark.group(1)}: salió sin pedir nada")
+              m_budget = grab(r"presupuesto de historial: (\d+) — cuota restante ~(-?\d+)[^\n]*censo ya gastado (\d+)")
+              if m_budget:
+                  L.append(f"Presupuesto: {m_budget.group(1)} (cuota restante ~{m_budget.group(2)} tras el "
+                           f"censo de {m_budget.group(3)})")
+              seeded = re.findall(r"\[\d+/\d+\] (.+?) pág\.(\d+): (\d+) partidos \(cuota (\S+)\)", log)
+              m_cnt = grab(r"contador de cuota allsports: \+(\d+) → used=(\d+), remaining_reported=(\S+)")
+
+          # ── 2. Firestore (solo lectura) ──────────────────────────────────────────
+          db = get_db(os.environ.get("FS_TRANSPORT", "grpc"), os.environ["GOOGLE_CLOUD_PROJECT"],
+                      os.environ["FIRESTORE_COLLECTION_PREFIX"], os.environ.get("GCLOUD_ACCOUNT"))
+          meta = {d["_id"]: d for d in db.read_collection("api_meta")}
+          prog = meta.get(SEED_PROGRESS_DOC, {})
+          L.append("")
+          mark = prog.get("seeded_period")
+          L.append(f"Marca de ventana (seeded_period): {mark or 'NO guardada'}"
+                   + (" ✅" if mark == day else (f" (esperada {day})" if run else "")))
+
+          if run:
+              L.append(f"Clubes sembrados: {len(seeded)}"
+                       + (" — " + ", ".join(n for n, *_ in seeded) if seeded else ""))
+          done = [n for sid, n in PENDING.items() if int((prog.get(sid) or {}).get("pages", 0) or 0) >= 1]
+          left = [n for sid, n in PENDING.items() if n not in done]
+          L.append(f"De los 12 pendientes: {len(done)} sembrados"
+                   + (f" ({', '.join(done)})" if done else "") + f" · quedan {len(left)}"
+                   + (f": {', '.join(left)}" if left else ""))
+
+          # Cuota que dejó la siembra para el collect (ventana del día de la revisión).
+          q = {d["_id"]: d for d in db.read_collection("api_quotas")}.get(f"allsports_{day}")
+          L.append("")
+          if run and m_cnt:
+              rem = m_cnt.group(3)
+              ok = rem.lstrip("-").isdigit() and int(rem) >= 60
+              L.append(f"Cuota al terminar la siembra: {rem} restantes (gastó {m_cnt.group(1)}) — "
+                       f"reserva de 60 {'respetada ✅' if ok else 'NO respetada ⚠️'}")
+          elif run:
+              L.append("Cuota al terminar la siembra: no aparece en el log")
+          if q:
+              L.append(f"Contador api_quotas/allsports_{day} ahora: used={q.get('used')}, "
+                       f"remaining_reported={q.get('remaining_reported')}, última llamada "
+                       f"{str(q.get('last_call'))[:19]}")
+
+          # Amistosos y duplicados en los docs que escribió la siembra (updated_at en el paso).
+          if run and step:
+              t0 = ts(step["started_at"]) - timedelta(minutes=1)
+              t1 = ts(step["completed_at"]) + timedelta(minutes=1)
+              ts_all = db.read_collection("team_stats")
+              football = [t for t in ts_all if is_football(t) and not str(t["_id"]).startswith("bball_")]
+              ocho = ocho_ligas_ids(football)
+              written = [t for t in football if (u := ts(t.get("updated_at"))) and t0 <= u <= t1]
+              fr, dup = [], []
+              for t in written:
+                  raw = t.get("raw_matches") or []
+                  for m in raw:
+                      h, a = str(m.get("home_team_id")), str(m.get("away_team_id"))
+                      if m.get("tournament_id") == 853 or (m.get("tournament") and is_friendly(m, ocho, (h, a))):
+                          fr.append(f"{t.get('team_name')} {str(m.get('date'))[:10]} «{m.get('tournament')}»")
+                  tid = t.get("team_id") if t.get("team_id") is not None else t["_id"]
+                  extra = len(raw) - len(dedupe_raw(raw, tid))
+                  if extra:
+                      dup.append(f"{t.get('team_name')} ({extra})")
+              L.append("")
+              m_docs = grab(r"\[seed-only\] hecho: (\d+) team_stats")
+              L.append(f"Documentos escritos por la siembra: {m_docs.group(1) if m_docs else '?'} según el log · "
+                       f"revisados {len(written)} (los que aún tienen la fecha de la siembra; el resto "
+                       f"lo ha reescrito después otro proceso)")
+              L.append(f"Amistosos colados: {len(fr)}" + (" — " + "; ".join(fr[:8]) if fr else " ✅"))
+              L.append(f"Duplicados: {len(dup)} docs" + (" — " + ", ".join(dup[:8]) if dup else " ✅"))
+
+          # ── 3. Aprendizaje: league_record y "acumulado desde" ────────────────────
+          mw = {d["_id"]: d for d in db.read_collection("model_weights")}.get("current", {})
+          wk = datetime.fromisoformat(day).isocalendar()
+          wk_id = f"{wk[0]}-W{wk[1]:02d}"
+          al = {d["_id"]: d for d in db.read_collection("accuracy_log")}.get(wk_id, {})
+          L.append("")
+          lr = mw.get("league_record")
+          if lr:
+              with_n = {k: v for k, v in lr.items() if (v or {}).get("total")}
+              L.append(f"Aprendizaje: model_weights/current con league_record ✅ ({len(with_n)} ligas con "
+                       f"muestra) · acumulado desde {mw.get('league_record_since') or 'SIN fecha ⚠️'} · "
+                       f"actualizado {str(mw.get('updated'))[:16]}")
+          else:
+              L.append(f"Aprendizaje: model_weights/current SIN league_record todavía "
+                       f"(actualizado {str(mw.get('updated'))[:16]})")
+          L.append(f"accuracy_log {wk_id}: "
+                   + (f"league_record ✅ · acumulado desde {al.get('league_record_since') or 'SIN fecha ⚠️'}"
+                      if al.get("league_record") else ("existe, SIN league_record" if al else "no existe todavía")))
+
+          text = "\n".join(L)[:4000]
+          print(text)
+          if os.environ.get("SEND") != "true":
+              print("\n[en seco] no se envía a Telegram")
+              sys.exit(0)
+          r = httpx.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_TOKEN']}/sendMessage",
+                         json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text,
+                               "disable_web_page_preview": True}, timeout=20)
+          print("Telegram:", r.status_code, r.text[:200])
+          r.raise_for_status()
+          EOF
