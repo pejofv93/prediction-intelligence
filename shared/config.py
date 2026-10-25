@@ -276,6 +276,11 @@ TREND_MODEL_MARGIN_RATIO_MIN = 1.30  # admite ~1 de cada 6 partidos reales (p85�
 TREND_CALIBRATION_MIN_SAMPLE = 30      # graduadas mínimas para calibrar (antes TREND_PERCENTILE_MIN_SAMPLE)
 TREND_CALIBRATION_WINDOW = 200         # solo las N graduadas más recientes — la forma de los equipos cambia de temporada
 TREND_CALIBRATION_MIN_TAIL_SAMPLE = 10 # mínimo de señales en un corte para no calibrar con ruido de muestra pequeña
+# Mercados de racha: el umbral nuevo solo sustituye al vigente si mejora su acierto en
+# estos puntos, y nunca antes de N días desde el último cambio (Ambos marcan cambiaba casi
+# a diario entre 0.8 y 0.9 con el acierto justo en el 70%).
+TREND_CALIBRATION_HYSTERESIS = 0.03
+TREND_CALIBRATION_MIN_DAYS = 7
 
 # Objetivo de acierto PROPIO de cada mercado (antes un 70% único). Sale de lo que
 # el mercado puede alcanzar: tasa base del suceso y, en los del modelo, la

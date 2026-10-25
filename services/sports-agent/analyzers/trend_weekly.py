@@ -70,8 +70,12 @@ def _calibration_label(cal: dict | None, graded: int, target: float) -> str:
     status = (cal or {}).get("status")
     if status == "at_fixed":
         return "✅ cumple con umbral fijo"
-    if status == "calibrated":
+    if status == "calibrated" and cal.get("threshold_effective") != cal.get("threshold_fixed"):
         return f"🎚️ calibrado (umbral {cal.get('threshold_effective')})"
+    if status == "calibrated":  # "calibrado" en el propio umbral fijo: no ha endurecido nada
+        hr = cal.get("hit_rate_fixed")
+        return ("✅ cumple con umbral fijo" if hr is not None and hr >= target
+                else f"⚠️ por debajo de su objetivo ({target * 100:.0f}%)")
     if status == "below_target":
         return f"⚠️ por debajo de su objetivo ({target * 100:.0f}%)"
     return f"fijo ({graded}/{TREND_CALIBRATION_MIN_SAMPLE})"

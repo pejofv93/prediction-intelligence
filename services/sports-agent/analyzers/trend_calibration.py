@@ -29,11 +29,26 @@ dashboard):
      marcado como aviso ("below_target").
 Por debajo de TREND_CALIBRATION_MIN_SAMPLE el mercado se queda sin cambios
 ("fixed") — puede quedarse así indefinidamente, no es un fallo.
+
+Mercados de RACHA (SERIES_MARKETS, desde 2026-10-25) — _calibrate_series + histéresis:
+  - Solo se prueban umbrales COMPLETOS (todo lo >= a un valor). Las rachas son
+    décimas (0.7/0.8/0.9/1.0) con muchos empates, y el corte por prefijo de
+    _calibrate_one partía un empate: anotaba "0.9 al 70% en 20" cuando el feed
+    admite las 21 señales >= 0.9 (66.7%).
+  - Sin umbral que llegue al objetivo → umbral fijo y "below_target" (la salida
+    para ese mercado es una variante en sombra, no apretar sin llegar).
+  - Histéresis: el umbral vigente solo se sustituye si el nuevo mejora su acierto
+    en >= TREND_CALIBRATION_HYSTERESIS (ambos tramos con >= MIN_TAIL señales), o si
+    el vigente ya no cumple el objetivo. Y nunca antes de TREND_CALIBRATION_MIN_DAYS
+    desde el último cambio. Sin esto Ambos marcan cambió 6 veces en 10 días.
+Todos los mercados guardan en el doc el historial de cambios de umbral.
 """
 import logging
 from datetime import datetime, timezone
 
 from shared.config import (
+    TREND_CALIBRATION_HYSTERESIS,
+    TREND_CALIBRATION_MIN_DAYS,
     TREND_CALIBRATION_MIN_SAMPLE,
     TREND_CALIBRATION_MIN_TAIL_SAMPLE,
     TREND_CALIBRATION_WINDOW,
@@ -42,6 +57,94 @@ from shared.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Mercados de racha (pattern_type "series"): hit-rate en décimas, con empates.
+SERIES_MARKETS = frozenset({"btts", "team_goals_over", "team_goals_over_3", "handicap"})
+
+
+def _tail(rows: list[dict], threshold: float) -> tuple[int, float | None]:
+    """(n, acierto) de TODO lo que admite el umbral — lo que el feed emitiría."""
+    tail = [r for r in rows if (r.get("rate_or_ratio") or 0) >= threshold - 1e-9]
+    if not tail:
+        return 0, None
+    return len(tail), sum(1 for r in tail if r.get("result") == "hit") / len(tail)
+
+
+def _calibrate_series(rows: list[dict], fixed_threshold: float, target: float) -> dict:
+    """Como _calibrate_one pero probando solo umbrales completos (sin partir empates)."""
+    n = len(rows)
+    if n < TREND_CALIBRATION_MIN_SAMPLE:
+        return {"sample_n": n, "hit_rate_fixed": None,
+                "threshold_effective": fixed_threshold, "status": "fixed"}
+    _, hr_fixed = _tail(rows, fixed_threshold)
+    hit_rate_fixed = round(hr_fixed, 4)
+    if hit_rate_fixed >= target:
+        return {"sample_n": n, "hit_rate_fixed": hit_rate_fixed,
+                "threshold_effective": fixed_threshold, "status": "at_fixed"}
+    values = sorted({r.get("rate_or_ratio") or 0 for r in rows
+                     if (r.get("rate_or_ratio") or 0) > fixed_threshold + 1e-9})
+    for value in values:  # el más laxo que cumple, para no perder más volumen del necesario
+        k, hr = _tail(rows, value)
+        if k >= TREND_CALIBRATION_MIN_TAIL_SAMPLE and hr >= target:
+            return {"sample_n": n, "hit_rate_fixed": hit_rate_fixed,
+                    "threshold_effective": round(value, 4), "status": "calibrated",
+                    "calibrated_n": k, "calibrated_hit_rate": round(hr, 4)}
+    return {"sample_n": n, "hit_rate_fixed": hit_rate_fixed,
+            "threshold_effective": fixed_threshold, "status": "below_target"}
+
+
+def _with_hysteresis(result: dict, rows: list[dict], prev: dict, fixed_threshold: float,
+                     target: float, now: datetime) -> dict:
+    """Decide si el umbral candidato sustituye al vigente (prev.threshold_effective).
+    Si no, devuelve el vigente con su acierto real de hoy y held_by con el motivo."""
+    current = prev.get("threshold_effective")
+    candidate = result["threshold_effective"]
+    if current is None or abs(current - candidate) < 1e-9:
+        return result
+
+    cur_n, cur_hr = _tail(rows, current)
+    cand_n, cand_hr = _tail(rows, candidate)
+    cur_meets = (cur_n >= TREND_CALIBRATION_MIN_TAIL_SAMPLE and cur_hr is not None
+                 and cur_hr >= target)
+    last = prev.get("last_change_at")
+    days = (now - datetime.fromisoformat(last)).days if last else None
+
+    held_by = None
+    if days is not None and days < TREND_CALIBRATION_MIN_DAYS:
+        held_by = "min_days"
+    elif cur_meets and not (cand_n >= TREND_CALIBRATION_MIN_TAIL_SAMPLE and cand_hr is not None
+                            and cand_hr >= cur_hr + TREND_CALIBRATION_HYSTERESIS):
+        held_by = "hysteresis"
+    if held_by is None:
+        return result
+
+    held = {k: v for k, v in result.items() if k not in ("calibrated_n", "calibrated_hit_rate")}
+    held.update({"threshold_effective": current, "held_by": held_by,
+                 "candidate_threshold": candidate})
+    if abs(current - fixed_threshold) < 1e-9:
+        held["status"] = "at_fixed" if (cur_hr or 0) >= target else "below_target"
+    else:
+        held["status"] = "calibrated" if cur_meets else "below_target"
+        held.update({"calibrated_n": cur_n,
+                     "calibrated_hit_rate": round(cur_hr, 4) if cur_hr is not None else None})
+    return held
+
+
+def _history(prev: dict, doc: dict, now_iso: str) -> tuple[list[dict], str | None]:
+    """Historial de cambios de umbral (todos los mercados) y fecha del último cambio."""
+    history = list(prev.get("threshold_history") or [])
+    last_change = prev.get("last_change_at")
+    before = prev.get("threshold_effective")
+    after = doc["threshold_effective"]
+    if before is None or abs(before - after) > 1e-9:
+        history.append({
+            "at": now_iso, "threshold_from": before, "threshold_to": after,
+            "status": doc.get("status"), "sample_n": doc.get("sample_n"),
+            "hit_rate": doc.get("calibrated_hit_rate") if doc.get("status") == "calibrated"
+            else doc.get("hit_rate_fixed"),
+        })
+        last_change = now_iso if before is not None else last_change
+    return history, last_change
 
 
 def _calibrate_one(rows: list[dict], fixed_threshold: float, target: float) -> dict:
@@ -108,7 +211,13 @@ async def run_trend_calibration() -> dict:
         logger.error("trend_calibration: error leyendo trend_accuracy_log", exc_info=True)
         return {"markets_updated": 0, "error": "read_failed"}
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    try:
+        prev_docs = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
+    except Exception:
+        logger.error("trend_calibration: error leyendo el estado anterior — sin histéresis", exc_info=True)
+        prev_docs = {}
     updated = 0
     for market, fixed_threshold in TREND_MARKET_FIXED_THRESHOLD.items():
         rows = by_market.get(market, [])
@@ -116,7 +225,12 @@ async def run_trend_calibration() -> dict:
         rows = rows[:TREND_CALIBRATION_WINDOW]
 
         target = TREND_MARKET_TARGET[market]
-        result = _calibrate_one(rows, fixed_threshold, target)
+        prev = prev_docs.get(market, {})
+        if market in SERIES_MARKETS:
+            result = _with_hysteresis(_calibrate_series(rows, fixed_threshold, target),
+                                      rows, prev, fixed_threshold, target, now)
+        else:
+            result = _calibrate_one(rows, fixed_threshold, target)
         doc = {
             "market": market,
             "pattern_type": rows[0].get("pattern_type") if rows else None,
@@ -125,6 +239,10 @@ async def run_trend_calibration() -> dict:
             "updated_at": now_iso,
             **result,
         }
+        doc["threshold_history"], doc["last_change_at"] = _history(prev, doc, now_iso)
+        if doc.get("held_by"):
+            logger.info("trend_calibration(%s): se mantiene %s (candidato %s, motivo %s)",
+                        market, doc["threshold_effective"], doc["candidate_threshold"], doc["held_by"])
         try:
             col("trend_market_calibration").document(market).set(doc)
             updated += 1
