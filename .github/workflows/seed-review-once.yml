@@ -212,7 +212,8 @@ jobs:
                    + (f": {', '.join(left)}" if left else ""))
 
           # Cuota que dejó la siembra para el collect (ventana del día de la revisión).
-          q = {d["_id"]: d for d in db.read_collection("api_quotas")}.get(f"allsports_{day}")
+          quotas = {d["_id"]: d for d in db.read_collection("api_quotas")}
+          q = quotas.get(f"allsports_{day}")
           L.append("")
           if run and m_cnt:
               rem = m_cnt.group(3)
@@ -221,6 +222,24 @@ jobs:
                        f"reserva de 60 {'respetada ✅' if ok else 'NO respetada ⚠️'}")
           elif run:
               L.append("Cuota al terminar la siembra: no aparece en el log")
+          # Ventana anterior (la que acaba a las 07:58 UTC del día revisado): cierre del contador.
+          # Los cortes del collect por cuota solo quedan en Cloud Logging, que la cuenta del
+          # workflow no puede leer: aquí solo el indicio (can_call corta con used >= 100 o
+          # remaining_reported <= 0).
+          prev = (datetime.fromisoformat(day) - timedelta(days=1)).date().isoformat()
+          qp = quotas.get(f"allsports_{prev}")
+          if qp:
+              used_p, rem_p = int(qp.get("used") or 0), qp.get("remaining_reported")
+              agotada = used_p >= 100 or (rem_p is not None and int(rem_p) <= 0)
+              L.append(f"Ventana anterior (allsports_{prev}, hasta las 07:58 UTC del {day[8:10]}/{day[5:7]}): "
+                       f"used={used_p}, remaining_reported={rem_p}, última llamada "
+                       f"{str(qp.get('last_call'))[:16]} — "
+                       + ("⚠️ cuota agotada: el collect pudo quedarse sin pedir desde esa hora "
+                          "(indicio; el recuento exacto está en Cloud Logging)" if agotada else
+                          "no se agotó: el collect no se cortó por el contador "
+                          "(indicio; los 429 solo están en Cloud Logging)"))
+          else:
+              L.append(f"Ventana anterior (allsports_{prev}): sin contador en api_quotas")
           if q:
               L.append(f"Contador api_quotas/allsports_{day} ahora: used={q.get('used')}, "
                        f"remaining_reported={q.get('remaining_reported')}, última llamada "
