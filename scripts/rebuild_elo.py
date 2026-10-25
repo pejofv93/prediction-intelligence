@@ -47,6 +47,7 @@ Local: Python 3.11 con SSL_CERT_FILE al bundle de Norton (gRPC está bloqueado �
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 from datetime import datetime, timezone
@@ -91,9 +92,47 @@ _SEED_LEAGUE_TOURNAMENTS = {17: "PL", 8: "PD", 23: "SA", 35: "BL1", 34: "FL1",
 _SEED_LEAGUE_CODES = set(_SEED_LEAGUE_TOURNAMENTS.values())
 
 
-def is_friendly(m: dict) -> bool:
-    return (m.get("tournament_id") in _FRIENDLY_TOURNAMENT_IDS
-            or "friendly" in str(m.get("tournament") or "").lower())
+# Torneos de verano que allsportsapi2 NO mete en 853 (Como Cup, Emirates Cup, Telekom Cup,
+# Torneio de Verão…: 10 partidos en las 8 ligas el 25-oct). Entre junio y agosto, un partido
+# de un equipo de las 8 ligas con torneo que no es una competición oficial de esos países
+# cuenta como amistoso. Oficial = ligas de cualquier división, UEFA/FIFA y copas/supercopas
+# nacionales (nombres reales de Sofascore, con patrocinador: "VriendenLoterij Eredivisie",
+# "Eurojackpot KNVB Beker"…). Solo vale para las 8 ligas: aplicada a un club UEFA de otro
+# país quitaría su propia liga (Austrian Bundesliga, Eliteserien… juegan en verano).
+_PRESEASON_MONTHS = ("06", "07", "08")
+_OFFICIAL_TOURNAMENT = re.compile(
+    r"^(premier league|championship|league one|league two|laliga( 2)?|serie [ab]|"
+    r"2\. bundesliga|bundesliga|ligue [12]|.*eredivisie|eerste divisie|liga portugal.*)$|"
+    r"uefa|fifa|efl cup|fa cup|community shield|coppa italia|supercoppa|copa del rey|"
+    r"supercopa|dfb pokal|supercup|coupe de france|troph[ée]e des champions|"
+    r"ta[çc]a de portugal|ta[çc]a da liga|superta[çc]a|knvb beker|johan cruijff schaal",
+    re.I)
+
+
+def is_friendly(m: dict, ocho_ligas: set | None = None, equipos: tuple = ()) -> bool:
+    """`ocho_ligas`: ids canónicos de los equipos de las 8 ligas; `equipos`: ids canónicos de
+    local y visitante. Sin ellos solo se mira 853 / "friendly", como antes."""
+    if (m.get("tournament_id") in _FRIENDLY_TOURNAMENT_IDS
+            or "friendly" in str(m.get("tournament") or "").lower()):
+        return True
+    if not ocho_ligas or not any(str(e) in ocho_ligas for e in equipos):
+        return False
+    # Pretemporada: solo partidos de allsportsapi2 CON torneo. Los ids de football-data
+    # (numéricos) y los antiguos sin torneo guardado se quedan como están.
+    torneo = str(m.get("tournament") or "").strip()
+    if not torneo or str(m.get("match_id", "")).isdigit():
+        return False
+    return (str(m.get("date") or "")[5:7] in _PRESEASON_MONTHS
+            and not _OFFICIAL_TOURNAMENT.search(torneo))
+
+
+def ocho_ligas_ids(team_stats: list[dict]) -> set:
+    """Ids (doc y team_id, en str) de los equipos de las 8 ligas, para is_friendly."""
+    out = set()
+    for t in team_stats:
+        if t.get("league") in _SEED_LEAGUE_CODES:
+            out.update(str(x) for x in (t.get("_id"), t.get("team_id")) if x is not None)
+    return out
 
 
 def _seed_tournaments() -> set:
@@ -324,7 +363,8 @@ SEED_PROGRESS_DOC = "uefa_seed_progress"
 def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
                          objetivo_paginas: int, presupuesto: int,
                          imap: dict | None = None,
-                         prioritarios: set | None = None) -> tuple[list[dict], dict]:
+                         prioritarios: set | None = None,
+                         ocho_ligas: set | None = None) -> tuple[list[dict], dict]:
     """
     Historial por club, paginado y reanudable.
 
@@ -405,7 +445,9 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
             torneo = ((e.get("tournament") or {}).get("uniqueTournament") or {})
             m["tournament"] = torneo.get("name", "")
             m["tournament_id"] = torneo.get("id")
-            m["friendly"] = is_friendly(m)
+            m["friendly"] = is_friendly(m, ocho_ligas, (
+                resolve(m["home_team"], m["home_source_id"], imap),
+                resolve(m["away_team"], m["away_source_id"], imap)))
             out.append(m)  # los amistosos van marcados: sirven para purgar copias viejas
             if m["friendly"] or m["tournament_id"] not in sembrables:
                 continue
@@ -681,7 +723,7 @@ def main() -> None:
 
         club_hist, progreso = fetch_club_histories(
             key, clubs, progreso_previo, args.history_pages, history_budget,
-            imap, prioritarios)
+            imap, prioritarios, ocho_ligas_ids(team_stats))
         _bump_allsports_used(db, now, _ALLSPORTS_REQUESTS, _ALLSPORTS_LAST_REMAINING, args.confirm)
         print(f"   {len(prioritarios)} clubes prioritarios (con partido programado)")
         print(f"   histórico de clubes: {len(club_hist)} partidos brutos")
@@ -746,6 +788,7 @@ def main() -> None:
     # Amistosos fuera del ELO: los marcados en el historial de esta tanda y, en raw_matches,
     # los guardados con su torneo o con el match_id de un amistoso visto ahora.
     friendly_ids = {m["match_id"] for m in club_hist if m.get("friendly")}
+    ocho = ocho_ligas_ids(team_stats)
 
     for t in team_stats:
         if str(t.get("team_id")) in selecciones:
@@ -758,7 +801,7 @@ def main() -> None:
                 continue
             if h in selecciones or a in selecciones:
                 continue
-            if is_friendly(m) or m.get("match_id") in friendly_ids:
+            if is_friendly(m, ocho, (h, a)) or m.get("match_id") in friendly_ids:
                 continue
             fp = match_fingerprint(m.get("date", ""), h, a)
             if fp not in universe:
