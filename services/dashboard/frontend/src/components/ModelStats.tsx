@@ -2,7 +2,9 @@ import { useApi } from '../hooks/useApi'
 
 interface Stats {
   accuracy_global: number
-  accuracy_by_league: Record<string, number>
+  accuracy_by_league: Record<string, number | null>
+  league_record?: Record<string, { correct: number; total: number }>
+  league_record_since?: string | null
   weights: Record<string, number>
   weights_history: Array<{ week: string; weights: Record<string, number> }>
   total_predictions: number
@@ -51,7 +53,7 @@ const FACTOR_COLORS: Record<string, string> = {
   h2h: '#00BCD4',
 }
 
-function AccuracyBar({ label, value, count }: { label: string; value: number; count?: number }) {
+function AccuracyBar({ label, value, count }: { label: string; value: number; count?: number | string }) {
   const color = value >= 0.6 ? '#00C853' : value >= 0.5 ? '#F7931A' : '#FF5252'
   return (
     <div style={{ marginBottom: 10 }}>
@@ -217,7 +219,9 @@ export default function ModelStats() {
   if (!data) return <p style={{ color: '#888', padding: 24 }}>Sin datos disponibles.</p>
 
   const accuracyColor = data.accuracy_global >= 0.6 ? '#00C853' : data.accuracy_global >= 0.5 ? '#F7931A' : '#FF5252'
-  const leagueEntries = Object.entries(data.accuracy_by_league ?? {}).sort((a, b) => b[1] - a[1])
+  // null = sin datos (liga sin predicciones resueltas): al final, sin barra
+  const leagueEntries = Object.entries(data.accuracy_by_league ?? {})
+    .sort((a, b) => (b[1] ?? -1) - (a[1] ?? -1) || a[0].localeCompare(b[0]))
   const weightEntries = Object.entries(data.weights ?? {}).sort((a, b) => b[1] - a[1])
 
   return (
@@ -245,7 +249,7 @@ export default function ModelStats() {
         <div style={{ background: '#141414', border: '1px solid #2a2a2a', borderRadius: 8, padding: '16px 20px' }}>
           <div style={{ color: '#555', fontSize: 11, marginBottom: 6, letterSpacing: 0.5 }}>LIGAS ACTIVAS</div>
           <div style={{ color: '#F7931A', fontSize: 36, fontWeight: 'bold', lineHeight: 1 }}>
-            {leagueEntries.length}
+            {leagueEntries.filter(([, acc]) => acc != null).length}
           </div>
         </div>
         <div style={{ background: '#141414', border: '1px solid #2a2a2a', borderRadius: 8, padding: '16px 20px' }}>
@@ -260,10 +264,20 @@ export default function ModelStats() {
         {/* Accuracy by league */}
         {leagueEntries.length > 0 && (
           <div style={{ background: '#141414', border: '1px solid #2a2a2a', borderRadius: 8, padding: '16px 20px' }}>
-            <div style={{ color: '#444', fontSize: 11, marginBottom: 16, letterSpacing: 0.5 }}>ACCURACY POR LIGA</div>
-            {leagueEntries.map(([league, acc]) => (
-              <AccuracyBar key={league} label={league} value={acc} />
-            ))}
+            <div style={{ color: '#444', fontSize: 11, marginBottom: 16, letterSpacing: 0.5 }}>
+              ACCURACY POR LIGA
+              {data.league_record_since && (
+                <span style={{ color: '#666', letterSpacing: 0 }}>
+                  {' '}· acumulado desde {data.league_record_since.slice(0, 10).split('-').reverse().join('/')}
+                </span>
+              )}
+            </div>
+            {leagueEntries.map(([league, acc]) => {
+              const rec = data.league_record?.[league]
+              return acc == null
+                ? <div key={league} style={{ color: '#555', fontSize: 12, marginBottom: 10 }}>{league} · sin datos</div>
+                : <AccuracyBar key={league} label={league} value={acc} count={rec ? `${rec.correct}/${rec.total}` : undefined} />
+            })}
           </div>
         )}
 

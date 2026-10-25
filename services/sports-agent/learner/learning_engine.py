@@ -467,6 +467,22 @@ def calculate_accuracy(predictions: list[dict]) -> float:
     return round(correct_count / len(evaluated), 4)
 
 
+def _merge_league_record(prev: dict, today: dict[str, list[bool]]) -> dict[str, dict]:
+    """Suma a {liga: {"correct", "total"}} los aciertos/fallos del lote de hoy."""
+    out = {lg: {"correct": int((v or {}).get("correct", 0)), "total": int((v or {}).get("total", 0))}
+           for lg, v in (prev or {}).items() if isinstance(v, dict)}
+    for lg, results in today.items():
+        rec = out.setdefault(lg, {"correct": 0, "total": 0})
+        rec["correct"] += sum(1 for r in results if r)
+        rec["total"] += len(results)
+    return out
+
+
+def _league_accuracy(record: dict[str, dict]) -> dict[str, float | None]:
+    """Acierto por liga desde el acumulado; None = sin datos (nunca 0.0 por falta de muestra)."""
+    return {lg: (round(v["correct"] / v["total"], 4) if v["total"] else None) for lg, v in record.items()}
+
+
 def _dedup_pending(pending: list[dict]) -> tuple[list[dict], dict[str, list[dict]]]:
     """
     Deduplication de predicciones pendientes (BUG 2: dos señales por mismo partido).
@@ -793,6 +809,8 @@ async def run_daily_learning() -> None:
 
     # --- 2. Cargar pesos actuales ---
     _prev_conf_data: dict = {}
+    _prev_league_record: dict = {}
+    _prev_league_since: str | None = None
     try:
         weights_doc = col("model_weights").document("current").get()
         if weights_doc.exists:
@@ -800,6 +818,8 @@ async def run_daily_learning() -> None:
             current_weights = data.get("weights", dict(DEFAULT_WEIGHTS))
             current_version = int(data.get("version", 0))
             _prev_conf_data = data.get("accuracy_by_confidence", {})
+            _prev_league_record = data.get("league_record", {}) or {}
+            _prev_league_since = data.get("league_record_since")
         else:
             current_weights = dict(DEFAULT_WEIGHTS)
             current_version = 0
@@ -1132,11 +1152,14 @@ async def run_daily_learning() -> None:
         return
 
     # --- 5. Guardar model_weights actualizado ---
-    # Calcular accuracy por liga
-    acc_by_league = {
-        league: round(sum(results) / len(results), 4) if results else 0.0
-        for league, results in accuracy_by_league.items()
-    }
+    # Accuracy por liga ACUMULADA (aciertos y total desde que existe league_record, 2026-10-25;
+    # antes era la foto del lote del día y una liga sin resueltas hoy salía 0.0). None = sin
+    # datos. rebuild_elo reescribe model_weights/current entero, así que se reinicia con la época.
+    # league_record_since: día del primer lote acumulado — dashboard e informe lo muestran
+    # ("acumulado desde …") para que no se lea como el acierto de toda la temporada.
+    league_record = _merge_league_record(_prev_league_record, accuracy_by_league)
+    acc_by_league = _league_accuracy(league_record)
+    league_since = (_prev_league_since if _prev_league_record else None) or now.date().isoformat()
 
     # Calcular accuracy por tipo de mercado
     acc_by_market = {
@@ -1174,6 +1197,8 @@ async def run_daily_learning() -> None:
                 "updated": now,
                 "weights": current_weights,
                 "accuracy_by_league": acc_by_league,
+                "league_record": league_record,
+                "league_record_since": league_since,
                 "accuracy_by_market": acc_by_market,
                 "accuracy_by_confidence": acc_by_confidence,
                 "blacklisted_leagues": [],
@@ -1237,7 +1262,13 @@ async def run_daily_learning() -> None:
             # accuracy_by_* y weights_end son foto de la ÉPOCA ACTUAL — solo se reescriben
             # si hoy hubo aprendizaje real; si no, se conservan los del último batch.
             if processed_predictions:
-                _payload["accuracy_by_league"] = acc_by_league
+                week_record = _merge_league_record(existing.get("league_record") or {}, accuracy_by_league)
+                _payload["league_record"] = week_record
+                _payload["league_record_since"] = (
+                    (existing.get("league_record_since") if existing.get("league_record") else None)
+                    or now.date().isoformat()
+                )
+                _payload["accuracy_by_league"] = _league_accuracy(week_record)
                 _payload["accuracy_by_market"] = acc_by_market
                 _payload["weights_end"] = current_weights
             acc_log_ref.update(_payload)
@@ -1249,7 +1280,9 @@ async def run_daily_learning() -> None:
                 "predictions_correct": correct_count,
                 "accuracy": week_accuracy,
                 "prev_week_accuracy": prev_week_accuracy,
-                "accuracy_by_league": acc_by_league,
+                "league_record": _merge_league_record({}, accuracy_by_league),
+                "league_record_since": now.date().isoformat(),
+                "accuracy_by_league": _league_accuracy(_merge_league_record({}, accuracy_by_league)),
                 "accuracy_by_market": acc_by_market,
                 "weights_start": weights_start,
                 "weights_end": current_weights,

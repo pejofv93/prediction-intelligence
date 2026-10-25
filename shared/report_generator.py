@@ -40,10 +40,18 @@ def generate_weekly_report(
     worst_match = week_stats.get("worst_match", "N/A")
     worst_edge = float(week_stats.get("worst_edge", 0.0))
 
-    # Accuracy por liga (solo con datos)
+    # Accuracy por liga (solo con datos). Con league_record (aciertos/total acumulados de la
+    # semana, desde 2026-10-25) se muestra también el 0% real; sin él (semanas anteriores)
+    # el 0.0 podía ser "sin resueltas" y se sigue ocultando.
     accuracy_by_league = week_stats.get("accuracy_by_league", {})
+    league_record = week_stats.get("league_record") or {}
     league_parts: list[str] = []
     for lg in ["PL", "PD", "BL1", "SA", "FL1", "CL"]:
+        if league_record:
+            rec = league_record.get(lg) or {}
+            if rec.get("total"):
+                league_parts.append(f"{lg} {rec['correct'] / rec['total']:.0%} ({rec['correct']}/{rec['total']})")
+            continue
         if lg in accuracy_by_league:
             acc_val = accuracy_by_league[lg]
             try:
@@ -53,6 +61,10 @@ def generate_weekly_report(
             if acc_f > 0:
                 league_parts.append(f"{lg} {acc_f:.0%}")
     league_line = " | ".join(league_parts) if league_parts else "—"
+    since = str(week_stats.get("league_record_since") or "")
+    if league_parts and league_record and since[:10].count("-") == 2:
+        y, m, d = since[:10].split("-")
+        league_line += f" (acumulado desde {d}/{m}/{y})"
 
     # Polymarket
     poly_total = int(week_stats.get("poly_total", 0))

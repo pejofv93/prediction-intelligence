@@ -128,9 +128,17 @@ async def get_stats() -> dict:
         correct = int(weights_data.get("correct_predictions", 0))
         accuracy_global = round(correct / total, 4) if total > 0 else 0.0
 
+        # Por liga solo desde el acumulado (league_record, desde 2026-10-25): el
+        # accuracy_by_league anterior era la foto del lote del día, con 0.0 = sin resueltas.
+        league_record = weights_data.get("league_record") or {}
         return {
             "accuracy_global": accuracy_global,
-            "accuracy_by_league": weights_data.get("accuracy_by_league", {}),
+            "accuracy_by_league": {
+                lg: (round(r["correct"] / r["total"], 4) if r.get("total") else None)
+                for lg, r in league_record.items()
+            },
+            "league_record": league_record,
+            "league_record_since": weights_data.get("league_record_since") if league_record else None,
             "weights": weights_data.get("weights", {}),
             "weights_version": int(weights_data.get("version", 0)),
             "weights_history": history,

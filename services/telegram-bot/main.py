@@ -559,6 +559,8 @@ async def send_weekly_report() -> JSONResponse:
             "predictions_pending": _pending_count,
             "prev_week_accuracy": log.get("prev_week_accuracy"),
             "accuracy_by_league": log.get("accuracy_by_league", {}),
+            "league_record": log.get("league_record", {}),
+            "league_record_since": log.get("league_record_since"),
             "best_match": best_match,
             "best_edge": best_edge,
             "best_result": best_result,
