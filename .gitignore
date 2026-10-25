@@ -49,6 +49,10 @@ services/dashboard/frontend/dist/
 
 # Dev / test
 test_*.py
+# Tests de verdad sí se versionan (no van en la imagen: .dockerignore de cada servicio).
+# scripts/test_betfair.py sigue ignorado: es un login manual contra Betfair, no un test.
+!services/*/tests/test_*.py
+!scripts/tests/test_*.py
 run_*.py
 fix_*.py
 

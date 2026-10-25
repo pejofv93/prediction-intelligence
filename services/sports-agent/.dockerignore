@@ -1,0 +1,2 @@
+# Los tests se versionan pero no van en la imagen de Cloud Run.
+tests/
