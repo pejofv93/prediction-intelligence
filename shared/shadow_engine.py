@@ -460,6 +460,30 @@ def poly_alerted_metrics(resolved_from: datetime = None, resolved_to: datetime =
     return out
 
 
+def period_metrics(trades: list, source: str, closed_from: datetime, closed_to: datetime) -> dict:
+    """
+    ROI/win rate de una fuente con closed_at en [closed_from, closed_to), mismo cálculo
+    que el ROI por source de calculate_metrics (pnl_virtual / virtual_stake). Para que
+    el ROI de la cabecera del semanal cubra la misma semana que su win rate.
+    """
+    out = {"roi": 0.0, "win_rate": 0.0, "n": 0, "wins": 0, "pnl": 0.0, "stake": 0.0}
+    for t in trades:
+        if t.get("source") != source or t.get("result") not in ("win", "loss"):
+            continue
+        closed_at = _as_utc_dt(t.get("closed_at"))
+        if closed_at is None or not (closed_from <= closed_at < closed_to):
+            continue
+        out["n"] += 1
+        out["wins"] += t.get("result") == "win"
+        out["pnl"] += float(t.get("pnl_virtual") or 0)
+        out["stake"] += float(t.get("virtual_stake") or _MIN_STAKE)
+    out["pnl"] = round(out["pnl"], 4)
+    out["stake"] = round(out["stake"], 4)
+    out["roi"] = round(out["pnl"] / out["stake"], 4) if out["stake"] > 0 else 0.0
+    out["win_rate"] = round(out["wins"] / out["n"], 4) if out["n"] else 0.0
+    return out
+
+
 def calculate_metrics(trades: list = None) -> dict:
     """Calcula métricas de rendimiento. Si trades=None, leerlos de Firestore."""
     try:

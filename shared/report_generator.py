@@ -19,6 +19,7 @@ def generate_weekly_report(
         worst_match, worst_edge, worst_error, poly_total, poly_alerts,
         poly_avg_edge, prev_week_accuracy,
         bankroll_current, roi_total, roi_sports, win_rate, closed_trades, streak,
+        roi_sports_week, n_sports_week,
         poly_buy_yes_correct, poly_buy_yes_total,
         poly_buy_no_correct, poly_buy_no_total,
         poly_best_market, poly_best_edge,
@@ -33,7 +34,10 @@ def generate_weekly_report(
     correct = int(week_stats.get("predictions_correct", 0))
     failed = total - correct
     accuracy = float(week_stats.get("accuracy", 0.0))
-    roi_sports = float(week_stats.get("roi_sports", 0.0))
+    roi_sports = float(week_stats.get("roi_sports", 0.0))  # acumulado (bloque de bankroll)
+    # Cabecera: ROI de los shadow_trades de Sports cerrados esta semana (mismo periodo que el win rate)
+    roi_sports_week = float(week_stats.get("roi_sports_week", 0.0))
+    n_sports_week = int(week_stats.get("n_sports_week", 0))
 
     best_match = week_stats.get("best_match", "N/A")
     best_edge = float(week_stats.get("best_edge", 0.0))
@@ -128,7 +132,8 @@ def generate_weekly_report(
         "",
         "⚽ SPORTS:",
         f"Resueltas: {total} | ✅ {correct} | ❌ {failed}{pending_note}",
-        f"Win rate: {accuracy:.0%} | ROI: {roi_sports:+.1%}",
+        f"Win rate: {accuracy:.0%} | ROI semana: "
+        + (f"{roi_sports_week:+.1%} ({n_sports_week} cerradas)" if n_sports_week else "— (0 cerradas)"),
     ]
 
     if best_match and best_match != "N/A":
@@ -172,8 +177,8 @@ def generate_weekly_report(
             "💰 Bankroll virtual:",
             f"Saldo: {bankroll_current:.2f}u | Win rate global: {win_rate:.0%}",
             f"P&L: ⚽ Sports {pnl_sports_bk:+.2f}u | 🔮 Polymarket {pnl_poly_bk:+.2f}u",
-            f"📈 ROI total: {roi_total:+.1%}",
-            f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports_bk:.0%}, {n_sports_bk} señales)",
+            f"📈 ROI acumulado total: {roi_total:+.1%}",
+            f"  ⚽ Sports (acumulado): {roi_sports:+.1%} (win rate {wr_sports_bk:.0%}, {n_sports_bk} señales)",
             f"  🔮 Polymarket — ledger crudo: {roi_poly_bk:+.1%} (win rate {wr_poly_bk:.0%}, {n_poly_bk} señales)",
             f"  🔮 Polymarket — emitido real (alertado, 1u/alerta): {roi_poly_alerted_bk:+.1%} "
             f"(win rate {wr_poly_alerted_bk:.0%}, {n_poly_alerted_bk} resueltas, {pending_poly_alerted_bk} pendientes)",

@@ -523,11 +523,16 @@ async def send_weekly_report() -> JSONResponse:
         n_signal_confidence = len(_signal_confidences)
 
         # Bankroll virtual (shadow trades) — ejecutar en executor para no bloquear event loop
+        # Una sola lectura de shadow_trades: acumulado (bloque de bankroll) y ROI de Sports
+        # de la semana (cabecera, mismo periodo que el win rate de accuracy_log).
+        sports_week: dict = {}
         try:
-            from shared.shadow_engine import calculate_metrics
-            shadow_metrics = await asyncio.get_event_loop().run_in_executor(
-                None, calculate_metrics
-            )
+            from shared.shadow_engine import _iter_all_shadow_trades, calculate_metrics, period_metrics
+            def _metrics() -> tuple[dict, dict]:
+                _trades = _iter_all_shadow_trades()
+                return calculate_metrics(_trades), period_metrics(_trades, "sports", week_start, week_end)
+
+            shadow_metrics, sports_week = await asyncio.get_event_loop().run_in_executor(None, _metrics)
         except Exception:
             logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
             shadow_metrics = {}
@@ -581,6 +586,9 @@ async def send_weekly_report() -> JSONResponse:
             "bankroll_current": shadow_metrics.get("current_bankroll", 50.0),
             "roi_total": shadow_metrics.get("roi_total", 0.0),
             "roi_sports": shadow_metrics.get("roi_sports", 0.0),
+            # Cabecera de Sports: ROI de shadow_trades cerrados en la misma semana que el win rate
+            "roi_sports_week": sports_week.get("roi", 0.0),
+            "n_sports_week": sports_week.get("n", 0),
             "roi_poly": shadow_metrics.get("roi_poly", 0.0),
             "win_rate": shadow_metrics.get("win_rate", 0.0),
             "win_rate_sports": shadow_metrics.get("win_rate_sports", 0.0),
