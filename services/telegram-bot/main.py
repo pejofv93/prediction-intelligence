@@ -245,7 +245,9 @@ async def _bg_daily_report() -> None:
     """
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter
-        from shared.model_health import check_model_health, format_health_alert, format_daily_report
+        from shared.model_health import (
+            check_model_health, format_health_alert, format_daily_report, sent_tier_stats,
+        )
         from shared.shadow_engine import calculate_metrics
         from shared.firestore_client import col
         from alert_manager import send_message
@@ -258,7 +260,6 @@ async def _bg_daily_report() -> None:
             "total": 0, "pending": 0, "resolved": 0, "correct": 0, "incorrect": 0,
             "synthetic": 0, "real_odds": 0,
         }
-        tier_stats: dict = {"fuerte": [], "detectada": [], "moderada": []}
         try:
             # 500 más recientes por created_at: determinista. Antes era limit(500) sin
             # order_by → rebanada arbitraria por doc-id que derivaba al crecer la colección.
@@ -284,16 +285,15 @@ async def _bg_daily_report() -> None:
                         pred_stats["correct"] += 1
                     elif d.get("correct") is False:
                         pred_stats["incorrect"] += 1
-                # Clasificar por tier de edge para el desglose del reporte
-                _edge = float(d.get("edge") or d.get("ev") or 0)
-                if _edge > 0.20:
-                    tier_stats["fuerte"].append(d)
-                elif _edge > 0.12:
-                    tier_stats["detectada"].append(d)
-                elif _edge > 0.08:
-                    tier_stats["moderada"].append(d)
         except Exception as _pe:
             logger.warning("daily-report: error leyendo predictions — %s", _pe)
+
+        # ROI por nivel: lo realmente enviado (alerts_sent sports_sent), no el ledger de predictions
+        tier_stats: dict = {}
+        try:
+            tier_stats = sent_tier_stats()
+        except Exception as _te:
+            logger.warning("daily-report: error leyendo alerts_sent por nivel — %s", _te)
 
         # Buscar top signal
         top_signal = None

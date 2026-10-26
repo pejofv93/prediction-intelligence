@@ -77,6 +77,69 @@ def _sports_alerted_graded() -> list[dict]:
     return out
 
 
+_TIER_MIN_GRADED = 20  # graduadas por nivel antes de mostrar win rate y ROI
+
+
+def _sent_tier(ev: float) -> Optional[str]:
+    """Nivel por el EV/edge del primer envío (mismos cortes que el mensaje de alerta)."""
+    if ev > 0.20:
+        return "fuerte"
+    if ev > 0.12:
+        return "detectada"
+    if ev > 0.08:
+        return "moderada"
+    return None
+
+
+def sent_tier_stats() -> dict:
+    """
+    ROI por nivel sobre lo REALMENTE enviado en Sports: alerts_sent type=sports_sent.
+
+    Un doc por predicción y selección (un reenvío suma resends, no es apuesta nueva).
+    Nivel, cuota y EV son los del PRIMER envío (odds/ev; last_odds/last_ev son del último).
+    1u por envío; los push no cuentan. Baloncesto no escribe sports_sent (va por slot de
+    partido) y queda fuera; tenis se registra pero no hay fuente de resultados → sin graduar.
+    Devuelve {fuerte|detectada|moderada: {sent, graded, wins, pnl}, tennis_ungraded, since}.
+    """
+    out = {t: {"sent": 0, "graded": 0, "wins": 0, "pnl": 0.0}
+           for t in ("fuerte", "detectada", "moderada")}
+    out["tennis_ungraded"] = 0
+    since = None
+    for doc in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
+        a = doc.to_dict() or {}
+        sent_at = _as_utc_dt(a.get("sent_at"))
+        if sent_at and (since is None or sent_at < since):
+            since = sent_at
+        if str(a.get("sport") or "football").lower() == "tennis":
+            if a.get("correct") not in (True, False):
+                out["tennis_ungraded"] += 1
+            continue
+        try:
+            tier = _sent_tier(float(a.get("ev") or 0))
+        except (TypeError, ValueError):
+            tier = None
+        if tier is None:
+            continue
+        bucket = out[tier]
+        bucket["sent"] += 1
+        if a.get("correct") not in (True, False):
+            continue  # pendiente o push
+        try:
+            odds = float(a.get("odds") or 0)
+        except (TypeError, ValueError):
+            odds = 0.0
+        if a["correct"] and odds <= 1.0:
+            continue  # acierto sin cuota del envío: no se puede valorar
+        bucket["graded"] += 1
+        if a["correct"]:
+            bucket["wins"] += 1
+            bucket["pnl"] += odds - 1.0
+        else:
+            bucket["pnl"] -= 1.0
+    out["since"] = since
+    return out
+
+
 def _poly_alerted_graded() -> list[dict]:
     """[{correct, odds, at}] de las alertas Polymarket enviadas y resueltas."""
     out = []
@@ -209,7 +272,7 @@ def format_daily_report(
     """
     Formato reporte diario matutino.
     pred_stats: {total, pending, resolved, correct, incorrect, synthetic, real_odds}.
-    tier_stats: {fuerte: [...], detectada: [...], moderada: [...]}.
+    tier_stats: sent_tier_stats() — lo enviado por nivel, desde alerts_sent (sports_sent).
     conf_calibration: {bucket: {count, correct, rate}} de model_weights.accuracy_by_confidence.
     Estado del modelo basado en win_rate real (shadow_trades):
       > 50% → ✅ SALUDABLE  |  40-50% → ⚠️ ATENCIÓN  |  < 40% → 🔴 REVISAR
@@ -312,34 +375,28 @@ def format_daily_report(
             score_str = f"{unified_score:.0f}/100" if isinstance(unified_score, (int, float)) and unified_score > 1 else f"{float(unified_score):.0%}"
             lines.append(f"\n🏆 Top señal hoy: {market} — Score: {score_str}")
 
-    # Desglose por tiers — formato compacto: contadores + métricas de resueltas
+    # Desglose por niveles — lo enviado por Telegram (sent_tier_stats), 1u por envío
     if tier_stats:
-        fuerte    = tier_stats.get("fuerte", [])
-        detectada = tier_stats.get("detectada", [])
-        moderada  = tier_stats.get("moderada", [])
+        def _tier_line(emoji: str, label: str, b: dict) -> str:
+            head = f"{emoji} {label}: {b['sent']} enviadas"
+            if b["graded"] < _TIER_MIN_GRADED:
+                return f"{head} | Sin datos ({b['graded']}/{_TIER_MIN_GRADED})"
+            wr = b["wins"] / b["graded"]
+            roi = b["pnl"] / b["graded"]
+            return f"{head} | Win rate: {wr:.0%} | ROI: {roi:+.0%} ({b['graded']} graduadas)"
 
-        def _tier_line(emoji: str, label: str, signals: list) -> str:
-            n = len(signals)
-            resolved = [p for p in signals if p.get("correct") is not None]
-            wins = [p for p in resolved if p.get("correct") is True]
-            if resolved:
-                wr = len(wins) / len(resolved)
-                roi = sum(
-                    (float(p.get("odds", 2.0)) - 1.0) if p.get("correct") else -1.0
-                    for p in resolved
-                ) / len(resolved)
-                return f"{emoji} {label}: {n} | Win rate: {wr:.0%} | ROI: {roi:+.0%}"
-            return f"{emoji} {label}: {n}"
-
-        total_signals = len(fuerte) + len(detectada) + len(moderada)
-        if total_signals > 0:
+        tiers = [tier_stats.get(t) or {"sent": 0, "graded": 0, "wins": 0, "pnl": 0.0}
+                 for t in ("fuerte", "detectada", "moderada")]
+        if sum(b["sent"] for b in tiers) > 0:
+            _since = tier_stats.get("since")
+            _since_str = f" desde {_since.strftime('%d/%m/%Y')}" if _since else ""
             lines.append("")
-            lines.append(_tier_line("🔥", "Fuertes",    fuerte))
-            lines.append(_tier_line("✅", "Detectadas", detectada))
-            lines.append(_tier_line("📊", "Moderadas",  moderada))
-            wr_str  = f" | Win rate: {win_rate:.0%}" if closed_trades >= 5 else ""
-            roi_str = f" | ROI: {roi_sports:+.0%}" if closed_trades >= 5 else ""
-            lines.append(f"📈 Total: {total_signals} señales{wr_str}{roi_str}")
+            lines.append(f"📨 Enviadas por nivel{_since_str} (1u por envío, cuota del primer envío):")
+            for (emoji, label), b in zip((("🔥", "Fuertes"), ("✅", "Detectadas"), ("📊", "Moderadas")), tiers):
+                lines.append(_tier_line(emoji, label, b))
+            _tennis = int(tier_stats.get("tennis_ungraded") or 0)
+            _tennis_str = f"; tenis sin graduar ({_tennis} enviadas)" if _tennis else "; tenis sale sin graduar"
+            lines.append(f"Baloncesto fuera{_tennis_str}.")
 
     # Tabla de calibración de confianza
     if conf_calibration:
