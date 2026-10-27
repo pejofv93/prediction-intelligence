@@ -1446,8 +1446,32 @@ async def _collect_uefa() -> None:
         return
     terminados = [_canonizar(m) for m in jugados
                   if m.get("goals_home") is not None and m.get("goals_away") is not None]
-    escritos = await update_finished_matches(terminados)
-    logger.info("collect.uefa: %d resultados escritos en match_results", escritos)
+    # Regla de propiedad también en resultados de CL: no reescribir lo que ya trajo
+    # football-data, salvo que una señal pendiente apunte al CL_SF_* (para graduarla).
+    a_escribir, cedidos_res = terminados, []
+    if any(m.get("league") == "CL" for m in terminados):
+        from collectors.allsports_uefa import results_owned_by_footballdata
+        try:
+            fd_cl = [d.to_dict() or {} for d in
+                     col("match_results").where(filter=FieldFilter("league", "==", "CL")).stream()]
+            # Ids pendientes de graduar (trend_signals sin graduar, predictions sin result).
+            # Las predictions de mercados alternativos llevan sufijo: CL_SF_x_btts → CL_SF_x.
+            pendientes_ids: set[str] = set()
+            for d in col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream():
+                pendientes_ids.add(str((d.to_dict() or {}).get("match_id", "")))
+            for d in col("predictions").where(filter=FieldFilter("result", "==", None)).stream():
+                mid = str((d.to_dict() or {}).get("match_id", ""))
+                pendientes_ids.add(mid)
+                if "_SF_" in mid:
+                    pendientes_ids.add("_".join(mid.split("_")[:3]))
+            a_escribir, cedidos_res = results_owned_by_footballdata(terminados, fd_cl, pendientes_ids)
+        except Exception:
+            logger.warning("collect.uefa: no se pudo aplicar la regla de propiedad en "
+                           "resultados — se escriben todos", exc_info=True)
+            a_escribir, cedidos_res = terminados, []
+    escritos = await update_finished_matches(a_escribir)
+    logger.info("collect.uefa: %d resultados escritos en match_results · %d de CL cedidos a "
+                "football-data", escritos, len(cedidos_res))
 
     try:
         from enrichers.elo_rating import update_all_elos

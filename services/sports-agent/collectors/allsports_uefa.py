@@ -264,6 +264,47 @@ def parse_event(raw: dict, league: str) -> dict | None:
         return None
 
 
+def results_owned_by_footballdata(sf_results: list[dict], fd_results: list[dict],
+                                  pending_ids: set[str]) -> tuple[list[dict], list[dict]]:
+    """
+    Regla de propiedad en RESULTADOS de CL (la de próximos partidos ya existía): si
+    football-data ya tiene el resultado del mismo partido en match_results, el `CL_SF_*` no
+    se escribe — si no, la fase de liga queda dos veces (54 duplicados a 27-oct-2026).
+    Mismo partido = misma fecha y los dos equipos casan por nombre normalizado (igual o uno
+    contenido en el otro, ≥4 letras), o misma fecha, mismo marcador y al menos un equipo
+    casado ("PSV" vs "PSV Eindhoven", "PAE AEK" vs "AEK Athens").
+    Excepción: si una señal pendiente apunta al id `CL_SF_*` (pending_ids), se escribe igual
+    para que se pueda graduar.
+    Devuelve (a_escribir, cedidos). Solo toca CL; EL/ECL no tienen football-data.
+    """
+    from collectors.team_identity import normalize
+
+    def _same(x: str, y: str) -> bool:
+        x, y = normalize(x), normalize(y)
+        return bool(x and y) and (x == y or (len(x) >= 4 and x in y) or (len(y) >= 4 and y in x))
+
+    por_dia: dict[str, list[dict]] = {}
+    for f in fd_results:
+        if f.get("league") == "CL" and "_SF_" not in str(f.get("match_id", "")):
+            por_dia.setdefault(str(f.get("match_date") or "")[:10], []).append(f)
+
+    keep, ceded = [], []
+    for m in sf_results:
+        if m.get("league") != "CL" or m.get("match_id") in pending_ids:
+            keep.append(m)
+            continue
+        day = str(m.get("match_date") or m.get("date") or "")[:10]
+        twin = False
+        for f in por_dia.get(day, []):
+            home, away = _same(m["home_team"], f.get("home_team", "")), _same(m["away_team"], f.get("away_team", ""))
+            same_score = (m.get("goals_home"), m.get("goals_away")) == (f.get("goals_home"), f.get("goals_away"))
+            if (home and away) or (same_score and (home or away)):
+                twin = True
+                break
+        (ceded if twin else keep).append(m)
+    return keep, ceded
+
+
 async def fetch_tournament_matches(
     league: str, direction: str = "next", max_pages: int = 2
 ) -> list[dict]:
