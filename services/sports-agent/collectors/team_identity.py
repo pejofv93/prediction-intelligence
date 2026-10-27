@@ -176,6 +176,20 @@ def physical_fixture_key(match_date, home_team: str, away_team: str) -> str:
     return f"{day}|{lo}|{hi}"
 
 
+def physical_fixture_id_key(match_date, home_id, away_id) -> str:
+    """
+    Huella de un partido por FECHA + IDS CANÓNICOS de los dos equipos (ordenados), para
+    cuando el mismo partido llega con dos match_id y nombres distintos por fuente
+    (Roma–Real Madrid: CL_SF_16938872 "AS Roma" y 575352 "AS Roma"/"Real Madrid CF").
+    Devuelve "" si falta la fecha o algún id.
+    """
+    day = str(match_date or "")[:10].replace("/", "-")
+    if not day or home_id in (None, "") or away_id in (None, ""):
+        return ""
+    lo, hi = sorted((str(home_id), str(away_id)))
+    return f"{day}|id|{lo}|{hi}"
+
+
 def match_fingerprint(date: str, home_id, away_id) -> str:
     """
     Clave única de un partido, independiente de la fuente que lo trajo.

@@ -646,6 +646,7 @@ async def _fixture_candidates(enriched: dict, shadow_out: list[dict] | None = No
         c.update({
             "match_id": match_id, "league": league, "match_date": str(match_date),
             "home_team": home_team, "away_team": away_team,
+            "home_team_id": enriched.get("home_team_id"), "away_team_id": enriched.get("away_team_id"),
         })
     return out
 
@@ -672,18 +673,20 @@ def _candidate_key(c: dict) -> tuple:
 
 
 def _group_by_fixture(candidates: list[dict]) -> dict[str, dict]:
-    from collectors.team_identity import physical_fixture_key
-
     groups: dict[str, dict] = {}
+    alias: dict[str, str] = {}   # cualquier clave del partido → clave del grupo
     for c in candidates:
-        key = physical_fixture_key(c.get("match_date"), c.get("home_team", ""), c.get("away_team", ""))
-        if not key:
-            key = f"_nokey_{c.get('match_id', '')}"
+        keys = _fixture_lookup_keys(c)
+        key = next((alias[k] for k in keys if k in alias), keys[0])
+        for k in keys:
+            alias.setdefault(k, key)
         group = groups.setdefault(key, {
             "match_id": c["match_id"], "league": c["league"], "match_date": c["match_date"],
             "home_team": c["home_team"], "away_team": c["away_team"],
-            "by_candidate_key": {},
+            "home_team_id": c.get("home_team_id"), "away_team_id": c.get("away_team_id"),
+            "all_keys": [], "by_candidate_key": {},
         })
+        group["all_keys"] += [k for k in keys if k not in group["all_keys"]]
         ck = _candidate_key(c)
         existing = group["by_candidate_key"].get(ck)
         if existing is None or c["score"] > existing["score"]:
@@ -713,7 +716,8 @@ def rank_and_cap(candidates: list[dict]) -> list[dict]:
         fixtures.append({
             "match_id": g["match_id"], "league": g["league"], "match_date": g["match_date"],
             "home_team": g["home_team"], "away_team": g["away_team"],
-            "candidates": cands, "total_score": round(sum(c["score"] for c in cands), 4),
+            "home_team_id": g.get("home_team_id"), "away_team_id": g.get("away_team_id"),
+            "all_keys": g.get("all_keys") or [], "candidates": cands, "total_score": round(sum(c["score"] for c in cands), 4),
         })
 
     fixtures.sort(key=lambda f: -f["total_score"])
@@ -873,14 +877,29 @@ async def _persist_and_send(selected_fixtures: list[dict]) -> int:
 _FIXTURE_SENDS = "trend_fixture_sends"
 
 
-def _fixture_key_of(match_date, home_team: str, away_team: str, match_id) -> str:
-    from collectors.team_identity import physical_fixture_key
-    return physical_fixture_key(match_date, home_team, away_team) or f"_nokey_{match_id}"
+def _fixture_lookup_keys(fx: dict) -> list[str]:
+    """Claves del partido físico, la principal primero: fecha + ids canónicos de los
+    equipos (el mismo partido con dos match_id y nombres distintos por fuente da la misma)
+    y, detrás, fecha + nombres normalizados (la clave de antes del 2026-10-28: los partidos
+    ya enviados con ella se siguen reconociendo). Sin ninguna → _nokey_{match_id}."""
+    from collectors.team_identity import physical_fixture_id_key, physical_fixture_key
+    keys = [k for k in (
+        physical_fixture_id_key(fx.get("match_date"), fx.get("home_team_id"), fx.get("away_team_id")),
+        physical_fixture_key(fx.get("match_date"), fx.get("home_team", ""), fx.get("away_team", "")),
+    ) if k]
+    return keys or [f"_nokey_{fx.get('match_id', '')}"]
 
 
 def _fixture_key(fx: dict) -> str:
-    return _fixture_key_of(fx.get("match_date"), fx.get("home_team", ""),
-                           fx.get("away_team", ""), fx.get("match_id", ""))
+    return _fixture_lookup_keys(fx)[0]
+
+
+def _prev_send(fx: dict, sends: dict[str, dict]) -> dict | None:
+    """Registro de envíos del partido por cualquiera de sus claves (mercados unidos)."""
+    docs = [sends[k] for k in (fx.get("all_keys") or _fixture_lookup_keys(fx)) if k in sends]
+    if not docs:
+        return None
+    return {"markets_sent": sorted({m for d in docs for m in (d.get("markets_sent") or [])})}
 
 
 def _fixture_doc_id(key: str) -> str:
@@ -924,7 +943,7 @@ def _split_already_sent(fixtures: list[dict], sends: dict[str, dict]) -> tuple[l
     nuevo; en ese caso fx["new_markets"] lista los mercados nuevos."""
     keep, skipped = [], []
     for fx in fixtures:
-        new = _new_markets(fx["candidates"], sends.get(_fixture_key(fx)))
+        new = _new_markets(fx["candidates"], _prev_send(fx, sends))
         if new is None:
             keep.append(fx)
         elif new:
@@ -943,7 +962,8 @@ def _record_fixture_send(fx: dict, now: datetime) -> None:
     ref = col(_FIXTURE_SENDS).document(_fixture_doc_id(key))
     try:
         payload = {
-            "fixture_key": key, "match_id": fx["match_id"], "league": fx["league"],
+            "fixture_key": key, "alt_keys": [k for k in (fx.get("all_keys") or []) if k != key],
+            "match_id": fx["match_id"], "league": fx["league"],
             "match_date": fx["match_date"], "home_team": fx["home_team"], "away_team": fx["away_team"],
             "sends": firestore.Increment(1),
             "markets_sent": firestore.ArrayUnion(markets),
@@ -1072,13 +1092,13 @@ async def run_trend_finder() -> dict:
     # (TREND_DEDUP_BEFORE_CAP): se descartan ANTES de elegir y el hueco lo llenan los
     # siguientes del ranking → ~10 mensajes, de menor puntuación.
     groups = _group_by_fixture(all_candidates)
-    sends = _load_fixture_sends(set(groups))
+    sends = _load_fixture_sends({k for g in groups.values() for k in g["all_keys"]})
     if TREND_DEDUP_BEFORE_CAP:
-        drop = {k for k, g in groups.items()
-                if _new_markets(list(g["by_candidate_key"].values()), sends.get(k)) == set()}
+        drop = {k for g in groups.values()
+                if _new_markets(list(g["by_candidate_key"].values()), _prev_send(g, sends)) == set()
+                for k in g["all_keys"]}
         all_candidates = [c for c in all_candidates
-                          if _fixture_key_of(c.get("match_date"), c.get("home_team", ""),
-                                             c.get("away_team", ""), c.get("match_id", "")) not in drop]
+                          if not any(k in drop for k in _fixture_lookup_keys(c))]
     ranked = rank_and_cap(all_candidates)
     selected_fixtures, skipped = _split_already_sent(ranked, sends)
     repeats = sum(1 for fx in selected_fixtures if fx.get("new_markets"))
