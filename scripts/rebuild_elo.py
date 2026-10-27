@@ -403,11 +403,13 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
     —Liverpool o el Madrid no entran en CL hasta el sorteo de la fase de liga— pero sus ids
     de Sofascore sí aparecen como rivales en los partidos de liga de los que ya sembramos.
 
-    Orden de atención: primero quien menos páginas tiene; a igualdad, los clubes sobre los
-    que estamos a punto de apostar (los de `prioritarios`) y los que juegan Europa ahora.
+    Orden de atención: primero quien menos páginas tiene; a igualdad, los clubes de las 8
+    ligas (`ocho_ligas`), luego los que estamos a punto de apostar (los de `prioritarios`) y
+    los que juegan Europa ahora, y al final el resto.
     """
     imap = imap or {}
     prioritarios = prioritarios or set()
+    ocho = ocho_ligas or set()
     out: list[dict] = []
     # Defensa propia: el doc api_meta/uefa_seed_progress mezcla al mismo nivel los progresos
     # por club (dict) con metadata suelta — "_id" (str) y "updated_at" (timestamp, que bajo
@@ -422,9 +424,13 @@ def fetch_club_histories(key: str, candidatos: dict[int, str], progreso: dict,
     sembrables = _seed_tournaments()
 
     def _prioridad(sid: str, v: dict) -> int:
-        if str(v.get("canonical", "")) in prioritarios or sid in en_competicion:
+        # Los de las 8 ligas primero: son los docs que lee el pipeline, y sin su historial
+        # no se puede limpiar lo que les quedó sin torneo (grupo B de la limpieza de amistosos).
+        if str(v.get("canonical", "")) in ocho:
             return 0
-        return 1
+        if str(v.get("canonical", "")) in prioritarios or sid in en_competicion:
+            return 1
+        return 2
 
     def _cola() -> list[tuple]:
         return sorted(
