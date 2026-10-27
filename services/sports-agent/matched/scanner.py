@@ -3,7 +3,8 @@ matched/scanner.py — orquestador del escáner back/lay.
 
 Flujo por ejecución:
   1. /v4/sports (gratis) → deportes activos; filtra por grupo Betfair-líquido y descarta
-     mercados de futuros (_winner, election...). Ordena por prioridad y capa a N keys (coste).
+     mercados de futuros (_winner, election...). Rota: elige N keys (coste) por partidos
+     en las próximas 72h (/events, gratis) × horas sin escanear, con tope de tenis.
   2. Por sport_key: fetch_event_quotes (2 créditos) → classify cada selección back/lay.
   3. Timing guard: descarta eventos ya empezados o demasiado próximos.
   4. Persiste señales en Firestore matched_signals (id determinista → idempotente) y limpia
@@ -19,7 +20,9 @@ import httpx
 
 from shared.config import (
     ODDS_API_KEY,
+    MATCHED_KEY_WINDOW_HOURS,
     MATCHED_MAX_KEYS_PER_SCAN,
+    MATCHED_MAX_TENNIS_KEYS_PER_SCAN,
     SIGNAL_MIN_MINUTES_BEFORE_KICKOFF,
 )
 from shared.firestore_client import col
@@ -101,15 +104,114 @@ async def _active_sport_keys() -> list[str]:
         cand.append((_GROUP_PRIORITY[group], key))
 
     cand.sort(key=lambda t: (t[0], t[1]))
-    keys = [k for _, k in cand][:MATCHED_MAX_KEYS_PER_SCAN]
+    now = datetime.now(timezone.utc)
+    counts = await _upcoming_counts([k for _, k in cand], now)
+    keys, selection = _choose_keys(cand, counts, _last_scanned(), now)
     _KEY_STATS.clear()
     _KEY_STATS.update({
         "keys_excluded_whitelist": sorted(not_liquid),
-        "keys_over_cap": [k for _, k in cand][MATCHED_MAX_KEYS_PER_SCAN:],
+        "keys_over_cap": [s["key"] for s in selection if not s["chosen"]],
+        "key_selection": selection,
     })
     logger.info("matched.scanner: %d keys activas seleccionadas (de %d deportes): %s",
                 len(keys), len(sports), keys)
     return keys
+
+
+async def _upcoming_counts(keys: list[str], now: datetime) -> dict[str, int | None]:
+    """Partidos de cada key con kickoff entre el buffer y +MATCHED_KEY_WINDOW_HOURS.
+    GET /v4/sports/{key}/events no consume créditos (x-requests-last: 0, verificado
+    2026-10-27). None = la llamada falló (la key no se descarta por eso)."""
+    t0 = now + timedelta(minutes=SIGNAL_MIN_MINUTES_BEFORE_KICKOFF)
+    t1 = now + timedelta(hours=MATCHED_KEY_WINDOW_HOURS)
+    params = {"apiKey": ODDS_API_KEY,
+              "commenceTimeFrom": t0.strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "commenceTimeTo": t1.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    out: dict[str, int | None] = {}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for key in keys:
+            try:
+                resp = await client.get(f"{_SPORTS_URL}/{key}/events", params=params)
+                if resp.status_code != 200:
+                    logger.warning("matched.scanner: /events %s HTTP %d", key, resp.status_code)
+                    out[key] = None
+                    continue
+                if resp.headers.get("x-requests-last") not in (None, "0"):
+                    logger.warning("matched.scanner: /events %s cobró %s créditos",
+                                   key, resp.headers.get("x-requests-last"))
+                out[key] = len(resp.json() or [])
+            except Exception:
+                logger.warning("matched.scanner: error /events %s", key, exc_info=True)
+                out[key] = None
+    return out
+
+
+def _last_scanned() -> dict[str, datetime]:
+    """Último escaneo de cada key según los registros de matched_scan_runs."""
+    last: dict[str, datetime] = {}
+    try:
+        for d in col(_RUNS_COLL).stream():
+            run = d.to_dict() or {}
+            try:
+                at = datetime.fromisoformat(str(run.get("at", "")).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            for k in run.get("keys") or []:
+                if k not in last or at > last[k]:
+                    last[k] = at
+    except Exception:
+        logger.warning("matched.scanner: no se pudo leer el histórico de escaneos", exc_info=True)
+    return last
+
+
+def _choose_keys(cand: list[tuple[int, str]], counts: dict[str, int | None],
+                 last: dict[str, datetime], now: datetime) -> tuple[list[str], list[dict]]:
+    """
+    Elige MATCHED_MAX_KEYS_PER_SCAN keys por puntuación = partidos en la ventana ×
+    min(horas sin escanear / 24, 3) (nunca escaneada = 3), con como mucho
+    MATCHED_MAX_TENNIS_KEYS_PER_SCAN de tenis. Sin partidos en la ventana → fuera.
+    Si /events falló en TODAS las keys, se vuelve al orden fijo (grupo, alfabético).
+    `cand` ya viene ordenado por (grupo, key): es el desempate.
+    Devuelve (keys elegidas, detalle por key para matched_scan_runs).
+    """
+    if cand and all(counts.get(k) is None for _, k in cand):
+        keys = [k for _, k in cand][:MATCHED_MAX_KEYS_PER_SCAN]
+        return keys, [{"key": k, "events": None, "hours_since_scan": None, "score": None,
+                       "chosen": k in keys,
+                       "reason": "elegida (orden fijo: /events falló)" if k in keys
+                       else "tope de keys (orden fijo: /events falló)"} for _, k in cand]
+
+    rows = []
+    for order, (_, key) in enumerate(cand):
+        n = counts.get(key)
+        hours = (now - last[key]).total_seconds() / 3600 if key in last else None
+        factor = 3.0 if hours is None else min(max(hours, 0.0) / 24, 3.0)
+        # /events falló solo en esta key: no se descarta, cuenta como 1 partido.
+        score = (1 if n is None else n) * factor
+        rows.append({"key": key, "events": n,
+                     "hours_since_scan": None if hours is None else round(hours, 1),
+                     "score": round(score, 2), "chosen": False, "_order": order})
+
+    keys: list[str] = []
+    tennis = 0
+    for r in sorted(rows, key=lambda r: (-r["score"], r["_order"])):
+        is_tennis = r["key"].startswith("tennis_")
+        if r["events"] == 0:
+            r["reason"] = f"sin partidos en {MATCHED_KEY_WINDOW_HOURS}h"
+        elif len(keys) >= MATCHED_MAX_KEYS_PER_SCAN:
+            r["reason"] = "tope de keys"
+        elif is_tennis and tennis >= MATCHED_MAX_TENNIS_KEYS_PER_SCAN:
+            r["reason"] = "tope de tenis"
+        elif r["score"] <= 0:
+            r["reason"] = "escaneada hace nada"
+        else:
+            r["chosen"] = True
+            r["reason"] = "elegida"
+            keys.append(r["key"])
+            tennis += is_tennis
+    for r in rows:
+        del r["_order"]
+    return keys, rows
 
 
 def _too_close(commence_time: str, now: datetime) -> bool:

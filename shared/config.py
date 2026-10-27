@@ -86,6 +86,10 @@ MATCHED_LAY_ODDS_MAX = float(os.environ.get("MATCHED_LAY_ODDS_MAX", "51.0"))
 # margen para runs manuales). La 4ª key era siempre una liga menor (Austria/Bélgica) con
 # lay de Betfair casi inexistente → recortarla no pierde señal accionable.
 MATCHED_MAX_KEYS_PER_SCAN = int(os.environ.get("MATCHED_MAX_KEYS_PER_SCAN", "3"))
+# Rotación de keys: se eligen por partidos en las próximas N horas (GET /events, 0 créditos)
+# × horas sin escanear. Tope de keys de tenis por escaneo para que no ocupen todos los huecos.
+MATCHED_KEY_WINDOW_HOURS = int(os.environ.get("MATCHED_KEY_WINDOW_HOURS", "72"))
+MATCHED_MAX_TENNIS_KEYS_PER_SCAN = int(os.environ.get("MATCHED_MAX_TENNIS_KEYS_PER_SCAN", "2"))
 # Staleness del lay (The Odds API no da liquidez/size, sí last_update por mercado):
 #   lay más fresco que FRESH_SEC  → confianza "high"
 #   entre FRESH y STALE           → confianza "medium"
