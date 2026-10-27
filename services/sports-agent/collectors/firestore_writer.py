@@ -134,6 +134,8 @@ async def save_upcoming_matches(matches: list[dict]) -> None:
             v = m.get(extra_key)
             if v is not None:
                 doc[extra_key] = v
+        if m.get("source") == "allsports_uefa":
+            _copy_uefa_context(m, doc)
 
         ok = await _firestore_set("upcoming_matches", match_id, doc)
         if ok:
@@ -298,6 +300,21 @@ def _derive_season(date_str: str) -> int:
         return datetime.now(timezone.utc).year
 
 
+# Contexto de eliminatoria de los partidos UEFA (collectors/allsports_uefa.parse_event).
+# Solo se guarda; nadie lo lee todavía. `goals_*`/`winner` siguen siendo el marcador final.
+_UEFA_CONTEXT_KEYS = (
+    "source", "home_source_id", "away_source_id", "round", "round_num", "cup_round_type",
+    "previous_leg_event_id", "goals_home_90", "goals_away_90", "went_extra_time",
+    "penalties_home", "penalties_away", "winner_code", "aggregated_winner_code",
+)
+
+
+def _copy_uefa_context(m: dict, doc: dict) -> None:
+    for k in _UEFA_CONTEXT_KEYS:
+        if m.get(k) is not None and k not in doc:
+            doc[k] = m[k]
+
+
 async def update_finished_matches(matches: list[dict]) -> int:
     """
     Escribe partidos FINISHED en la colección permanente 'prodmatch_results'.
@@ -339,6 +356,11 @@ async def update_finished_matches(matches: list[dict]) -> int:
             "match_date": match_date,
             "season":    _derive_season(match_date),
         }
+        if m.get("source") == "allsports_uefa":
+            for k in ("home_team_id", "away_team_id"):
+                if m.get(k) is not None:
+                    doc[k] = m[k]
+            _copy_uefa_context(m, doc)
 
         try:
             col("match_results").document(match_id).set(doc)

@@ -205,8 +205,29 @@ def parse_event(raw: dict, league: str) -> dict | None:
         match_date = (datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
                       if ts else "")
         status_type = (raw.get("status") or {}).get("type", "notstarted")
-        gh = (raw.get("homeScore") or {}).get("current")
-        ga = (raw.get("awayScore") or {}).get("current")
+        hs, as_ = raw.get("homeScore") or {}, raw.get("awayScore") or {}
+        gh = hs.get("current")
+        ga = as_.get("current")
+        rinfo = raw.get("roundInfo") or {}
+        status_code = (raw.get("status") or {}).get("code")
+        # Contexto de eliminatoria: SOLO se guarda, nadie lo lee todavía. `goals_*` sigue
+        # siendo `current` (puede incluir la prórroga); el marcador a 90' va aparte.
+        # Sofascore: code 110 = tras prórroga, 120 = tras penaltis.
+        went_et = (any(s.get(k) is not None for s in (hs, as_) for k in ("extra1", "extra2", "overtime"))
+                   or hs.get("penalties") is not None or status_code in (110, 120))
+        # Sin `normaltime`, el final solo vale como 90' si las dos partes suman exactamente el
+        # final (si hubo goles en la prórroga no cuadra). No depende de cómo se llame el campo
+        # de prórroga: si no se puede comprobar, se deja vacío.
+        def _halves_match(s: dict, final) -> bool:
+            p1, p2 = s.get("period1"), s.get("period2")
+            return final is not None and p1 is not None and p2 is not None and p1 + p2 == final
+        if hs.get("normaltime") is not None and as_.get("normaltime") is not None:
+            gh90, ga90 = hs["normaltime"], as_["normaltime"]
+        elif (status_type == "finished" and not went_et
+              and _halves_match(hs, gh) and _halves_match(as_, ga)):
+            gh90, ga90 = gh, ga
+        else:
+            gh90 = ga90 = None
 
         return {
             "match_id": f"{league}_SF_{ev_id}",
@@ -221,7 +242,17 @@ def parse_event(raw: dict, league: str) -> dict | None:
             "source": "allsports_uefa",
             "match_date": match_date,
             "date": (datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""),
-            "round": (raw.get("roundInfo") or {}).get("name", ""),
+            "round": rinfo.get("name", ""),
+            "round_num": rinfo.get("round"),
+            "cup_round_type": rinfo.get("cupRoundType"),
+            "previous_leg_event_id": raw.get("previousLegEventId"),
+            "goals_home_90": gh90,
+            "goals_away_90": ga90,
+            "went_extra_time": went_et if status_type == "finished" else None,
+            "penalties_home": hs.get("penalties"),
+            "penalties_away": as_.get("penalties"),
+            "winner_code": raw.get("winnerCode"),                       # 1 local · 2 visitante · 3 empate
+            "aggregated_winner_code": raw.get("aggregatedWinnerCode"),  # quién pasa la eliminatoria
             "status": "FINISHED" if status_type == "finished" else "SCHEDULED",
             # Selección nacional (flag `national` del equipo en Sofascore). La siembra lo usa
             # para no meter partidos de selecciones en el ELO de clubes (ver rebuild_elo.py).
