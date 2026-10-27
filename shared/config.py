@@ -272,7 +272,13 @@ TREND_MODEL_MARGIN_RATIO_MIN = 1.30  # admite ~1 de cada 6 partidos reales (p85�
 # y no cuenta en el acierto global, el diario, el semanal ni el dashboard — ni sus graduadas
 # de antes —, que lo muestran aparte con su objetivo. TREND_EXACT_TOTAL_LIVE=true lo reactiva.
 TREND_EXACT_TOTAL_LIVE = os.environ.get("TREND_EXACT_TOTAL_LIVE", "false").lower() in ("1", "true", "yes")
-TREND_SHADOW_MARKETS: frozenset[str] = frozenset() if TREND_EXACT_TOTAL_LIVE else frozenset({"exact_total"})
+# Margen de victoria EN SOMBRA (2026-10-27: 4/11 = 36% y el modelo elige siempre el empate,
+# margen 0, en 11 de 11). Mismo trato que Total exacto. TREND_WIN_MARGIN_LIVE=true lo reactiva.
+TREND_WIN_MARGIN_LIVE = os.environ.get("TREND_WIN_MARGIN_LIVE", "false").lower() in ("1", "true", "yes")
+TREND_SHADOW_MARKETS: frozenset[str] = frozenset(
+    ({"exact_total"} if not TREND_EXACT_TOTAL_LIVE else set())
+    | ({"win_margin"} if not TREND_WIN_MARGIN_LIVE else set())
+)
 
 # ── Auto-calibración por mercado (analyzers/trend_calibration.py) ──────────────
 # Cada uno de los 14 mercados del feed acumula su propio hit-rate real en

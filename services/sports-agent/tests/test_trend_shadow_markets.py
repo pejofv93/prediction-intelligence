@@ -1,4 +1,4 @@
-"""Total exacto en sombra: se genera y gradúa, no se envía ni cuenta en el acierto."""
+"""Total exacto y Margen de victoria en sombra: se generan y gradúan, no se envían ni cuentan."""
 import asyncio
 import os
 import sys
@@ -21,7 +21,7 @@ def _cand(market):
 def test_exact_total_va_a_sombra(monkeypatch):
     monkeypatch.setattr(trend_finder, "_read_team_stats", lambda _id: {})
     monkeypatch.setattr(trend_finder, "_read_corner_stats", lambda *_: {})
-    monkeypatch.setattr(trend_finder, "_model_candidates", lambda e: [_cand("exact_total"), _cand("dnb")])
+    monkeypatch.setattr(trend_finder, "_model_candidates", lambda e: [_cand("exact_total"), _cand("dnb"), _cand("win_margin")])
     monkeypatch.setattr(trend_variants, "active_rules", lambda: {})
     monkeypatch.setattr(trend_variants, "variant_candidates", lambda *a: [])
     shadow = []
@@ -29,11 +29,13 @@ def test_exact_total_va_a_sombra(monkeypatch):
                 "match_date": "2026-10-26"}
     out = asyncio.run(trend_finder._fixture_candidates(enriched, shadow))
     assert [c["market"] for c in out] == ["dnb"]
-    assert [(c["market"], c["rule_id"], c["match_id"]) for c in shadow] == [("exact_total", "exact_total.v1", "m1")]
+    assert [(c["market"], c["rule_id"], c["match_id"]) for c in shadow] == [
+        ("exact_total", "exact_total.v1", "m1"), ("win_margin", "win_margin.v1", "m1")]
 
 
 def test_fuera_del_acierto_incluso_lo_enviado_antes():
     assert not counts_in_feed({"market": "exact_total", "shadow": False})
+    assert not counts_in_feed({"market": "win_margin", "shadow": False})
     assert not counts_in_feed({"market": "btts", "shadow": True})
     assert counts_in_feed({"market": "btts", "shadow": False})
 
@@ -42,7 +44,8 @@ def test_lineas_aparte_con_objetivo():
     rows = ([{"market": "exact_total", "result": "hit"}] * 6 + [{"market": "exact_total", "result": "miss"}] * 30
             + [{"market": "exact_total", "result": "hit", "shadow": True}])
     lines = shadow_market_lines(rows, [{"market": "exact_total"}] * 13)
-    assert lines[-1] == "Total exacto (obj. 28%): en sombra 1/1 (100%) · enviadas antes 6/36 (17%) · 13 pend."
+    assert lines[-2] == "Total exacto (obj. 28%): en sombra 1/1 (100%) · enviadas antes 6/36 (17%) · 13 pend."
+    assert lines[-1] == "Margen de victoria (obj. 40%): en sombra — · enviadas antes — · 0 pend."
 
 
 def test_diario_no_lo_cuenta():
