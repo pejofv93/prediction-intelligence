@@ -55,3 +55,16 @@ def test_diario_no_lo_cuenta():
                                shadow_market_lines(rows, []))
     assert "Acierto total: 1/1 (100%)" in text
     assert "Total exacto (obj. 28%): en sombra — · enviadas antes 0/1 (0%) · 0 pend." in text
+
+
+def test_duplicadas_fuera_de_todo():
+    from analyzers.trend_weekly import not_duplicate
+    rows = [{"market": "btts", "result": "hit"},
+            {"market": "btts", "result": "hit", "duplicate_of": "575352_btts"},
+            {"market": "btts", "result": "miss", "shadow": True, "rule_id": "btts.B6",
+             "duplicate_of": "x"}]
+    kept = [r for r in rows if not_duplicate(r)]
+    assert kept == [rows[0]]
+    text = build_daily_summary([r for r in kept if counts_in_feed(r)], [], [], {}, None,
+                               datetime(2026, 10, 28, tzinfo=timezone.utc))
+    assert "Acierto total: 1/1 (100%)" in text

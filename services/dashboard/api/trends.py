@@ -29,8 +29,8 @@ async def trend_signals(pattern_type: str = "", limit: int = 100) -> dict:
     try:
         for d in col("trend_signals").stream():
             doc = (d.to_dict() or {}) | {"id": d.id}
-            if doc.get("shadow"):
-                continue  # variantes en sombra: no se envían, no se listan
+            if doc.get("shadow") or doc.get("duplicate_of"):
+                continue  # variantes en sombra y copias en otro id del mismo partido: no se listan
             if pattern_type and doc.get("pattern_type") != pattern_type:
                 continue
             signals.append(doc)
@@ -64,6 +64,8 @@ async def trend_accuracy() -> dict:
     try:
         for d in col("trend_accuracy_log").stream():
             row = d.to_dict() or {}
+            if row.get("duplicate_of"):
+                continue  # copia de la misma señal en otro id del mismo partido: no cuenta
             if row.get("market") in TREND_SHADOW_MARKETS:
                 shadow_market_rows.append(row)  # mercado en sombra: aparte, también lo enviado antes
             elif not row.get("shadow"):  # las variantes en sombra no cuentan en el acierto

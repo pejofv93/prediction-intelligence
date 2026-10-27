@@ -22,7 +22,8 @@ import httpx
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from analyzers.trend_weekly import (
-    _MARKET_LABEL, _calibration_label, _ratio, _tally, counts_in_feed, shadow_market_lines,
+    _MARKET_LABEL, _calibration_label, _ratio, _tally, counts_in_feed, not_duplicate,
+    shadow_market_lines,
 )
 from shared.config import (
     CLOUD_RUN_TOKEN,
@@ -122,10 +123,12 @@ async def run_trend_daily_summary(force: bool = False) -> dict:
     period_from_iso = prev_cutoff or (now - timedelta(days=1)).isoformat()
 
     try:
-        all_rows = [d.to_dict() or {} for d in col("trend_accuracy_log").stream()]
+        all_rows = [r for r in (d.to_dict() or {} for d in col("trend_accuracy_log").stream())
+                    if not_duplicate(r)]
         log_rows = [r for r in all_rows if counts_in_feed(r)]
-        all_pending = [d.to_dict() or {} for d in
-                       col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream()]
+        all_pending = [s for s in (d.to_dict() or {} for d in
+                       col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream())
+                       if not_duplicate(s)]
         pending = [s for s in all_pending if counts_in_feed(s)]
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
         run_snap = col("trend_runs").document((now - timedelta(days=1)).date().isoformat()).get()

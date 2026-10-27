@@ -82,6 +82,13 @@ def _calibration_label(cal: dict | None, graded: int, target: float) -> str:
     return f"fijo ({graded}/{TREND_CALIBRATION_MIN_SAMPLE})"
 
 
+def not_duplicate(r: dict) -> bool:
+    """Fuera las copias de una misma señal en otro id del mismo partido (`duplicate_of` =
+    id de la señal que se conserva; CL_SF_* vs id de football-data, marcadas 27-oct-2026).
+    No cuentan en nada: ni acierto, ni sombra, ni calibración, ni variantes."""
+    return not r.get("duplicate_of")
+
+
 def counts_in_feed(r: dict) -> bool:
     """Fila/señal que cuenta en el acierto: ni variante en sombra ni de un mercado en sombra
     (TREND_SHADOW_MARKETS — tampoco sus graduadas de cuando se enviaba)."""
@@ -238,10 +245,12 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
     period_from_iso = prev_cutoff or (now - timedelta(days=7)).isoformat()
 
     try:
-        all_rows = [d.to_dict() or {} for d in col("trend_accuracy_log").stream()]
+        all_rows = [r for r in (d.to_dict() or {} for d in col("trend_accuracy_log").stream())
+                    if not_duplicate(r)]
         log_rows = [r for r in all_rows if counts_in_feed(r)]
-        all_pending = [d.to_dict() or {} for d in
-                       col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream()]
+        all_pending = [s for s in (d.to_dict() or {} for d in
+                       col("trend_signals").where(filter=FieldFilter("graded", "==", False)).stream())
+                       if not_duplicate(s)]
         pending = [s for s in all_pending if counts_in_feed(s)]
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
         runs = {d.id: d.to_dict() or {} for d in col("trend_runs").stream()}

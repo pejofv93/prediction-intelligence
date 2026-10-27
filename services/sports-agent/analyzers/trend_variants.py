@@ -220,7 +220,7 @@ async def evaluate_promotions() -> dict:
 
     try:
         shadow_rows = [r for r in (d.to_dict() or {} for d in col("trend_accuracy_log").stream())
-                       if r.get("shadow")]
+                       if r.get("shadow") and not r.get("duplicate_of")]
     except Exception:
         logger.error("trend_variants: error leyendo datos de promoción", exc_info=True)
         return {"error": "read_failed"}

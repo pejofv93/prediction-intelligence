@@ -204,6 +204,8 @@ async def run_trend_calibration() -> dict:
                 continue  # "void" (DNB anulado por empate) fuera, igual que el dashboard
             if row.get("shadow"):
                 continue  # variantes en sombra: se miden aparte (trend_variants)
+            if row.get("duplicate_of"):
+                continue  # copia de la misma señal en otro id del mismo partido
             if market in active and row.get("rule_id") != f"{market}.{active[market]}":
                 continue
             by_market.setdefault(market, []).append(row)
