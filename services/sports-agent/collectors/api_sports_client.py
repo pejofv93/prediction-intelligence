@@ -333,13 +333,25 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
         return []
 
 
+def _espn_completed(comp: dict) -> bool:
+    """¿Partido terminado según ESPN (status.type.completed o state=post)? El marcador > 0
+    no basta: un partido en juego ya lo tiene (Clippers–Lakers se guardó 38-56 a mitad del
+    partido el 2026-10-29; acabó 87-103). Sin status (formato desconocido) → True, y decide
+    el marcador como antes."""
+    status = comp.get("status")
+    if not status:
+        return True
+    st = status.get("type") or {}
+    return bool(st.get("completed")) or st.get("state") == "post"
+
+
 async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict] | None:
     """
     Últimos partidos del equipo NBA desde el schedule ESPN (gratuito, sin clave).
     URL: /apis/site/v2/sports/basketball/nba/teams/{id}/schedule
     Devuelve raw_matches en formato basketball_collector:
       [{goals_home, goals_away, home_team_id, was_home, match_date}]
-    Solo partidos completados (ambas puntuaciones > 0).
+    Solo partidos terminados (status.type completed/post y ambas puntuaciones > 0).
     None si ESPN falla (HTTP != 200, timeout, JSON inválido) y [] si responde sin partidos
     terminados: el colector solo marca el doc como caducado en el segundo caso.
     """
@@ -367,7 +379,7 @@ async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict] | None:
         goals_home = float(home_score_raw.get("value", 0)) if isinstance(home_score_raw, dict) else 0.0
         goals_away = float(away_score_raw.get("value", 0)) if isinstance(away_score_raw, dict) else 0.0
 
-        if goals_home <= 0 or goals_away <= 0:
+        if goals_home <= 0 or goals_away <= 0 or not _espn_completed(comp):
             continue  # partido futuro o en curso
 
         home_tid = int(home.get("team", {}).get("id", 0)) or None
