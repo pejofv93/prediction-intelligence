@@ -1915,10 +1915,14 @@ async def _bg_analyze() -> None:
             _prefetch_coros = (
                 # odds-api.io: fuente primaria — pre-fetch todas las ligas activas
                 _oaio_coros
-                # The Odds API: secundaria — solo ligas con partidos en próximas 48h
+                # The Odds API: secundaria — solo ligas con partidos en próximas 48h.
+                # Sin baloncesto: el motor de valor no analiza basket (lo hace
+                # basketball_analyzer con su propia petición h2h+spreads+totals, abajo);
+                # pedirlo aquí también gastaba 1 crédito más por liga y día (NBA + Euroliga).
                 + [_get_league_events(sk, "prefetch", _now)
                    for lg, sk in _ODDS_SPORT_MAP.items()
-                   if lg in _active_leagues and _has_upcoming(lg, 48)]
+                   if lg in _active_leagues and not sk.startswith("basketball_")
+                   and _has_upcoming(lg, 48)]
                 # OddsPapi v4: un único rango semanal [hoy, hoy+7d]. La llamada extra
                 # a "solo hoy" era redundante — el rango semanal ya lo cubre y ahora
                 # _fetch_fixtures_for_date reutiliza cualquier rango que contenga el
