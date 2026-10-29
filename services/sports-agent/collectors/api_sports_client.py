@@ -198,6 +198,51 @@ def _current_basketball_season() -> str:
     return f"{start}-{start + 1}"
 
 
+def _american_odds(raw) -> int | None:
+    """"-218" / "+180" / "EVEN" / -110 → entero americano; None si no se puede leer."""
+    if raw is None:
+        return None
+    txt = str(raw).strip().upper()
+    if txt in ("EVEN", "EV", "PK"):
+        return 100
+    try:
+        val = int(float(txt.replace("+", "")))
+    except ValueError:
+        return None
+    return val if abs(val) >= 100 else None
+
+
+def _parse_espn_odds(odds_list: list) -> dict | None:
+    """{home_ml, away_ml, spread, total} de competition.odds del scoreboard ESPN.
+
+    Formato actual (DraftKings, visto 2026-10-29): moneyline.home/away.close.odds ("-218")
+    y pointSpread.home.close.line ("-5.5", con signo desde el local). El formato anterior
+    (homeTeamOdds.moneyLine) ya no viene: con él espn_odds quedaba vacío en todos los
+    partidos. Se mantiene como alternativa. spread = línea del LOCAL; total = overUnder.
+    """
+    for o in odds_list or []:
+        ml = o.get("moneyline") or {}
+
+        def _side(d: dict | None) -> int | None:
+            d = d or {}
+            return _american_odds((d.get("close") or {}).get("odds")) or                 _american_odds((d.get("open") or {}).get("odds"))
+
+        home_ml, away_ml = _side(ml.get("home")), _side(ml.get("away"))
+        if not (home_ml and away_ml):
+            home_ml = _american_odds((o.get("homeTeamOdds") or {}).get("moneyLine"))
+            away_ml = _american_odds((o.get("awayTeamOdds") or {}).get("moneyLine"))
+        if not (home_ml and away_ml):
+            continue
+        ps_home = (o.get("pointSpread") or {}).get("home") or {}
+        spread = (ps_home.get("close") or {}).get("line") or (ps_home.get("open") or {}).get("line")
+        if spread is None and o.get("spread") is not None:
+            spread = str(o.get("spread"))
+        return {"home_ml": home_ml, "away_ml": away_ml,
+                "spread": spread if spread is not None else o.get("details"),
+                "total": o.get("overUnder")}
+    return None
+
+
 async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
     """
     NBA games via ESPN public scoreboard API — sin clave, completamente gratuito.
@@ -233,19 +278,8 @@ async def get_nba_games_espn(date_str: str | None = None) -> list[dict]:
                         return int(raw) if raw is not None else None
                     except (TypeError, ValueError):
                         return None
-                # ESPN embeds Caesars odds in competition.odds — extraer para fallback en basketball_analyzer
-                espn_odds = None
-                for _o in comp.get("odds", []):
-                    _home_ml = (_o.get("homeTeamOdds") or {}).get("moneyLine")
-                    _away_ml = (_o.get("awayTeamOdds") or {}).get("moneyLine")
-                    if _home_ml and _away_ml:
-                        espn_odds = {
-                            "home_ml": int(_home_ml),
-                            "away_ml": int(_away_ml),
-                            "spread": _o.get("details"),       # e.g. "-4.5" or "Cavaliers -4"
-                            "total": _o.get("overUnder"),      # e.g. 218.5
-                        }
-                        break
+                # ESPN embebe cuotas en competition.odds — fallback en basketball_analyzer
+                espn_odds = _parse_espn_odds(comp.get("odds") or [])
                 # Estado de serie playoffs (ESPN expone competition.series con wins por equipo)
                 series_wins_home = series_wins_away = None
                 series_title = ""
