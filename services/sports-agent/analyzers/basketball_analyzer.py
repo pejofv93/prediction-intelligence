@@ -13,7 +13,7 @@ Odds: The Odds API — basketball_nba, basketball_euroleague
 """
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from scipy.stats import norm
 
 import httpx
@@ -165,6 +165,55 @@ def _normalize(name: str) -> str:
     import re, unicodedata
     n = unicodedata.normalize("NFD", name.lower().strip()).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z ]", "", n).strip()
+
+
+# Ligas cuyos partidos se fechan en hora de EE. UU.: un partido de las 22:00 ET cae al
+# día siguiente en UTC, así que la fecha UTC sola no dice qué día se jugó.
+_US_TZ_LEAGUES = {"NBA", "NBA_GL"}
+
+
+def _us_eastern():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("America/New_York")
+    except Exception:
+        # Sin base de zonas: UTC-5 da el mismo día que ET para cualquier hora de NBA
+        return timezone(timedelta(hours=-5))
+
+
+def _game_local_date(raw, league: str) -> "date | None":
+    """Fecha local de un partido: hora de EE. UU. (Nueva York) en NBA, UTC en el resto
+    (Europa juega por la tarde, sin cruzar medianoche UTC). En NBA una fecha sin hora
+    ("2026-10-29", historial anterior a match_datetime) es ambigua → None."""
+    txt = str(raw or "").strip()
+    if len(txt) < 10:
+        return None
+    if len(txt) == 10:
+        if league in _US_TZ_LEAGUES:
+            return None
+        try:
+            return date.fromisoformat(txt)
+        except ValueError:
+            return None
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00").replace(" ", "T", 1))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_us_eastern() if league in _US_TZ_LEAGUES else timezone.utc).date()
+
+
+def _rest_days(raw_matches: list, game_day: "date | None", league: str) -> int | None:
+    """Días entre el último partido jugado ANTES de este y este, en fecha local de la
+    liga (1 = back-to-back). None si no se puede saber (sin fecha del partido o sin
+    historial fechado con hora en NBA): sin ajuste, mejor que uno equivocado."""
+    if game_day is None:
+        return None
+    prev = [d for m in raw_matches or []
+            if (d := _game_local_date(m.get("match_datetime") or m.get("match_date"), league))
+            and d < game_day]
+    return (game_day - max(prev)).days if prev else None
 
 
 def _find_event(events: list, home: str, away: str) -> dict | None:
@@ -691,37 +740,21 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     )
 
     # --- Back-to-back detection ---
-    yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
-
-    # ORDEN: estas tres funciones leen "los últimos partidos". Antes asumían raw_matches
+    # ORDEN: _consecutive_wins lee "los últimos partidos". Antes se asumía raw_matches
     # del más antiguo al más reciente ([-3:], reversed([-5:])), pero el colector los guarda
-    # del más reciente al más antiguo → leían los MÁS VIEJOS: descanso de 100+ días (caso
-    # ACB), back-to-back nunca detectado, rachas contadas desde el principio del historial.
-    # Con el historial de Euroliga mezclando dos temporadas, eso son partidos de la anterior.
-    # Se ordena aquí por fecha (no se confía en el orden guardado: los docs viejos siguen
-    # en Firestore hasta el próximo collect).
+    # del más reciente al más antiguo → leían los MÁS VIEJOS: rachas contadas desde el
+    # principio del historial. Con el historial de Euroliga mezclando dos temporadas, eso
+    # son partidos de la anterior. Se ordena aquí por fecha (no se confía en el orden
+    # guardado: los docs viejos siguen en Firestore hasta el próximo collect).
     def _recent_first(raw_matches: list) -> list:
         con_fecha = [m for m in raw_matches if str(m.get("match_date") or "")[:10]]
         return sorted(con_fecha, key=lambda m: str(m.get("match_date"))[:10], reverse=True)
 
-    def _played_yesterday(raw_matches: list) -> bool:
-        for m in _recent_first(raw_matches)[:3]:  # solo los 3 más recientes
-            d = str(m.get("match_date", ""))[:10]
-            if d == yesterday_iso:
-                return True
-        return False
-
-    def _days_since_last_game(raw_matches: list) -> int | None:
-        today_iso = datetime.now(timezone.utc).date().isoformat()
-        for m in _recent_first(raw_matches)[:5]:
-            d = str(m.get("match_date", ""))[:10]
-            if d and d < today_iso:
-                try:
-                    from datetime import date as _date
-                    return (_date.fromisoformat(today_iso) - _date.fromisoformat(d)).days
-                except ValueError:
-                    pass
-        return None
+    # Descanso y back-to-back respecto a la FECHA DEL PARTIDO en hora local de la liga
+    # (EE. UU. en NBA), no respecto a la hora del análisis: antes "ayer" era el de ahora
+    # en UTC y se marcaba B2B a quien jugó 2-3 días antes del partido (Lakers en
+    # Warriors–Lakers, 29-oct). Ver _rest_days.
+    _game_day = _game_local_date(match_date, league)
 
     def _consecutive_wins(raw_matches: list, team_id: int) -> int:
         # was_home es fiable (seteado por el collector); fallback a comparación de id
@@ -743,8 +776,10 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
                 break
         return streak
 
-    home_b2b = _played_yesterday(home_stats.get("raw_matches", []))
-    away_b2b = _played_yesterday(away_stats.get("raw_matches", []))
+    _home_rest = _rest_days(home_stats.get("raw_matches", []), _game_day, league)
+    _away_rest = _rest_days(away_stats.get("raw_matches", []), _game_day, league)
+    home_b2b = _home_rest == 1
+    away_b2b = _away_rest == 1
 
     p_home = rats["p_home_win"]
     if home_b2b:
@@ -816,8 +851,6 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
         rats = {**rats, "p_home_win": adj_p}
 
     # --- REST_ADVANTAGE: 3+ días descanso vs 1 día → ventaja real en NBA ---
-    _home_rest = _days_since_last_game(home_stats.get("raw_matches", []))
-    _away_rest = _days_since_last_game(away_stats.get("raw_matches", []))
     if _home_rest is not None and _away_rest is not None:
         _rest_diff = _home_rest - _away_rest
         if _rest_diff >= 2:

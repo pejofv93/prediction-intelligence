@@ -350,7 +350,7 @@ async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict] | None:
     Últimos partidos del equipo NBA desde el schedule ESPN (gratuito, sin clave).
     URL: /apis/site/v2/sports/basketball/nba/teams/{id}/schedule
     Devuelve raw_matches en formato basketball_collector:
-      [{goals_home, goals_away, home_team_id, was_home, match_date}]
+      [{goals_home, goals_away, home_team_id, was_home, match_date, match_datetime}]
     Solo partidos terminados (status.type completed/post y ambas puntuaciones > 0).
     None si ESPN falla (HTTP != 200, timeout, JSON inválido) y [] si responde sin partidos
     terminados: el colector solo marca el doc como caducado en el segundo caso.
@@ -389,6 +389,9 @@ async def get_nba_team_stats_espn(espn_team_id: int) -> list[dict] | None:
             "home_team_id": home_tid,
             "was_home": home_tid == espn_team_id,
             "match_date": event.get("date", "")[:10],
+            # Con hora (UTC): el descanso se mide en fecha de EE. UU., y un partido de las
+            # 22:00 ET ya es el día siguiente en UTC (basketball_analyzer._rest_days).
+            "match_datetime": event.get("date", ""),
         })
 
     logger.info("ESPN NBA schedule team %d: %d partidos completados", espn_team_id, len(matches))
