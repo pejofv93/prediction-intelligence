@@ -976,6 +976,10 @@ async def run_daily_learning() -> None:
             # pero quedan fuera de pesos, accuracy y totales.
             _epoch = _prediction_epoch(prediction, _epoch_cutoff)
             _is_legacy = _epoch == MODEL_EPOCH_PRE_ELO_REBUILD
+            # Cuotas viejas (stale_odds: odds_cache revivía BTTS/CS de odds-api.io de días
+            # antes, 27-29 oct): mismo trato — se gradúan, fuera de pesos, accuracy y totales.
+            if prediction.get("stale_odds"):
+                _is_legacy = True
 
             # Identificar factor dominante
             factors = prediction.get("factors", {})
@@ -1039,7 +1043,11 @@ async def run_daily_learning() -> None:
                 "model_epoch": _epoch,
             })
 
-            # Sincronizar shadow_trade — crea el doc si no existe, luego lo resuelve
+            # Sincronizar shadow_trade — crea el doc si no existe, luego lo resuelve.
+            # stale_odds (cuotas viejas): sin trade, el bankroll virtual no la cuenta.
+            if prediction.get("stale_odds"):
+                logger.info("run_daily_learning: %s con stale_odds — sin shadow_trade", match_id)
+                continue
             try:
                 from shared.shadow_engine import track_new_signal, update_trade_result
                 shadow_result = "win" if correct else "loss"

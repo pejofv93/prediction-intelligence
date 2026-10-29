@@ -73,7 +73,8 @@ async def run_production_backtest() -> dict:
         logger.warning("production_backtest: 0 predictions resueltas encontradas")
         return {"n": 0, "message": "sin datos resueltos"}
 
-    records = [d.to_dict() for d in resolved_docs]
+    # stale_odds: generadas con cuotas viejas (odds_cache, 27-29 oct) → no cuentan
+    records = [r for r in (d.to_dict() for d in resolved_docs) if not r.get("stale_odds")]
     logger.info("production_backtest: %d predictions resueltas", len(records))
 
     # ── Accuracy por liga ─────────────────────────────────────────────────

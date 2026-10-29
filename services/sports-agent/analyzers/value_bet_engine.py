@@ -773,11 +773,18 @@ async def fetch_bookmaker_odds(
                 # Restaurar source y all_markets para que EXTRA_MARKETS genere AH/BTTS
                 if data.get("source"):
                     cached_result["source"] = data["source"]
-                if data.get("all_markets"):
-                    cached_result["all_markets"] = data["all_markets"]
+                _am = _fresh_cached_all_markets(data, now, cache_ttl)
+                if _am:
+                    cached_result["all_markets"] = _am
                     logger.info(
                         "fetch_bookmaker_odds(%s): cache Firestore HIT source=%s all_markets_keys=%s",
-                        match_id, data.get("source", "?"), list(data["all_markets"].keys()),
+                        match_id, data.get("source", "?"), list(_am.keys()),
+                    )
+                elif data.get("all_markets"):
+                    logger.info(
+                        "fetch_bookmaker_odds(%s): cache Firestore — all_markets caducados "
+                        "(all_markets_fetched_at=%s), se ignoran",
+                        match_id, data.get("all_markets_fetched_at"),
                     )
                 return cached_result
     except Exception:
@@ -811,7 +818,7 @@ async def fetch_bookmaker_odds(
             if league in _op_map:
                 op_result = await get_oddspapi_h2h_odds(league, home_team, away_team)
                 if op_result:
-                    await _save_odds_cache(match_id, op_result, now)
+                    await _save_odds_cache(match_id, {**op_result, "source": op_result.get("source") or "oddspapi"}, now)
                     logger.info("fetch_bookmaker_odds(%s): OddsPapi h2h — %s @ home=%.2f away=%.2f",
                                 match_id, op_result.get("bookmaker", "oddspapi"),
                                 op_result.get("home_odds", 0), op_result.get("away_odds", 0))
@@ -826,7 +833,7 @@ async def fetch_bookmaker_odds(
             if _OPTIC_KEY:
                 optic = await _fetch_opticodds(match_id, home_team, away_team, league, now)
                 if optic:
-                    await _save_odds_cache(match_id, optic, now)
+                    await _save_odds_cache(match_id, {**optic, "source": "opticodds"}, now)
                     logger.info("fetch_bookmaker_odds(%s): opticodds — %s @ home=%.2f away=%.2f",
                                 match_id, optic.get("bookmaker", "opticodds"),
                                 optic.get("home_odds", 0), optic.get("away_odds", 0))
@@ -1043,7 +1050,7 @@ async def _fetch_the_odds_api(
                     match_id, odds_result["bookmaker"],
                     odds_result["home_odds"], odds_result["draw_odds"], odds_result["away_odds"],
                 )
-                await _save_odds_cache(match_id, odds_result, now)
+                await _save_odds_cache(match_id, {**odds_result, "source": "theoddsapi"}, now)
                 return odds_result
 
     # Logging detallado para diagnosticar por qué no matchea.
@@ -1919,6 +1926,40 @@ def _parse_odds_response(fixture_data: dict) -> dict | None:
         return None
 
 
+def _fresh_cached_all_markets(data: dict, now: datetime, ttl: timedelta) -> dict | None:
+    """all_markets del odds_cache solo si su propia fecha (all_markets_fetched_at) está
+    dentro del TTL. fetched_at no vale: lo renueva cualquier fuente del 1X2 (The Odds API
+    refrescaba el 1X2 y los BTTS/AH/CS de odds-api.io de días antes revivían, 27-29 oct).
+    Sin all_markets_fetched_at (docs anteriores a este cambio) → no se usan."""
+    am = data.get("all_markets")
+    am_at = data.get("all_markets_fetched_at")
+    if not am or not am_at:
+        return None
+    if isinstance(am_at, str):
+        try:
+            am_at = datetime.fromisoformat(am_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if am_at.tzinfo is None:
+        am_at = am_at.replace(tzinfo=timezone.utc)
+    return am if (now - am_at) < ttl else None
+
+
+def _odds_cache_extra(odds: dict, now: datetime, existing: bool) -> dict:
+    """source/all_markets del odds_cache. Una fuente sin mercados alternativos (The Odds
+    API, OddsPapi) BORRA los anteriores al actualizar: no se mezclan con su 1X2 nuevo."""
+    from google.cloud import firestore
+    extra: dict = {"parser_version": _ODDS_CACHE_PARSER_VERSION,
+                   "source": odds.get("source") or "desconocida"}
+    if odds.get("all_markets"):
+        extra["all_markets"] = odds["all_markets"]
+        extra["all_markets_fetched_at"] = now
+    elif existing:
+        extra["all_markets"] = firestore.DELETE_FIELD
+        extra["all_markets_fetched_at"] = firestore.DELETE_FIELD
+    return extra
+
+
 async def _save_odds_cache(match_id: str, odds: dict, now: datetime) -> None:
     """Guarda cuotas en odds_cache. opening_* solo se establece la primera vez."""
     try:
@@ -1926,11 +1967,7 @@ async def _save_odds_cache(match_id: str, odds: dict, now: datetime) -> None:
         existing = doc_ref.get()
 
         # Campos extra: source y all_markets para que el cache hit también genere AH/BTTS
-        _extra: dict = {"parser_version": _ODDS_CACHE_PARSER_VERSION}
-        if odds.get("source"):
-            _extra["source"] = odds["source"]
-        if odds.get("all_markets"):
-            _extra["all_markets"] = odds["all_markets"]
+        _extra = _odds_cache_extra(odds, now, existing.exists)
 
         if existing.exists:
             # Actualizar cuotas actuales — NO tocar opening_*

@@ -271,6 +271,8 @@ async def _bg_daily_report() -> None:
             )
             for doc in all_preds:
                 d = doc.to_dict()
+                if d.get("stale_odds"):
+                    continue  # cuotas viejas (odds_cache, 27-29 oct): no cuentan
                 pred_stats["total"] += 1
                 is_synthetic = d.get("is_synthetic", False) or d.get("source", "") == "POISSON_SYNTHETIC"
                 if is_synthetic:
@@ -401,7 +403,7 @@ async def send_weekly_report() -> JSONResponse:
             .where(filter=FieldFilter("created_at", "<", week_end))
             .stream()
         )
-        week_preds = [d.to_dict() for d in pred_docs]
+        week_preds = [p for p in (d.to_dict() for d in pred_docs) if not p.get("stale_odds")]
 
         best_match = "N/A"
         best_edge = 0.0
