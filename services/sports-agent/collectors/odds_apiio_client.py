@@ -436,10 +436,15 @@ async def _find_sport_slug(category: str) -> str | None:
 # "soccer" se mantiene como fallback por si la API revirtiera.
 _FOOTBALL_SLUG_CANDIDATES = ["football", "soccer", "soccer_football"]
 
-# Casas de apuestas para /odds/multi — plan free de odds-api.io permite max 2.
-# Bookmakers permitidos en el plan actual: Bet365, Unibet.
+# Casas de apuestas para /odds/multi — plan free de odds-api.io permite max 2, y solo las
+# seleccionadas en la cuenta (GET /bookmakers/selected).
 # Enviar más de 2 devuelve 403 "Access denied. You're allowed max 2 bookmakers."
-_DEFAULT_BOOKMAKERS = "Bet365,Unibet"
+# Bet365 pasó a planes de pago el 2026-10-26: pedirla daba 403 a TODA la petición
+# ("Bet365 is only available on our paid plans") y dejaba todas las ligas sin cuotas.
+# Desde entonces la cuenta solo tiene Unibet (verificado 2026-10-29: /odds/multi 200 con
+# ML/Spread/Totals/BTTS; Unibet no da Correct Score). Añadir una segunda casa exige
+# seleccionarla antes en la cuenta de odds-api.io.
+_DEFAULT_BOOKMAKERS = "Unibet"
 
 # Caché global de odds por eventId: {event_id: odds_item}
 # Poblado una sola vez por _prefetch_priority_odds() en _fetch_all_soccer_events().
