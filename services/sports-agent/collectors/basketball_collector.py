@@ -589,9 +589,7 @@ async def get_basketball_result_by_teams(league: str, home_team: str, away_team:
     Resultado h2h/moneyline de un partido de basket terminado: 'HOME_WIN' | 'AWAY_WIN' | None.
     Estrategia:
       1. ACB con id TheSportsDB embebido (ACB_<id>_*) → lookupevent por id (robusto).
-      2. Casa por nombres normalizados + fecha contra el histórico de la fuente del league
-         (NBA→ESPN, ACB→Sofascore, EUR→Euroleague).
-    NO grada totales/spread (requieren marcador final, fase posterior).
+      2. Marcador por nombres + fecha (get_basketball_score_by_teams).
     Mismo patrón que football_api.get_wc26_result_by_teams.
     """
     lg = (league or "").upper()
@@ -604,11 +602,25 @@ async def get_basketball_result_by_teams(league: str, home_team: str, away_team:
         except Exception:
             logger.warning("get_basketball_result_by_teams: error lookupevent ACB %s", match_id, exc_info=True)
 
+    score = await get_basketball_score_by_teams(league, home_team, away_team, date_str)
+    if score is None:
+        return None
+    return "HOME_WIN" if score[0] > score[1] else "AWAY_WIN"
+
+
+async def get_basketball_score_by_teams(league: str, home_team: str, away_team: str,
+                                        date_str: str) -> tuple[int, int] | None:
+    """
+    Marcador final (puntos local, puntos visitante) en la orientación de home_team/
+    away_team, o None. Casa por nombres normalizados + fecha contra el histórico de la
+    fuente del league (NBA→ESPN, ACB→Sofascore, EUR→Euroleague). Lo usan el h2h y la
+    graduación de totales/hándicap.
+    """
     date10 = str(date_str)[:10]
     try:
         finished = await _basket_finished_for_league(league, date10)
     except Exception:
-        logger.warning("get_basketball_result_by_teams: error fetch %s", league, exc_info=True)
+        logger.warning("get_basketball_score_by_teams: error fetch %s", league, exc_info=True)
         return None
     hn, an = _norm_team(home_team), _norm_team(away_team)
     for f in finished:
@@ -620,11 +632,11 @@ async def get_basketball_result_by_teams(league: str, home_team: str, away_team:
             continue
         fh, fa = _norm_team(f.get("home_team_name", "")), _norm_team(f.get("away_team_name", ""))
         if fh == hn and fa == an:
-            return "HOME_WIN" if hs > as_ else "AWAY_WIN"
+            return int(hs), int(as_)
         if fh == an and fa == hn:  # orientación invertida entre fuentes
-            return "AWAY_WIN" if hs > as_ else "HOME_WIN"
+            return int(as_), int(hs)
     logger.debug(
-        "get_basketball_result_by_teams: sin resultado %s vs %s (%s, %s)",
+        "get_basketball_score_by_teams: sin resultado %s vs %s (%s, %s)",
         home_team, away_team, date10, league,
     )
     return None

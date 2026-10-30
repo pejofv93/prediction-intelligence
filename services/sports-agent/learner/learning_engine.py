@@ -8,6 +8,7 @@ Flujo:
 """
 import asyncio
 import logging
+import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 
@@ -261,10 +262,39 @@ async def check_score(match_id: str) -> tuple[int, int] | None:
 
 
 # Mercados que se gradúan con el marcador final. El resto sigue por la comparación
-# clásica contra el nombre del equipo (1X2, tenis, baloncesto).
+# clásica contra el nombre del equipo (1X2, tenis, baloncesto). "spread" es el hándicap
+# de baloncesto (la línea es siempre la del local, como asian_handicap).
 _SCORE_GRADED_MARKETS: frozenset[str] = frozenset({
-    "btts", "totals", "asian_handicap", "correct_score",
+    "btts", "totals", "asian_handicap", "spread", "correct_score",
 })
+
+# Totales y hándicap de baloncesto: se gradúan con el marcador de la fuente de basket
+# (no con check_score) y van por la vía legacy (como stale_odds): ni pesos ni métricas
+# del modelo de fútbol. Sus factores (off_edge/def_edge/form) no son los del ensemble y
+# un acierto reforzaría el peso "form" del fútbol.
+_BASKET_SCORE_MARKETS: frozenset[str] = frozenset({"totals", "spread"})
+
+# Solo partidos desde el despliegue (30-oct-2026). Las enviadas anteriores se graduaron con
+# un backfill a mano (graded_by="backfill_basket_score_20261030"), sin apuestas virtuales;
+# las no enviadas anteriores se dejan como están.
+_BASKET_SCORE_SINCE = "2026-10-30"
+
+# Línea al final de la selección de basket: "Over 223.5", "Washington Wizards -1.5".
+_SELECTION_LINE_RE = re.compile(r"\s*([+-]?\d+(?:\.\d+)?)$")
+
+
+def _is_basketball(prediction: dict) -> bool:
+    return (str(prediction.get("sport", "")).lower() in ("basketball", "nba")
+            or str(prediction.get("league", "")).upper() in ("NBA", "ACB", "EUROLEAGUE"))
+
+
+def _is_basket_score_market(prediction: dict) -> bool:
+    return (_is_basketball(prediction)
+            and str(prediction.get("market_type") or "").lower() in _BASKET_SCORE_MARKETS)
+
+
+def _basket_score_in_window(prediction: dict) -> bool:
+    return str(prediction.get("match_date") or "")[:10] >= _BASKET_SCORE_SINCE
 
 
 def _grade_with_score(prediction: dict, gh: int, ga: int) -> dict | None:
@@ -279,6 +309,15 @@ def _grade_with_score(prediction: dict, gh: int, ga: int) -> dict | None:
         return None
     sel = str(prediction.get("selection") or "").strip()
     total = gh + ga
+    # Basket no guarda `line`: va al final de la selección. Solo en basket — en fútbol
+    # una predicción sin `line` sigue sin graduarse, como hasta ahora.
+    sel_line = None
+    if _is_basketball(prediction):
+        m = _SELECTION_LINE_RE.search(sel)
+        if m:
+            sel_line = float(m.group(1))
+            if market == "spread":
+                sel = sel[:m.start()].strip()
 
     if market == "btts":
         both = gh > 0 and ga > 0
@@ -288,6 +327,8 @@ def _grade_with_score(prediction: dict, gh: int, ga: int) -> dict | None:
     if market == "totals":
         line = prediction.get("line")
         if line is None:
+            line = sel_line
+        if line is None:
             return None
         line = float(line)
         if abs(total - line) < 1e-9:          # línea entera clavada → push
@@ -295,8 +336,10 @@ def _grade_with_score(prediction: dict, gh: int, ga: int) -> dict | None:
         over = sel.lower().startswith("over")
         return {"correct": (total > line) if over else (total < line), "error_type": None}
 
-    if market == "asian_handicap":
+    if market in ("asian_handicap", "spread"):
         point = prediction.get("line")
+        if point is None:
+            point = sel_line
         if point is None:
             return None
         point = float(point)
@@ -715,6 +758,26 @@ async def _resolve_basket_extra(prediction: dict) -> str | None:
     return None
 
 
+async def _resolve_basket_score(prediction: dict) -> tuple[str, tuple[int, int]] | None:
+    """Totales/hándicap de basket: (resultado, marcador) desde la fuente del league."""
+    home_team = str(prediction.get("home_team") or "")
+    away_team = str(prediction.get("away_team") or "")
+    match_date = prediction.get("match_date")
+    if not home_team or not away_team or not match_date:
+        return None
+    try:
+        from collectors.basketball_collector import get_basketball_score_by_teams
+        score = await get_basketball_score_by_teams(
+            str(prediction.get("league") or ""), home_team, away_team, str(match_date)[:10],
+        )
+    except Exception:
+        logger.warning("_resolve_basket_score: error consultando fuente basket", exc_info=True)
+        return None
+    if score is None:
+        return None
+    return ("HOME_WIN" if score[0] > score[1] else "AWAY_WIN"), score
+
+
 def _get_week_label(dt: datetime) -> str:
     """Devuelve etiqueta de semana ISO: ej. '2025-W14'."""
     iso_cal = dt.isocalendar()
@@ -863,6 +926,7 @@ async def run_daily_learning() -> None:
     _needs_score = [
         i for i, pr in enumerate(pending)
         if str(pr.get("market_type") or "").lower() in _SCORE_GRADED_MARKETS
+        and not _is_basketball(pr)   # basket: marcador de su propia fuente, abajo
     ]
     _scores: list[tuple[int, int] | None] = [None] * len(pending)
     if _needs_score:
@@ -933,6 +997,27 @@ async def run_daily_learning() -> None:
             resolved_basket, len(_basket_indices),
         )
 
+    # Basket totales/hándicap: resultado + marcador por nombres+fecha.
+    _basket_score_indices = [
+        i for i, (p, r) in enumerate(zip(pending, _raw_results))
+        if (r is None or isinstance(r, Exception)) and _is_basket_score_market(p)
+        and _basket_score_in_window(p)
+    ]
+    if _basket_score_indices:
+        _basket_scores = await asyncio.gather(
+            *[_resolve_basket_score(pending[i]) for i in _basket_score_indices],
+            return_exceptions=True,
+        )
+        resolved_basket_score = 0
+        for idx, rs in zip(_basket_score_indices, _basket_scores):
+            if isinstance(rs, tuple):
+                _raw_results[idx], _scores[idx] = rs
+                resolved_basket_score += 1
+        logger.info(
+            "run_daily_learning: basket totales/hándicap — %d/%d con marcador",
+            resolved_basket_score, len(_basket_score_indices),
+        )
+
     groq_predictions_count = 0  # contador de predicciones groq_ai procesadas hoy
 
     # 3b. Procesar resultados en orden (weight updates son acumulativos)
@@ -979,6 +1064,10 @@ async def run_daily_learning() -> None:
             # Cuotas viejas (stale_odds: odds_cache revivía BTTS/CS de odds-api.io de días
             # antes, 27-29 oct): mismo trato — se gradúan, fuera de pesos, accuracy y totales.
             if prediction.get("stale_odds"):
+                _is_legacy = True
+            # Basket totales/hándicap: mismo trato (ver _BASKET_SCORE_MARKETS) — se gradúan
+            # y sincronizan con shadow_trades, fuera de pesos y de las métricas del fútbol.
+            if _is_basket_score_market(prediction):
                 _is_legacy = True
 
             # Identificar factor dominante
