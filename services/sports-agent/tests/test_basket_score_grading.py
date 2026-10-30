@@ -61,3 +61,10 @@ def test_marcador_en_la_orientacion_de_la_prediccion(monkeypatch):
     assert run(bc.get_basketball_score_by_teams("NBA", "Los Angeles Lakers", "LA Clippers", "2026-10-29")) == (103, 87)
     assert run(bc.get_basketball_result_by_teams("NBA", "LA Clippers", "Los Angeles Lakers", "2026-10-29")) == "AWAY_WIN"
     assert run(bc.get_basketball_score_by_teams("NBA", "LA Clippers", "Los Angeles Lakers", "2026-10-28")) is None
+
+
+def test_moneyline_de_basket_tambien_es_basket():
+    from learner.learning_engine import _is_basketball
+    assert _is_basketball(_p("h2h", "Washington Wizards"))
+    assert _is_basketball({"league": "EUROLEAGUE", "market_type": "h2h"})
+    assert not _is_basketball({"sport": "football", "league": "PL", "market_type": "h2h"})

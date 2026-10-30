@@ -1065,9 +1065,12 @@ async def run_daily_learning() -> None:
             # antes, 27-29 oct): mismo trato — se gradúan, fuera de pesos, accuracy y totales.
             if prediction.get("stale_odds"):
                 _is_legacy = True
-            # Basket totales/hándicap: mismo trato (ver _BASKET_SCORE_MARKETS) — se gradúan
-            # y sincronizan con shadow_trades, fuera de pesos y de las métricas del fútbol.
-            if _is_basket_score_market(prediction):
+            # Basket (moneyline, totales y hándicap): mismo trato — se gradúan y sincronizan
+            # con shadow_trades, fuera de pesos y de las métricas del fútbol. Sus factores
+            # (off_edge/def_edge/form) no son los del ensemble: _top_factor se quedaba con
+            # "form" y cada acierto de basket subía el peso "form" del fútbol; además la
+            # moneyline caía en la cesta 1X2 de accuracy_by_market.
+            if _is_basketball(prediction):
                 _is_legacy = True
 
             # Identificar factor dominante
