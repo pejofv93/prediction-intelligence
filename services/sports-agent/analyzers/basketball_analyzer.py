@@ -430,6 +430,16 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
 _DOC_SUFFIXES = ("ml", "spread", "tot", "h1_spread", "h1_tot", "q1_tot")
 
 
+# Sombra (desde 2026-11-01): la señal se guarda y se gradúa (y su shadow_trade), pero no
+# se envía a Telegram. Queda marcada con shadow=True y shadow_reason.
+def _shadow_reason(pred: dict, sfx: str) -> str | None:
+    # NBA: solo la moneyline se envía; totales y hándicaps (también 1ª mitad / 1er cuarto)
+    # van a sombra.
+    if str(pred.get("league") or "").upper() == "NBA" and sfx != "ml":
+        return "nba_alt_market"
+    return None
+
+
 def _best_side(candidates: list[dict]) -> dict | None:
     """El lado de mayor EV entre los que han pasado los filtros (igual que fútbol)."""
     return max(candidates, key=lambda p: p["ev"]) if candidates else None
@@ -528,7 +538,7 @@ async def _save_and_alert(pred: dict, doc_id: str, enriched: dict, batch=None,
     from analyzers.value_bet_engine import _send_telegram_alert, _build_alert_payload
     locked = bool(existing and existing.get("alerted"))
     sent = False
-    if pred.get("ev", pred["edge"]) > SPORTS_ALERT_EDGE:
+    if not pred.get("shadow") and pred.get("ev", pred["edge"]) > SPORTS_ALERT_EDGE:
         try:
             sent = await _send_telegram_alert(_build_alert_payload(pred, enriched))
         except Exception:
@@ -1260,6 +1270,10 @@ async def generate_basketball_signals(game: dict, weights_version: int = 0) -> l
     for pred, sfx in _kept:
         doc_id = f"{match_id}_{sfx}"
         pred["match_id"] = doc_id
+        _reason = _shadow_reason(pred, sfx)
+        if _reason:
+            pred["shadow"] = True
+            pred["shadow_reason"] = _reason
         if await _save_and_alert(pred, doc_id, game, batch=_fs_batch,
                                  existing=_existing.get(doc_id)):
             predictions.append(pred)
