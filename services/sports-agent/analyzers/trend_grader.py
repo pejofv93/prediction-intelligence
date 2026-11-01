@@ -259,6 +259,8 @@ def _write_grade(doc_id: str, sig: dict, result: str, source: str, extra: dict |
         "model_prob": sig.get("model_prob"),
         # Puntuación del partido al enviarse (informativo: acierto por tramo en los resúmenes).
         "fixture_total_score": sig.get("fixture_total_score"),
+        # Cuándo se generó (variantes en sombra: el recuento cuenta desde TREND_VARIANT_COUNT_SINCE).
+        "generated_at": sig.get("generated_at"),
         "result": result, "graded_at": now_iso, "grade_source": source,
         **(extra or {}),
     }

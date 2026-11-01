@@ -22,7 +22,7 @@ Promover = trend_market_rules/{mercado}.active_rule; borrar ese doc vuelve a v1.
 import logging
 from datetime import datetime, timezone
 
-from shared.config import TREND_MARKET_TARGET, TREND_PROMOTION_MIN_SHADOW
+from shared.config import TREND_MARKET_TARGET, TREND_PROMOTION_MIN_SHADOW, TREND_VARIANT_COUNT_SINCE
 
 logger = logging.getLogger(__name__)
 
@@ -183,8 +183,15 @@ def active_rules() -> dict[str, str]:
     return rules
 
 
+def in_variant_count(r: dict) -> bool:
+    """Fila de sombra dentro del recuento: generada desde TREND_VARIANT_COUNT_SINCE. Las
+    graduadas antes del reinicio no llevan generated_at en el log → fuera."""
+    return str(r.get("generated_at") or "")[:10] >= TREND_VARIANT_COUNT_SINCE
+
+
 def _shadow_tally(rows: list[dict], rule_id: str) -> tuple[int, int]:
-    graded = [r for r in rows if r.get("rule_id") == rule_id and r.get("result") in ("hit", "miss")]
+    graded = [r for r in rows if r.get("rule_id") == rule_id and r.get("result") in ("hit", "miss")
+              and in_variant_count(r)]
     return sum(1 for r in graded if r.get("result") == "hit"), len(graded)
 
 

@@ -329,6 +329,10 @@ TREND_MARKET_TARGET = {
 TREND_RULE_VERSION = "v1"
 # Graduadas en sombra que necesita una variante antes de poder estar LISTA para promoción.
 TREND_PROMOTION_MIN_SHADOW = 30
+# Reinicio del recuento de las variantes en sombra (2026-11-01, tras limpiar team_stats y
+# repetir el backtest con el menú 3fdd95f9…): solo cuentan las señales en sombra generadas
+# desde esta fecha (generated_at de trend_signals, copiado al log por el grader).
+TREND_VARIANT_COUNT_SINCE = "2026-11-01"
 
 # Umbral fijo de cada mercado — mismo valor que ya usa trend_finder.py hoy,
 # aquí como mapa para poder compararlo contra el umbral calibrado por mercado.

@@ -152,7 +152,10 @@ def _variant_lines(variants: list[dict]) -> list[str]:
     """Sección "Probando": variantes en sombra frente a v1 en sombra (mismos partidos)."""
     from shared.config import TREND_PROMOTION_MIN_SHADOW
 
-    lines = ["", "Probando (en sombra, no cuenta en el acierto)"]
+    from shared.config import TREND_VARIANT_COUNT_SINCE
+    y, m, d = (int(x) for x in TREND_VARIANT_COUNT_SINCE.split("-"))
+    lines = ["", f"Probando (en sombra, no cuenta en el acierto; recuento desde el "
+                 f"{d} {_MONTHS[m - 1]} {y})"]
     alerts = []
     for v in variants:
         name = f"{_MARKET_LABEL.get(v['market'], v['market'])} {v['variant']}"
