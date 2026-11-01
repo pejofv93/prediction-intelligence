@@ -1133,6 +1133,8 @@ async def run_daily_learning() -> None:
                 "correct": correct,
                 "error_type": error_type,
                 "model_epoch": _epoch,
+                # Solo para el filtro de contadores de abajo; no se escribe en Firestore.
+                "basketball": _is_basketball(prediction),
             })
 
             # Sincronizar shadow_trade — crea el doc si no existe, luego lo resuelve.
@@ -1232,6 +1234,9 @@ async def run_daily_learning() -> None:
     # aunque el ELO estuviera distorsionado cuando saltó la señal. Solo PESOS y accuracy_by_*
     # se restringen a la época actual (ahí sí contamina el feature corrupto).
     all_resolved = processed_predictions + legacy_predictions
+    # Contadores de por vida y accuracy_log semanal: rendimiento del modelo de fútbol.
+    # El basket se gradúa y va a shadow_trades, pero no suma aquí.
+    ledger_resolved = [p for p in all_resolved if not p.get("basketball")]
 
     if not all_resolved:
         logger.info("run_daily_learning: nada resuelto hoy (ni época actual ni legacy)")
@@ -1287,8 +1292,8 @@ async def run_daily_learning() -> None:
     new_version = current_version + 1
     total_in_db, correct_in_db = _get_historical_counts()
     # Contadores de POR VIDA — ciegos a la época (legacy incluida).
-    lifetime_total = total_in_db + len(all_resolved)
-    lifetime_correct = correct_in_db + sum(1 for p in all_resolved if p.get("correct"))
+    lifetime_total = total_in_db + len(ledger_resolved)
+    lifetime_correct = correct_in_db + sum(1 for p in ledger_resolved if p.get("correct"))
 
     if processed_predictions:
         try:
@@ -1333,7 +1338,7 @@ async def run_daily_learning() -> None:
             )
 
     # --- 6. Actualizar accuracy_log de la semana — TOTALES ciegos a la época ---
-    week_predictions = all_resolved
+    week_predictions = ledger_resolved
     week_accuracy = calculate_accuracy(
         [{"correct": p.get("correct")} for p in week_predictions]
     )
