@@ -257,6 +257,8 @@ def _write_grade(doc_id: str, sig: dict, result: str, source: str, extra: dict |
         "team": sig.get("team"), "league": sig.get("league"), "match_id": sig.get("match_id"),
         "sample_size": sig.get("sample_size"), "rate_or_ratio": sig.get("rate_or_ratio"),
         "model_prob": sig.get("model_prob"),
+        # Puntuación del partido al enviarse (informativo: acierto por tramo en los resúmenes).
+        "fixture_total_score": sig.get("fixture_total_score"),
         "result": result, "graded_at": now_iso, "grade_source": source,
         **(extra or {}),
     }

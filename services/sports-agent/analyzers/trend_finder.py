@@ -36,8 +36,10 @@ from shared.config import (
     CLOUD_RUN_TOKEN,
     TELEGRAM_BOT_URL,
     TREND_DEDUP_BEFORE_CAP,
+    TREND_FEED_CONFIG_SINCE,
     TREND_MAX_FIXTURES_PER_RUN,
     TREND_MAX_FIXTURES_PER_TEAM,
+    TREND_MIN_FIXTURE_SCORE,
     TREND_ROLLING_MIN_SAMPLE,
     TREND_SERIES_MIN_SAMPLE,
     TREND_RULE_VERSION,
@@ -701,7 +703,8 @@ def rank_and_cap(candidates: list[dict]) -> list[dict]:
     partido con equipos invertidos, mismo motivo que el bug de duplicados
     UEFA). Rankea PARTIDOS por la suma de scores de sus mercados y capa a
     TREND_MAX_FIXTURES_PER_RUN, con máximo TREND_MAX_FIXTURES_PER_TEAM
-    apariciones por equipo.
+    apariciones por equipo. Los partidos por debajo de TREND_MIN_FIXTURE_SCORE no
+    entran (desde 2026-11-01).
 
     Sin round-robin por mercado: con el mensaje agrupado por partido la
     variedad de mercados ya sale sola dentro de cada mensaje, no hace falta
@@ -711,7 +714,7 @@ def rank_and_cap(candidates: list[dict]) -> list[dict]:
     fixtures: list[dict] = []
     for g in groups.values():
         cands = sorted(g["by_candidate_key"].values(), key=lambda c: -c["score"])
-        if not cands:
+        if not cands or sum(c["score"] for c in cands) < TREND_MIN_FIXTURE_SCORE:
             continue
         fixtures.append({
             "match_id": g["match_id"], "league": g["league"], "match_date": g["match_date"],
@@ -990,6 +993,8 @@ def _record_run(now: datetime, sent: int, ranked: int, skipped: int, repeats: in
             "skipped_already_sent": firestore.Increment(skipped),
             "new_market_repeats": firestore.Increment(repeats),
             "dedup_before_cap": TREND_DEDUP_BEFORE_CAP,
+            "min_fixture_score": TREND_MIN_FIXTURE_SCORE,
+            "feed_config_since": TREND_FEED_CONFIG_SINCE,
         }, merge=True)
     except Exception:
         logger.error("trend_finder: error guardando trend_runs", exc_info=True)

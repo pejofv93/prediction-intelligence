@@ -244,7 +244,14 @@ TREND_MAX_FIXTURES_PER_TEAM = 2
 # nuevo. Apagado (opción A): se descartan los ya enviados DESPUÉS de elegir los 10
 # mejores → ~3,4-3,9 mensajes/día. Encendido (opción B): se descartan ANTES y el hueco
 # lo llenan los siguientes del ranking → ~10/día, de menor puntuación.
-TREND_DEDUP_BEFORE_CAP = os.environ.get("TREND_DEDUP_BEFORE_CAP", "false").lower() in ("1", "true", "yes")
+# Desde 2026-11-01 encendido por defecto (opción B) junto con la puntuación mínima.
+TREND_DEDUP_BEFORE_CAP = os.environ.get("TREND_DEDUP_BEFORE_CAP", "true").lower() in ("1", "true", "yes")
+# Puntuación mínima del partido (suma de la fuerza de sus mercados) para entrar en el
+# ranking, desde 2026-11-01: acierto 5-7 ≈58 % (n=65) frente a 7+ ≈67 % (n=403). Con 6
+# no salía ningún mensaje el 1-nov (todos los partidos de 6+ ya enviados) → 5,5.
+TREND_MIN_FIXTURE_SCORE = float(os.environ.get("TREND_MIN_FIXTURE_SCORE", "5.5"))
+# Fecha del cambio a opción B + mínimo; se guarda en cada fila de trend_runs.
+TREND_FEED_CONFIG_SINCE = "2026-11-01"
 # Reparto de mercados: descartado el round-robin (tenía sentido cuando cada
 # mensaje era 1 señal suelta; con el mensaje agrupado por partido la variedad
 # de mercados ya sale sola dentro de cada mensaje).

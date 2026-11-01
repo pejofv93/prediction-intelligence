@@ -22,8 +22,8 @@ import httpx
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from analyzers.trend_weekly import (
-    _MARKET_LABEL, _calibration_label, _ratio, _tally, counts_in_feed, not_duplicate,
-    shadow_market_lines,
+    _MARKET_LABEL, _calibration_label, _ratio, _tally, counts_in_feed, fixture_scores,
+    not_duplicate, score_band_line, shadow_market_lines,
 )
 from shared.config import (
     CLOUD_RUN_TOKEN,
@@ -50,7 +50,8 @@ def _sends_line(run: dict | None) -> str:
 
 def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: list[dict],
                         calibration: dict[str, dict], run: dict | None, day: datetime,
-                        shadow_lines: list[str] | None = None) -> str:
+                        shadow_lines: list[str] | None = None,
+                        scores: dict[str, float] | None = None) -> str:
     """Texto plano del diario. Función pura: todo entra por parámetro, ya sin sombra."""
     d_hit, d_miss, d_void = _tally(day_rows)
     t_hit, t_miss, _ = _tally(log_rows)
@@ -61,6 +62,9 @@ def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: lis
                  f" · {d_void} anuladas)")
     lines.append(f"⏳ Pendientes: {len(pending)}")
     lines.append(f"🎯 Acierto total: {_ratio(t_hit, t_miss)}")
+    if scores is not None:
+        lines.append(score_band_line("🔢 Por puntuación del partido (total, informativo)",
+                                     log_rows, scores))
 
     pending_by_market: dict[str, int] = {}
     for s in pending:
@@ -133,6 +137,7 @@ async def run_trend_daily_summary(force: bool = False) -> dict:
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
         run_snap = col("trend_runs").document((now - timedelta(days=1)).date().isoformat()).get()
         run = run_snap.to_dict() if run_snap.exists else None
+        scores = fixture_scores(col("trend_signals").select(["fixture_total_score"]).stream())
     except Exception:
         logger.error("trend_daily: error leyendo datos de tendencias", exc_info=True)
         return {"sent": False, "reason": "read_failed"}
@@ -140,7 +145,7 @@ async def run_trend_daily_summary(force: bool = False) -> dict:
     day_rows = [r for r in log_rows if str(r.get("graded_at") or "") > period_from_iso]
     cutoff = max((str(r.get("graded_at") or "") for r in log_rows), default=now.isoformat())
     text = build_daily_summary(log_rows, day_rows, pending, calibration, run, now,
-                               shadow_market_lines(all_rows, all_pending))
+                               shadow_market_lines(all_rows, all_pending), scores)
 
     try:
         reports.document(day_key).create({

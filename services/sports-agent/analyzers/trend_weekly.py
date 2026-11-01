@@ -112,6 +112,38 @@ def shadow_market_lines(all_rows: list[dict], all_pending: list[dict]) -> list[s
     return lines
 
 
+# Tramos de puntuación del partido (informativo, desde 2026-11-01): el mínimo para enviar
+# es TREND_MIN_FIXTURE_SCORE (5,5); se compara 5,5-7 frente a 7 o más.
+_SCORE_BANDS = (("5,5-7", 5.5, 7.0), ("7+", 7.0, float("inf")))
+
+
+def fixture_scores(signals) -> dict[str, float]:
+    """{signal_id: fixture_total_score} de trend_signals, para las filas de
+    trend_accuracy_log anteriores a que el grader copiara la puntuación."""
+    out = {}
+    for d in signals:
+        v = (d.to_dict() or {}).get("fixture_total_score")
+        if isinstance(v, (int, float)):
+            out[d.id] = float(v)
+    return out
+
+
+def score_band_line(label: str, rows: list[dict], scores: dict[str, float]) -> str:
+    """'<label>: 5,5-7 h/n (%) · 7+ h/n (%)' por la puntuación del partido de cada fila."""
+    parts = []
+    for name, lo, hi in _SCORE_BANDS:
+        band = []
+        for r in rows:
+            s = r.get("fixture_total_score")
+            if not isinstance(s, (int, float)):
+                s = scores.get(r.get("signal_id"))
+            if isinstance(s, (int, float)) and lo <= s < hi:
+                band.append(r)
+        h, m, _ = _tally(band)
+        parts.append(f"{name} {_ratio(h, m)}")
+    return f"{label}: " + " · ".join(parts)
+
+
 def _fmt_day(d: datetime) -> str:
     return f"{d.day} {_MONTHS[d.month - 1]}"
 
@@ -161,7 +193,8 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
                          period_from: datetime, period_to: datetime,
                          variants: list[dict] | None = None,
                          runs: dict[str, dict] | None = None,
-                         shadow_lines: list[str] | None = None) -> str:
+                         shadow_lines: list[str] | None = None,
+                         scores: dict[str, float] | None = None) -> str:
     """Texto plano del resumen. Función pura: todo lo que lee entra por parámetro.
     log_rows/week_rows/pending ya vienen sin las variantes ni los mercados en sombra."""
     w_hit, w_miss, w_void = _tally(week_rows)
@@ -176,6 +209,10 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
     zero_line = _zero_days_line(runs or {}, period_from, period_to)
     if zero_line:
         lines.append(zero_line)
+    if scores is not None:
+        lines += ["", "Por puntuación del partido (informativo)",
+                  score_band_line("Semana", week_rows, scores),
+                  score_band_line("Total", log_rows, scores)]
 
     lines += ["", "Por tipo (total)"]
     for ptype, label in _TYPE_LABEL:
@@ -254,6 +291,7 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
         pending = [s for s in all_pending if counts_in_feed(s)]
         calibration = {d.id: d.to_dict() or {} for d in col("trend_market_calibration").stream()}
         runs = {d.id: d.to_dict() or {} for d in col("trend_runs").stream()}
+        scores = fixture_scores(col("trend_signals").select(["fixture_total_score"]).stream())
     except Exception:
         logger.error("trend_weekly: error leyendo datos de tendencias", exc_info=True)
         return {"sent": False, "reason": "read_failed"}
@@ -265,7 +303,7 @@ async def run_trend_weekly_summary(force: bool = False) -> dict:
     variants = promotion_status([r for r in all_rows if r.get("shadow")], active_rules())
     text = build_weekly_summary(log_rows, week_rows, pending, calibration,
                                 period_from, now - timedelta(days=1), variants, runs,
-                                shadow_market_lines(all_rows, all_pending))
+                                shadow_market_lines(all_rows, all_pending), scores)
 
     try:
         reports.document(week_key).create({
