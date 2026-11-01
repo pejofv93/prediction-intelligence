@@ -430,6 +430,8 @@ def _make_pred(base: dict, market: str, selection: str, odds: float,
 _DOC_SUFFIXES = ("ml", "spread", "tot", "h1_spread", "h1_tot", "q1_tot")
 
 
+_ML_SHADOW_EV = 0.25
+
 # Sombra (desde 2026-11-01): la señal se guarda y se gradúa (y su shadow_trade), pero no
 # se envía a Telegram. Queda marcada con shadow=True y shadow_reason.
 def _shadow_reason(pred: dict, sfx: str) -> str | None:
@@ -437,6 +439,10 @@ def _shadow_reason(pred: dict, sfx: str) -> str | None:
     # van a sombra.
     if str(pred.get("league") or "").upper() == "NBA" and sfx != "ml":
         return "nba_alt_market"
+    # Moneyline (todas las ligas) con EV > 0,25, desde 2026-11-01: en las enviadas y
+    # graduadas, 1/7 aciertos y ROI -75,1 % (EV <= 0,25: 16/37, ROI +7,3 %).
+    if sfx == "ml" and float(pred.get("ev", pred.get("edge")) or 0) > _ML_SHADOW_EV:
+        return "ml_ev_high"
     return None
 
 

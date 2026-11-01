@@ -18,6 +18,16 @@ def test_nba_totales_y_handicap_a_sombra():
     assert ba._shadow_reason(_pred("ACB"), "spread") is None
 
 
+def test_moneyline_ev_alto_a_sombra():
+    for lg in ("NBA", "EUROLEAGUE", "ACB"):
+        assert ba._shadow_reason(_pred(lg, ev=0.257), "ml") == "ml_ev_high"
+        assert ba._shadow_reason(_pred(lg, ev=0.25), "ml") is None
+        assert ba._shadow_reason(_pred(lg, ev=0.234), "ml") is None
+    # el EV alto no cambia la razón de los mercados alternativos NBA
+    assert ba._shadow_reason(_pred("NBA", ev=0.4), "tot") == "nba_alt_market"
+    assert ba._shadow_reason(_pred("EUROLEAGUE", ev=0.4), "tot") is None
+
+
 def _run_save(monkeypatch, pred, existing=None):
     sent, saved = [], []
     async def fake_send(payload):
