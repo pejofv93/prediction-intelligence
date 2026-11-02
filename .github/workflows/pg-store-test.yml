@@ -1,0 +1,84 @@
+# Tests de scripts/migration/pg_store.py contra un Postgres de usar y tirar (service container). SOLO manual.
+#
+# Sin entrada: solo los tests de semántica (tests/pg_store/).
+# Con `dump` (carpeta jsonl/<readTime> del bucket, la que imprime firestore-backup): además
+# descarga ese volcado al runner, lo carga en el Postgres del runner y compara documento a
+# documento con el manifest. Los datos no salen del runner (sin artifacts) y se borran al final;
+# el log solo muestra recuentos y hashes. pg_store no se conecta a ningún servicio.
+name: pg-store-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      dump:
+        description: "Carpeta del volcado en gs://prediction-intelligence-fs-backup/jsonl/ (vacío = solo tests)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  BUCKET: prediction-intelligence-fs-backup
+  # Postgres efímero del propio runner, sin red exterior: esta contraseña no protege nada.
+  PG_DSN: postgresql://postgres:pgtest@localhost:5432/postgres
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pgtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Dependencias
+        run: |
+          pip install "psycopg[binary]==3.2.3" "psycopg-pool==3.2.4" "pytest==8.3.3" \
+            "google-cloud-firestore==2.19.0" "grpcio==1.62.2" "grpcio-status==1.62.2"
+
+      - name: Tests de semántica
+        run: python -m pytest tests/pg_store -q -p no:cacheprovider
+
+      - name: Validar nombre del volcado
+        if: inputs.dump != ''
+        env:
+          DUMP: ${{ inputs.dump }}
+        run: |
+          [[ "$DUMP" =~ ^[0-9TZ-]+$ ]] || { echo "nombre de volcado no válido"; exit 1; }
+          echo "DUMP=$DUMP" >> "$GITHUB_ENV"
+
+      - name: Auth GCP
+        if: inputs.dump != ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        if: inputs.dump != ''
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Descargar volcado al runner
+        if: inputs.dump != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/dump"
+          gcloud storage cp -r "gs://$BUCKET/jsonl/$DUMP" "$RUNNER_TEMP/dump/" --no-user-output-enabled
+
+      - name: Cargar en Postgres y comparar
+        if: inputs.dump != ''
+        run: python scripts/migration/load_jsonl_pg.py --dump "$RUNNER_TEMP/dump/$DUMP"
+
+      - name: Borrar datos locales del runner
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/dump"

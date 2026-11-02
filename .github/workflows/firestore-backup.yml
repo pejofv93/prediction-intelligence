@@ -1,0 +1,99 @@
+# Copia completa de Firestore (default) antes de la migración. SOLO manual.
+#
+# 1. gcloud firestore export (copia oficial, restaurable con gcloud firestore import)
+#      -> gs://prediction-intelligence-fs-backup/managed/<fecha>/
+# 2. Volcado JSONL con readTime fijo + verificación (conteos, duplicados, relectura aleatoria,
+#    sha256, censo de tipos) + detector de claves sobre TODOS los documentos
+# 3. Subida -> gs://prediction-intelligence-fs-backup/jsonl/<readTime>/ y relectura para
+#    comparar sha256 fichero a fichero
+#
+# El repo es público y sus logs también: nada de este workflow imprime contenido de
+# documentos, solo nombres de colección, recuentos y hashes. Sin artifacts: los datos solo
+# salen del runner hacia el bucket privado, y la carpeta local se borra al final.
+# Si el detector encuentra algo con forma de clave, el paso 2 falla y no se sube nada.
+name: firestore-backup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firestore-backup
+  cancel-in-progress: false
+
+env:
+  PROJECT: prediction-intelligence
+  BUCKET: prediction-intelligence-fs-backup
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 1. Export gestionado de Firestore
+        run: |
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          gcloud firestore export "gs://$BUCKET/managed/$STAMP" \
+            --database='(default)' --project="$PROJECT"
+
+      - name: 2. Volcado JSONL + verificación + detector de claves
+        run: python -I scripts/migration/firestore_dump.py --out "$RUNNER_TEMP/fsdump"
+
+      - name: 3. Subida al bucket
+        run: |
+          DIR=$(cat "$RUNNER_TEMP/fsdump/LAST_DUMP")
+          [[ "$DIR" =~ ^[0-9TZ-]+$ ]] || { echo "nombre de carpeta inesperado"; exit 1; }
+          echo "DUMP_DIR=$DIR" >> "$GITHUB_ENV"
+          gcloud storage cp -r "$RUNNER_TEMP/fsdump/$DIR" "gs://$BUCKET/jsonl/" --no-user-output-enabled
+          echo "Subida: gs://$BUCKET/jsonl/$DIR/"
+
+      - name: 4. Relectura y comparación de sha256
+        run: |
+          mkdir -p "$RUNNER_TEMP/verify"
+          gcloud storage cp -r "gs://$BUCKET/jsonl/$DUMP_DIR" "$RUNNER_TEMP/verify/" --no-user-output-enabled
+          python - "$RUNNER_TEMP/fsdump/$DUMP_DIR" "$RUNNER_TEMP/verify/$DUMP_DIR" <<'PY'
+          import hashlib, json, os, sys
+          local, remote = sys.argv[1], sys.argv[2]
+          def sha(p):
+              h = hashlib.sha256()
+              with open(p, "rb") as f:
+                  for c in iter(lambda: f.read(1 << 20), b""):
+                      h.update(c)
+              return h.hexdigest()
+          m = json.load(open(os.path.join(local, "manifest.json"), encoding="utf-8"))
+          files = sorted(os.listdir(local))
+          bad = [f for f in files if not os.path.exists(os.path.join(remote, f))
+                 or sha(os.path.join(local, f)) != sha(os.path.join(remote, f))]
+          bad += [c for c, meta in m["collections"].items()
+                  if sha(os.path.join(remote, meta["file"])) != meta["sha256_file"]]
+          extra = sorted(set(os.listdir(remote)) - set(files))
+          print(f"ficheros {len(files)} / distintos o ausentes {len(bad)} / sobrantes {len(extra)} / "
+                f"docs {m['total_docs']} / readTime {m['readTime']}")
+          sys.exit(1 if bad or extra else 0)
+          PY
+
+      - name: Resumen
+        run: |
+          echo "Export gestionado: gs://$BUCKET/managed/$STAMP/"
+          echo "JSONL verificado:  gs://$BUCKET/jsonl/$DUMP_DIR/"
+
+      - name: Borrar datos locales del runner
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/fsdump" "$RUNNER_TEMP/verify"
