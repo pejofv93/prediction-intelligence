@@ -57,6 +57,11 @@ SHADOW_VARIANTS: dict[str, list[dict]] = {
         {"id": "H5", "desc": "gana por 2+ >=50% y rival pierde por 2+ >=30% (10)",
          "conds": [{"who": "team", "stat": "win2", "rate": 0.50, "W": 10, "min_n": 8},
                    {"who": "opp", "stat": "lose2", "rate": 0.30, "W": 10, "min_n": 8}]},
+        # H4 añadida 2026-11-02: ganadora del backtest repetido sobre team_stats limpio
+        # (menú 3fdd95f9…, comprobación 962/1423 68%). Convive con H5; no la sustituye.
+        {"id": "H4", "desc": "gana por 2+ >=50% y rival pierde por 2+ >=40% (10)",
+         "conds": [{"who": "team", "stat": "win2", "rate": 0.50, "W": 10, "min_n": 8},
+                   {"who": "opp", "stat": "lose2", "rate": 0.40, "W": 10, "min_n": 8}]},
     ],
 }
 MATCH_LEVEL = {"btts"}
