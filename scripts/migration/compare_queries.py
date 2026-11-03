@@ -273,9 +273,14 @@ def fs_structured(cid, case, limit, cursor_values=None):
             fl.append({"fieldFilter": {"field": {"fieldPath": f}, "op": FS_OP[op], "value": val}})
     if fl:
         sq["where"] = fl[0] if len(fl) == 1 else {"compositeFilter": {"op": "AND", "filters": fl}}
-    if case["orders"]:
+    orders = list(case["orders"])
+    if cursor_values is not None and orders and all(f != "__name__" for f, _ in orders):
+        # El cursor lleva campo + id: en REST el orden por id tiene que ser explícito
+        # (las SDK lo añaden solas al usar un snapshot como cursor), con la dirección del último.
+        orders.append(("__name__", orders[-1][1]))
+    if orders:
         sq["orderBy"] = [{"field": {"fieldPath": f}, "direction": "DESCENDING" if d == "DESC" else "ASCENDING"}
-                         for f, d in case["orders"]]
+                         for f, d in orders]
     if cursor_values is not None:
         sq["startAt"] = {"values": cursor_values, "before": False}
     if limit is not None:
