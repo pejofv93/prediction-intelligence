@@ -1,0 +1,176 @@
+# Reintenta crear la VM pi-migracion en Oracle Cloud (VM.Standard.A1.Flex, 2 OCPU / 12 GB,
+# Ubuntu 24.04 aarch64, disco 50 GB) hasta que haya capacidad. Un intento por ejecución,
+# alternando AD-1 y AD-2 (en AD-3 el límite A1 de la cuenta es 0).
+#
+#   - Si pi-migracion ya existe (no terminada): no hace nada y se deshabilita.
+#   - Si la crea: se deshabilita. La IP y el OCID NO salen en el log; consúltalos en local.
+#   - "Out of host capacity": termina en verde y espera a la siguiente ejecución.
+#   - Cualquier otro error: se deshabilita y termina en rojo (no reintenta a ciegas).
+#
+# El repo es público y sus logs también: no se imprime ningún OCID, huella, IP ni nada del
+# config. Los secretos se escriben en ficheros temporales del runner que se borran al final.
+# Solo crea esa VM. No toca red, puertos, las dos Micro ni ningún otro recurso.
+name: oracle-a1-retry
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write   # para `gh workflow disable` sobre este mismo workflow
+
+concurrency:
+  group: oracle-a1-retry
+  cancel-in-progress: false
+
+env:
+  NAME: pi-migracion
+  OCI_REGION: uk-london-1
+  OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+
+jobs:
+  intento:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: OCI CLI
+        run: pip install --quiet "oci-cli==3.95.1"
+
+      - name: Config temporal (desde secretos)
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_API_KEY: ${{ secrets.OCI_API_KEY }}
+          PI_ORACLE_SSH_PUB: ${{ secrets.PI_ORACLE_SSH_PUB }}
+        run: |
+          set -eu
+          umask 077
+          D="$RUNNER_TEMP/oci"
+          mkdir -p "$D"
+          for v in OCI_USER_OCID OCI_TENANCY_OCID OCI_FINGERPRINT OCI_API_KEY PI_ORACLE_SSH_PUB; do
+            [ -n "${!v}" ] || { echo "Falta el secreto $v"; exit 1; }
+          done
+          printf '%s\n' "$OCI_API_KEY" > "$D/key.pem"
+          printf '%s\n' "$PI_ORACLE_SSH_PUB" > "$D/ssh.pub"
+          cat > "$D/config" <<EOF
+          [DEFAULT]
+          user=$OCI_USER_OCID
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY_OCID
+          region=$OCI_REGION
+          key_file=$D/key.pem
+          EOF
+          sed -i 's/^ *//' "$D/config"
+          echo "OCI_CLI_CONFIG_FILE=$D/config" >> "$GITHUB_ENV"
+          echo "Config preparada."
+
+      - name: Intento
+        id: intento
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          COMPARTMENT: ${{ secrets.OCI_COMPARTMENT_OCID }}
+          SUBNET: ${{ secrets.OCI_SUBNET_OCID }}
+          IMAGE: ${{ secrets.OCI_IMAGE_OCID }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -u
+          for v in COMPARTMENT SUBNET IMAGE; do
+            [ -n "${!v}" ] || { echo "Falta el secreto de $v"; echo "result=error" >> "$GITHUB_OUTPUT"; exit 0; }
+          done
+
+          # Resume un error de la CLI sin OCID, huellas, IP ni ids de petición.
+          clean() {
+            python3 -c '
+          import json, re, sys
+          t = sys.stdin.read()
+          m = re.search(r"\{.*\}", t, re.S)
+          out = t
+          try:
+              d = json.loads(m.group(0)) if m else {}
+              out = "status=%s code=%s message=%s" % (d.get("status"), d.get("code"), d.get("message"))
+          except Exception:
+              pass
+          out = re.sub(r"ocid1\.[\w.-]+", "<ocid>", out)
+          out = re.sub(r"([0-9a-fA-F]{2}:){15}[0-9a-fA-F]{2}", "<huella>", out)
+          out = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}\b", "<ip>", out)
+          out = re.sub(r"[0-9A-F]{32}(/[0-9A-F]{32})*", "<id>", out)
+          print(out.replace("\n", " ")[:300])'
+          }
+
+          # 1) ¿Ya existe?
+          E="$RUNNER_TEMP/oci/stderr"
+          if ! list=$(oci compute instance list --compartment-id "$COMPARTMENT" --all --output json 2>"$E"); then
+            echo "Error al listar instancias: $(clean <"$E")"
+            echo "result=error" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          n=$(python3 -c '
+          import json, os, sys
+          t = sys.stdin.read().strip()
+          d = json.loads(t)["data"] if t else []
+          print(sum(1 for i in d if i["display-name"] == os.environ["NAME"]
+                    and i["lifecycle-state"] not in ("TERMINATED", "TERMINATING")))' <<<"$list")
+          if [ "$n" != "0" ]; then
+            echo "$NAME ya existe: no creo otra."
+            echo "result=exists" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # 2) AD de este intento: alterna AD-1 / AD-2 según el número de ejecución
+          if ! ads=$(oci iam availability-domain list --compartment-id "$OCI_TENANCY_OCID" \
+                       --query 'data[].name' --output json 2>"$E"); then
+            echo "Error al listar ADs: $(clean <"$E")"
+            echo "result=error" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          idx=$((RUN_NUMBER % 2))
+          ad=$(python3 -c 'import json, sys; print(sorted(json.load(sys.stdin))[int(sys.argv[1])])' "$idx" <<<"$ads")
+          echo "Intento en AD-$((idx + 1))"
+
+          # 3) Lanzar
+          out=$(oci compute instance launch \
+            --compartment-id "$COMPARTMENT" \
+            --availability-domain "$ad" \
+            --display-name "$NAME" \
+            --shape VM.Standard.A1.Flex \
+            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+            --image-id "$IMAGE" \
+            --boot-volume-size-in-gbs 50 \
+            --subnet-id "$SUBNET" \
+            --assign-public-ip true \
+            --ssh-authorized-keys-file "$RUNNER_TEMP/oci/ssh.pub" \
+            --query 'data.id' --raw-output 2>"$E")
+          rc=$?
+          if [ $rc -eq 0 ] && [[ "$out" == ocid1.instance.* ]]; then
+            echo "$NAME creada en AD-$((idx + 1)). IP y OCID: consúltalos en local (no se imprimen aquí)."
+            echo "result=created" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if grep -q "Out of host capacity" "$E"; then
+            echo "Sin capacidad en AD-$((idx + 1)); siguiente intento en la próxima ejecución."
+            echo "result=capacity" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "Error distinto de capacidad (no reintento): $(clean <"$E")"
+          echo "result=error" >> "$GITHUB_OUTPUT"
+
+      - name: Deshabilitar este workflow
+        # todo lo que no sea "sin capacidad" lo para: ya existe, creada, error o fallo previo
+        if: always() && steps.intento.outputs.result != 'capacity'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow disable oracle-a1-retry.yml -R "$GITHUB_REPOSITORY"
+          echo "Workflow deshabilitado (motivo: ${{ steps.intento.outputs.result }})."
+
+      - name: Fallar si hubo error
+        if: always() && steps.intento.outputs.result != 'capacity' && steps.intento.outputs.result != 'exists' && steps.intento.outputs.result != 'created'
+        run: |
+          echo "Parado por un error distinto de 'Out of host capacity' (resultado: '${{ steps.intento.outputs.result }}'). Revisa los pasos anteriores."
+          exit 1
+
+      - name: Borrar config temporal
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci"
