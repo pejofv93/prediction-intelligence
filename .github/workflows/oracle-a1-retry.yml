@@ -80,7 +80,9 @@ jobs:
           IMAGE: ${{ secrets.OCI_IMAGE_OCID }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          set -u
+          # Actions ejecuta con `bash -e`: sin +e, un `out=$(oci ...)` que falla mata el paso
+          # antes de poder leer el error y distinguir "Out of host capacity".
+          set +e -u
           for v in COMPARTMENT SUBNET IMAGE; do
             [ -n "${!v}" ] || { echo "Falta el secreto de $v"; echo "result=error" >> "$GITHUB_OUTPUT"; exit 0; }
           done
