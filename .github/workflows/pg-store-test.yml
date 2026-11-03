@@ -5,6 +5,11 @@
 # descarga ese volcado al runner, lo carga en el Postgres del runner y compara documento a
 # documento con el manifest. Los datos no salen del runner (sin artifacts) y se borran al final;
 # el log solo muestra recuentos y hashes. pg_store no se conecta a ningún servicio.
+#
+# Con `compare`: hace un volcado NUEVO al runner (Firestore sin PITR solo deja leer la última
+# hora), lo carga en Postgres y compara recuento e ids de cada forma de consulta del código
+# (y sondas de null / campo ausente) entre Firestore real y pg_store en ese mismo readTime.
+# Solo lectura en Firestore; el volcado no se sube a ningún sitio y se borra al final.
 name: pg-store-test
 
 on:
@@ -14,6 +19,10 @@ on:
         description: "Carpeta del volcado en gs://prediction-intelligence-fs-backup/jsonl/ (vacío = solo tests)"
         required: false
         default: ""
+      compare:
+        description: "Volcado nuevo + comparar consultas Firestore real / Postgres en el mismo instante"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -60,13 +69,13 @@ jobs:
           echo "DUMP=$DUMP" >> "$GITHUB_ENV"
 
       - name: Auth GCP
-        if: inputs.dump != ''
+        if: inputs.dump != '' || inputs.compare
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Setup gcloud
-        if: inputs.dump != ''
+        if: inputs.dump != '' || inputs.compare
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Descargar volcado al runner
@@ -79,6 +88,24 @@ jobs:
         if: inputs.dump != ''
         run: python scripts/migration/load_jsonl_pg.py --dump "$RUNNER_TEMP/dump/$DUMP"
 
+      - name: Volcado nuevo para comparar (solo en el runner)
+        if: inputs.compare
+        run: python -I scripts/migration/firestore_dump.py --out "$RUNNER_TEMP/cmp" --sample 5
+
+      - name: Cargar el volcado nuevo en Postgres
+        if: inputs.compare
+        run: |
+          DIR=$(cat "$RUNNER_TEMP/cmp/LAST_DUMP")
+          [[ "$DIR" =~ ^[0-9TZ-]+$ ]] || { echo "nombre de volcado no válido"; exit 1; }
+          echo "CMP_DIR=$RUNNER_TEMP/cmp/$DIR" >> "$GITHUB_ENV"
+          python scripts/migration/load_jsonl_pg.py --dump "$RUNNER_TEMP/cmp/$DIR"
+
+      - name: Comparar consultas Firestore real / Postgres
+        if: inputs.compare
+        env:
+          FIRESTORE_COLLECTION_PREFIX: prod
+        run: python scripts/migration/compare_queries.py --dump "$CMP_DIR"
+
       - name: Borrar datos locales del runner
         if: always()
-        run: rm -rf "$RUNNER_TEMP/dump"
+        run: rm -rf "$RUNNER_TEMP/dump" "$RUNNER_TEMP/cmp"

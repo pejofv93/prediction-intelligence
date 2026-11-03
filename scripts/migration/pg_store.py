@@ -20,10 +20,8 @@ Codificación en JSONB (sin pérdida de tipos de Firestore):
 
 Semántica Firestore que se reproduce (cubierta por tests/pg_store/):
   - campo ausente != null: `== None` solo casa null; order_by y desigualdades excluyen
-    los documentos sin el campo; `!=`/`not-in` también (confirmado en la documentación).
-    RIESGO NO CONFIRMADO: aquí `!=`/`not-in` INCLUYEN los docs con null salvo que se
-    filtre null (modelo "<v OR >v"). No he encontrado documentación que lo confirme;
-    verificarlo contra Firestore real antes de cablear un servicio que dependa de ello.
+    los documentos sin el campo; `!=`/`not-in` excluyen además los que valen null
+    (verificado contra Firestore real el 2026-11-02 con recuentos en 3 campos).
   - comparaciones estrictas por tipo (5 no casa con "5"; int y float sí se comparan);
     orden entre tipos: null < bool < número < timestamp < string < bytes < ref < geo < array < map.
   - orden implícito por __name__ con la dirección del último order_by; los campos con
@@ -692,6 +690,8 @@ def _filter_sql(f) -> tuple[str, list, set]:
 
     x = "(data #> %s::text[])"
     exists = f"{x} IS NOT NULL"
+    # != y not-in de Firestore excluyen también los documentos cuyo campo vale null
+    not_null = f"{x} IS NOT NULL AND jsonb_typeof({x}) <> 'null'"
     key, kp = _key_sql(path)
 
     def eq(v):
@@ -718,10 +718,10 @@ def _filter_sql(f) -> tuple[str, list, set]:
         body = " OR ".join(parts) or "FALSE"
         if op == "in":
             return f"{exists} AND ({body})", [list(path)] + params, ineq
-        return f"{exists} AND NOT ({body})", [list(path)] + params, ineq
+        return f"{not_null} AND NOT ({body})", [list(path)] * 2 + params, ineq
     if op == "!=":
         s, p = eq(value)
-        return f"{exists} AND NOT ({s})", [list(path)] + p, ineq
+        return f"{not_null} AND NOT ({s})", [list(path)] * 2 + p, ineq
     # < <= > >=: solo valores del mismo tipo
     ls, lp = _lit_key(value)
     rank = lp[0]

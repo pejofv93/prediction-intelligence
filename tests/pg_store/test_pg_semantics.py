@@ -77,10 +77,11 @@ def test_missing_vs_null_equality(nullish):
 
 
 def test_missing_vs_null_not_equal(nullish):
-    # != y not-in excluyen el doc sin el campo; != None excluye también null
+    # Como Firestore real (verificado 2026-11-02): != y not-in excluyen el doc sin el
+    # campo y también el que vale null.
     assert sorted(ids(nullish.where(filter=FieldFilter("v", "!=", None)))) == ["one", "str", "two"]
-    assert sorted(ids(nullish.where(filter=FieldFilter("v", "!=", 1)))) == ["null", "str", "two"]
-    assert sorted(ids(nullish.where(filter=FieldFilter("v", "not-in", [1, "x"])))) == ["null", "two"]
+    assert sorted(ids(nullish.where(filter=FieldFilter("v", "!=", 1)))) == ["str", "two"]
+    assert sorted(ids(nullish.where(filter=FieldFilter("v", "not-in", [1, "x"])))) == ["two"]
 
 
 def test_missing_excluded_from_order_by(nullish):
