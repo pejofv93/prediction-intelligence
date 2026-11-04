@@ -1,0 +1,72 @@
+# Inventario de Artifact Registry frente a Cloud Run + simulación de la limpieza. SOLO LECTURA:
+# solo usa list/describe/du, no etiqueta, no cambia políticas y no borra nada.
+# Lista por imagen los digests, tamaños, fechas, etiquetas y qué revisión de Cloud Run usa cada una,
+# y simula "3 más recientes + protegidas (tráfico, etiqueta, última, canary)".
+# Log público: digests, nombres de revisión y tamaños; sin cuentas ni claves.
+name: ar-inventory
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_recent:
+        description: "Versiones recientes a conservar por imagen (simulación)"
+        default: "3"
+      canary:
+        description: "Sufijo de la revisión canary a proteger"
+        default: "00370-biq"
+
+permissions:
+  contents: read
+
+env:
+  PROJECT: prediction-intelligence
+  REGION: europe-west1
+
+jobs:
+  inventario:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Volcado (solo lectura)
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/ar"; mkdir -p "$D"
+          gcloud artifacts repositories list --project "$PROJECT" --format=json > "$D/repos.json"
+          python3 - "$D/repos.json" > "$D/docker_repos.txt" <<'EOF'
+          import json, sys
+          for r in json.load(open(sys.argv[1])):
+              if r.get("format") == "DOCKER":
+                  p = r["name"].split("/")
+                  print(p[3], p[5])
+          EOF
+          while read -r loc repo; do
+            echo "Listando repo $repo ($loc)"
+            gcloud artifacts docker images list "$loc-docker.pkg.dev/$PROJECT/$repo" \
+              --include-tags --format=json > "$D/images_$repo.json" \
+              || { echo "  no se pudo listar $repo"; rm -f "$D/images_$repo.json"; }
+          done < "$D/docker_repos.txt"
+          gcloud run revisions list --project "$PROJECT" --region "$REGION" --format=json > "$D/revisions.json"
+          gcloud run services list --project "$PROJECT" --region "$REGION" --format=json > "$D/services.json"
+          echo "Fuentes de --source (bucket de Cloud Build), solo tamaño:"
+          gcloud storage du -s -r "gs://run-sources-$PROJECT-$REGION" 2>/dev/null \
+            | awk '{printf "  %.2f GB\n", $1/1024/1024/1024}' || echo "  no encontrado"
+
+      - name: Inventario y simulación
+        env:
+          KEEP_RECENT: ${{ inputs.keep_recent }}
+          CANARY_REVISION_SUFFIX: ${{ inputs.canary }}
+        run: python3 scripts/ops/ar_inventory.py "$RUNNER_TEMP/ar"
+
+      - name: Borrar volcado
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ar"
