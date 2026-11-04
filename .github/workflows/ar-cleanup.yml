@@ -1,0 +1,159 @@
+# Limpieza de Artifact Registry, SOLO sobre europe-west1/cloud-run-source-deploy. Manual.
+# gcr.io no se toca. Ningún servicio de Cloud Run se toca.
+#
+# modo=dry-run (por defecto):
+#   1. Comprueba que las revisiones con tráfico son exactamente las esperadas, que la canary existe
+#      y que cada digest está en el repo. Si algo no cuadra, para ANTES de escribir nada.
+#   2. Etiqueta los 6 digests protegidos con keep-<servicio>-<revisión>. Si la etiqueta ya existe
+#      apuntando a otro digest, para.
+#   3. Aplica scripts/ops/ar_cleanup_policy.json en modo DRY-RUN (no borra) y simula su efecto.
+# modo=informe: solo lectura; lee de Cloud Audit Logs lo que el dry-run habría borrado
+#   (Artifact Registry evalúa las políticas una vez al día, no al instante).
+# modo=activar: quita el dry-run (empieza a borrar). Exige confirmar=ACTIVAR. Solo con OK del usuario.
+name: ar-cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        type: choice
+        options: [dry-run, informe, activar]
+        default: dry-run
+      confirmar:
+        description: "Para modo=activar escribe ACTIVAR"
+        default: ""
+      activas:
+        description: "Revisiones con tráfico esperadas (separadas por espacios)"
+        default: "dashboard-00457-gdm market-sentinel-00005-9t2 polymarket-agent-00561-klf sports-agent-00635-9jq telegram-bot-00487-2qm"
+      canary:
+        description: "Revisión canary a proteger"
+        default: "polymarket-agent-00370-biq"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ar-cleanup
+  cancel-in-progress: false
+
+env:
+  PROJECT: prediction-intelligence
+  LOCATION: europe-west1
+  REPO: cloud-run-source-deploy
+  REPO_URL: europe-west1-docker.pkg.dev/prediction-intelligence/cloud-run-source-deploy
+  POLICY: scripts/ops/ar_cleanup_policy.json
+
+jobs:
+  limpieza:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Volcado (lectura)
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/arc"; mkdir -p "$D"; echo "D=$D" >> "$GITHUB_ENV"
+          gcloud run revisions list --project "$PROJECT" --region "$LOCATION" --format=json > "$D/revisions.json"
+          gcloud run services list --project "$PROJECT" --region "$LOCATION" --format=json > "$D/services.json"
+          gcloud artifacts docker images list "$REPO_URL" --include-tags --format=json > "$D/images.json"
+          gcloud artifacts repositories describe "$REPO" --project "$PROJECT" --location "$LOCATION" \
+            --format=json > "$D/repo.json"
+          python3 - "$D/repo.json" <<'EOF'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print("Política actual:", len(r.get("cleanupPolicies", {})), "reglas; dry-run:", r.get("cleanupPolicyDryRun"))
+          EOF
+
+      - name: Comprobar revisiones y digests
+        if: inputs.modo == 'dry-run'
+        env:
+          ACTIVAS: ${{ inputs.activas }}
+          CANARY: ${{ inputs.canary }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/ar_cleanup.py verify "$D" "$REPO_URL" "$ACTIVAS" "$CANARY"
+          # cada digest debe existir en el repo; la etiqueta keep- no puede apuntar ya a otro digest
+          while read -r svc rev dig; do
+            gcloud artifacts docker images describe "$REPO_URL/$svc@$dig" --format='value(image_summary.digest)' </dev/null >/dev/null
+            cur=$(gcloud artifacts docker images describe "$REPO_URL/$svc:keep-$svc-$rev" \
+                    --format='value(image_summary.digest)' </dev/null 2>/dev/null || true)
+            if [ -n "$cur" ] && [ "$cur" != "$dig" ]; then
+              echo "ERROR: keep-$svc-$rev ya apunta a otro digest"; exit 1
+            fi
+            echo "  OK $svc $rev (etiqueta ${cur:+ya existe}${cur:-nueva})"
+          done < "$D/protected.txt"
+
+      - name: Etiquetar protegidas (keep-)
+        if: inputs.modo == 'dry-run'
+        run: |
+          set -euo pipefail
+          while read -r svc rev dig; do
+            gcloud artifacts docker tags add "$REPO_URL/$svc@$dig" "$REPO_URL/$svc:keep-$svc-$rev" --quiet </dev/null
+            echo "  etiquetada keep-$svc-$rev -> ${dig:7:12}"
+          done < "$D/protected.txt"
+          gcloud artifacts docker images list "$REPO_URL" --include-tags --format=json > "$D/images.json"
+          n=$(python3 -c 'import json,sys; print(sum(1 for i in json.load(open(sys.argv[1])) for t in (i.get("tags") or []) if str(t).startswith("keep-")))' "$D/images.json")
+          echo "Versiones con etiqueta keep- en el repo: $n"
+
+      - name: Simulación local de la política
+        if: inputs.modo == 'dry-run'
+        run: python3 scripts/ops/ar_cleanup.py simulate "$D/images.json" "$POLICY"
+
+      - name: Aplicar política en DRY-RUN
+        if: inputs.modo == 'dry-run'
+        run: |
+          set -euo pipefail
+          gcloud artifacts repositories set-cleanup-policies "$REPO" --project "$PROJECT" --location "$LOCATION" \
+            --policy="$POLICY" --dry-run --format=none
+          gcloud artifacts repositories describe "$REPO" --project "$PROJECT" --location "$LOCATION" \
+            --format='value(cleanupPolicyDryRun)' | sed 's/^/cleanupPolicyDryRun=/'
+
+      - name: Informe del dry-run (audit logs)
+        if: inputs.modo == 'informe'
+        run: |
+          set -euo pipefail
+          gcloud logging read --project "$PROJECT" --freshness=3d --format=json \
+            'protoPayload.serviceName="artifactregistry.googleapis.com" AND protoPayload.methodName:"BatchDeleteVersions" AND protoPayload.request.validateOnly=true' \
+            > "$D/logs.json"
+          python3 - "$D/logs.json" "$D/images.json" <<'EOF'
+          import collections, json, sys
+          logs, imgs = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+          size = {i["package"].split("/")[-1] + "@" + i["version"]: int(i.get("metadata", {}).get("imageSizeBytes", 0) or 0) for i in imgs}
+          names = {n for e in logs for n in e.get("protoPayload", {}).get("request", {}).get("names", [])}
+          per = collections.defaultdict(lambda: [0, 0])
+          for n in names:
+              pkg, ver = n.split("/packages/")[-1].split("/versions/")
+              pkg = pkg.replace("%2F", "/")
+              per[pkg][0] += 1
+              per[pkg][1] += size.get(pkg + "@" + ver, 0)
+          print(f"Entradas de log: {len(logs)}; versiones que habría borrado: {len(names)}")
+          for p in sorted(per):
+              print(f"  {p:18} {per[p][0]:5d} versiones  {per[p][1] / 1024 ** 3:7.2f} GB")
+          bad = [p for p in per if p not in ("dashboard", "polymarket-agent", "sports-agent", "telegram-bot")]
+          print("ERROR: borraría fuera de los 4 servicios: %s" % bad if bad else "Solo afecta a los 4 servicios.")
+          EOF
+
+      - name: Activar (borra de verdad)
+        if: inputs.modo == 'activar'
+        env:
+          CONFIRMAR: ${{ inputs.confirmar }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRMAR" = "ACTIVAR" ] || { echo "Falta confirmar=ACTIVAR"; exit 1; }
+          gcloud artifacts repositories set-cleanup-policies "$REPO" --project "$PROJECT" --location "$LOCATION" \
+            --policy="$POLICY" --no-dry-run --format=none
+          gcloud artifacts repositories describe "$REPO" --project "$PROJECT" --location "$LOCATION" \
+            --format='value(cleanupPolicyDryRun)' | sed 's/^/cleanupPolicyDryRun=/'
+
+      - name: Borrar volcado
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/arc"

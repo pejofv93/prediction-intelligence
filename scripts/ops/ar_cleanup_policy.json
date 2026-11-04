@@ -1,0 +1,28 @@
+[
+  {
+    "name": "keep-3-recientes-4-servicios",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {
+      "packageNamePrefixes": ["dashboard", "polymarket-agent", "sports-agent", "telegram-bot"],
+      "keepCount": 3
+    }
+  },
+  {
+    "name": "keep-etiqueta-keep",
+    "action": {"type": "Keep"},
+    "condition": {"tagState": "tagged", "tagPrefixes": ["keep-"]}
+  },
+  {
+    "name": "keep-market-sentinel-todo",
+    "action": {"type": "Keep"},
+    "condition": {"tagState": "any", "packageNamePrefixes": ["market-sentinel"]}
+  },
+  {
+    "name": "delete-resto-4-servicios",
+    "action": {"type": "Delete"},
+    "condition": {
+      "tagState": "any",
+      "packageNamePrefixes": ["dashboard", "polymarket-agent", "sports-agent", "telegram-bot"]
+    }
+  }
+]
