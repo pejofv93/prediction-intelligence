@@ -124,6 +124,10 @@ jobs:
           gcloud logging read --project "$PROJECT" --freshness=3d --format=json \
             'protoPayload.serviceName="artifactregistry.googleapis.com" AND protoPayload.methodName:"BatchDeleteVersions" AND protoPayload.request.validateOnly=true' \
             > "$D/logs.json"
+          # diagnóstico si sale vacío: cualquier borrado de AR en 3 días, sin filtrar por validateOnly
+          n_any=$(gcloud logging read --project "$PROJECT" --freshness=3d --format='value(protoPayload.methodName)' \
+            'protoPayload.serviceName="artifactregistry.googleapis.com" AND protoPayload.methodName:"Delete"' | wc -l)
+          echo "Entradas de borrado de Artifact Registry en 3 días (cualquier tipo): $n_any"
           python3 - "$D/logs.json" "$D/images.json" <<'EOF'
           import collections, json, sys
           logs, imgs = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
@@ -139,7 +143,24 @@ jobs:
           for p in sorted(per):
               print(f"  {p:18} {per[p][0]:5d} versiones  {per[p][1] / 1024 ** 3:7.2f} GB")
           bad = [p for p in per if p not in ("dashboard", "polymarket-agent", "sports-agent", "telegram-bot")]
+          if not names:
+              print("Sin datos todavía: no se puede comprobar nada (AR evalúa la política ~1 vez al día).")
+              sys.exit(0)
           print("ERROR: borraría fuera de los 4 servicios: %s" % bad if bad else "Solo afecta a los 4 servicios.")
+          # protegidas: versiones con etiqueta keep- (incluye la canary) y todo market-sentinel
+          def tags(i):
+              t = i.get("tags") or []
+              return [x for x in t.split(",") if x] if isinstance(t, str) else t
+          keep = {i["package"].split("/")[-1] + "@" + i["version"]: [t for t in tags(i) if t.startswith("keep-")]
+                  for i in imgs if any(t.startswith("keep-") for t in tags(i))}
+          names_k = {n.split("/packages/")[-1].replace("/versions/", "@").replace("%2F", "/") for n in names}
+          hit = sorted(k for k in names_k if k in keep)
+          print(f"Versiones keep- en el repo: {len(keep)}; de ellas en la lista de borrado: {len(hit)}")
+          for k in hit:
+              print(f"  ERROR: protegida en la lista: {keep[k]}")
+          canary = [k for k, t in keep.items() if any(x.endswith("00370-biq") for x in t)]
+          print(f"Canary 00370-biq etiquetada: {'sí' if canary else 'NO'}; en la lista: {'SÍ' if set(canary) & names_k else 'no'}")
+          print(f"market-sentinel en la lista: {per.get('market-sentinel', [0])[0]} versiones")
           EOF
 
       - name: Activar (borra de verdad)
