@@ -2,12 +2,43 @@ name: deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:   # manual: despliega los 4 servicios
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # para comparar con el commit anterior al push
+
+      # Qué servicios reconstruir: solo los que tienen cambios en services/<svc>/.
+      # Un cambio en shared/ o en este workflow, un lanzamiento manual o un diff
+      # imposible de calcular (push nuevo, historia reescrita) → los 4.
+      - name: Servicios a desplegar
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          ALL="sports-agent polymarket-agent telegram-bot dashboard"
+          if [ "$EVENT" != "push" ] || [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! files=$(git diff --name-only "$BEFORE" "$AFTER" 2>/dev/null); then
+            echo "Sin diff fiable ($EVENT): despliego todos."
+            svcs="$ALL"
+          elif grep -qE '^(shared/|\.github/workflows/deploy\.yml$)' <<<"$files"; then
+            echo "Cambió shared/ o deploy.yml: despliego todos."
+            svcs="$ALL"
+          else
+            svcs=""
+            for s in $ALL; do
+              grep -q "^services/$s/" <<<"$files" && svcs="$svcs $s"
+            done
+          fi
+          svcs=$(echo $svcs)
+          echo "Servicios: ${svcs:-ninguno}"
+          echo "svcs=$svcs" >> "$GITHUB_OUTPUT"
 
       - name: Auth GCP
         uses: google-github-actions/auth@v2
@@ -23,8 +54,10 @@ jobs:
             cp -r shared/ services/$svc/shared/
           done
 
-      - name: Deploy all services
+      - name: Deploy changed services
+        if: steps.changes.outputs.svcs != ''
         env:
+          SVCS: ${{ steps.changes.outputs.svcs }}
           PROJECT: prediction-intelligence
           REGION: europe-west1
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -47,26 +80,36 @@ jobs:
           ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
           ODDSAPIIO_KEY: ${{ secrets.ODDSAPIIO_KEY }}
         run: |
+          want() { [[ " $SVCS " == *" $1 "* ]]; }
+
+          if want sports-agent; then
           gcloud run deploy sports-agent \
             --source services/sports-agent --project $PROJECT --region $REGION \
             --allow-unauthenticated --timeout=3600 --concurrency=1 --min-instances=0 --memory=512Mi --cpu=1 \
             --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,FOOTBALL_API_KEY=$FOOTBALL_API_KEY,FOOTBALL_RAPID_API_KEY=$FOOTBALL_RAPID_API_KEY,CLOUD_RUN_TOKEN=$CLOUD_RUN_TOKEN,TELEGRAM_BOT_URL=$TELEGRAM_BOT_URL,FIRESTORE_COLLECTION_PREFIX=$FIRESTORE_COLLECTION_PREFIX,ODDS_API_KEY=$ODDS_API_KEY,ODDSPAPI_KEY=$ODDSPAPI_KEY,ODDSAPIIO_KEY=$ODDSAPIIO_KEY" \
             --set-secrets="BETFAIR_USERNAME=BETFAIR_USERNAME:latest,BETFAIR_PASSWORD=BETFAIR_PASSWORD:latest,BETFAIR_APP_KEY=BETFAIR_APP_KEY:latest"
+          fi
 
+          if want polymarket-agent; then
           gcloud run deploy polymarket-agent \
             --source services/polymarket-agent --project $PROJECT --region $REGION \
             --allow-unauthenticated --timeout=1800 --min-instances=0 --memory=512Mi --cpu=1 \
             --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,GROQ_API_KEY=$GROQ_API_KEY,TAVILY_API_KEY=$TAVILY_API_KEY,COINGECKO_API_KEY=$COINGECKO_API_KEY,CLOUD_RUN_TOKEN=$CLOUD_RUN_TOKEN,TELEGRAM_BOT_URL=$TELEGRAM_BOT_URL,FIRESTORE_COLLECTION_PREFIX=$FIRESTORE_COLLECTION_PREFIX"
+          fi
 
+          if want telegram-bot; then
           gcloud run deploy telegram-bot \
             --source services/telegram-bot --project $PROJECT --region $REGION \
             --allow-unauthenticated --timeout=120 --min-instances=0 --memory=256Mi --cpu=1 \
             --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,TELEGRAM_TOKEN=$TELEGRAM_TOKEN,TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID,CLOUD_RUN_TOKEN=$CLOUD_RUN_TOKEN,FIRESTORE_COLLECTION_PREFIX=$FIRESTORE_COLLECTION_PREFIX,TELEGRAM_SPORTS_THREAD_ID=$TELEGRAM_SPORTS_THREAD_ID,TELEGRAM_POLY_THREAD_ID=$TELEGRAM_POLY_THREAD_ID,TELEGRAM_DAILY_THREAD_ID=$TELEGRAM_DAILY_THREAD_ID,TELEGRAM_TRENDS_THREAD_ID=$TELEGRAM_TRENDS_THREAD_ID"
+          fi
 
+          if want dashboard; then
           gcloud run deploy dashboard \
             --source services/dashboard --project $PROJECT --region $REGION \
             --allow-unauthenticated --timeout=60 --min-instances=0 --memory=512Mi --cpu=1 \
             --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,GROQ_API_KEY=$GROQ_API_KEY,TAVILY_API_KEY=$TAVILY_API_KEY,DASHBOARD_USER=$DASHBOARD_USER,DASHBOARD_PASS=$DASHBOARD_PASS,CLOUD_RUN_TOKEN=$CLOUD_RUN_TOKEN,FIRESTORE_COLLECTION_PREFIX=$FIRESTORE_COLLECTION_PREFIX"
+          fi
 
       - name: Deploy Firestore security rules + indexes
         working-directory: ${{ github.workspace }}
