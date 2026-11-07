@@ -260,6 +260,40 @@ async def run_fdco_collect() -> StreamingResponse:
     return StreamingResponse(_stream_job(_bg_fdco_collect, "fdco-collect"), media_type="text/plain")
 
 
+@app.post("/run-fdco-team-matches", dependencies=[Depends(verify_token)])
+async def run_fdco_team_matches_job(seasons: str = "current", dry_run: bool = True) -> StreamingResponse:
+    """
+    Ampliación de Tendencias (Fase 1): filas equipo-partido + porcentajes por mercado desde
+    football-data.co.uk → fdco_team_matches / fdco_team_market_rates. Aislado del feed:
+    no lo lee trend_finder ni toca team_corner_stats.
+
+    Por defecto dry_run=true (calcula y cuenta, no escribe): escribir exige ?dry_run=false.
+    seasons=current|previous|both — qué temporada escribe filas equipo-partido (para repartir
+    la carga inicial en dos días). La última línea del stream es 'summary: {...}'.
+    """
+    if seasons not in ("current", "previous", "both"):
+        raise HTTPException(status_code=400, detail="seasons debe ser current, previous o both")
+
+    result: dict = {}
+
+    async def _job() -> None:
+        try:
+            from collectors.fdco_team_matches import run_fdco_team_matches
+            result.update(await run_fdco_team_matches(seasons=seasons, dry_run=dry_run))
+        except Exception as e:
+            logger.error("fdco-team-matches: error no controlado — %s", e, exc_info=True)
+            result.update({"ok": False, "errors": [str(e)]})
+
+    async def _stream():
+        async for line in _stream_job(_job, "fdco-team-matches"):
+            yield line
+        if result:
+            import json
+            yield "summary: " + json.dumps(result, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(_stream(), media_type="text/plain")
+
+
 @app.post("/run-trends", dependencies=[Depends(verify_token)])
 async def run_trends() -> StreamingResponse:
     """
