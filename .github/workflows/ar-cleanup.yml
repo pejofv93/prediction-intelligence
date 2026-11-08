@@ -14,7 +14,12 @@
 # modo=verificar: solo lectura; tras activar un paso comprueba revisiones activas, servicios Ready,
 #   imágenes de activas/canary/keep- en el repo, y llama a /health de los 4 servicios (no a
 #   market-sentinel).
+# modo=etiquetar: ÚNICA escritura = añade keep-<servicio>-<revisión> a la imagen de `revision`.
+#   No aplica ni cambia la política. Para si la etiqueta ya existe apuntando a otro digest.
 # modo=activar: quita el dry-run (empieza a borrar). Exige confirmar=ACTIVAR. Solo con OK del usuario.
+#   Antes comprueba (y para si falla): revisiones activas/Ready/imágenes, que cada regla Delete
+#   tenga olderThan >= 14 días y que cada revisión activa tenga etiqueta keep-; imprime la simulación.
+#   La política vigente en el fichero es el PASO 1: olderThan 60 días (5184000s).
 name: ar-cleanup
 
 on:
@@ -22,7 +27,7 @@ on:
     inputs:
       modo:
         type: choice
-        options: [dry-run, informe, simular, verificar, activar]
+        options: [dry-run, informe, simular, verificar, etiquetar, activar]
         default: dry-run
       confirmar:
         description: "Para modo=activar escribe ACTIVAR"
@@ -36,6 +41,9 @@ on:
       canary:
         description: "Revisión canary a proteger"
         default: "polymarket-agent-00370-biq"
+      revision:
+        description: "modo=etiquetar: revisión de Cloud Run cuya imagen se etiqueta keep-"
+        default: ""
 
 permissions:
   contents: read
@@ -203,13 +211,38 @@ jobs:
           done < "$D/health_urls.txt"
           exit $fail
 
+      - name: Etiquetar una revisión (keep-)
+        if: inputs.modo == 'etiquetar'
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          [ -n "$REVISION" ] || { echo "Falta revision"; exit 1; }
+          target=$(python3 scripts/ops/ar_cleanup.py tag-target "$D" "$REPO_URL" "$REVISION")
+          read -r svc dig <<<"$target"
+          tag="keep-$REVISION"
+          cur=$(gcloud artifacts docker images describe "$REPO_URL/$svc:$tag" \
+                  --format='value(image_summary.digest)' </dev/null 2>/dev/null || true)
+          if [ -n "$cur" ] && [ "$cur" != "$dig" ]; then echo "ERROR: $tag ya apunta a otro digest"; exit 1; fi
+          if [ "$cur" = "$dig" ]; then echo "$tag ya existe en ${dig:7:12}: nada que hacer"; exit 0; fi
+          gcloud artifacts docker tags add "$REPO_URL/$svc@$dig" "$REPO_URL/$svc:$tag" --quiet </dev/null
+          now=$(gcloud artifacts docker images describe "$REPO_URL/$svc:$tag" --format='value(image_summary.digest)' </dev/null)
+          [ "$now" = "$dig" ] || { echo "ERROR: la etiqueta no apunta al digest esperado"; exit 1; }
+          echo "etiquetada $tag -> ${dig:7:12}"
+
       - name: Activar (borra de verdad)
         if: inputs.modo == 'activar'
         env:
           CONFIRMAR: ${{ inputs.confirmar }}
+          ACTIVAS: ${{ inputs.activas }}
+          CANARY: ${{ inputs.canary }}
         run: |
           set -euo pipefail
           [ "$CONFIRMAR" = "ACTIVAR" ] || { echo "Falta confirmar=ACTIVAR"; exit 1; }
+          python3 scripts/ops/ar_cleanup.py verify-running "$D" "$REPO_URL" "$ACTIVAS" "$CANARY"
+          python3 scripts/ops/ar_cleanup.py preflight-activate "$D" "$POLICY" "$ACTIVAS"
+          echo "Simulación de la política que se va a activar:"
+          python3 scripts/ops/ar_cleanup.py simulate "$D/images.json" "$POLICY"
           gcloud artifacts repositories set-cleanup-policies "$REPO" --project "$PROJECT" --location "$LOCATION" \
             --policy="$POLICY" --no-dry-run --format=none
           gcloud artifacts repositories describe "$REPO" --project "$PROJECT" --location "$LOCATION" \

@@ -241,7 +241,59 @@ def verify_running(d, repo_url, expected, canary):
     return 0 if ok else 1
 
 
+MIN_OLDER_THAN_DAYS = 14
+
+
+def preflight_activate(d, policy_path, expected):
+    """
+    Solo lectura, justo antes de quitar el dry-run. Para si:
+      - alguna regla Delete no tiene olderThan, o lo tiene por debajo de 14 días (la política
+        sin antigüedad borraría todo salvo keep-3/keep-);
+      - alguna revisión con tráfico esperada no tiene su imagen etiquetada keep-.
+    """
+    ok = True
+    for rule in load(policy_path):
+        if rule["action"]["type"].lower() != "delete":
+            continue
+        ot = (rule.get("condition") or {}).get("olderThan")
+        if not ot:
+            print(f"ERROR: la regla Delete {rule.get('name')} no tiene olderThan")
+            ok = False
+        elif _age_seconds(ot) < MIN_OLDER_THAN_DAYS * 86400:
+            print(f"ERROR: {rule.get('name')}: olderThan {ot} < {MIN_OLDER_THAN_DAYS} días")
+            ok = False
+        else:
+            print(f"  {rule.get('name')}: olderThan = {_age_seconds(ot) // 86400} días")
+    revisions = {r["metadata"]["name"]: r for r in load(f"{d}/revisions.json")}
+    tags_by_img = {}
+    for i in load(f"{d}/images.json"):
+        tags = i.get("tags") or []
+        tags_by_img[f"{i['package']}@{i['version']}"] = [t for t in tags.split(",") if t] if isinstance(tags, str) else tags
+    for rn in expected.split():
+        img = revisions.get(rn, {}).get("status", {}).get("imageDigest", "")
+        keep = [t for t in tags_by_img.get(img, []) if t.startswith("keep-")]
+        print(f"  {rn}: etiquetas keep- = {keep or 'NINGUNA'}")
+        ok = ok and bool(keep)
+    return 0 if ok else 1
+
+
+def tag_target(d, repo_url, revision):
+    """Solo lectura: imprime 'servicio digest' de una revisión, validando que su imagen es del repo."""
+    r = {x["metadata"]["name"]: x for x in load(f"{d}/revisions.json")}.get(revision)
+    if not r:
+        print(f"ERROR: la revisión {revision} no existe")
+        return 1
+    svc = r["metadata"].get("labels", {}).get("serving.knative.dev/service", "")
+    pkg, _, dig = r.get("status", {}).get("imageDigest", "").partition("@")
+    if pkg != f"{repo_url}/{svc}" or not dig.startswith("sha256:") or not revision.startswith(svc + "-"):
+        print(f"ERROR: {revision}: imagen fuera del repo esperado o sin digest")
+        return 1
+    print(f"{svc} {dig}")
+    return 0
+
+
 if __name__ == "__main__":
     cmd, *a = sys.argv[1:]
-    cmds = {"verify": verify, "simulate": simulate, "stages": stages, "verify-running": verify_running}
+    cmds = {"verify": verify, "simulate": simulate, "stages": stages, "verify-running": verify_running,
+            "preflight-activate": preflight_activate, "tag-target": tag_target}
     sys.exit(cmds[cmd](*a))

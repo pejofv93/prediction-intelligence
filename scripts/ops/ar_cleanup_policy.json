@@ -22,7 +22,8 @@
     "action": {"type": "Delete"},
     "condition": {
       "tagState": "any",
-      "packageNamePrefixes": ["dashboard", "polymarket-agent", "sports-agent", "telegram-bot"]
+      "packageNamePrefixes": ["dashboard", "polymarket-agent", "sports-agent", "telegram-bot"],
+      "olderThan": "5184000s"
     }
   }
 ]
