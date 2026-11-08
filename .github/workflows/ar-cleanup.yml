@@ -9,6 +9,11 @@
 #   3. Aplica scripts/ops/ar_cleanup_policy.json en modo DRY-RUN (no borra) y simula su efecto.
 # modo=informe: solo lectura; lee de Cloud Audit Logs lo que el dry-run habría borrado
 #   (Artifact Registry evalúa las políticas una vez al día, no al instante).
+# modo=simular: solo lectura; simula la política escalonada (olderThan = cada valor de `etapas`
+#   en días) sobre el listado actual y dice cuánto borraría cada paso. No etiqueta ni aplica nada.
+# modo=verificar: solo lectura; tras activar un paso comprueba revisiones activas, servicios Ready,
+#   imágenes de activas/canary/keep- en el repo, y llama a /health de los 4 servicios (no a
+#   market-sentinel).
 # modo=activar: quita el dry-run (empieza a borrar). Exige confirmar=ACTIVAR. Solo con OK del usuario.
 name: ar-cleanup
 
@@ -17,14 +22,17 @@ on:
     inputs:
       modo:
         type: choice
-        options: [dry-run, informe, activar]
+        options: [dry-run, informe, simular, verificar, activar]
         default: dry-run
       confirmar:
         description: "Para modo=activar escribe ACTIVAR"
         default: ""
       activas:
         description: "Revisiones con tráfico esperadas (separadas por espacios)"
-        default: "dashboard-00457-gdm market-sentinel-00005-9t2 polymarket-agent-00561-klf sports-agent-00635-9jq telegram-bot-00487-2qm"
+        default: "dashboard-00457-gdm market-sentinel-00005-9t2 polymarket-agent-00561-klf sports-agent-00637-6df telegram-bot-00487-2qm"
+      etapas:
+        description: "modo=simular: antigüedades en días, separadas por espacios"
+        default: "60 30 14"
       canary:
         description: "Revisión canary a proteger"
         default: "polymarket-agent-00370-biq"
@@ -162,6 +170,38 @@ jobs:
           print(f"Canary 00370-biq etiquetada: {'sí' if canary else 'NO'}; en la lista: {'SÍ' if set(canary) & names_k else 'no'}")
           print(f"market-sentinel en la lista: {per.get('market-sentinel', [0])[0]} versiones")
           EOF
+
+      - name: Simular política escalonada (solo lectura)
+        if: inputs.modo == 'simular'
+        env:
+          ETAPAS: ${{ inputs.etapas }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          python3 scripts/ops/ar_cleanup.py stages "$D/images.json" "$POLICY" "$D/repo.json" $ETAPAS
+
+      - name: Verificar Cloud Run (solo lectura)
+        if: inputs.modo == 'verificar'
+        env:
+          ACTIVAS: ${{ inputs.activas }}
+          CANARY: ${{ inputs.canary }}
+        run: |
+          set -uo pipefail
+          fail=0
+          python3 scripts/ops/ar_cleanup.py verify-running "$D" "$REPO_URL" "$ACTIVAS" "$CANARY" || fail=1
+          # /health no hace nada salvo responder; si el servicio estaba a 0 instancias, esto
+          # fuerza un arranque en frío desde la imagen. 3 intentos con margen para el arranque.
+          while read -r name url; do
+            code=000
+            for i in 1 2 3; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 "$url/health" || true)
+              [ "$code" = "200" ] && break
+              sleep 10
+            done
+            echo "  /health $name -> $code"
+            [ "$code" = "200" ] || fail=1
+          done < "$D/health_urls.txt"
+          exit $fail
 
       - name: Activar (borra de verdad)
         if: inputs.modo == 'activar'
