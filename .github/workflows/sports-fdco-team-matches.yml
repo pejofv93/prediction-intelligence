@@ -1,0 +1,41 @@
+# Ampliación de Tendencias (Fase 1): filas equipo-partido + porcentajes por mercado desde
+# football-data.co.uk → fdco_team_matches / fdco_team_market_rates. Aislado del feed actual.
+# SOLO manual por ahora. dry_run=true por defecto (no escribe nada). Escribir exige
+# dry_run=false Y confirmar=ESCRIBIR. El horario diario se añadirá después de la carga inicial.
+name: sports-fdco-team-matches
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Temporada que escribe filas equipo-partido"
+        type: choice
+        options: [current, previous, both]
+        default: current
+      dry_run:
+        description: "true = solo calcula y cuenta"
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      confirmar:
+        description: "Para dry_run=false escribe ESCRIBIR"
+        default: ""
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Comprobar confirmación
+        if: ${{ inputs.dry_run == 'false' && inputs.confirmar != 'ESCRIBIR' }}
+        run: |
+          echo "dry_run=false exige confirmar=ESCRIBIR — no se llama al servicio"
+          exit 1
+      - name: Trigger Cloud Run (sync)
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-fdco-team-matches?seasons=${{ inputs.seasons }}&dry_run=${{ inputs.dry_run }}" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 800 \
+            --no-buffer \
+            --fail --silent --show-error | tee out.txt
+          grep -q '^done ' out.txt
+          grep -q '^summary: {"ok": true' out.txt
