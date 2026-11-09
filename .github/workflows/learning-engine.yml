@@ -4,6 +4,12 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
 
+# Una sola ejecución a la vez: dos solapadas leían model_weights al empezar y la segunda
+# pisaba lo que sumó la primera. La que llega espera; no se cancela la que está corriendo.
+concurrency:
+  group: learning-engine
+  cancel-in-progress: false
+
 jobs:
   trigger:
     runs-on: ubuntu-latest

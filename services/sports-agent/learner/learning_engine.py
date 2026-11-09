@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.config import DEFAULT_WEIGHTS, LEARNING_RATE, SUPPORTED_FOOTBALL_LEAGUES
-from shared.firestore_client import col
+from shared.firestore_client import col, get_client
 
 logger = logging.getLogger(__name__)
 
@@ -547,6 +547,90 @@ def _confidence_bucket(prediction: dict) -> str | None:
     return "90_99"
 
 
+def _save_model_weights(payload: dict, existed: bool | None, read_time,
+                        only_update: bool = False) -> bool:
+    """Escribe model_weights/current solo si nadie lo ha tocado desde que se leyó.
+
+    existed=None → la lectura del principio falló: no se escribe (antes se escribían los
+    pesos por defecto encima del documento). existed=True → update con precondición sobre la
+    hora de última escritura: si otra ejecución (o un recálculo manual) lo cambió entre medias,
+    falla en vez de pisarlo. existed=False → create (falla si alguien lo creó entre medias).
+    Devuelve True si se escribió.
+    """
+    if existed is None:
+        logger.error("run_daily_learning: model_weights no se pudo leer al empezar — no se escribe")
+        return False
+    if not existed and only_update:
+        logger.error("run_daily_learning: model_weights/current no existe — nada que actualizar")
+        return False
+    ref = col("model_weights").document("current")
+    try:
+        if existed:
+            ref.update(payload, option=get_client().write_option(last_update_time=read_time))
+        else:
+            ref.create(payload)
+        return True
+    except Exception:
+        logger.error(
+            "run_daily_learning: error guardando model_weights (¿otra ejecución lo cambió entre "
+            "medias?) — las predicciones de hoy NO se marcan como graduadas y se repetirán",
+            exc_info=True,
+        )
+        return False
+
+
+def _persist_grading(weights_saved: bool, update_accuracy_log, mark_graded) -> bool:
+    """Pasos 6 (accuracy_log) y 7 (marcar predicciones) solo si model_weights se guardó.
+
+    Si no se guardó, nada de lo graduado hoy queda contado; dejar las predicciones pendientes
+    hace que la próxima ejecución las gradúe y las sume. Marcarlas igualmente (lo de antes)
+    perdía sus aciertos para siempre de los contadores.
+    """
+    if not weights_saved:
+        logger.error("run_daily_learning: sin model_weights guardado — no se actualiza accuracy_log "
+                     "ni se marcan predicciones; se graduarán en la próxima ejecución")
+        return False
+    update_accuracy_log()
+    mark_graded()
+    return True
+
+
+def _mark_predictions_graded(updates: list[dict]) -> None:
+    """Paso 7: escribe result/correct/error_type en cada predicción (y en su _synthetic)."""
+    # Las de la época anterior también se persisten: se gradúan igual, solo que marcadas
+    # con model_epoch=1 y excluidas de pesos/accuracy.
+    for upd in updates:
+        payload = {
+            "result": upd["result"],
+            "correct": upd["correct"],
+            "error_type": upd["error_type"],
+            "model_epoch": upd.get("model_epoch", MODEL_EPOCH_CURRENT),
+        }
+        if upd.get("model_epoch") == MODEL_EPOCH_PRE_ELO_REBUILD:
+            payload["excluded_from_learning"] = True
+        mid = upd["match_id"]
+        # Usar el Firestore doc ID real (preservado en fetch_pending_results)
+        # para evitar 404 si el campo match_id almacenado difiere del doc ID
+        doc_id = upd.get("_firestore_doc_id") or mid
+        try:
+            col("predictions").document(str(doc_id)).update(payload)
+        except Exception:
+            logger.error(
+                "run_daily_learning: error actualizando prediction %s (doc_id=%s)", mid, doc_id, exc_info=True
+            )
+        # Actualizar también {doc_id}_synthetic si existe
+        try:
+            synthetic_ref = col("predictions").document(f"{doc_id}_synthetic")
+            snap = synthetic_ref.get()
+            if snap.exists:
+                synthetic_ref.update(payload)
+                logger.debug("run_daily_learning: %s_synthetic actualizado", doc_id)
+        except Exception:
+            logger.warning(
+                "run_daily_learning: error actualizando %s_synthetic", doc_id, exc_info=True
+            )
+
+
 def _dedup_pending(pending: list[dict]) -> tuple[list[dict], dict[str, list[dict]]]:
     """
     Deduplication de predicciones pendientes (BUG 2: dos señales por mismo partido).
@@ -895,8 +979,14 @@ async def run_daily_learning() -> None:
     _prev_conf_data: dict = {}
     _prev_league_record: dict = {}
     _prev_league_since: str | None = None
+    # Para escribir al final solo si nadie ha tocado el documento desde esta lectura.
+    # None = la lectura falló: entonces no se escribe (pisaría el documento con defaults).
+    _weights_existed: bool | None = None
+    _weights_read_time = None
     try:
         weights_doc = col("model_weights").document("current").get()
+        _weights_existed = bool(weights_doc.exists)
+        _weights_read_time = weights_doc.update_time if weights_doc.exists else None
         if weights_doc.exists:
             data = weights_doc.to_dict()
             current_weights = data.get("weights", dict(DEFAULT_WEIGHTS))
@@ -1311,45 +1401,39 @@ async def run_daily_learning() -> None:
     lifetime_correct = correct_in_db + sum(1 for p in ledger_resolved if p.get("correct"))
 
     if processed_predictions:
-        try:
-            col("model_weights").document("current").set({
-                "version": new_version,
-                "updated": now,
-                "weights": current_weights,
-                "accuracy_by_league": acc_by_league,
-                "league_record": league_record,
-                "league_record_since": league_since,
-                "accuracy_by_market": acc_by_market,
-                "accuracy_by_confidence": acc_by_confidence,
-                "blacklisted_leagues": [],
-                "min_edge_threshold": 0.08,
-                "min_confidence": 0.65,
-                "total_predictions": lifetime_total,
-                "correct_predictions": lifetime_correct,
-                "groq_predictions_count": groq_predictions_count,
-            })
+        _weights_saved = _save_model_weights({
+            "version": new_version,
+            "updated": now,
+            "weights": current_weights,
+            "accuracy_by_league": acc_by_league,
+            "league_record": league_record,
+            "league_record_since": league_since,
+            "accuracy_by_market": acc_by_market,
+            "accuracy_by_confidence": acc_by_confidence,
+            "blacklisted_leagues": [],
+            "min_edge_threshold": 0.08,
+            "min_confidence": 0.65,
+            "total_predictions": lifetime_total,
+            "correct_predictions": lifetime_correct,
+            "groq_predictions_count": groq_predictions_count,
+        }, _weights_existed, _weights_read_time)
+        if _weights_saved:
             logger.info(
                 "run_daily_learning: model_weights actualizado → version %d pesos=%s",
                 new_version, current_weights,
             )
-        except Exception:
-            logger.error("run_daily_learning: error guardando model_weights", exc_info=True)
     else:
         # Solo legacy resuelto hoy: nada que aprender. No se tocan weights/accuracy_by_* ni
-        # se bumpea versión — solo el contador de por vida (merge, preserva el resto).
-        try:
-            col("model_weights").document("current").update({
-                "total_predictions": lifetime_total,
-                "correct_predictions": lifetime_correct,
-                "updated": now,
-            })
+        # se bumpea versión — solo el contador de por vida (preserva el resto).
+        _weights_saved = _save_model_weights({
+            "total_predictions": lifetime_total,
+            "correct_predictions": lifetime_correct,
+            "updated": now,
+        }, _weights_existed, _weights_read_time, only_update=True)
+        if _weights_saved:
             logger.info(
                 "run_daily_learning: sin época actual — solo contadores de por vida "
                 "(+%d legacy resueltas, total=%d)", len(legacy_predictions), lifetime_total,
-            )
-        except Exception:
-            logger.error(
-                "run_daily_learning: error actualizando contadores de por vida", exc_info=True
             )
 
     # --- 6. Actualizar accuracy_log de la semana — TOTALES ciegos a la época ---
@@ -1358,97 +1442,74 @@ async def run_daily_learning() -> None:
         [{"correct": p.get("correct")} for p in week_predictions]
     )
 
-    # Buscar accuracy de la semana anterior para el delta del reporte
-    prev_week_accuracy = _get_prev_week_accuracy(current_week)
+    def _update_accuracy_log() -> None:
+        # Buscar accuracy de la semana anterior para el delta del reporte
+        prev_week_accuracy = _get_prev_week_accuracy(current_week)
 
-    try:
-        acc_log_ref = col("accuracy_log").document(current_week)
-        acc_log_doc = acc_log_ref.get()
-
-        if acc_log_doc.exists:
-            existing = acc_log_doc.to_dict()
-            total_prev = existing.get("predictions_total", 0)
-            correct_prev = existing.get("predictions_correct", 0)
-            total_new = total_prev + len(week_predictions)
-            correct_new = correct_prev + sum(1 for p in week_predictions if p.get("correct"))
-            updated_accuracy = round(correct_new / total_new, 4) if total_new > 0 else 0.0
-
-            _payload = {
-                "predictions_total": total_new,
-                "predictions_correct": correct_new,
-                "accuracy": updated_accuracy,
-                "prev_week_accuracy": prev_week_accuracy,
-            }
-            # accuracy_by_* y weights_end son foto de la ÉPOCA ACTUAL — solo se reescriben
-            # si hoy hubo aprendizaje real; si no, se conservan los del último batch.
-            if processed_predictions:
-                week_record = _merge_league_record(existing.get("league_record") or {}, accuracy_by_league)
-                _payload["league_record"] = week_record
-                _payload["league_record_since"] = (
-                    (existing.get("league_record_since") if existing.get("league_record") else None)
-                    or now.date().isoformat()
-                )
-                _payload["accuracy_by_league"] = _league_accuracy(week_record)
-                _payload["accuracy_by_market"] = acc_by_market
-                _payload["weights_end"] = current_weights
-            acc_log_ref.update(_payload)
-        else:
-            correct_count = sum(1 for p in week_predictions if p.get("correct"))
-            acc_log_ref.set({
-                "week": current_week,
-                "predictions_total": len(week_predictions),
-                "predictions_correct": correct_count,
-                "accuracy": week_accuracy,
-                "prev_week_accuracy": prev_week_accuracy,
-                "league_record": _merge_league_record({}, accuracy_by_league),
-                "league_record_since": now.date().isoformat(),
-                "accuracy_by_league": _league_accuracy(_merge_league_record({}, accuracy_by_league)),
-                "accuracy_by_market": acc_by_market,
-                "weights_start": weights_start,
-                "weights_end": current_weights,
-                "created_at": now,
-            })
-
-        logger.info(
-            "run_daily_learning: accuracy_log[%s] — +%d resueltas hoy (accuracy dia=%.1f%%)",
-            current_week, len(week_predictions), week_accuracy * 100,
-        )
-    except Exception:
-        logger.error("run_daily_learning: error guardando accuracy_log", exc_info=True)
-
-    # --- 7. Actualizar cada prediction con result/correct/error_type ---
-    # Las de la época anterior también se persisten: se gradúan igual, solo que marcadas
-    # con model_epoch=1 y excluidas de pesos/accuracy más arriba.
-    for upd in processed_predictions + legacy_predictions:
-        payload = {
-            "result": upd["result"],
-            "correct": upd["correct"],
-            "error_type": upd["error_type"],
-            "model_epoch": upd.get("model_epoch", MODEL_EPOCH_CURRENT),
-        }
-        if upd.get("model_epoch") == MODEL_EPOCH_PRE_ELO_REBUILD:
-            payload["excluded_from_learning"] = True
-        mid = upd["match_id"]
-        # Usar el Firestore doc ID real (preservado en fetch_pending_results)
-        # para evitar 404 si el campo match_id almacenado difiere del doc ID
-        doc_id = upd.get("_firestore_doc_id") or mid
         try:
-            col("predictions").document(str(doc_id)).update(payload)
-        except Exception:
-            logger.error(
-                "run_daily_learning: error actualizando prediction %s (doc_id=%s)", mid, doc_id, exc_info=True
+            acc_log_ref = col("accuracy_log").document(current_week)
+            acc_log_doc = acc_log_ref.get()
+
+            if acc_log_doc.exists:
+                existing = acc_log_doc.to_dict()
+                total_prev = existing.get("predictions_total", 0)
+                correct_prev = existing.get("predictions_correct", 0)
+                total_new = total_prev + len(week_predictions)
+                correct_new = correct_prev + sum(1 for p in week_predictions if p.get("correct"))
+                updated_accuracy = round(correct_new / total_new, 4) if total_new > 0 else 0.0
+
+                _payload = {
+                    "predictions_total": total_new,
+                    "predictions_correct": correct_new,
+                    "accuracy": updated_accuracy,
+                    "prev_week_accuracy": prev_week_accuracy,
+                }
+                # accuracy_by_* y weights_end son foto de la ÉPOCA ACTUAL — solo se reescriben
+                # si hoy hubo aprendizaje real; si no, se conservan los del último batch.
+                if processed_predictions:
+                    week_record = _merge_league_record(existing.get("league_record") or {}, accuracy_by_league)
+                    _payload["league_record"] = week_record
+                    _payload["league_record_since"] = (
+                        (existing.get("league_record_since") if existing.get("league_record") else None)
+                        or now.date().isoformat()
+                    )
+                    _payload["accuracy_by_league"] = _league_accuracy(week_record)
+                    _payload["accuracy_by_market"] = acc_by_market
+                    _payload["weights_end"] = current_weights
+                acc_log_ref.update(_payload)
+            else:
+                correct_count = sum(1 for p in week_predictions if p.get("correct"))
+                acc_log_ref.set({
+                    "week": current_week,
+                    "predictions_total": len(week_predictions),
+                    "predictions_correct": correct_count,
+                    "accuracy": week_accuracy,
+                    "prev_week_accuracy": prev_week_accuracy,
+                    "league_record": _merge_league_record({}, accuracy_by_league),
+                    "league_record_since": now.date().isoformat(),
+                    "accuracy_by_league": _league_accuracy(_merge_league_record({}, accuracy_by_league)),
+                    "accuracy_by_market": acc_by_market,
+                    "weights_start": weights_start,
+                    "weights_end": current_weights,
+                    "created_at": now,
+                })
+
+            logger.info(
+                "run_daily_learning: accuracy_log[%s] — +%d resueltas hoy (accuracy dia=%.1f%%)",
+                current_week, len(week_predictions), week_accuracy * 100,
             )
-        # Actualizar también {doc_id}_synthetic si existe
-        try:
-            synthetic_ref = col("predictions").document(f"{doc_id}_synthetic")
-            snap = synthetic_ref.get()
-            if snap.exists:
-                synthetic_ref.update(payload)
-                logger.debug("run_daily_learning: %s_synthetic actualizado", doc_id)
         except Exception:
-            logger.warning(
-                "run_daily_learning: error actualizando %s_synthetic", doc_id, exc_info=True
-            )
+            logger.error("run_daily_learning: error guardando accuracy_log", exc_info=True)
+
+    # --- 7. Actualizar cada prediction con result/correct/error_type (_mark_predictions_graded) ---
+    # Los pasos 6 y 7 solo se hacen si model_weights se guardó: si no, las predicciones
+    # siguen pendientes y la próxima ejecución las vuelve a graduar y a sumar (antes se
+    # marcaban igualmente y sus aciertos se perdían para siempre de los contadores).
+    _persist_grading(
+        _weights_saved,
+        _update_accuracy_log,
+        lambda: _mark_predictions_graded(processed_predictions + legacy_predictions),
+    )
 
     # --- 8. Marcar predicciones obsoletas (>48h sin resultado) ---
     try:
