@@ -1,22 +1,25 @@
-# Publica la web privada de Tendencias en Cloudflare Pages. Manual, sin cron.
+# Publica la web de Tendencias en Cloudflare Pages. Manual, sin cron.
+#
+# La web es PÚBLICA (sin usuario ni contraseña) pero no indexable: el middleware
+# (functions/_middleware.js) añade a todo noindex/nofollow, no-store, no-referrer y nosniff.
+#
+# ⚠️ Cuando la web incluya datos de jugadores de Highlightly, debe volver a ser PRIVADA:
+#    PRIVATE = true en el middleware, secretos TRENDS_WEB_USER/TRENDS_WEB_PASS y las
+#    comprobaciones 401/401/200 con prueba de datos falsos y retirada del despliegue fallido
+#    (versión privada de este flujo: commit 30fb955).
 #
 # Sin credenciales de GCP: los datos se calculan desde los CSV de football-data.co.uk.
 # El JSON se genera en el runner y va directo a Cloudflare: no se sube a git ni como artefacto
-# (el repositorio es público) y el log solo muestra recuentos.
+# y el log solo muestra recuentos.
 #
 # Orden, parando al primer fallo:
 #   1. Faltan secretos → para sin tocar Cloudflare.
-#   2. Tests de la protección (functions/_middleware.js).
-#   3. Crea el proyecto de Pages si no existe y guarda en él usuario y contraseña (secretos
-#      cifrados de Cloudflare, leídos de los secretos de GitHub por stdin, nunca en el log).
-#   4. PRUEBA con datos falsos: publica una página y un rates.json de mentira y exige 401 sin
-#      credenciales y con credenciales erróneas, y 200 con las buenas, en la URL del proyecto
-#      y en la del despliegue. Si algo no cuadra, para: los datos reales no han salido.
-#   5. Genera los datos reales, los publica y repite las comprobaciones. Si fallaran, vuelve a
-#      publicar la prueba (retira los datos) y sale en rojo.
+#   2. Tests del middleware y de la exportación.
+#   3. Crea el proyecto de Pages si no existe.
+#   4. Genera los datos reales, los publica y comprueba, en la URL del despliegue y en la del
+#      proyecto, que /, /data/rates.json y /app.js dan 200 sin credenciales y llevan noindex.
 #
-# Secretos de GitHub: CLOUDFLARE_API_TOKEN (solo "Cloudflare Pages: Edit"), CLOUDFLARE_ACCOUNT_ID,
-# TRENDS_WEB_USER, TRENDS_WEB_PASS (contraseña nueva, distinta de la del dashboard).
+# Secretos de GitHub: CLOUDFLARE_API_TOKEN (solo "Cloudflare Pages: Edit"), CLOUDFLARE_ACCOUNT_ID.
 name: trends-web-publish
 
 on:
@@ -38,8 +41,6 @@ env:
   WRANGLER: npx --yes wrangler@4.151.3
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-  WEB_USER: ${{ secrets.TRENDS_WEB_USER }}
-  WEB_PASS: ${{ secrets.TRENDS_WEB_PASS }}
 
 jobs:
   publicar:
@@ -53,16 +54,10 @@ jobs:
           set -euo pipefail
           [ "$CONFIRMAR" = "PUBLICAR" ] || { echo "Escribe confirmar=PUBLICAR"; exit 1; }
           missing=""
-          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID WEB_USER WEB_PASS; do
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
             [ -n "${!v}" ] || missing="$missing $v"
           done
           [ -z "$missing" ] || { echo "Faltan secretos:$missing — no se toca Cloudflare"; exit 1; }
-          [ "${#WEB_PASS}" -ge 16 ] || { echo "La contraseña debe tener al menos 16 caracteres"; exit 1; }
-          # Un salto de línea o espacio colado al guardar el secreto impediría entrar desde el navegador.
-          for v in WEB_USER WEB_PASS; do
-            [[ "${!v}" =~ [[:space:]] ]] && { echo "$v contiene espacios o saltos de línea: vuelve a guardarlo"; exit 1; }
-          done
-          true
 
       - uses: actions/checkout@v4
 
@@ -74,66 +69,47 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Tests de la protección y de la exportación
+      - name: Tests del middleware y de la exportación
         run: |
           set -euo pipefail
           node --test trends_web/tests/middleware.test.mjs
           pip install --quiet httpx pytest
           python -m pytest -q trends_web/tests
 
-      - name: Proyecto de Pages y acceso (usuario y contraseña)
+      - name: Proyecto de Pages
         working-directory: trends_web
         run: |
           set -euo pipefail
           if ! $WRANGLER pages project list 2>/dev/null | grep -q "\b$PROJECT\b"; then
             $WRANGLER pages project create "$PROJECT" --production-branch main
           fi
-          printf '%s' "$WEB_USER" | $WRANGLER pages secret put TRENDS_WEB_USER --project-name "$PROJECT" >/dev/null
-          printf '%s' "$WEB_PASS" | $WRANGLER pages secret put TRENDS_WEB_PASS --project-name "$PROJECT" >/dev/null
-          echo "Acceso configurado en el proyecto $PROJECT."
 
-      - name: Comprobador de acceso
+      - name: Comprobador de la web pública
         run: |
           cat > "$RUNNER_TEMP/check.sh" <<'EOF'
-          # check.sh URL_BASE → 0 si / y /data/rates.json piden credenciales y solo abren con las buenas
+          # check.sh URL_BASE → 0 si /, /data/rates.json y /app.js dan 200 sin credenciales y llevan noindex
           set -uo pipefail
           base="$1"; bad=0
-          # Un proyecto o despliegue nuevo tarda en existir en DNS/TLS (curl da 000): se espera
-          # hasta 5 min a que responda algo antes de medir. Mientras, no se sirve nada.
+          # Un despliegue nuevo tarda en existir en DNS/TLS (curl da 000): se espera hasta 5 min.
           for i in $(seq 1 30); do
             [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base/")" != "000" ] && break
             sleep 10
           done
           for path in / /data/rates.json /app.js; do
             for i in 1 2 3 4 5 6; do   # la publicación tarda unos segundos en propagarse
-              anon=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base$path")
-              [ "$anon" = "401" ] && break
+              hdr=$(curl -s -o /dev/null -D - --max-time 10 "$base$path" | tr -d '\r')
+              code=$(awk 'NR==1{print $2}' <<<"$hdr")
+              [ "$code" = "200" ] && break
               sleep 10
             done
-            wrong=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "nadie:incorrecta" "$base$path")
-            good=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "$WEB_USER:$WEB_PASS" "$base$path")
-            echo "  $path → sin credenciales $anon · erróneas $wrong · buenas $good"
-            [ "$anon" = "401" ] && [ "$wrong" = "401" ] && [ "$good" = "200" ] || bad=1
+            robots=$(grep -i '^x-robots-tag:' <<<"$hdr" | cut -d' ' -f2- )
+            cache=$(grep -i '^cache-control:' <<<"$hdr" | cut -d' ' -f2- )
+            echo "  $path → sin credenciales ${code:-000} · X-Robots-Tag: ${robots:-falta} · Cache-Control: ${cache:-falta}"
+            [ "$code" = "200" ] && [[ "$robots" == *noindex* ]] || bad=1
           done
           exit $bad
           EOF
           chmod +x "$RUNNER_TEMP/check.sh"
-
-      - name: Prueba con datos falsos
-        working-directory: trends_web
-        run: |
-          set -euo pipefail
-          P="$RUNNER_TEMP/prueba"; mkdir -p "$P/data"
-          printf '<!doctype html><title>Prueba</title><p>Prueba de acceso.</p>' > "$P/index.html"
-          printf 'console.log("prueba");' > "$P/app.js"
-          printf '{"prueba": true}' > "$P/data/rates.json"
-          out=$($WRANGLER pages deploy "$P" --project-name "$PROJECT" --branch main --commit-dirty=true 2>&1)
-          dep=$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.pages\.dev' <<<"$out" | head -1)
-          [ -n "$dep" ] || { echo "No se encontró la URL del despliegue"; exit 1; }
-          prod="https://${dep#https://*.}"
-          echo "PROD=$prod" >> "$GITHUB_ENV"
-          echo "Prueba en el despliegue:"; "$RUNNER_TEMP/check.sh" "$dep"
-          echo "Prueba en la URL del proyecto:"; "$RUNNER_TEMP/check.sh" "$prod"
 
       - name: Generar datos reales (desde los CSV)
         run: python trends_web/export_rates.py --out trends_web/site/data/rates.json
@@ -144,43 +120,11 @@ jobs:
           set -uo pipefail
           out=$($WRANGLER pages deploy site --project-name "$PROJECT" --branch main --commit-dirty=true 2>&1)
           dep=$(grep -oE 'https://[a-z0-9-]+\.[a-z0-9-]+\.pages\.dev' <<<"$out" | head -1)
+          [ -n "$dep" ] || { echo "ERROR: no se encontró la URL del despliegue"; exit 1; }
+          prod="https://${dep#https://*.}"
           ok=1
-          [ -n "$dep" ] || ok=0
-          if [ "$ok" = 1 ]; then
-            echo "Despliegue:"; "$RUNNER_TEMP/check.sh" "$dep" || ok=0
-            echo "URL del proyecto:"; "$RUNNER_TEMP/check.sh" "$PROD" || ok=0
-          fi
-          if [ "$ok" != 1 ]; then
-            echo "ERROR: la protección no responde como debe: se retiran los datos"
-            # 1) La prueba vuelve a ser la publicación activa (Cloudflare no deja borrar la activa).
-            $WRANGLER pages deploy "$RUNNER_TEMP/prueba" --project-name "$PROJECT" --branch main --commit-dirty=true >/dev/null 2>&1 \
-              || echo "ERROR: no se pudo republicar la prueba"
-            # 2) Cada despliegue conserva su propia URL: se borra el fallido, buscado por su URL.
-            if [ -z "$dep" ]; then
-              echo "ERROR: sin URL del despliegue fallido; revisa a mano con: wrangler pages deployment list --project-name $PROJECT"
-              exit 1
-            fi
-            id=$($WRANGLER pages deployment list --project-name "$PROJECT" --environment production --json 2>/dev/null \
-                 | python3 "$GITHUB_WORKSPACE/trends_web/deployment_id.py" "$dep")
-            if [ -z "$id" ]; then
-              echo "ERROR: no se encontró el id de $dep; BÓRRALO A MANO (wrangler pages deployment delete)"
-              exit 1
-            fi
-            $WRANGLER pages deployment delete "$id" --project-name "$PROJECT" --force >/dev/null 2>&1 \
-              || { echo "ERROR: no se pudo borrar el despliegue $id; BÓRRALO A MANO"; exit 1; }
-            # 3) Su URL ya no puede servir los datos, ni con las credenciales buenas.
-            gone=0
-            for i in 1 2 3 4 5 6 7 8 9; do
-              code=$(curl -s -o /dev/null -w '%{http_code}' -u "$WEB_USER:$WEB_PASS" "$dep/data/rates.json")
-              if [ "$code" != "200" ]; then gone=1; break; fi
-              sleep 10
-            done
-            if [ "$gone" = 1 ]; then
-              echo "Despliegue fallido $id borrado: su URL ya no sirve los datos (HTTP $code)."
-            else
-              echo "ERROR: $dep sigue sirviendo los datos 90 s después de borrarlo (id $id); BÓRRALO A MANO"
-            fi
-            exit 1
-          fi
-          echo "Publicada en $PROD (protegida)."
+          echo "Despliegue:"; "$RUNNER_TEMP/check.sh" "$dep" || ok=0
+          echo "URL del proyecto:"; "$RUNNER_TEMP/check.sh" "$prod" || ok=0
           rm -f site/data/rates.json
+          [ "$ok" = 1 ] || { echo "ERROR: la web no responde 200 sin credenciales o le falta noindex"; exit 1; }
+          echo "Publicada en $prod (pública, noindex)."

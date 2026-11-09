@@ -1,7 +1,16 @@
-// Protección de la web de Tendencias en Cloudflare Pages: se ejecuta ANTES de servir cualquier
-// ruta (la página, app.js, data/rates.json…). Autenticación básica con TRENDS_WEB_USER y
-// TRENDS_WEB_PASS, secretos del proyecto de Pages (nunca en el repositorio).
-// Falla cerrada: si falta cualquiera de los dos, deniega TODO (503), también con credenciales.
+// Middleware de la web de Tendencias en Cloudflare Pages: se ejecuta ANTES de servir cualquier
+// ruta (la página, app.js, data/rates.json…).
+//
+// Ahora la web es PÚBLICA (PRIVATE = false): sirve todo sin pedir credenciales, pero siempre con
+// las cabeceras de privacidad (noindex, no-store, no-referrer, nosniff).
+//
+// ⚠️ Cuando la web incluya datos de jugadores de Highlightly, debe volver a ser PRIVADA:
+//    PRIVATE = true, secretos TRENDS_WEB_USER/TRENDS_WEB_PASS en el proyecto de Pages y
+//    comprobaciones 401/401/200 en trends-web-publish (ver commit 30fb955 para la versión privada).
+//
+// En modo privado: autenticación básica con TRENDS_WEB_USER y TRENDS_WEB_PASS (secretos del
+// proyecto de Pages). Falla cerrada: si falta cualquiera de los dos, deniega TODO (503).
+export const PRIVATE = false;
 
 const REALM = 'Basic realm="Tendencias", charset="UTF-8"';
 const PRIVATE_HEADERS = {
@@ -43,7 +52,14 @@ export function parseBasic(header) {
   return i < 0 ? null : { user: decoded.slice(0, i), pass: decoded.slice(i + 1) };
 }
 
-export async function onRequest(context) {
+async function withPrivateHeaders(res) {
+  const out = new Response(res.body, res);
+  for (const [k, v] of Object.entries(PRIVATE_HEADERS)) out.headers.set(k, v);
+  return out;
+}
+
+// Modo privado (desactivado mientras PRIVATE = false).
+export async function protect(context) {
   const { request, env, next } = context;
   const user = env.TRENDS_WEB_USER;
   const pass = env.TRENDS_WEB_PASS;
@@ -57,8 +73,10 @@ export async function onRequest(context) {
   if (!cred || !okUser || !okPass) {
     return deny(401, "Acceso restringido.", { "WWW-Authenticate": REALM });
   }
-  const res = await next();
-  const out = new Response(res.body, res);
-  for (const [k, v] of Object.entries(PRIVATE_HEADERS)) out.headers.set(k, v);
-  return out;
+  return withPrivateHeaders(await next());
+}
+
+export async function onRequest(context) {
+  if (PRIVATE) return protect(context);
+  return withPrivateHeaders(await context.next());
 }
