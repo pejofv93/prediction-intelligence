@@ -1,8 +1,11 @@
-"""Recalcula model_weights/current.accuracy_by_confidence SIN el resultado exacto.
+"""Recalcula model_weights/current.accuracy_by_confidence con el universo que el contador sumará
+a partir de ahora: SOLO FÚTBOL graduado por el aprendizaje nocturno (model_epoch=2), sin
+resultado exacto (sin distinguir mayúsculas), sin push ni stale_odds, creadas desde el reset v63
+(2026-08-27 15:51 UTC).
 
-Mismo universo que calib_breakdown.py (y que learning_engine): graduadas (correct True/False),
-sin push ni stale_odds, creadas desde el reset v63 (2026-08-27 15:51 UTC), baloncesto solo hasta
-2026-11-01; además, fuera market_type=correct_score (sin distinguir mayúsculas).
+Fuera, además del resultado exacto: todo el baloncesto (desde e71e47b el aprendizaje nocturno ya
+no lo suma; antes sí, y mezclarlo dejaría la tabla con dos modelos distintos) y lo graduado por
+otros caminos (duplicados, backfills, arreglos manuales), que el contador nunca sumó.
 
 Por defecto, PASADA EN SECO: imprime los tramos antes y después. No escribe nada.
 Con --escribir, en este orden y parando al primer fallo:
@@ -22,7 +25,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from calib_breakdown import BASKET_OUT, BUCKETS, RESET, as_dt, bucket, is_basket  # noqa: E402
+from calib_breakdown import BUCKETS, RESET, as_dt, bucket, grader, is_basket  # noqa: E402
 from shared.firestore_client import col, get_client, iter_all  # noqa: E402
 
 BACKUP_COLLECTION = "model_weights_backup_20261109"
@@ -32,9 +35,9 @@ def is_correct_score(p: dict) -> bool:
     return str(p.get("market_type") or "h2h").strip().lower() == "correct_score"
 
 
-def rebuild() -> tuple[dict, int]:
+def rebuild() -> tuple[dict, dict]:
     counts = defaultdict(lambda: [0, 0])
-    excluded_cs = 0
+    fuera = defaultdict(int)   # motivo → predicciones del tramo ≥65 % que quedan fuera
     for d in iter_all("predictions"):
         p = d.to_dict() or {}
         if p.get("correct") not in (True, False) or p.get("push") or p.get("stale_odds"):
@@ -43,16 +46,21 @@ def rebuild() -> tuple[dict, int]:
         b = bucket(float(p.get("confidence") or 0))
         if not created or created < RESET or not b:
             continue
-        if is_basket(p) and created >= BASKET_OUT:
-            continue
         if is_correct_score(p):
-            excluded_cs += 1
+            fuera["resultado exacto"] += 1
+            continue
+        if is_basket(p):
+            fuera["baloncesto"] += 1
+            continue
+        g = grader(p)
+        if g != "nocturno":
+            fuera[f"graduada por {g}"] += 1
             continue
         counts[b][0] += 1
         counts[b][1] += p["correct"] is True
     out = {b: {"count": n, "correct": k, "rate": round(k / n, 4) if n else None}
            for b, (n, k) in ((b, counts[b]) for b in BUCKETS)}
-    return out, excluded_cs
+    return out, dict(fuera)
 
 
 def show(title: str, acc: dict) -> None:
@@ -78,8 +86,9 @@ def main() -> int:
     print(f"model_weights/current: última escritura {snap.update_time}; {len(data)} campos\n")
 
     show("ANTES (contador actual):", data.get("accuracy_by_confidence"))
-    new, excluded = rebuild()
-    show(f"\nDESPUÉS (recalculado sin resultado exacto; {excluded} de resultado exacto fuera):", new)
+    new, fuera = rebuild()
+    show("\nDESPUÉS (solo fútbol graduado por el aprendizaje nocturno, sin resultado exacto):", new)
+    print("Fuera: " + (", ".join(f"{k} {v}" for k, v in sorted(fuera.items())) or "nada"))
 
     if not args.escribir:
         print(f"\nPasada en seco: no se ha escrito nada (la copia iría a {BACKUP_COLLECTION}).")
