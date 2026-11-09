@@ -11,6 +11,10 @@ enviado:
                 marca predictions.alerted mientras no junte 20; baloncesto por la marca.
   - Polymarket: alerts_sent (type=polymarket, status sent/sent_archived) graduadas
                 por polymarket_resolver (result win/loss), por resolved_at.
+Los dos grupos comparan con el acierto esperado por la cuota de esas mismas señales.
+Polymarket usa además un margen según la muestra: un BUY_NO a 0.80 que acierta un 50 %
+es malo aunque pase de 45 %, y un BUY_YES a 0.25 que acierta un 30 % va bien aunque no
+llegue a 35 % (los antiguos umbrales fijos).
 """
 import logging
 from datetime import datetime, timezone
@@ -27,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 _LAST_N = 20
 _MIN_SAMPLE = 20
-_MIN_GAP_VS_EXPECTED = 0.10  # Sports: puntos por debajo del acierto esperado por cuota
+_MIN_GAP_VS_EXPECTED = 0.10  # puntos por debajo del acierto esperado por cuota
+_Z_ONE_SIDED_95 = 1.645      # Polymarket: el margen crece con el ruido binomial de la muestra
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
 _GROUP_LABELS = {"sports": "⚽ Sports", "polymarket": "🔮 Polymarket"}
@@ -158,30 +163,41 @@ def _poly_alerted_graded() -> list[dict]:
     return out
 
 
-def _evaluate_group(signals: list[dict], vs_expected: bool = False) -> dict:
+def _min_gap(expected: float, n: int, sample_aware: bool) -> float:
+    """Puntos por debajo del esperado para avisar. sample_aware: max(10 puntos,
+    1,645·√(e(1−e)/n)) — con n=20 y e=0,5 son 18 puntos; con e=0,95, 10."""
+    if not sample_aware or n <= 0:
+        return _MIN_GAP_VS_EXPECTED
+    noise = _Z_ONE_SIDED_95 * (expected * (1.0 - expected) / n) ** 0.5
+    return round(max(_MIN_GAP_VS_EXPECTED, noise), 4)
+
+
+def _evaluate_group(signals: list[dict], vs_expected: bool = False,
+                    sample_aware: bool = False) -> dict:
     """Acierto de las últimas _LAST_N señales graduadas de un grupo.
 
-    vs_expected=True (Sports): solo degradado si el acierto queda al menos
-    _MIN_GAP_VS_EXPECTED por debajo del esperado por cuota. False (Polymarket):
-    umbrales fijos 35% / 45%.
+    vs_expected=True: solo degradado si el acierto queda al menos el margen por debajo
+    del esperado por cuota (_MIN_GAP_VS_EXPECTED; con sample_aware, el que da _min_gap).
+    vs_expected=False: umbrales fijos 35% / 45% (ya no lo usa ningún grupo).
     """
     last = sorted(signals, key=lambda s: s.get("at") or _EPOCH, reverse=True)[:_LAST_N]
     n = len(last)
     if n < _MIN_SAMPLE:
         return {
             "status": "SIN MUESTRA", "n": n, "win_rate_last_20": 0.0,
-            "expected_win_rate": None, "degraded": False,
+            "expected_win_rate": None, "min_gap": None, "degraded": False,
         }
     win_rate = round(sum(1 for s in last if s["correct"]) / n, 4)
     # Acierto que implican las cuotas de esas mismas señales (1/cuota), como referencia:
     # un 35% de acierto a cuota media 3.0 no es lo mismo que a 1.5.
     implied = [1.0 / float(s["odds"]) for s in last if s.get("odds") and float(s["odds"]) > 1.0]
     expected = round(sum(implied) / len(implied), 4) if implied else None
+    min_gap = _min_gap(expected, n, sample_aware) if (vs_expected and expected is not None) else None
     if vs_expected:
         # Contra la cuota: un 40% a cuota media 2.4 es lo esperable, no una degradación.
         if expected is None:
             status = "SIN CUOTAS"
-        elif round(expected - win_rate, 4) >= _MIN_GAP_VS_EXPECTED:  # round: 0.5-0.4 = 0.0999…
+        elif round(expected - win_rate, 4) >= min_gap:  # round: 0.5-0.4 = 0.0999…
             status = "POR DEBAJO DE CUOTA"
         else:
             status = "SALUDABLE"
@@ -194,6 +210,7 @@ def _evaluate_group(signals: list[dict], vs_expected: bool = False) -> dict:
     return {
         "status": status, "n": n, "win_rate_last_20": win_rate,
         "expected_win_rate": expected,
+        "min_gap": min_gap,
         "degraded": status not in ("SALUDABLE", "SIN CUOTAS"),
     }
 
@@ -215,18 +232,20 @@ def check_model_health(
       "checked_at": datetime
     }
     """
-    loaders = {"sports": (sports_signals, _sports_alerted_graded, True),
-               "polymarket": (poly_signals, _poly_alerted_graded, False)}
+    # (señales, cargador, margen según la muestra)
+    loaders = {"sports": (sports_signals, _sports_alerted_graded, False),
+               "polymarket": (poly_signals, _poly_alerted_graded, True)}
     groups = {}
-    for name, (signals, loader, vs_expected) in loaders.items():
+    for name, (signals, loader, sample_aware) in loaders.items():
         try:
             groups[name] = _evaluate_group(
-                signals if signals is not None else loader(), vs_expected=vs_expected,
+                signals if signals is not None else loader(),
+                vs_expected=True, sample_aware=sample_aware,
             )
         except Exception as e:
             logger.error("check_model_health(%s): error — %s", name, e)
             groups[name] = {"status": "ERROR", "n": 0, "win_rate_last_20": 0.0,
-                            "expected_win_rate": None, "degraded": False}
+                            "expected_win_rate": None, "min_gap": None, "degraded": False}
         logger.info(
             "check_model_health(%s): status=%s n=%d win_rate=%.0f%%",
             name, groups[name]["status"], groups[name]["n"],
@@ -257,6 +276,8 @@ def format_health_alert(group_name: str, group: dict) -> str:
     if expected is not None:
         _gap = (float(group.get("win_rate_last_20") or 0) - expected) * 100
         lines.append(f"Acierto esperado por cuota de esas señales: {expected:.0%} ({_gap:+.0f} puntos)")
+        if group.get("min_gap") is not None:
+            lines.append(f"Se avisa a partir de {float(group['min_gap']) * 100:.0f} puntos por debajo del esperado.")
     lines.append("No se cambia ningún umbral ni se suspende nada: solo informativo.")
     return "\n".join(lines)
 
