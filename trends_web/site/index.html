@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Tendencias por equipo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Tendencias por equipo</h1>
+    <p id="meta" class="muted">Cargando…</p>
+  </header>
+
+  <nav class="controls" aria-label="Filtros">
+    <div class="group" id="leagues" role="tablist" aria-label="Liga"></div>
+    <div class="group" id="splits" role="tablist" aria-label="Casa o fuera"></div>
+    <div class="group markets">
+      <span class="label">Del equipo</span><span id="markets-team"></span>
+    </div>
+    <div class="group markets">
+      <span class="label">Del partido</span><span id="markets-match"></span>
+    </div>
+    <label class="toggle"><input type="checkbox" id="by-gap"> Ordenar por diferencia con la liga</label>
+  </nav>
+
+  <main>
+    <section id="team" hidden></section>
+    <p id="table-title" class="table-title"></p>
+    <div class="table-wrap"><table id="grid"></table></div>
+  </main>
+
+  <footer>
+    <h2>Cómo leerlo</h2>
+    <ul>
+      <li><b>Cada celda</b>: porcentaje de partidos del equipo por encima de la línea, ajustado hacia la media de la liga
+        cuando la muestra es pequeña. Debajo, la media de la liga, la diferencia en puntos <b>frente a la media de la liga</b>
+        y la muestra: partidos de esta temporada + de la anterior (que cuenta la mitad; un cuarto si fue en otra división)
+        y el n efectivo.</li>
+      <li><b>Fiabilidad</b>: <span class="tag encima">por encima</span> o <span class="tag debajo">por debajo</span>
+        de la liga si la diferencia es de al menos <span id="gap-pts">5</span> puntos y la muestra es suficiente;
+        <span class="tag en_linea">en línea con la liga</span> si es menor;
+        <span class="tag insuficiente">muestra insuficiente</span> si no llega al mínimo
+        (n efectivo ≥ 10 y ≥ 5 partidos de esta temporada; en casa o fuera, n efectivo ≥ 8).</li>
+      <li><b>Es descriptivo</b>: el porcentaje de un solo equipo apenas mejora a la media de la liga en el backtest.
+        La probabilidad de un partido concreto (ataque de uno contra defensa del otro) irá en la previa de partido.</li>
+      <li><b>Paradas (derivadas)</b> = remates a puerta del rival − goles encajados; con un gol en propia puerta pueden salir de menos.</li>
+      <li><b>Tarjetas</b>: en Inglaterra la doble amarilla cuenta solo la roja; en el resto, amarilla + roja.
+        <b>Faltas</b>: la Ligue 2 no las publica (son tiros libres), así que no cuenta en ese mercado.</li>
+      <li>Fuente: football-data.co.uk. <span id="generated" class="muted"></span></li>
+    </ul>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
