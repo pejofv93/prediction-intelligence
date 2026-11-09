@@ -437,7 +437,7 @@ def format_daily_report(
                 _calib_rows.append(f"  {_label}: {_rate:.0%} win ({_cnt} señales){_flag}")
         if _calib_rows:
             lines.append("")
-            lines.append("🎯 Calibración histórica de confianza:")
+            lines.append("🎯 Calibración de confianza (solo fútbol, sin resultado exacto):")
             lines.extend(_calib_rows)
 
     return "\n".join(lines)
