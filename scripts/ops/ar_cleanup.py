@@ -277,6 +277,31 @@ def preflight_activate(d, policy_path, expected):
     return 0 if ok else 1
 
 
+def active(d, since=""):
+    """
+    Solo lectura: imprime en stdout las revisiones con tráfico según Cloud Run (separadas por
+    espacios), para activas=auto. En stderr, cada una con su servicio, % de tráfico y fecha de
+    creación, marcando las creadas desde `since` (ISO, p. ej. el despliegue de hoy).
+    """
+    revisions = {r["metadata"]["name"]: r for r in load(f"{d}/revisions.json")}
+    out = []
+    for s in load(f"{d}/services.json"):
+        st = s.get("status", {})
+        for t in st.get("traffic", []):
+            rn = t.get("revisionName") or (st.get("latestReadyRevisionName") if t.get("latestRevision") else None)
+            if rn and t.get("percent"):
+                out.append(rn)
+                created = revisions.get(rn, {}).get("metadata", {}).get("creationTimestamp", "?")
+                new = " (nueva desde " + since + ")" if since and created >= since else ""
+                print(f"  activa {s['metadata']['name']}: {rn} {t['percent']}% creada {created}{new}",
+                      file=sys.stderr)
+    if not out:
+        print("ERROR: ninguna revisión con tráfico", file=sys.stderr)
+        return 1
+    print(" ".join(sorted(set(out))))
+    return 0
+
+
 def tag_target(d, repo_url, revision):
     """Solo lectura: imprime 'servicio digest' de una revisión, validando que su imagen es del repo."""
     r = {x["metadata"]["name"]: x for x in load(f"{d}/revisions.json")}.get(revision)
@@ -295,5 +320,5 @@ def tag_target(d, repo_url, revision):
 if __name__ == "__main__":
     cmd, *a = sys.argv[1:]
     cmds = {"verify": verify, "simulate": simulate, "stages": stages, "verify-running": verify_running,
-            "preflight-activate": preflight_activate, "tag-target": tag_target}
+            "preflight-activate": preflight_activate, "tag-target": tag_target, "active": active}
     sys.exit(cmds[cmd](*a))

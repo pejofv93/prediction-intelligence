@@ -16,6 +16,9 @@
 #   market-sentinel).
 # modo=etiquetar: ÚNICA escritura = añade keep-<servicio>-<revisión> a la imagen de `revision`.
 #   No aplica ni cambia la política. Para si la etiqueta ya existe apuntando a otro digest.
+#   revision=auto: etiqueta todas las revisiones con tráfico según Cloud Run, salvo market-sentinel.
+# activas=auto (solo verificar y etiquetar): lee de Cloud Run las revisiones con tráfico en vez de
+#   una lista escrita a mano y marca las creadas desde `desde`. dry-run y activar exigen la lista.
 # modo=activar: quita el dry-run (empieza a borrar). Exige confirmar=ACTIVAR. Solo con OK del usuario.
 #   Antes comprueba (y para si falla): revisiones activas/Ready/imágenes, que cada regla Delete
 #   tenga olderThan >= 14 días y que cada revisión activa tenga etiqueta keep-; imprime la simulación.
@@ -33,7 +36,7 @@ on:
         description: "Para modo=activar escribe ACTIVAR"
         default: ""
       activas:
-        description: "Revisiones con tráfico esperadas (separadas por espacios)"
+        description: "Revisiones con tráfico esperadas (separadas por espacios), o auto en verificar/etiquetar"
         default: "dashboard-00457-gdm market-sentinel-00005-9t2 polymarket-agent-00561-klf sports-agent-00637-6df telegram-bot-00487-2qm"
       etapas:
         description: "modo=simular: antigüedades en días, separadas por espacios"
@@ -42,7 +45,10 @@ on:
         description: "Revisión canary a proteger"
         default: "polymarket-agent-00370-biq"
       revision:
-        description: "modo=etiquetar: revisión de Cloud Run cuya imagen se etiqueta keep-"
+        description: "modo=etiquetar: revisión cuya imagen se etiqueta keep-, o auto (todas las activas salvo market-sentinel)"
+        default: ""
+      desde:
+        description: "activas=auto: marca las revisiones creadas desde esta fecha ISO (p. ej. 2026-11-09T00:00:00Z)"
         default: ""
 
 permissions:
@@ -87,7 +93,19 @@ jobs:
           import json, sys
           r = json.load(open(sys.argv[1]))
           print("Política actual:", len(r.get("cleanupPolicies", {})), "reglas; dry-run:", r.get("cleanupPolicyDryRun"))
+          print(f"Tamaño del repositorio: {int(r.get('sizeBytes') or 0) / 1024 ** 3:.1f} GB")
           EOF
+
+      - name: Resolver activas=auto (lectura)
+        if: inputs.activas == 'auto' || inputs.revision == 'auto'
+        env:
+          MODO: ${{ inputs.modo }}
+          DESDE: ${{ inputs.desde }}
+        run: |
+          set -euo pipefail
+          case "$MODO" in verificar|etiquetar) ;; *) echo "auto solo vale en verificar y etiquetar"; exit 1;; esac
+          act=$(python3 scripts/ops/ar_cleanup.py active "$D" "$DESDE")
+          echo "ACTIVAS_AUTO=$act" >> "$GITHUB_ENV"
 
       - name: Comprobar revisiones y digests
         if: inputs.modo == 'dry-run'
@@ -196,6 +214,7 @@ jobs:
         run: |
           set -uo pipefail
           fail=0
+          if [ "$ACTIVAS" = "auto" ]; then ACTIVAS="$ACTIVAS_AUTO"; fi
           python3 scripts/ops/ar_cleanup.py verify-running "$D" "$REPO_URL" "$ACTIVAS" "$CANARY" || fail=1
           # /health no hace nada salvo responder; si el servicio estaba a 0 instancias, esto
           # fuerza un arranque en frío desde la imagen. 3 intentos con margen para el arranque.
@@ -218,17 +237,25 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$REVISION" ] || { echo "Falta revision"; exit 1; }
-          target=$(python3 scripts/ops/ar_cleanup.py tag-target "$D" "$REPO_URL" "$REVISION")
-          read -r svc dig <<<"$target"
-          tag="keep-$REVISION"
-          cur=$(gcloud artifacts docker images describe "$REPO_URL/$svc:$tag" \
-                  --format='value(image_summary.digest)' </dev/null 2>/dev/null || true)
-          if [ -n "$cur" ] && [ "$cur" != "$dig" ]; then echo "ERROR: $tag ya apunta a otro digest"; exit 1; fi
-          if [ "$cur" = "$dig" ]; then echo "$tag ya existe en ${dig:7:12}: nada que hacer"; exit 0; fi
-          gcloud artifacts docker tags add "$REPO_URL/$svc@$dig" "$REPO_URL/$svc:$tag" --quiet </dev/null
-          now=$(gcloud artifacts docker images describe "$REPO_URL/$svc:$tag" --format='value(image_summary.digest)' </dev/null)
-          [ "$now" = "$dig" ] || { echo "ERROR: la etiqueta no apunta al digest esperado"; exit 1; }
-          echo "etiquetada $tag -> ${dig:7:12}"
+          if [ "$REVISION" = "auto" ]; then
+            revs=$(tr ' ' '\n' <<<"$ACTIVAS_AUTO" | grep -v '^market-sentinel' || true)
+          else
+            revs="$REVISION"
+          fi
+          [ -n "$revs" ] || { echo "Ninguna revisión que etiquetar"; exit 1; }
+          for rev in $revs; do
+            target=$(python3 scripts/ops/ar_cleanup.py tag-target "$D" "$REPO_URL" "$rev")
+            read -r svc dig <<<"$target"
+            tag="keep-$rev"
+            cur=$(gcloud artifacts docker images describe "$REPO_URL/$svc:$tag" \
+                    --format='value(image_summary.digest)' </dev/null 2>/dev/null || true)
+            if [ -n "$cur" ] && [ "$cur" != "$dig" ]; then echo "ERROR: $tag ya apunta a otro digest"; exit 1; fi
+            if [ "$cur" = "$dig" ]; then echo "$tag ya existe en ${dig:7:12}: nada que hacer"; continue; fi
+            gcloud artifacts docker tags add "$REPO_URL/$svc@$dig" "$REPO_URL/$svc:$tag" --quiet </dev/null
+            now=$(gcloud artifacts docker images describe "$REPO_URL/$svc:$tag" --format='value(image_summary.digest)' </dev/null)
+            [ "$now" = "$dig" ] || { echo "ERROR: la etiqueta no apunta al digest esperado"; exit 1; }
+            echo "etiquetada $tag -> ${dig:7:12}"
+          done
 
       - name: Activar (borra de verdad)
         if: inputs.modo == 'activar'
