@@ -46,6 +46,30 @@ def is_basket(p: dict) -> bool:
             or str(p.get("league") or "").upper() in ("NBA", "ACB", "EUROLEAGUE"))
 
 
+def grader(p: dict) -> str:
+    """Quién graduó la predicción, por las marcas que deja cada camino (solo lectura).
+      duplicado      → el aprendizaje nocturno le copió el resultado del primario
+                       (_resolved_from_duplicate); NO suma en accuracy_by_confidence.
+      backfill       → scripts/backfill_predictions_result.py (backfill_at/backfill_note).
+      regrade_alt    → scripts/regrade_alt_markets_backfill.py (regrade_note).
+      nocturno_fuera → aprendizaje nocturno con excluded_from_learning (época 1: stale_odds,
+                       baloncesto desde e71e47b); NO suma.
+      nocturno       → aprendizaje nocturno normal (model_epoch=2); SÍ suma.
+      sin_marca      → ninguna de las anteriores (arreglo manual u otro camino).
+    """
+    if p.get("_resolved_from_duplicate"):
+        return "duplicado"
+    if p.get("backfill_at") or p.get("backfill_note"):
+        return "backfill"
+    if p.get("regrade_note"):
+        return "regrade_alt"
+    if p.get("excluded_from_learning") or p.get("model_epoch") == 1:
+        return "nocturno_fuera"
+    if p.get("model_epoch") == 2:
+        return "nocturno"
+    return "sin_marca"
+
+
 def main() -> None:
     sent_ids = set()
     for d in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
@@ -77,6 +101,9 @@ def main() -> None:
             "enviada": "enviada" if (pid in sent_ids or d.id in sent_ids or p.get("alerted")) else "no enviada",
             "periodo": "antes 26-oct" if created < CUT else "desde 26-oct",
         }
+        # Quién gradúa, sin resultado exacto (para cuadrar con el recálculo) y por deporte
+        if str(p.get("market_type") or "h2h").strip().lower() != "correct_score":
+            dims["graduador"] = f"{grader(p)} · {'basket' if basket else 'fútbol'}"
         odds = float(p.get("odds") or 0)
         prob = p.get("calculated_prob")
         ok = p["correct"] is True
@@ -102,7 +129,7 @@ def main() -> None:
         for (_, dim, val), (n, ok, inv, ninv, pr, npr) in rows:
             exp = f"{inv / ninv:.0%}" if ninv else "—"
             mod = f"{pr / npr:.0%}" if npr else "—"
-            print(f"  {dim:8s} {val[:24]:24s} n={n:4d} acierto={ok / n:4.0%}"
+            print(f"  {dim:9s} {val[:24]:24s} n={n:4d} acierto={ok / n:4.0%}"
                   f" esperado_cuota={exp:>4s} prob_modelo={mod:>4s}")
         print()
 
