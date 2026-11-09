@@ -526,6 +526,27 @@ def _league_accuracy(record: dict[str, dict]) -> dict[str, float | None]:
     return {lg: (round(v["correct"] / v["total"], 4) if v["total"] else None) for lg, v in record.items()}
 
 
+def _confidence_bucket(prediction: dict) -> str | None:
+    """Tramo de accuracy_by_confidence de una predicción graduada, o None si no cuenta.
+
+    El resultado exacto (poisson_cs) no cuenta en ningún tramo, se escriba como se escriba
+    market_type: su "confianza" sale 0.90+ con probabilidad real ~5 % (cuota ~25), y 110 de
+    179 señales del tramo 90-99 eran suyas; hundían el tramo al 22 % aunque nunca se envían.
+    """
+    if str(prediction.get("market_type") or "h2h").strip().lower() == "correct_score":
+        return None
+    conf = float(prediction.get("confidence") or 0.0)
+    if conf < 0.65:
+        return None
+    if conf < 0.70:
+        return "65_70"
+    if conf < 0.80:
+        return "70_80"
+    if conf < 0.90:
+        return "80_90"
+    return "90_99"
+
+
 def _dedup_pending(pending: list[dict]) -> tuple[list[dict], dict[str, list[dict]]]:
     """
     Deduplication de predicciones pendientes (BUG 2: dos señales por mismo partido).
@@ -1114,15 +1135,9 @@ async def run_daily_learning() -> None:
                     )
 
                 # Acumular accuracy por bucket de confianza (calibración)
-                _conf = float(prediction.get("confidence") or 0.0)
-                if 0.65 <= _conf < 0.70:
-                    accuracy_by_confidence["65_70"].append(correct)
-                elif 0.70 <= _conf < 0.80:
-                    accuracy_by_confidence["70_80"].append(correct)
-                elif 0.80 <= _conf < 0.90:
-                    accuracy_by_confidence["80_90"].append(correct)
-                elif _conf >= 0.90:
-                    accuracy_by_confidence["90_99"].append(correct)
+                _cbkt = _confidence_bucket(prediction)
+                if _cbkt:
+                    accuracy_by_confidence[_cbkt].append(correct)
 
             # Actualizar el documento prediction en Firestore
             (legacy_predictions if _is_legacy else processed_predictions).append({
