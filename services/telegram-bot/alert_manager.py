@@ -926,31 +926,10 @@ async def send_sports_alert(prediction: dict) -> bool:
             f"{_resend_from_odds:.2f} → {float(prediction.get('odds') or 0):.2f}\n" + text
         )
 
-    # Calibración de confianza: muestra win rate histórico real cuando hay ≥10 señales en el bucket
-    try:
-        from shared.firestore_client import col as _fscol
-        _conf_val = float(prediction.get("confidence") or 0.0)
-        _cbkt = (
-            "65_70" if 0.65 <= _conf_val < 0.70 else
-            "70_80" if 0.70 <= _conf_val < 0.80 else
-            "80_90" if 0.80 <= _conf_val < 0.90 else
-            "90_99" if _conf_val >= 0.90 else None
-        )
-        if _cbkt:
-            _mw = _fscol("model_weights").document("current").get()
-            if _mw.exists:
-                _bkt_data = _mw.to_dict().get("accuracy_by_confidence", {}).get(_cbkt, {})
-                _rate = _bkt_data.get("rate")
-                _cnt = int(_bkt_data.get("count", 0))
-                if _rate is not None and _cnt >= 10:
-                    # ⚠️ si el modelo sobreestima más de 10pp, ✅ si está bien calibrado
-                    _calib_emoji = "⚠️" if _rate < _conf_val - 0.10 else "✅"
-                    text += (
-                        f"\n{_calib_emoji} Confianza histórica real: *{_rate:.0%}*"
-                        f" (modelo: {_conf_val:.0%}) — {_cnt} señales"
-                    )
-    except Exception:
-        pass
+    # Sin línea "Confianza histórica real": comparaba la confianza (acuerdo entre las señales
+    # del modelo, 1 − desviación; en mercados alternativos, su probabilidad) con el acierto de
+    # todas las predicciones del tramo, enviadas o no. Un 95 % de acuerdo en un visitante a
+    # cuota 3.5 espera acertar ~29 %, no 95 %: el ⚠️ salía siempre y no decía nada útil.
 
     sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
 
