@@ -1,0 +1,60 @@
+# Recalcula model_weights/current.accuracy_by_confidence sin el resultado exacto. Manual, sin cron.
+# modo=seco (por defecto): solo lectura; tramos antes y después. No escribe nada.
+# modo=escribir: exige confirmar=ESCRIBIR; copia model_weights/current a la colección
+#   model_weights_backup_20261109 (Firestore, no artefacto: el repositorio es público) y después
+#   escribe SOLO accuracy_by_confidence.
+name: sports-calib-rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        type: choice
+        options: [seco, escribir]
+        default: seco
+      confirmar:
+        description: "Para modo=escribir escribe ESCRIBIR"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sports-calib-rebuild
+  cancel-in-progress: false
+
+jobs:
+  recalculo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Comprobar confirmación
+        if: ${{ inputs.modo == 'escribir' && inputs.confirmar != 'ESCRIBIR' }}
+        run: |
+          echo "modo=escribir exige confirmar=ESCRIBIR"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Recalcular (${{ inputs.modo }})
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          MODO: ${{ inputs.modo }}
+        run: |
+          set -euo pipefail
+          extra=""
+          if [ "$MODO" = "escribir" ]; then extra="--escribir"; fi
+          python scripts/ops/calib_rebuild.py $extra
