@@ -1,0 +1,45 @@
+# Resumen del aprendizaje nocturno desde el registro de Cloud Run de sports-agent. SOLO LECTURA.
+# El repositorio es público: el registro se descarga a un fichero temporal del runner y solo se
+# imprimen recuentos, la versión de model_weights escrita y el nombre de las excepciones; ninguna
+# línea del registro sale al log del flujo. Manual, sin cron.
+name: sports-learning-log
+
+on:
+  workflow_dispatch:
+    inputs:
+      horas:
+        description: "Ventana hacia atrás, en horas"
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  resumen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resumen (solo lectura)
+        env:
+          HORAS: ${{ inputs.horas }}
+        run: |
+          set -euo pipefail
+          [[ "$HORAS" =~ ^[0-9]+$ ]] || { echo "horas debe ser un número"; exit 1; }
+          F="$RUNNER_TEMP/learning_log.json"
+          gcloud logging read --project prediction-intelligence --freshness="${HORAS}h" --format=json \
+            --limit 20000 \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND (textPayload:"run_daily_learning" OR textPayload:"learning: iniciando pipeline" OR textPayload=~"^\s*[A-Za-z_][A-Za-z0-9_.]*(Error|Exception|FailedPrecondition|Aborted|AlreadyExists|NotFound|Conflict|DeadlineExceeded|ServiceUnavailable)(:|$)")' \
+            > "$F"
+          echo "Entradas leídas: $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$F")"
+          python3 scripts/ops/learning_log_summary.py "$F"
+          rm -f "$F"
