@@ -5,26 +5,29 @@ Ficha de partido de Tendencias (mp-v1) — Paso 1: lista de partidos próximos d
 
 SIN USO todavía: ningún endpoint ni job lo llama y no escribe nada en Firestore (lo único que
 escribe, solo si se le pasa un QuotaManager, es el contador de cuota de Highlightly). Aislado
-del feed actual, de trend_finder, de `upcoming` y de Polymarket.
+del feed actual, de trend_finder y de Polymarket; `upcoming_matches` solo se LEE.
 
 Fuentes, en este orden:
   1. football-data.co.uk/fixtures.csv — gratis, fecha + hora (de Londres) + cuotas. Problemas
      verificados: SP2 llega incompleta (8 de 11 partidos el 8-nov) y el fichero es una foto por
-     jornada que no se refresca enseguida (el lunes 9-nov aún traía la jornada ya jugada).
-  2. Highlightly /matches?leagueId=&date= — 1 petición por liga y día, SOLO para los próximos
-     días (por defecto 3: hoy, mañana y pasado, en UTC) y SOLO donde el CSV no basta:
-       - liga cuyo CSV trae menos partidos que una jornada completa (SP2), o
-       - día de la ventana que cae fuera de las fechas que cubre el CSV de esa liga.
-     Se paga con la RESERVA MANUAL de Highlightly (HL_MANUAL_RESERVE = 10 de las 100 diarias,
-     las que el colector de jugadores no puede gastar): contador propio "highlightly_fixtures"
-     y nunca más de lo que la propia API dice que queda.
-  Nunca se inventa un partido. Lo que no se pudo comprobar por falta de cuota sale en
-  `unchecked` (liga y día), a la vista, para que ningún partido se quede sin ficha en silencio.
+     jornada que no se refresca entre jornadas (el lunes 9-nov aún traía la jornada jugada).
+  2. upcoming_matches (football-data.org, lo escribe el colector de Sports; aquí solo lectura):
+     cubre PD, PL, SA, BL1, FL1, DED y PPL (SUPPORTED_FOOTBALL_LEAGUES), NO Segunda (SD).
+     Se da por buena si el colector la ha refrescado hace menos de UPCOMING_MAX_AGE_H horas.
+  3. Highlightly /matches?leagueId=&date=&timezone=Etc/UTC — 1 petición por liga y día, solo
+     para los próximos días (por defecto 3, en UTC) y solo lo que 1 y 2 no cubren: en la
+     práctica SP2, o cualquier liga si upcoming_matches está caducada. Se paga con la RESERVA
+     MANUAL (HL_MANUAL_RESERVE = 10 de las 100 diarias): contador propio
+     "highlightly_fixtures" y nunca más de lo que la API dice que queda.
+     Verificado 2026-11-09: `date` filtra en la zona de `timezone` (UTC por defecto) y los
+     partidos por jugar traen state.description == "Not started".
+  Nunca se inventa un partido. Lo que no se pudo comprobar sale en `unchecked` (liga y día).
 
-Nombres de equipo: se guardan los de football-data.co.uk (los mismos de fdco_team_matches, que
-es de donde saldrá el cálculo). Un partido de Highlightly se pasa a esos nombres con el mismo
-normalizador del colector de jugadores; si un equipo no se reconoce, el partido sigue en la
-lista con team_matched=False (su ficha dirá "sin datos", no desaparece).
+Nombres de equipo: se guardan los de football-data.co.uk (los de fdco_team_matches, de donde
+saldrá el cálculo). El emparejado es estricto: alias conocidos → igualdad → contención de
+palabras completas con candidato ÚNICO. Ante la duda NO se empareja: el partido sigue en la
+lista con team_matched=False y el nombre sale en `unmatched_teams` (mejor "sin datos" que la
+ficha de otro equipo). `team_mapping` lista cada traducción para revisarla.
 
 Id del partido: {div}_{fecha}_{local}_{visitante}, con la fecha de Londres (la del CSV de
 resultados) y los nombres en slug, para emparejarlo después con fdco_team_matches.
@@ -40,8 +43,9 @@ import httpx
 
 from collectors.fdco_team_matches import MAIN_DIVS, _float, _parse_date, slugify
 from collectors.highlightly_players import (
-    HL_LEAGUES, HL_MANUAL_RESERVE, HL_QUOTA_API, HighlightlyBudgetExhausted, hl_get, team_similarity,
+    HL_LEAGUES, HL_MANUAL_RESERVE, HL_QUOTA_API, HighlightlyBudgetExhausted, hl_get,
 )
+from collectors.team_identity import normalize
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +53,8 @@ FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 SEASON_CSV_URL = "https://www.football-data.co.uk/mmz4281/{season}/{div}.csv"
 HL_FIXTURES_QUOTA_API = "highlightly_fixtures"   # contador propio dentro de la reserva manual
 DEFAULT_WINDOW_DAYS = 3
+UPCOMING_MAX_AGE_H = 36
 _HTTP_TIMEOUT = 30.0
-_TEAM_MIN_SIMILARITY = 0.75
 
 # Partidos de una jornada completa (equipos / 2), 2026/27
 ROUND_SIZE: dict[str, int] = {
@@ -58,9 +62,45 @@ ROUND_SIZE: dict[str, int] = {
     "F1": 9, "P1": 9, "D1": 9, "N1": 9,
 }
 
+# Código de liga de football-data.org (upcoming_matches.league) → división FDCO
+FD_LEAGUE_TO_DIV: dict[str, str] = {v: k for k, v in MAIN_DIVS.items()}
+# Las que football-data.org da en el plan gratuito (SUPPORTED_FOOTBALL_LEAGUES); SD no
+UPCOMING_DIVS = frozenset({"SP1", "E0", "I1", "D1", "F1", "N1", "P1"})
+
 # Cuotas del CSV que se guardan (media del mercado; la de cierre aún no existe antes del partido)
 _ODDS_COLUMNS = {"AvgH": "home", "AvgD": "draw", "AvgA": "away",
                  "Avg>2.5": "over_2_5", "Avg<2.5": "under_2_5"}
+
+# Alias: nombre de football-data.org / Highlightly ya normalizado (team_identity.normalize) →
+# nombre de football-data.co.uk. Son los casos en que el emparejado estricto falla o, peor,
+# acertaría con otro club: "internazionale milano" → Milan, "paris saint germain" → Paris FC,
+# "espanyol barcelona" → Barcelona, "madrid" (Club Atlético de Madrid) → Real Madrid.
+# Base: _CORNER_STATS_ALIASES de trend_finder (comprobados en BL1/PD/PL/SA/FL1) + los de
+# highlightly_players. Los nombres oficiales de DED/PPL no están comprobados en vivo: lo que
+# falte saldrá en unmatched_teams del dry-run.
+TEAM_ALIASES: dict[str, str] = {
+    # España
+    "madrid": "Ath Madrid", "espanyol barcelona": "Espanol", "espanyol": "Espanol",
+    "racing santander": "Santander", "sporting gijon": "Sp Gijon",
+    # Inglaterra
+    "manchester city": "Man City", "manchester united": "Man United",
+    "nottingham forest": "Nott'm Forest",
+    # Italia
+    "internazionale milano": "Inter", "internazionale": "Inter",
+    # Alemania
+    "bayern munchen": "Bayern Munich", "borussia monchengladbach": "M'gladbach",
+    "eintracht frankfurt": "Ein Frankfurt", "hamburger": "Hamburg",
+    # Francia
+    "paris saint germain": "Paris SG", "stade rennais": "Rennes", "stade brestois": "Brest",
+    "olympique lyonnais": "Lyon",
+    # Portugal
+    "sporting clube portugal": "Sp Lisbon", "sporting cp": "Sp Lisbon",
+    "sporting clube braga": "Sp Braga", "vitoria": "Guimaraes",
+    # Países Bajos
+    "nec": "Nijmegen", "fortuna sittard": "For Sittard",
+}
+# Nombres que la normalización deja vacíos (todas sus palabras son genéricas)
+RAW_ALIASES: dict[str, str] = {"athletic club": "Ath Bilbao", "athletic bilbao": "Ath Bilbao"}
 
 
 # ── Hora de Londres ↔ UTC (sin depender de tzdata en el contenedor) ─────────────
@@ -94,16 +134,58 @@ def uk_date(utc_dt: datetime) -> str:
     return (utc_dt + _uk_offset(utc_dt)).date().isoformat()
 
 
-def _parse_utc(raw: str) -> Optional[datetime]:
-    try:
-        dt = datetime.fromisoformat((raw or "").replace("Z", "+00:00"))
-    except ValueError:
-        return None
+def _parse_utc(raw) -> Optional[datetime]:
+    """ISO con o sin zona, 'YYYY-MM-DD HH:MM' o datetime (Firestore); sin zona = UTC."""
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        try:
+            dt = datetime.fromisoformat(str(raw or "").strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
     return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def match_id(div: str, uk_date_iso: str, home: str, away: str) -> str:
     return f"{div}_{uk_date_iso}_{slugify(home)}_{slugify(away)}"
+
+
+# ── Nombres → football-data.co.uk ──────────────────────────────────────────────
+
+def _raw_key(name: str) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode().lower()
+    return " ".join("".join(c if c.isalnum() else " " for c in s).split())
+
+
+def map_team(name: str, fdco_teams: set[str]) -> tuple[str, bool]:
+    """
+    Nombre de football-data.co.uk para un nombre de otra fuente, o (nombre original, False).
+    alias → igualdad tras normalizar → contención de palabras completas (en un sentido o en
+    el otro) con candidato único. Dos o más candidatos = sin emparejar.
+    """
+    alias = RAW_ALIASES.get(_raw_key(name))
+    n = normalize(name)
+    alias = alias or TEAM_ALIASES.get(n)
+    if alias:
+        return (alias, True) if alias in fdco_teams else (name, False)
+    if not n:
+        return name, False
+    norm = {t: normalize(t) for t in fdco_teams}
+    exact = [t for t, nt in norm.items() if nt == n]
+    if len(exact) == 1:
+        return exact[0], True
+    words = set(n.split())
+    cands = [t for t, nt in norm.items() if nt and (set(nt.split()) <= words or words <= set(nt.split()))]
+    return (cands[0], True) if len(cands) == 1 else (name, False)
+
+
+def _same_team(a: str, b: str) -> bool:
+    na, nb = normalize(a), normalize(b)
+    if not na or not nb:
+        return _raw_key(a) == _raw_key(b)
+    wa, wb = set(na.split()), set(nb.split())
+    return wa <= wb or wb <= wa
 
 
 # ── 1. fixtures.csv ────────────────────────────────────────────────────────────
@@ -125,13 +207,54 @@ def parse_fixtures_csv(text: str, divs=tuple(MAIN_DIVS)) -> list[dict]:
         out.append({
             "match_id": match_id(div, d, home, away), "div": div, "league": MAIN_DIVS[div],
             "date": d, "kickoff_utc": ko.isoformat(), "home_team": home, "away_team": away,
-            "source": "fixtures_csv", "team_matched": True, "hl_match_id": None,
+            "source": "fixtures_csv", "team_matched": True, "hl_match_id": None, "fd_match_id": None,
             "odds": {k: v for k, v in odds.items() if v is not None} or None,
         })
     return out
 
 
-# ── 2. Qué pedir a Highlightly ─────────────────────────────────────────────────
+# ── 2. upcoming_matches (solo lectura) ─────────────────────────────────────────
+
+def parse_upcoming_docs(docs: list[dict]) -> list[dict]:
+    """Docs de upcoming_matches de las 7 ligas → partidos en bruto (nombres de football-data.org)."""
+    out = []
+    for u in docs:
+        div = FD_LEAGUE_TO_DIV.get(u.get("league") or "")
+        if div not in UPCOMING_DIVS or u.get("status") not in ("SCHEDULED", "TIMED"):
+            continue
+        if (u.get("sport") or "football") != "football":
+            continue
+        ko = _parse_utc(u.get("match_date") or u.get("date"))
+        home, away = (u.get("home_team") or "").strip(), (u.get("away_team") or "").strip()
+        if ko and home and away:
+            out.append({"div": div, "kickoff": ko, "src_home": home, "src_away": away,
+                        "source": "football_data_org", "fd_match_id": u.get("match_id"), "hl_match_id": None})
+    return out
+
+
+def upcoming_fresh(docs: list[dict], now: datetime, max_age_h: int = UPCOMING_MAX_AGE_H) -> bool:
+    """El colector de Sports reescribe toda la ventana de 7 días de golpe: si algún doc de
+    estas ligas se escribió hace menos de max_age_h, la colección está viva (aunque una liga
+    no tenga partidos, p. ej. en parón de selecciones)."""
+    newest = None
+    for u in docs:
+        if FD_LEAGUE_TO_DIV.get(u.get("league") or "") not in UPCOMING_DIVS:
+            continue
+        c = _parse_utc(u.get("collected_at"))
+        if c and (newest is None or c > newest):
+            newest = c
+    return newest is not None and (now - newest) <= timedelta(hours=max_age_h)
+
+
+def _read_upcoming_docs() -> list[dict]:
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from shared.firestore_client import col
+    leagues = sorted(MAIN_DIVS[d] for d in UPCOMING_DIVS)
+    q = col("upcoming_matches").where(filter=FieldFilter("league", "in", leagues))
+    return [d.to_dict() or {} for d in q.stream()]
+
+
+# ── 3. Qué pedir a Highlightly ─────────────────────────────────────────────────
 
 def window_days(now: datetime, days: int = DEFAULT_WINDOW_DAYS) -> list[str]:
     """Días UTC de la ventana: hoy y los siguientes (days en total)."""
@@ -139,14 +262,18 @@ def window_days(now: datetime, days: int = DEFAULT_WINDOW_DAYS) -> list[str]:
 
 
 def plan_hl_checks(csv_by_div: dict[str, list[dict]], days: list[str],
-                   already_checked: frozenset = frozenset()) -> list[dict]:
+                   already_checked: frozenset = frozenset(),
+                   covered_divs: frozenset = frozenset()) -> list[dict]:
     """
     (liga, día) a comprobar en Highlightly, en orden de prioridad: primero el día más cercano;
-    dentro del día, primero las ligas cuyo CSV está incompleto. Una liga con la jornada
-    completa en el CSV solo se da por cubierta en los días que abarca ese CSV.
+    dentro del día, primero las ligas cuyo CSV está incompleto. covered_divs (las de
+    upcoming_matches cuando está al día) no se piden. Una liga con la jornada completa en el
+    CSV solo se da por cubierta en los días que abarca ese CSV.
     """
     plan = []
     for div in MAIN_DIVS:
+        if div in covered_divs:
+            continue
         rows = csv_by_div.get(div, [])
         complete = len(rows) >= ROUND_SIZE[div]
         utc_days = {r["kickoff_utc"][:10] for r in rows}
@@ -174,11 +301,8 @@ def fixtures_budget(used_fixtures_today: int, remaining_reported: Optional[int],
     return max(0, left)
 
 
-# ── 3. Respuesta de Highlightly → partidos ─────────────────────────────────────
-
 def parse_hl_listing(raw, div: str) -> list[dict]:
-    """Elementos de /matches → {hl_match_id, kickoff, home, away, state}. Descarta los que no
-    traen hora o equipos."""
+    """Elementos de /matches → partidos en bruto. Descarta los que no traen hora o equipos."""
     data = raw.get("data", []) if isinstance(raw, dict) else (raw or [])
     out = []
     for m in data:
@@ -187,62 +311,62 @@ def parse_hl_listing(raw, div: str) -> list[dict]:
         away = ((m.get("awayTeam") or {}).get("name") or "").strip()
         if not (ko and home and away):
             continue
-        out.append({"hl_match_id": m.get("id"), "div": div, "kickoff": ko, "hl_home": home, "hl_away": away,
+        out.append({"div": div, "kickoff": ko, "src_home": home, "src_away": away, "source": "highlightly",
+                    "hl_match_id": m.get("id"), "fd_match_id": None,
                     "state": ((m.get("state") or {}).get("description") or "")})
     return out
 
 
-def map_team(hl_name: str, fdco_teams: set[str]) -> tuple[str, bool]:
-    """Nombre de football-data.co.uk más parecido; si ninguno convence, el de Highlightly."""
-    best, score = None, 0.0
-    for t in fdco_teams:
-        s = team_similarity(hl_name, t)
-        if s > score:
-            best, score = t, s
-    return (best, True) if best and score >= _TEAM_MIN_SIMILARITY else (hl_name, False)
-
+# ── 4. Fusión ──────────────────────────────────────────────────────────────────
 
 def _same_match(a: dict, b: dict) -> bool:
     return (a["div"] == b["div"]
             and abs((_parse_utc(a["kickoff_utc"]) - _parse_utc(b["kickoff_utc"])).total_seconds()) <= 36 * 3600
-            and team_similarity(a["home_team"], b["home_team"]) >= _TEAM_MIN_SIMILARITY
-            and team_similarity(a["away_team"], b["away_team"]) >= _TEAM_MIN_SIMILARITY)
+            and _same_team(a["home_team"], b["home_team"]) and _same_team(a["away_team"], b["away_team"]))
 
 
-def merge_fixtures(csv_matches: list[dict], hl_matches: list[dict],
-                   fdco_teams_by_div: dict[str, set[str]]) -> tuple[list[dict], list[str]]:
+def merge_fixtures(csv_matches: list[dict], others: list[dict],
+                   fdco_teams_by_div: dict[str, set[str]]) -> tuple[list[dict], list[str], list[dict]]:
     """
-    CSV primero (trae cuotas); de Highlightly se añade solo lo que el CSV no tiene. Si el CSV
-    y Highlightly no coinciden en la hora, manda Highlightly (el CSV puede ser una foto vieja) y
-    se marca. Devuelve (partidos, equipos de Highlightly sin emparejar).
+    CSV primero (trae cuotas); después upcoming_matches y Highlightly, en ese orden, solo con
+    lo que falta. Si la hora no coincide con el CSV, manda la fuente en vivo y se marca.
+    Devuelve (partidos, nombres sin emparejar, traducciones de nombres para revisar).
     """
     merged = [dict(m) for m in csv_matches]
-    unmatched: list[str] = []
-    for h in hl_matches:
-        teams = fdco_teams_by_div.get(h["div"], set())
-        home, ok_h = map_team(h["hl_home"], teams)
-        away, ok_a = map_team(h["hl_away"], teams)
-        for name, ok in ((h["hl_home"], ok_h), (h["hl_away"], ok_a)):
-            if not ok:
-                unmatched.append(f"{h['div']}: {name}")
-        d = uk_date(h["kickoff"])
+    unmatched: set[str] = set()
+    mapping: dict[tuple, str] = {}
+    for o in others:
+        teams = fdco_teams_by_div.get(o["div"], set())
+        home, ok_h = map_team(o["src_home"], teams)
+        away, ok_a = map_team(o["src_away"], teams)
+        for src, dst, ok in ((o["src_home"], home, ok_h), (o["src_away"], away, ok_a)):
+            if ok:
+                mapping[(o["div"], o["source"], src)] = dst
+            else:
+                unmatched.add(f"{o['div']}: {src} ({o['source']})")
+        d = uk_date(o["kickoff"])
         cand = {
-            "match_id": match_id(h["div"], d, home, away), "div": h["div"], "league": MAIN_DIVS[h["div"]],
-            "date": d, "kickoff_utc": h["kickoff"].isoformat(), "home_team": home, "away_team": away,
-            "source": "highlightly", "team_matched": ok_h and ok_a, "hl_match_id": h["hl_match_id"],
-            "hl_home": h["hl_home"], "hl_away": h["hl_away"], "odds": None,
+            "match_id": match_id(o["div"], d, home, away), "div": o["div"], "league": MAIN_DIVS[o["div"]],
+            "date": d, "kickoff_utc": o["kickoff"].isoformat(), "home_team": home, "away_team": away,
+            "source": o["source"], "team_matched": ok_h and ok_a,
+            "hl_match_id": o.get("hl_match_id"), "fd_match_id": o.get("fd_match_id"),
+            "src_home": o["src_home"], "src_away": o["src_away"], "odds": None,
         }
         twin = next((m for m in merged if _same_match(m, cand)), None)
         if twin is None:
             merged.append(cand)
             continue
-        twin["hl_match_id"] = h["hl_match_id"]
-        if twin["kickoff_utc"] != cand["kickoff_utc"]:
+        for k in ("hl_match_id", "fd_match_id"):
+            if cand[k] is not None and twin.get(k) is None:
+                twin[k] = cand[k]
+        if twin["source"] == "fixtures_csv" and twin["kickoff_utc"] != cand["kickoff_utc"] \
+                and "kickoff_source" not in twin:
             twin["kickoff_csv_utc"] = twin["kickoff_utc"]
             twin["kickoff_utc"] = cand["kickoff_utc"]
-            twin["kickoff_source"] = "highlightly"
+            twin["kickoff_source"] = o["source"]
     merged.sort(key=lambda m: (m["kickoff_utc"], m["div"], m["home_team"]))
-    return merged, sorted(set(unmatched))
+    mapping_list = [{"div": k[0], "source": k[1], "name": k[2], "fdco": v} for k, v in sorted(mapping.items())]
+    return merged, sorted(unmatched), mapping_list
 
 
 def in_window(m: dict, now: datetime, days: list[str]) -> bool:
@@ -283,14 +407,15 @@ def _fixtures_quota_state(quota) -> tuple[int, Optional[int]]:
 async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT_WINDOW_DAYS,
                              api_key: Optional[str] = None, quota=None, season: Optional[str] = None,
                              already_checked: frozenset = frozenset(),
-                             max_hl_requests: Optional[int] = None) -> dict:
+                             max_hl_requests: Optional[int] = None,
+                             upcoming_docs: Optional[list[dict]] = None) -> dict:
     """
     Lista de partidos de la ventana. No escribe partidos en ningún sitio.
-      api_key None      → solo fixtures.csv; todo lo que habría que mirar en Highlightly sale
-                          en `unchecked`.
+      api_key None      → sin Highlightly; lo que habría que mirar ahí sale en `unchecked`.
       quota             → QuotaManager: presupuesto = reserva manual (contador propio) y
                           cabecera de la API. Sin quota hace falta max_hl_requests (prueba manual).
       already_checked   → (liga, día) ya comprobados hoy, para no repetir peticiones.
+      upcoming_docs     → docs de upcoming_matches (tests); None = leerlos de Firestore.
     """
     from collectors.fdco_team_matches import current_season_end_year, season_code
 
@@ -298,19 +423,34 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
     season = season or season_code(current_season_end_year(now.date()))
     days_list = window_days(now, days)
     summary: dict = {"window_days": days_list, "matches": [], "by_div": {}, "hl_requests": 0,
-                     "hl_checked": [], "unchecked": [], "unmatched_teams": [], "errors": []}
+                     "hl_checked": [], "unchecked": [], "unmatched_teams": [], "team_mapping": [],
+                     "upcoming_fresh": False, "errors": []}
+
+    if upcoming_docs is None:
+        try:
+            upcoming_docs = _read_upcoming_docs()
+        except Exception as e:
+            logger.error("match_fixtures: error leyendo upcoming_matches", exc_info=True)
+            summary["errors"].append(f"upcoming_matches no leída: {e}")
+            upcoming_docs = []
+    fresh = upcoming_fresh(upcoming_docs, now)
+    summary["upcoming_fresh"] = fresh
+    upcoming = parse_upcoming_docs(upcoming_docs) if fresh else []
+    if upcoming_docs and not fresh:
+        summary["errors"].append(f"upcoming_matches sin refrescar en {UPCOMING_MAX_AGE_H} h: no se usa")
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
         text = await _get_text(client, FIXTURES_URL)
         csv_all = parse_fixtures_csv(text) if text else []
         if text is None:
-            summary["errors"].append("fixtures.csv no descargado: todo depende de Highlightly")
+            summary["errors"].append("fixtures.csv no descargado")
         csv_by_div: dict[str, list[dict]] = {}
         for m in csv_all:
             csv_by_div.setdefault(m["div"], []).append(m)
         summary["csv_rows_by_div"] = {d: len(csv_by_div.get(d, [])) for d in MAIN_DIVS}
 
-        plan = plan_hl_checks(csv_by_div, days_list, already_checked)
+        plan = plan_hl_checks(csv_by_div, days_list, already_checked,
+                              covered_divs=UPCOMING_DIVS if fresh else frozenset())
         if api_key and plan:
             if quota is not None:
                 used, remaining = _fixtures_quota_state(quota)
@@ -323,9 +463,8 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
         summary["unchecked"] = [{**p, "why": "sin presupuesto" if api_key else "sin clave"} for p in rest]
 
         hl_matches: list[dict] = []
-        teams_cache: dict[str, set[str]] = {}
         for i, p in enumerate(todo):
-            path = f"/matches?leagueId={HL_LEAGUES[p['div']]}&date={p['day']}&limit=100"
+            path = f"/matches?leagueId={HL_LEAGUES[p['div']]}&date={p['day']}&timezone=Etc/UTC&limit=100"
             try:
                 raw = await hl_get(client, api_key, path, quota=quota)
             except HighlightlyBudgetExhausted:
@@ -338,23 +477,29 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
                 summary["unchecked"].append({**p, "why": "error de Highlightly"})
                 continue
             summary["hl_checked"].append(p)
-            found = parse_hl_listing(raw, p["div"])
-            if found and p["div"] not in teams_cache:
-                teams_cache[p["div"]] = await _fdco_teams(client, p["div"], season)
-                if not teams_cache[p["div"]]:
-                    summary["errors"].append(f"{p['div']}: sin CSV de temporada para emparejar nombres")
-            hl_matches.extend(found)
+            hl_matches.extend(parse_hl_listing(raw, p["div"]))
             await asyncio.sleep(0.2)
 
-    merged, unmatched = merge_fixtures(csv_all, hl_matches, teams_cache)
+        others = upcoming + hl_matches
+        teams_by_div: dict[str, set[str]] = {}
+        for div in sorted({o["div"] for o in others}):
+            teams_by_div[div] = await _fdco_teams(client, div, season)
+            if not teams_by_div[div]:
+                summary["errors"].append(f"{div}: sin CSV de temporada para emparejar nombres")
+
+    merged, unmatched, mapping = merge_fixtures(csv_all, others, teams_by_div)
     matches = [m for m in merged if in_window(m, now, days_list)]
     summary["matches"] = matches
     summary["unmatched_teams"] = unmatched
+    summary["team_mapping"] = mapping
     for m in matches:
-        c = summary["by_div"].setdefault(m["div"], {"total": 0, "fixtures_csv": 0, "highlightly": 0})
+        c = summary["by_div"].setdefault(m["div"], {"total": 0, "fixtures_csv": 0,
+                                                     "football_data_org": 0, "highlightly": 0})
         c["total"] += 1
         c[m["source"]] += 1
     summary["unchecked"].sort(key=lambda p: (p["day"], p["div"]))
-    logger.info("match_fixtures: %d partidos en %s; Highlightly %d peticiones; sin comprobar %d (liga, día)",
-                len(matches), days_list, summary["hl_requests"], len(summary["unchecked"]))
+    logger.info("match_fixtures: %d partidos en %s; upcoming %s; Highlightly %d peticiones; "
+                "sin comprobar %d (liga, día); sin emparejar %d",
+                len(matches), days_list, "al día" if fresh else "NO usada", summary["hl_requests"],
+                len(summary["unchecked"]), len(unmatched))
     return summary
