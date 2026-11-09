@@ -1,0 +1,44 @@
+# SOLO LECTURA. Comprueba que los porcentajes que la web de Tendencias calcula desde los CSV de
+# football-data.co.uk coinciden con fdco_team_market_rates en una muestra de equipos.
+# Es el ÚNICO flujo de la web que lee Firestore; el de publicación no tiene credenciales de GCP.
+# Imprime solo recuentos y hasta 10 celdas distintas. Manual, sin cron.
+name: trends-web-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      muestra:
+        description: "Equipos a comparar"
+        default: "40"
+
+permissions:
+  contents: read
+
+jobs:
+  comparar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Comparar (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          MUESTRA: ${{ inputs.muestra }}
+        run: |
+          set -euo pipefail
+          [[ "$MUESTRA" =~ ^[0-9]+$ ]] || { echo "muestra debe ser un número"; exit 1; }
+          python trends_web/compare_rates.py --muestra "$MUESTRA"

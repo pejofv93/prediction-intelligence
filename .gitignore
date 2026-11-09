@@ -53,6 +53,7 @@ test_*.py
 # scripts/test_betfair.py sigue ignorado: es un login manual contra Betfair, no un test.
 !services/*/tests/test_*.py
 !scripts/tests/test_*.py
+!trends_web/tests/test_*.py
 run_*.py
 fix_*.py
 
@@ -67,3 +68,6 @@ Thumbs.db
 # Entornos virtuales
 .venv/
 venv/
+
+# Web privada de Tendencias: los datos generados nunca van a git (repositorio público)
+trends_web/site/data/
