@@ -58,6 +58,11 @@ jobs:
           done
           [ -z "$missing" ] || { echo "Faltan secretos:$missing — no se toca Cloudflare"; exit 1; }
           [ "${#WEB_PASS}" -ge 16 ] || { echo "La contraseña debe tener al menos 16 caracteres"; exit 1; }
+          # Un salto de línea o espacio colado al guardar el secreto impediría entrar desde el navegador.
+          for v in WEB_USER WEB_PASS; do
+            [[ "${!v}" =~ [[:space:]] ]] && { echo "$v contiene espacios o saltos de línea: vuelve a guardarlo"; exit 1; }
+          done
+          true
 
       - uses: actions/checkout@v4
 
@@ -93,14 +98,20 @@ jobs:
           # check.sh URL_BASE → 0 si / y /data/rates.json piden credenciales y solo abren con las buenas
           set -uo pipefail
           base="$1"; bad=0
+          # Un proyecto o despliegue nuevo tarda en existir en DNS/TLS (curl da 000): se espera
+          # hasta 5 min a que responda algo antes de medir. Mientras, no se sirve nada.
+          for i in $(seq 1 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base/")" != "000" ] && break
+            sleep 10
+          done
           for path in / /data/rates.json /app.js; do
             for i in 1 2 3 4 5 6; do   # la publicación tarda unos segundos en propagarse
-              anon=$(curl -s -o /dev/null -w '%{http_code}' "$base$path")
+              anon=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base$path")
               [ "$anon" = "401" ] && break
               sleep 10
             done
-            wrong=$(curl -s -o /dev/null -w '%{http_code}' -u "nadie:incorrecta" "$base$path")
-            good=$(curl -s -o /dev/null -w '%{http_code}' -u "$WEB_USER:$WEB_PASS" "$base$path")
+            wrong=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "nadie:incorrecta" "$base$path")
+            good=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "$WEB_USER:$WEB_PASS" "$base$path")
             echo "  $path → sin credenciales $anon · erróneas $wrong · buenas $good"
             [ "$anon" = "401" ] && [ "$wrong" = "401" ] && [ "$good" = "200" ] || bad=1
           done
