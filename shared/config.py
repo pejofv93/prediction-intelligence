@@ -135,6 +135,12 @@ POLY_CATEGORY_BIAS_ENABLED = os.environ.get("POLY_CATEGORY_BIAS_ENABLED", "false
 # lo medido en <campo>_measured sin cambiar el valor aplicado, y alert_engine usa siempre
 # los umbrales base por dirección aunque el acierto global pase del 50 %.
 POLY_LEARNED_PARAMS_FROZEN = os.environ.get("POLY_LEARNED_PARAMS_FROZEN", "true").lower() in ("1", "true", "yes")
+# BUY_NO en sombra (2026-11-10): revisión gpt-oss con 94 alertas limpias resueltas, ROI plano
+# −12,9 % y edge sobreestimado +0,26. Las BUY_NO que pasan todos los filtros se guardan en
+# alerts_sent con status "shadow" y el resolver las gradúa, pero NO se envían a Telegram, no
+# abren shadow_trade ni marcan poly_predictions.alerted. Para reactivar el envío: cambiar el
+# valor por defecto aquí a "false" (deploy.yml reescribe las variables de entorno).
+POLY_BUY_NO_SHADOW = os.environ.get("POLY_BUY_NO_SHADOW", "true").lower() in ("1", "true", "yes")
 
 # Thresholds por liga — calibrados por backtest histórico (prodmatch_results)
 # Ligas con ROI positivo en backtest → umbral más bajo (más señales)

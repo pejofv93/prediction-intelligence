@@ -41,6 +41,10 @@ _NOTIFY_MAX_AGE_H = 48
 # "sent" = envío vigente; "sent_archived" = envío anterior con el mismo alert_key que
 # check_and_alert archiva antes de sobrescribir el doc al re-alertar.
 _SENT_STATUSES = ("sent", "sent_archived")
+# "shadow" = BUY_NO en sombra (POLY_BUY_NO_SHADOW): se gradúa igual que un envío, pero no
+# se notifica, no toca poly_predictions ni tiene shadow_trade. Los informes de ROI siguen
+# leyendo solo _SENT_STATUSES, así que no se mezcla con lo enviado.
+_SHADOW_STATUS = "shadow"
 
 _YES_THRESHOLD = 0.9
 _NO_THRESHOLD = 0.1
@@ -138,7 +142,7 @@ def _load_pending_alerts() -> list[tuple[str, dict]]:
     out = []
     for doc in iter_all("alerts_sent", where=("type", "==", "polymarket")):
         a = doc.to_dict() or {}
-        if a.get("status") not in _SENT_STATUSES or not a.get("market_id"):
+        if a.get("status") not in (*_SENT_STATUSES, _SHADOW_STATUS) or not a.get("market_id"):
             continue
         if a.get("result") in ("win", "loss") and a.get("shadow_synced"):
             continue
@@ -209,6 +213,7 @@ async def resolve_closed_markets() -> dict:
     started = _time.monotonic()
     now = datetime.now(timezone.utc)
     resolved = skipped_unresolved = shadow_synced = shadow_deferred = errors = 0
+    buy_no_shadow_graded = 0
 
     try:
         pending = _load_pending_alerts()
@@ -241,6 +246,7 @@ async def resolve_closed_markets() -> dict:
         if sent_at is not None and hasattr(sent_at, "tzinfo") and sent_at.tzinfo is None:
             sent_at = sent_at.replace(tzinfo=timezone.utc)
         selection = _alert_selection(alert)
+        is_shadow = alert.get("status") == _SHADOW_STATUS
         try:
             result = alert.get("result")
             outcome = alert.get("outcome")
@@ -267,12 +273,17 @@ async def resolve_closed_markets() -> dict:
                     "graded_selection": selection,
                     "resolved_at": now,
                     "market_closed_time": raw.get("closedTime"),
+                    **({"shadow_synced": True, "shadow_trade_id": None} if is_shadow else {}),
                 })
-                resolved += 1
+                if not is_shadow:
+                    resolved += 1
                 logger.info(
                     "POLY_RESOLVE: alerta %s (%s) — %s vs outcome=%s → %s",
                     alert_id, market_id, selection, outcome, result,
                 )
+                if is_shadow:
+                    buy_no_shadow_graded += 1
+                    continue
                 prev = latest_by_market.get(market_id)
                 if prev is None or (sent_at and (prev[0] is None or sent_at > prev[0])):
                     latest_by_market[market_id] = (sent_at, result, outcome)
@@ -296,6 +307,8 @@ async def resolve_closed_markets() -> dict:
                 except Exception:
                     logger.warning("POLY_RESOLVE: error notificando %s", alert_id, exc_info=True)
 
+            if is_shadow:
+                continue
             # Sincronizar el shadow_trade de esta alerta (ledger de ROI y aprendizaje).
             # Va con presupuesto de tiempo; el resto se sincroniza en la siguiente
             # ejecución (la alerta ya queda graduada).
@@ -340,8 +353,9 @@ async def resolve_closed_markets() -> dict:
 
     logger.info(
         "POLY_RESOLVE: completado — resolved=%d skipped_unresolved=%d shadow_synced=%d "
-        "shadow_deferred=%d errors=%d bankroll=%s",
+        "shadow_deferred=%d errors=%d buy_no_shadow_graded=%d bankroll=%s",
         resolved, skipped_unresolved, shadow_synced, shadow_deferred, errors,
+        buy_no_shadow_graded,
         bankroll_state.get("running", "sin cambios"),
     )
     return {
@@ -349,6 +363,7 @@ async def resolve_closed_markets() -> dict:
         "skipped_unresolved": skipped_unresolved,
         "shadow_synced": shadow_synced,
         "shadow_deferred": shadow_deferred,
+        "buy_no_shadow_graded": buy_no_shadow_graded,
         "errors": errors,
         "gamma": gamma_health,
     }

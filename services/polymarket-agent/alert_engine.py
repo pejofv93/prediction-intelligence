@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.config import (
-    POLY_LEARNED_PARAMS_FROZEN, POLY_MIN_CONFIDENCE, POLY_MIN_EDGE, TELEGRAM_BOT_URL,
+    POLY_BUY_NO_SHADOW, POLY_LEARNED_PARAMS_FROZEN, POLY_MIN_CONFIDENCE, POLY_MIN_EDGE,
+    TELEGRAM_BOT_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,13 @@ def _doc_direction(doc: dict):
 
 def _sent_docs(history: list[dict]) -> list[dict]:
     return [h for h in history if h.get("status") in _SLOT_STATUSES and h.get("sent_at")]
+
+
+def _shadow_opposite(history: list[dict], direction: str) -> dict | None:
+    """Último doc en sombra ("shadow") de la dirección contraria, o None."""
+    docs = [h for h in history if h.get("status") == "shadow" and h.get("sent_at")
+            and _doc_direction(h) not in (None, direction)]
+    return max(docs, key=lambda h: _as_utc(h["sent_at"])) if docs else None
 
 
 def _same_direction_count(history: list[dict], direction: str) -> int:
@@ -464,12 +472,35 @@ async def check_and_alert(analysis: dict) -> bool:
                      "envía)", market_id, exc_info=True)
         return False
     action, why, prev = _slot_decision(_history, direction, current_price, edge, now)
+    # Un BUY_NO en sombra no ocupa el slot de envío, pero sigue protegiendo contra la
+    # señal contraria: un BUY_YES posterior en el mismo mercado no se envía.
+    if action != "skip" and direction == "BUY_YES":
+        _shadow_no = _shadow_opposite(_history, direction)
+        if _shadow_no is not None:
+            action, why = "skip", (f"cambio de dirección BUY_NO (sombra "
+                                   f"{_as_utc(_shadow_no['sent_at']):%d/%m}) → BUY_YES; solo se registra")
     if action == "skip":
         logger.info("check_and_alert(%s): SKIP_SLOT %s %s — omitida", market_id, direction, why)
         return False
     is_resend = action == "resend"
     _n_same = _same_direction_count(_history, direction)
     alert_key = f"{market_id}_{direction}" + (f"_r{_n_same}" if _n_same else "")
+
+    # BUY_NO en sombra: misma ruta y mismos filtros, pero se guarda ya graduable
+    # (status "shadow") y no se envía. "shadow" no está en _SLOT_STATUSES, así que no
+    # cuenta como envío para el slot; el doc id fijo evita repetir la sombra.
+    is_shadow = direction == "BUY_NO" and POLY_BUY_NO_SHADOW
+    snapshot = {
+        "recommendation": rec,
+        "market_price_yes": current_price,
+        "real_prob": analysis.get("real_prob"),
+        "edge": edge,
+        "confidence": confidence,
+        "category": analysis.get("category"),
+        "categorizer_version": analysis.get("categorizer_version"),
+        "question": analysis.get("question"),
+        "end_date_iso": analysis.get("end_date_iso"),
+    }
 
     db = get_client()
     dedup_ref = col("alerts_sent").document(alert_key)
@@ -496,7 +527,10 @@ async def check_and_alert(analysis: dict) -> bool:
             "last_price": current_price,
             "sent_at": now,
             "type": "polymarket",
-            "status": "pending",
+            "status": "shadow" if is_shadow else "pending",
+            **(snapshot if is_shadow else {}),
+            **({"resend_of": prev.get("alert_key"), "resend_reason": why}
+               if is_shadow and is_resend else {}),
         })
         return True
 
@@ -510,6 +544,13 @@ async def check_and_alert(analysis: dict) -> bool:
         return False
 
     if not should_send:
+        return False
+
+    if is_shadow:
+        logger.info(
+            "check_and_alert(%s): SHADOW_BUY_NO — guardada sin enviar edge=%.3f conf=%.2f mp_yes=%.3f",
+            market_id, edge, confidence, current_price,
+        )
         return False
 
     if is_resend:
@@ -579,15 +620,7 @@ async def check_and_alert(analysis: dict) -> bool:
         dedup_ref.update({
             "status": "resent" if is_resend else "sent",
             **({"resend_of": prev.get("alert_key"), "resend_reason": why} if is_resend else {}),
-            "recommendation": rec,
-            "market_price_yes": current_price,
-            "real_prob": analysis.get("real_prob"),
-            "edge": edge,
-            "confidence": confidence,
-            "category": analysis.get("category"),
-            "categorizer_version": analysis.get("categorizer_version"),
-            "question": analysis.get("question"),
-            "end_date_iso": analysis.get("end_date_iso"),
+            **snapshot,
         })
     except Exception:
         logger.warning(
