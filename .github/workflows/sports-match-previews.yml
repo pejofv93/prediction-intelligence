@@ -1,8 +1,15 @@
 # Ficha de partido de Tendencias (mp-v1): backtest (etiquetas), fichas y graduación.
-# Aislado del feed actual. SOLO manual por ahora (el cron 16:00 y 02:00 UTC irá aparte y con OK).
-# dry_run=true por defecto (no escribe nada). Escribir exige dry_run=false Y confirmar=ESCRIBIR.
+# Aislado del feed actual.
+# Manual: dry_run=true por defecto (no escribe nada). Escribir exige dry_run=false Y confirmar=ESCRIBIR.
+# Cron: 16:00 UTC (la principal: aunque GitHub la retrase horas, llega antes de congelar los
+# partidos del día siguiente) y 02:00 UTC (solo refresca). Cada pasada escribe fichas
+# (Highlightly solo SP2, como mucho 3 peticiones, sin repetir lo mirado en 20 h) y después gradúa.
+# Las dos son idempotentes: no reescriben si no cambia el hash y nunca tocan una ficha congelada.
 name: sports-match-previews
 on:
+  schedule:
+    - cron: "0 16 * * *"
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       job:
@@ -30,17 +37,22 @@ on:
         description: "Para dry_run=false escribe ESCRIBIR"
         default: ""
 
+concurrency:
+  group: sports-match-previews
+  cancel-in-progress: false
+
 jobs:
   trigger:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Comprobar confirmación
-        if: ${{ inputs.dry_run == 'false' && inputs.confirmar != 'ESCRIBIR' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false' && inputs.confirmar != 'ESCRIBIR' }}
         run: |
           echo "dry_run=false exige confirmar=ESCRIBIR — no se llama al servicio"
           exit 1
       - name: Trigger Cloud Run (sync)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           JOB: ${{ inputs.job }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -63,3 +75,21 @@ jobs:
           grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
           grep -q '^done ' out.txt
           grep -q '^summary: {"ok": true' out.txt
+
+      - name: Programado — fichas y graduación (escriben)
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          for path in "run-match-previews?dry_run=false&highlightly=true&hl_max=3&hl_divs=SP2" \
+                      "run-match-preview-grade?dry_run=false"; do
+            echo "== $path"
+            curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
+              -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+              --max-time 1100 \
+              --no-buffer \
+              --fail --silent --show-error > out.txt
+            grep -v '^summary: ' out.txt
+            grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
+            grep -q '^done ' out.txt
+            grep -q '^summary: {"ok": true' out.txt
+          done
