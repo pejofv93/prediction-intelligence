@@ -165,6 +165,48 @@ def _sent_docs(history: list[dict]) -> list[dict]:
     return [h for h in history if h.get("status") in _SLOT_STATUSES and h.get("sent_at")]
 
 
+def _record_conf_skip(analysis: dict, edge: float, confidence: float, min_conf: float) -> None:
+    """Registra un BUY_YES descartado por confianza en poly_conf_skips, para poder decidir
+    el tope de confianza del tramo alto con datos limpios. Un doc por mercado: el primer
+    descarte (precio, hora, edge, confianza) queda fijo y es el que se gradúa; los
+    siguientes solo actualizan last_* y el contador. Nunca bloquea ni cambia la decisión."""
+    from shared.firestore_client import col
+    market_id = str(analysis.get("market_id") or "")
+    if not market_id:
+        return
+    now = datetime.now(timezone.utc)
+    mp = analysis.get("market_price_yes")
+    last = {"last_at": now, "last_price_yes": mp, "last_edge": edge, "last_confidence": confidence}
+    try:
+        ref = col("poly_conf_skips").document(f"{market_id}_BUY_YES")
+        snap = ref.get()
+        if snap.exists:
+            ref.update({**last, "n_skips": int((snap.to_dict() or {}).get("n_skips") or 1) + 1})
+            return
+        ref.set({
+            "market_id": market_id,
+            "direction": "BUY_YES",
+            "skipped_at": now,
+            "market_price_yes": mp,
+            "real_prob": analysis.get("real_prob"),
+            "edge": edge,
+            "confidence": confidence,
+            "confidence_precap": analysis.get("confidence_precap"),
+            "conf_cap_applied": analysis.get("conf_cap_applied"),
+            "min_confidence": min_conf,
+            "volume_spike": bool(analysis.get("volume_spike", False)),
+            "would_pass_longshot": mp is not None and float(mp) >= _BUY_YES_MIN_MP_YES,
+            "category": analysis.get("category"),
+            "categorizer_version": analysis.get("categorizer_version"),
+            "end_date_iso": analysis.get("end_date_iso"),
+            "n_skips": 1,
+            **last,
+        })
+    except Exception:
+        logger.warning("check_and_alert(%s): no se pudo registrar el descarte por confianza "
+                       "(no crítico)", market_id, exc_info=True)
+
+
 def _shadow_opposite(history: list[dict], direction: str) -> dict | None:
     """Último doc en sombra ("shadow") de la dirección contraria, o None."""
     docs = [h for h in history if h.get("status") == "shadow" and h.get("sent_at")
@@ -399,6 +441,8 @@ async def check_and_alert(analysis: dict) -> bool:
             "check_and_alert(%s): SKIP_CONF conf=%.3f < %.3f (%s) — omitida",
             analysis.get("market_id"), confidence, effective_min_conf, direction,
         )
+        if direction == "BUY_YES":
+            _record_conf_skip(analysis, edge, confidence, effective_min_conf)
         return False
 
     # Filtro anti-longshot BUY_YES: no comprar YES en eventos que el mercado considera

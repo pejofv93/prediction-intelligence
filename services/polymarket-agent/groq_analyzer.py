@@ -3843,6 +3843,10 @@ async def analyze_market(enriched_market: dict) -> dict | None:
     # (que baja el mínimo a 0.55). BUY_NO no se ve afectado (mínimo 0.55). Si el tramo
     # medio llegara a n>=50 con acc~41% su tope (~0.56) bloquearía también BUY_YES 0.12-0.15;
     # congelado, no llega a aplicarse (sigue en n=34).
+    # Confianza antes del tope, guardada en la predicción para poder estudiar el tope
+    # (alert_engine la registra en poly_conf_skips cuando descarta un BUY_YES).
+    _conf_precap = confidence
+    _conf_cap_applied = None
     try:
         _weights = _get_poly_weights()
         _by_bucket = _weights.get("accuracy_by_bucket", {})
@@ -3863,6 +3867,7 @@ async def analyze_market(enriched_market: dict) -> dict | None:
                     market_id, _bucket, _bacc * 100, _bn, confidence, _conf_cap,
                 )
                 confidence = _conf_cap
+                _conf_cap_applied = _conf_cap
     except Exception:
         pass
 
@@ -4145,6 +4150,8 @@ async def analyze_market(enriched_market: dict) -> dict | None:
         "real_prob": round(real_prob, 4),
         "edge": round(edge, 4),
         "confidence": round(confidence, 4),
+        "confidence_precap": round(_conf_precap, 4),
+        "conf_cap_applied": _conf_cap_applied,
         "trend": trend,
         "recommendation": recommendation,
         "key_factors": [_fix_encoding(f) for f in (key_factors[:5] if key_factors else [])],
