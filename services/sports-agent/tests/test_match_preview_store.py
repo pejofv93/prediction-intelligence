@@ -93,7 +93,7 @@ def test_escritura_real_guarda_ficha_y_estado(monkeypatch):
     doc = written[st.PREVIEWS][f["match_id"]]
     assert doc["freeze_at"] == (NOW + timedelta(days=1, hours=-2)).isoformat()
     assert doc["computed_at"] == NOW.isoformat() and doc["n_writes"] == 1 and doc["model_version"] == "mp-v1"
-    assert written[st.STATE]["previews"]["already_checked"] == {"2026-12-30": [["SP2", "2026-12-31"]]}
+    assert written[st.STATE]["previews"]["hl_checked_at"] == {"SP2|2026-12-31": NOW.isoformat()}
     # segunda pasada con lo mismo → igual, no escribe
     written.clear()
     out = asyncio.run(st.run_match_previews(
@@ -186,3 +186,29 @@ def test_backtest_dry_run_con_partidos():
         m["date"] = m["date"].replace("2026", "2025")
     out = asyncio.run(st.run_match_preview_backtest(dry_run=True, now=NOW, matches=ms))
     assert out["ok"] and out["seasons"] == ["2526", "2627"] and out["n_rows"] > 0 and out["written"] == 0
+
+
+def test_highlightly_no_repite_lo_mirado_en_20_h_y_poda_a_48_h():
+    state = {"hl_checked_at": {"SP2|2026-12-31": (NOW - timedelta(hours=10)).isoformat(),
+                               "SP2|2026-12-30": (NOW - timedelta(hours=21)).isoformat(),
+                               "SP2|2026-12-28": (NOW - timedelta(hours=50)).isoformat(),
+                               "roto": "no es fecha"}}
+    assert st.recent_checks(state, NOW) == frozenset({("SP2", "2026-12-31")})
+    merged = st.merge_checks(state, [{"div": "SP2", "day": "2027-01-01"}], NOW)
+    assert set(merged) == {"SP2|2026-12-31", "SP2|2026-12-30", "SP2|2027-01-01"}
+    assert merged["SP2|2027-01-01"] == NOW.isoformat()
+
+
+def test_hl_divs_limita_el_plan_de_highlightly(monkeypatch):
+    from collectors import match_fixtures as mf
+    async def no_text(client, url):
+        return None
+    async def no_teams(client, div, season):
+        return set()
+    monkeypatch.setattr(mf, "_get_text", no_text)
+    monkeypatch.setattr(mf, "_fdco_teams", no_teams)
+    out = asyncio.run(mf.build_fixture_list(now=NOW, days=2, api_key=None, upcoming_docs=[],
+                                            hl_divs=frozenset({"SP2"})))
+    why = {(p["div"], p["why"]) for p in out["unchecked"]}
+    assert ("SP2", "sin clave") in why and ("SP1", "fuera de hl_divs") in why
+    assert not any(p["div"] != "SP2" and p["why"] == "sin clave" for p in out["unchecked"])

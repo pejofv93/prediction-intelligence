@@ -408,7 +408,8 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
                              api_key: Optional[str] = None, quota=None, season: Optional[str] = None,
                              already_checked: frozenset = frozenset(),
                              max_hl_requests: Optional[int] = None,
-                             upcoming_docs: Optional[list[dict]] = None) -> dict:
+                             upcoming_docs: Optional[list[dict]] = None,
+                             hl_divs: Optional[frozenset] = None) -> dict:
     """
     Lista de partidos de la ventana. No escribe partidos en ningún sitio.
       api_key None      → sin Highlightly; lo que habría que mirar ahí sale en `unchecked`.
@@ -417,6 +418,8 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
                           hace falta max_hl_requests (prueba manual).
       already_checked   → (liga, día) ya comprobados hoy, para no repetir peticiones.
       upcoming_docs     → docs de upcoming_matches (tests); None = leerlos de Firestore.
+      hl_divs           → si se pasa, Highlightly solo para esas ligas; el resto del plan sale
+                          en `unchecked` ("fuera de hl_divs").
     """
     from collectors.fdco_team_matches import current_season_end_year, season_code
 
@@ -452,6 +455,10 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
 
         plan = plan_hl_checks(csv_by_div, days_list, already_checked,
                               covered_divs=UPCOMING_DIVS if fresh else frozenset())
+        skipped = []
+        if hl_divs is not None:
+            skipped = [{**p, "why": "fuera de hl_divs"} for p in plan if p["div"] not in hl_divs]
+            plan = [p for p in plan if p["div"] in hl_divs]
         if api_key and plan:
             if quota is not None:
                 used, remaining = _fixtures_quota_state(quota)
@@ -463,7 +470,7 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
             todo, rest = plan[:budget], plan[budget:]
         else:
             todo, rest = [], plan
-        summary["unchecked"] = [{**p, "why": "sin presupuesto" if api_key else "sin clave"} for p in rest]
+        summary["unchecked"] = [{**p, "why": "sin presupuesto" if api_key else "sin clave"} for p in rest] + skipped
 
         hl_matches: list[dict] = []
         for i, p in enumerate(todo):

@@ -23,6 +23,9 @@ on:
       hl_max:
         description: "previews: máximo de peticiones a Highlightly"
         default: "3"
+      hl_divs:
+        description: "previews: ligas para Highlightly, separadas por comas (vacío = todas)"
+        default: "SP2"
       confirmar:
         description: "Para dry_run=false escribe ESCRIBIR"
         default: ""
@@ -43,9 +46,11 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           HL: ${{ inputs.highlightly }}
           HL_MAX: ${{ inputs.hl_max }}
+          HL_DIVS: ${{ inputs.hl_divs }}
         run: |
+          [[ "$HL_DIVS" =~ ^[A-Z0-9,]*$ ]] || { echo "hl_divs inválido"; exit 1; }
           case "$JOB" in
-            previews) path="run-match-previews?dry_run=$DRY_RUN&highlightly=$HL&hl_max=$HL_MAX" ;;
+            previews) path="run-match-previews?dry_run=$DRY_RUN&highlightly=$HL&hl_max=$HL_MAX&hl_divs=$HL_DIVS" ;;
             backtest) path="run-match-preview-backtest?dry_run=$DRY_RUN" ;;
             grade)    path="run-match-preview-grade?dry_run=$DRY_RUN" ;;
           esac

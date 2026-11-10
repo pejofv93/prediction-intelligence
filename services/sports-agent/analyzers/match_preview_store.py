@@ -46,6 +46,7 @@ FREEZE_BEFORE = timedelta(hours=2)
 GRADE_AFTER_H = 6
 NO_RESULT_DAYS = 7
 GRADE_LOOKBACK_DAYS = 14
+HL_RECHECK_H = 20                   # (liga, día) mirado en Highlightly hace menos → no se repite
 _HTTP_TIMEOUT = 30.0
 REVIEW_DIVS = ("N1", "P1")          # DED y PPL: alias a revisar aparte en el dry-run
 
@@ -237,8 +238,35 @@ async def run_match_preview_backtest(dry_run: bool = True, now: Optional[datetim
 
 # ── 2. Fichas ──────────────────────────────────────────────────────────────────
 
+def recent_checks(state: dict, now: datetime, hours: int = HL_RECHECK_H) -> frozenset:
+    """(liga, día) mirados en Highlightly hace menos de `hours` horas (state["hl_checked_at"])."""
+    out = set()
+    for key, ts in (state.get("hl_checked_at") or {}).items():
+        div, _, day = key.partition("|")
+        try:
+            if now - _parse(ts) < timedelta(hours=hours):
+                out.add((div, day))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return frozenset(out)
+
+
+def merge_checks(state: dict, checked: list[dict], now: datetime, keep_h: int = 48) -> dict[str, str]:
+    """Lo mirado ahora más lo anterior de menos de keep_h horas."""
+    out = {}
+    for key, ts in (state.get("hl_checked_at") or {}).items():
+        try:
+            if now - _parse(ts) < timedelta(hours=keep_h):
+                out[key] = ts
+        except (TypeError, ValueError, AttributeError):
+            continue
+    for p in checked:
+        out[f"{p['div']}|{p['day']}"] = now.isoformat()
+    return out
+
+
 async def run_match_previews(dry_run: bool = True, now: Optional[datetime] = None, days: int = 3,
-                             highlightly: bool = False, hl_max: int = 3,
+                             highlightly: bool = False, hl_max: int = 3, hl_divs: Optional[frozenset] = None,
                              fixtures: Optional[dict] = None, matches: Optional[list[dict]] = None,
                              labels_doc: Optional[dict] = None, existing: Optional[dict[str, dict]] = None,
                              state: Optional[dict] = None) -> dict:
@@ -246,20 +274,20 @@ async def run_match_previews(dry_run: bool = True, now: Optional[datetime] = Non
     highlightly: usar Highlightly para lo que no cubren fixtures.csv ni upcoming_matches (en la
                  práctica SP2), con la reserva manual y como mucho hl_max peticiones. Necesita
                  HIGHLIGHTLY_API_KEY en el servicio; sin ella lo pendiente sale en `unchecked`.
+                 Un (liga, día) mirado hace menos de HL_RECHECK_H horas no se repite.
+    hl_divs:     si se pasa, Highlightly solo para esas ligas (p. ej. {"SP2"}).
     Los parámetros fixtures/matches/labels_doc/existing/state son para tests (None = leer).
     """
     from collectors.match_fixtures import build_fixture_list
 
     now = now or _now()
     season = _season_now(now)
-    today = now.date().isoformat()
     summary: dict = {"ok": True, "dry_run": dry_run, "now": now.isoformat(), "season": season,
                      "counts": {}, "previews": [], "errors": []}
 
     if state is None:
         state = (_get_doc(STATE, "previews") or {}) if fixtures is None else {}
-    checked_today = state.get("already_checked", {}).get(today, [])
-    already = frozenset((c[0], c[1]) for c in checked_today)
+    already = recent_checks(state, now)
 
     if fixtures is None:
         api_key = os.environ.get("HIGHLIGHTLY_API_KEY") if highlightly else None
@@ -269,7 +297,8 @@ async def run_match_previews(dry_run: bool = True, now: Optional[datetime] = Non
             from shared.api_quota_manager import QuotaManager
             quota = QuotaManager()
         fixtures = await build_fixture_list(now=now, days=days, api_key=api_key, quota=quota, season=season,
-                                            already_checked=already, max_hl_requests=hl_max)
+                                            already_checked=already, max_hl_requests=hl_max,
+                                            hl_divs=hl_divs)
         if highlightly and not api_key:
             summary["errors"].append("highlightly=true pero HIGHLIGHTLY_API_KEY no está en el servicio")
     summary["fixtures"] = {k: fixtures.get(k) for k in ("window_days", "by_div", "csv_rows_by_div", "hl_requests",
@@ -329,8 +358,7 @@ async def run_match_previews(dry_run: bool = True, now: Optional[datetime] = Non
     if not dry_run:
         try:
             _set_docs(PREVIEWS, to_write)
-            checked = sorted({(p["div"], p["day"]) for p in fixtures.get("hl_checked", [])} | set(already))
-            _set_docs(STATE, {"previews": {"already_checked": {today: [list(c) for c in checked]},
+            _set_docs(STATE, {"previews": {"hl_checked_at": merge_checks(state, fixtures.get("hl_checked", []), now),
                                            "last_run": now.isoformat(), "last_counts": dict(counts)}})
         except Exception as e:
             logger.error("match_previews: error escribiendo", exc_info=True)

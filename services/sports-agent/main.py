@@ -346,15 +346,20 @@ async def run_match_preview_backtest_job(dry_run: bool = True) -> StreamingRespo
 
 @app.post("/run-match-previews", dependencies=[Depends(verify_token)])
 async def run_match_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = False,
-                                 hl_max: int = 3) -> StreamingResponse:
+                                 hl_max: int = 3, hl_divs: str = "") -> StreamingResponse:
     """Ficha de partido (mp-v1): una ficha por partido de los próximos `days` días en
     match_previews; se recalcula si cambia y se congela 2 h antes del inicio. dry_run=true por
-    defecto. highlightly=true gasta como mucho hl_max peticiones de la reserva manual."""
+    defecto. highlightly=true gasta como mucho hl_max peticiones de la reserva manual;
+    hl_divs="SP2" (separadas por comas) limita Highlightly a esas ligas."""
     if not 1 <= days <= 3 or not 0 <= hl_max <= 10:
         raise HTTPException(status_code=400, detail="days 1-3 y hl_max 0-10")
+    from collectors.fdco_team_matches import MAIN_DIVS
+    divs = frozenset(d.strip().upper() for d in hl_divs.split(",") if d.strip()) or None
+    if divs and not divs <= set(MAIN_DIVS):
+        raise HTTPException(status_code=400, detail=f"hl_divs: solo {sorted(MAIN_DIVS)}")
     from analyzers.match_preview_store import run_match_previews
     return _stream_with_summary("match-previews", run_match_previews, dry_run=dry_run, days=days,
-                                highlightly=highlightly, hl_max=hl_max)
+                                highlightly=highlightly, hl_max=hl_max, hl_divs=divs)
 
 
 @app.post("/run-match-preview-grade", dependencies=[Depends(verify_token)])
