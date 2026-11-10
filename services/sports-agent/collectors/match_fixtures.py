@@ -413,7 +413,8 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
     Lista de partidos de la ventana. No escribe partidos en ningún sitio.
       api_key None      → sin Highlightly; lo que habría que mirar ahí sale en `unchecked`.
       quota             → QuotaManager: presupuesto = reserva manual (contador propio) y
-                          cabecera de la API. Sin quota hace falta max_hl_requests (prueba manual).
+                          cabecera de la API, y como mucho max_hl_requests si se pasa. Sin quota
+                          hace falta max_hl_requests (prueba manual).
       already_checked   → (liga, día) ya comprobados hoy, para no repetir peticiones.
       upcoming_docs     → docs de upcoming_matches (tests); None = leerlos de Firestore.
     """
@@ -455,6 +456,8 @@ async def build_fixture_list(now: Optional[datetime] = None, days: int = DEFAULT
             if quota is not None:
                 used, remaining = _fixtures_quota_state(quota)
                 budget = fixtures_budget(used, remaining)
+                if max_hl_requests is not None:
+                    budget = min(budget, max(0, int(max_hl_requests)))
             else:
                 budget = max(0, min(int(max_hl_requests or 0), HL_MANUAL_RESERVE))
             todo, rest = plan[:budget], plan[budget:]

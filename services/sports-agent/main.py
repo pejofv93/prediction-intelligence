@@ -315,6 +315,56 @@ async def run_trend_grade() -> StreamingResponse:
     return StreamingResponse(_stream_job(_bg_trend_grade, "trend-grade"), media_type="text/plain")
 
 
+def _stream_with_summary(job_name: str, func, **kwargs) -> StreamingResponse:
+    """Ejecuta func(**kwargs) (async, devuelve dict) con pings y una última línea 'summary: {...}'."""
+    result: dict = {}
+
+    async def _job() -> None:
+        try:
+            result.update(await func(**kwargs))
+        except Exception as e:
+            logger.error("%s: error no controlado — %s", job_name, e, exc_info=True)
+            result.update({"ok": False, "errors": [str(e)]})
+
+    async def _stream():
+        async for line in _stream_job(_job, job_name):
+            yield line
+        if result:
+            import json
+            yield "summary: " + json.dumps(result, ensure_ascii=False, default=str) + "\n"
+
+    return StreamingResponse(_stream(), media_type="text/plain")
+
+
+@app.post("/run-match-preview-backtest", dependencies=[Depends(verify_token)])
+async def run_match_preview_backtest_job(dry_run: bool = True) -> StreamingResponse:
+    """Ficha de partido (mp-v1): backtest de la última temporada completa → etiquetas por
+    mercado y liga en match_preview_metrics/mp-v1_backtest. dry_run=true por defecto."""
+    from analyzers.match_preview_store import run_match_preview_backtest
+    return _stream_with_summary("match-preview-backtest", run_match_preview_backtest, dry_run=dry_run)
+
+
+@app.post("/run-match-previews", dependencies=[Depends(verify_token)])
+async def run_match_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = False,
+                                 hl_max: int = 3) -> StreamingResponse:
+    """Ficha de partido (mp-v1): una ficha por partido de los próximos `days` días en
+    match_previews; se recalcula si cambia y se congela 2 h antes del inicio. dry_run=true por
+    defecto. highlightly=true gasta como mucho hl_max peticiones de la reserva manual."""
+    if not 1 <= days <= 3 or not 0 <= hl_max <= 10:
+        raise HTTPException(status_code=400, detail="days 1-3 y hl_max 0-10")
+    from analyzers.match_preview_store import run_match_previews
+    return _stream_with_summary("match-previews", run_match_previews, dry_run=dry_run, days=days,
+                                highlightly=highlightly, hl_max=hl_max)
+
+
+@app.post("/run-match-preview-grade", dependencies=[Depends(verify_token)])
+async def run_match_preview_grade_job(dry_run: bool = True) -> StreamingResponse:
+    """Ficha de partido (mp-v1): gradúa las fichas congeladas contra el CSV de resultados →
+    match_preview_grades y match_preview_metrics/mp-v1_live. dry_run=true por defecto."""
+    from analyzers.match_preview_store import run_match_preview_grade
+    return _stream_with_summary("match-preview-grade", run_match_preview_grade, dry_run=dry_run)
+
+
 @app.get("/api/oddsapiio-coverage", dependencies=[Depends(verify_token)])
 async def api_oddsapiio_coverage() -> dict:
     """

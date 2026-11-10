@@ -1,0 +1,60 @@
+# Ficha de partido de Tendencias (mp-v1): backtest (etiquetas), fichas y graduación.
+# Aislado del feed actual. SOLO manual por ahora (el cron 16:00 y 02:00 UTC irá aparte y con OK).
+# dry_run=true por defecto (no escribe nada). Escribir exige dry_run=false Y confirmar=ESCRIBIR.
+name: sports-match-previews
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Qué ejecutar"
+        type: choice
+        options: [previews, backtest, grade]
+        default: previews
+      dry_run:
+        description: "true = solo calcula y cuenta"
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      highlightly:
+        description: "previews: usar Highlightly (reserva manual) para lo que falte"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      hl_max:
+        description: "previews: máximo de peticiones a Highlightly"
+        default: "3"
+      confirmar:
+        description: "Para dry_run=false escribe ESCRIBIR"
+        default: ""
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Comprobar confirmación
+        if: ${{ inputs.dry_run == 'false' && inputs.confirmar != 'ESCRIBIR' }}
+        run: |
+          echo "dry_run=false exige confirmar=ESCRIBIR — no se llama al servicio"
+          exit 1
+      - name: Trigger Cloud Run (sync)
+        env:
+          JOB: ${{ inputs.job }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          HL: ${{ inputs.highlightly }}
+          HL_MAX: ${{ inputs.hl_max }}
+        run: |
+          case "$JOB" in
+            previews) path="run-match-previews?dry_run=$DRY_RUN&highlightly=$HL&hl_max=$HL_MAX" ;;
+            backtest) path="run-match-preview-backtest?dry_run=$DRY_RUN" ;;
+            grade)    path="run-match-preview-grade?dry_run=$DRY_RUN" ;;
+          esac
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1100 \
+            --no-buffer \
+            --fail --silent --show-error > out.txt
+          grep -v '^summary: ' out.txt
+          grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
+          grep -q '^done ' out.txt
+          grep -q '^summary: {"ok": true' out.txt
