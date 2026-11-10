@@ -1,0 +1,35 @@
+# Revisión de Polymarket con gpt-oss (alertas desde el 23-sep). SOLO LECTURA: lee
+# alerts_sent, shadow_trades, poly_predictions y poly_model_weights, consulta Gamma (GET
+# público) y no escribe nada. Imprime solo agregados: el log es público. Manual, sin cron.
+name: poly-gptoss-review
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  revision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Revisión (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: python scripts/ops/poly_gptoss_review.py
