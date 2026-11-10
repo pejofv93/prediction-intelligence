@@ -1,0 +1,33 @@
+# Solo lectura: compara model_weights/current con la copia del 9-nov. No escribe nada.
+name: sports-weights-compare
+on:
+  workflow_dispatch:
+    inputs:
+      backup_doc:
+        description: "Documento de la copia en model_weights_backup_20261109"
+        default: "current_20261109T123204Z"
+permissions:
+  contents: read
+jobs:
+  comparar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Comparar (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          BACKUP_DOC: ${{ inputs.backup_doc }}
+        run: |
+          [[ "$BACKUP_DOC" =~ ^[A-Za-z0-9_]+$ ]] || { echo "backup_doc inválido"; exit 1; }
+          python scripts/ops/weights_compare.py --backup-doc "$BACKUP_DOC"
