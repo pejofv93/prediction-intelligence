@@ -183,3 +183,13 @@ def test_buy_no_en_sombra_bloquea_el_buy_yes_contrario():
           "market_id": "m9", "type": "polymarket"}]
     ok, store, posts, alerted = _check(dict(_BUY_YES), True, history=h)
     assert ok is False and posts == [] and alerted == [] and "m9_BUY_YES" not in store
+
+
+def test_sombra_antigua_bloquea_igual_que_un_envio_antiguo():
+    # La protección contra la contraria de un BUY_NO enviado no caduca (todo el historial
+    # del mercado); la sombra bloquea lo mismo, también 60 días después.
+    now = T0 + timedelta(days=60)
+    base = {"sent_at": T0, "direction": "BUY_NO", "market_price_yes": 0.7, "edge": -0.2,
+            "alert_key": "m_BUY_NO"}
+    assert _slot_decision([{**base, "status": "sent_archived"}], "BUY_YES", 0.7, 0.2, now)[0] == "skip"
+    assert _shadow_opposite([{**base, "status": "shadow"}], "BUY_YES") is not None
