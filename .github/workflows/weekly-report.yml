@@ -18,6 +18,8 @@ jobs:
             --fail --silent --show-error
 
       - name: Trigger production backtest (actualiza model_weights con datos reales)
+        # Corre aunque el reporte falle (Telegram lo rechace → 502); no si se cancela.
+        if: success() || failure()
         run: |
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-production-backtest" \
             -H "Content-Type: application/json" \
