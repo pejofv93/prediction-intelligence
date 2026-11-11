@@ -96,7 +96,10 @@ from unittest.mock import MagicMock, patch  # noqa: E402
 import alert_engine  # noqa: E402
 
 
-def _check(analysis, shadow_flag, history=None):
+def _check(analysis, shadow_flag, history=None, bot_status=200, bot_body=None):
+    """bot_status/bot_body: respuesta simulada de telegram-bot /send-alert."""
+    if bot_body is None:
+        bot_body = {"ok": True, "sent": True, "reason": "sent"}
     store, posts, alerted = {}, [], []
 
     class _Ref:
@@ -134,7 +137,8 @@ def _check(analysis, shadow_flag, history=None):
 
         async def post(self, url, json=None, headers=None):
             posts.append(json)
-            return MagicMock(status_code=200)
+            return MagicMock(status_code=bot_status, text=str(bot_body),
+                             json=lambda: dict(bot_body))
 
     async def _state(mid):
         return {"open": True, "reason": None}

@@ -537,6 +537,17 @@ def _claim_alert_slot(key: str, alert_type: str) -> bool:
         return True
 
 
+def _release_alert_slot(key: str) -> None:
+    """Libera el slot reservado por _claim_alert_slot cuando Telegram no aceptó el
+    mensaje: si no, el reintento del agente chocaría con el dedup 24 h sin que nada
+    hubiera llegado a Telegram."""
+    from shared.firestore_client import col
+    try:
+        col("alerts_sent").document(_safe_doc_id(key)).delete()
+    except Exception as exc:
+        logger.error("_release_alert_slot(%s): no se pudo liberar el slot: %s", key, exc)
+
+
 # ── Una alerta por partido y mercado (baloncesto, fútbol, tenis) ─────────────
 # Nació para baloncesto y desde 2026-10-22 cubre también fútbol y tenis: con el dedup
 # genérico de 24h la misma señal de fútbol salía cada día hasta el partido (82 de 145
@@ -888,12 +899,13 @@ def _record_sports_sent(prediction: dict) -> None:
         logger.error("_record_sports_sent(%s): error Firestore — %s", prediction_id, exc)
 
 
-async def send_sports_alert(prediction: dict) -> bool:
+async def send_sports_alert(prediction: dict) -> str:
     """
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
     Baloncesto/fútbol/tenis: un envío por partido+fecha+mercado (_claim_match_slot).
     Resto, o sin fecha: dedup 24h via _claim_alert_slot.
-    Devuelve True si envio.
+    Devuelve "sent", "duplicate" (dedup), "too_late" (TIMING_GUARD) o
+    "rejected" (Telegram no aceptó el mensaje).
     """
     edge = float(prediction.get("edge") or 0)
     key = _alert_key(prediction, edge)
@@ -908,16 +920,16 @@ async def send_sports_alert(prediction: dict) -> bool:
             prediction.get("home_team", "?"), prediction.get("away_team", "?"),
             kickoff_label(prediction.get("match_date")),
         )
-        return False
+        return "too_late"
 
     # Dedup atómico: pre-escribe antes de enviar
     _resend_from_odds = None
     if str(prediction.get("sport", "")).lower() in _SLOT_SPORTS:
         _ok, _resend_from_odds = _claim_match_slot(prediction)
         if not _ok:
-            return False
+            return "duplicate"
     elif not _claim_alert_slot(key, "sports"):
-        return False
+        return "duplicate"
 
     text = _format_alert_unified(prediction)
     if _resend_from_odds is not None:
@@ -935,36 +947,38 @@ async def send_sports_alert(prediction: dict) -> bool:
 
     if not sent:
         logger.error("send_sports_alert: fallo al enviar (%s)", key)
-        return False
+        return "rejected"
 
     if str(prediction.get("sport", "")).lower() not in _BBALL_SPORTS:
         _record_sports_sent(prediction)  # baloncesto ya tiene su slot por partido
 
     await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
     logger.info("send_sports_alert: alerta enviada para %s (edge=%.3f)", key, edge)
-    return True
+    return "sent"
 
 
-async def send_poly_alert(analysis: dict) -> bool:
+async def send_poly_alert(analysis: dict) -> str:
     """
     Formatea senal de Polymarket y envia a TELEGRAM_CHAT_ID.
     Dedup 24h via _claim_alert_slot — mismo mecanismo que sports.
-    Devuelve True si envio.
+    Devuelve "sent", "duplicate" (dedup) o "rejected" (Telegram no aceptó el mensaje;
+    el slot se libera para que el reintento no choque con el dedup).
     """
     edge = float(analysis.get("edge") or 0)
     key = _alert_key(analysis, edge)
 
     # Dedup atómico: pre-escribe antes de enviar
     if not _claim_alert_slot(key, "polymarket"):
-        return False
+        return "duplicate"
 
     text = _format_alert_unified(analysis) if analysis.get("sport") else _format_poly_alert(analysis)
     sent = await send_message(text, message_thread_id=TELEGRAM_POLY_THREAD_ID)
 
     if not sent:
         logger.error("send_poly_alert: fallo al enviar (%s)", key)
-        return False
+        _release_alert_slot(key)
+        return "rejected"
 
     await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
     logger.info("send_poly_alert: alerta enviada para %s (edge=%.3f)", key, edge)
-    return True
+    return "sent"

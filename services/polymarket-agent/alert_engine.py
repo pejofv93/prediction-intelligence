@@ -637,10 +637,16 @@ async def check_and_alert(analysis: dict) -> bool:
                 json={"type": "polymarket", "data": analysis_safe},
                 headers={"x-cloud-token": cloud_run_token},
             )
-        if resp.status_code not in (200, 201, 202):
-            logger.error(
-                "check_and_alert(%s): telegram-bot respondio %d",
-                market_id, resp.status_code,
+        # Solo cuenta como enviada si el bot confirma sent=True: un 409 (dedup del bot)
+        # o un 502 (Telegram rechazó) no llegaron al canal y no deben quedar "sent".
+        try:
+            _bot_sent = resp.status_code == 200 and bool(resp.json().get("sent"))
+        except Exception:
+            _bot_sent = False
+        if not _bot_sent:
+            (logger.info if resp.status_code == 409 else logger.error)(
+                "check_and_alert(%s): telegram-bot no envió (HTTP %d, %s) — slot liberado",
+                market_id, resp.status_code, resp.text[:120],
             )
             # Revertir claim para que el error no bloquee futuros reintentos
             try:

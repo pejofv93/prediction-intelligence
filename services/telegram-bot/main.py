@@ -172,41 +172,48 @@ async def send_alert(request: Request) -> JSONResponse:
 
     from alert_manager import send_sports_alert, send_poly_alert, send_message
 
-    sent = False
+    # Resultado: "sent" | "duplicate" | "too_late" | "rejected" | "empty" | "unknown_type".
+    # Solo "sent" responde 200: los agentes que miran el código HTTP (polymarket-agent)
+    # no deben marcar como enviada una alerta que no llegó a Telegram.
+    async def _plain(text: str, **kw) -> str:
+        if not text:
+            return "empty"
+        return "sent" if await send_message(text, **kw) else "rejected"
+
     try:
         if alert_type == "sports":
-            sent = await send_sports_alert(data)
+            outcome = await send_sports_alert(data)
         elif alert_type == "polymarket":
-            sent = await send_poly_alert(data)
+            outcome = await send_poly_alert(data)
         elif alert_type == "polymarket_resolution":
-            text = data.get("text", "")
-            if text:
-                sent = await send_message(text, message_thread_id=TELEGRAM_POLY_THREAD_ID)
+            outcome = await _plain(data.get("text", ""), message_thread_id=TELEGRAM_POLY_THREAD_ID)
         elif alert_type == "arbitrage":
-            text = data.get("message", "")
-            if text:
-                sent = await send_message(text, message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
+            outcome = await _plain(data.get("message", ""), message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
         elif alert_type == "matched":
             # Detector back/lay (surebets + coberturas) → canal General (thread None).
             # Texto plano (parse_mode=None) para evitar errores de entidades Markdown.
-            text = data.get("text", "")
-            if text:
-                sent = await send_message(text, parse_mode=None, message_thread_id=None)
+            outcome = await _plain(data.get("text", ""), parse_mode=None, message_thread_id=None)
         elif alert_type == "trend":
             # Feed de tendencias estadísticas (sin cuotas/EV) → tema propio "Tendencias".
             # Aislado del resto: nunca toca predictions/shadow_trades/accuracy_log.
             # parse_mode=None: nombres de equipo pueden traer caracteres que rompen
             # entidades Markdown (mismo motivo que el tipo "matched").
-            text = data.get("text", "")
-            if text:
-                sent = await send_message(text, parse_mode=None, message_thread_id=TELEGRAM_TRENDS_THREAD_ID)
+            outcome = await _plain(data.get("text", ""), parse_mode=None,
+                                   message_thread_id=TELEGRAM_TRENDS_THREAD_ID)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
+            outcome = "unknown_type"
     except Exception:
         logger.error("send-alert: error enviando alerta tipo=%s", alert_type, exc_info=True)
+        outcome = "rejected"
 
-    logger.info("send-alert: tipo=%s sent=%s", alert_type, sent)
-    return JSONResponse({"ok": True, "sent": sent})
+    status = {"sent": 200, "duplicate": 409, "too_late": 409,
+              "empty": 400, "unknown_type": 400}.get(outcome, 502)
+    logger.info("send-alert: tipo=%s resultado=%s http=%d", alert_type, outcome, status)
+    return JSONResponse(
+        {"ok": outcome == "sent", "sent": outcome == "sent", "reason": outcome},
+        status_code=status,
+    )
 
 
 @app.post("/daily-report", dependencies=[Depends(verify_token)])
@@ -610,7 +617,11 @@ async def send_weekly_report() -> JSONResponse:
         }
 
         report_text = generate_weekly_report(week_stats, weights_before, weights_after)
-        await send_message(report_text, message_thread_id=TELEGRAM_DAILY_THREAD_ID)
+        if not await send_message(report_text, message_thread_id=TELEGRAM_DAILY_THREAD_ID):
+            logger.error("send-weekly-report: Telegram no aceptó el reporte de %s", prev_week)
+            return JSONResponse(
+                {"ok": False, "week": prev_week, "reason": "rejected"}, status_code=502,
+            )
 
         logger.info(
             "send-weekly-report: enviado para %s (%d preds, %d poly)",
