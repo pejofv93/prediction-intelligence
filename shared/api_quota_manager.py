@@ -110,6 +110,33 @@ class QuotaManager:
             self._col_fn = col
         return self._col_fn("api_quotas")
 
+    def _claim_alert(self, alert_key: str, api_name: str, period: str) -> bool:
+        """Reserva el aviso en Firestore: un doc por API, periodo y fecha, creado solo si
+        no existe (create). Así cada aviso sale una vez por periodo aunque haya arranques
+        en frío (self._alerted vive en memoria). Si ya existe o Firestore falla → no avisar."""
+        if self._col_fn is None:
+            self._col()
+        try:
+            self._col_fn("api_quota_alerts").document(alert_key).create({
+                "alert_key": alert_key, "api": api_name, "period": period,
+                "sent_at": datetime.now(timezone.utc),
+            })
+            return True
+        except Exception as exc:
+            if type(exc).__name__ in ("AlreadyExists", "Conflict"):
+                logger.info("QuotaManager: aviso %s ya enviado en este periodo", alert_key)
+            else:
+                logger.warning("QuotaManager: Firestore falló reservando aviso %s — no se avisa: %s",
+                               alert_key, exc)
+            return False
+
+    def _release_alert(self, alert_key: str) -> None:
+        """Libera la reserva si el bot no envió el aviso, para que el siguiente intento avise."""
+        try:
+            self._col_fn("api_quota_alerts").document(alert_key).delete()
+        except Exception:
+            logger.warning("QuotaManager: no se pudo liberar el aviso %s", alert_key, exc_info=True)
+
     def _get_doc(self, key: str) -> dict:
         try:
             snap = self._col().document(key).get()
@@ -172,7 +199,7 @@ class QuotaManager:
                 self._alerted.add(key)
                 pct = int(used / limit * 100)
                 try:
-                    asyncio.create_task(self._send_alert(api_name, used, limit, pct, "día"))
+                    asyncio.create_task(self._send_alert(api_name, used, limit, pct, "día", key))
                 except RuntimeError:
                     pass
 
@@ -240,7 +267,7 @@ class QuotaManager:
                 self._alerted.add(key)
                 try:
                     asyncio.create_task(
-                        self._send_alert(api_name, used_effective, limit, pct, "mes")
+                        self._send_alert(api_name, used_effective, limit, pct, "mes", key)
                     )
                 except RuntimeError:
                     pass
@@ -330,23 +357,35 @@ class QuotaManager:
 
     # ── Telegram ──────────────────────────────────────────────────────────────
 
-    async def _send_alert(self, api_name: str, used: int, limit: int, pct: int, period: str) -> None:
-        from shared.config import TELEGRAM_BOT_URL
+    async def _send_alert(self, api_name: str, used: int, limit: int, pct: int, period: str,
+                          alert_key: str) -> None:
+        from shared.config import TELEGRAM_BOT_URL, CLOUD_RUN_TOKEN
         if not TELEGRAM_BOT_URL:
             return
+        if not self._claim_alert(alert_key, api_name, period):
+            return
+        # Texto plano: los nombres de API llevan "_" (the_odds_api) y rompían el Markdown.
         msg = (
-            f"⚠️ *Quota {api_name} al {pct}%*\n"
+            f"⚠️ Quota {api_name} al {pct}%\n"
             f"Periodo: {period} — {used}/{limit} llamadas\n"
             f"Fecha: {_today()}"
         )
         try:
+            # El bot no tiene /send (daba 404): /send-alert type "matched" es el aviso de
+            # texto plano al canal General, con el token inter-servicios.
             async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(
-                    TELEGRAM_BOT_URL + "/send",
-                    json={"text": msg, "parse_mode": "Markdown"},
+                resp = await client.post(
+                    TELEGRAM_BOT_URL + "/send-alert",
+                    json={"type": "matched", "data": {"text": msg}},
+                    headers={"x-cloud-token": CLOUD_RUN_TOKEN},
                 )
+            if resp.status_code != 200:
+                logger.warning("QuotaManager: aviso de cuota %s no enviado (HTTP %d, %s)",
+                               api_name, resp.status_code, resp.text[:120])
+                self._release_alert(alert_key)
         except Exception:
             logger.warning("QuotaManager: error enviando alerta Telegram para %s", api_name, exc_info=True)
+            self._release_alert(alert_key)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
