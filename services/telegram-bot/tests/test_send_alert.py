@@ -21,6 +21,7 @@ def bot(monkeypatch):
 
     async def _send(text, *a, **k):
         state["messages"].append(text)
+        state["last_kwargs"] = k
         return state["telegram_ok"]
 
     async def _no_sleep(*a, **k):
@@ -104,3 +105,12 @@ def test_texto_vacio_400(bot):
     r = _post(bot, "matched", {"text": ""})
     assert r.status_code == 400 and r.json()["reason"] == "empty"
     assert bot["messages"] == []
+
+
+def test_resolucion_poly_va_en_texto_plano(bot):
+    # La pregunta del mercado puede traer "_" o "*": con Markdown Telegram da 400.
+    text = "✅ ACERTADO\nMercado: Will BTC_USD hit *100k*?"
+    r = _post(bot, "polymarket_resolution", {"text": text})
+    assert r.status_code == 200
+    assert bot["messages"] == [text]
+    assert bot["last_kwargs"].get("parse_mode", "Markdown") is None

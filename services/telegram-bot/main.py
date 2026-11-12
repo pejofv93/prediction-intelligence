@@ -186,7 +186,10 @@ async def send_alert(request: Request) -> JSONResponse:
         elif alert_type == "polymarket":
             outcome = await send_poly_alert(data)
         elif alert_type == "polymarket_resolution":
-            outcome = await _plain(data.get("text", ""), message_thread_id=TELEGRAM_POLY_THREAD_ID)
+            # Resoluciones y movimientos bruscos: texto sin formato que lleva la pregunta del
+            # mercado tal cual; un "_" o "*" en ella rompía las entidades Markdown (400).
+            outcome = await _plain(data.get("text", ""), parse_mode=None,
+                                   message_thread_id=TELEGRAM_POLY_THREAD_ID)
         elif alert_type == "arbitrage":
             outcome = await _plain(data.get("message", ""), message_thread_id=TELEGRAM_SPORTS_THREAD_ID)
         elif alert_type == "matched":
