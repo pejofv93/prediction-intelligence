@@ -2,6 +2,7 @@
 cambia el hash, graduación contra el resultado, anulación y dry-run sin escribir. Sin red ni
 Firestore: todo se inyecta."""
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -212,3 +213,37 @@ def test_hl_divs_limita_el_plan_de_highlightly(monkeypatch):
     why = {(p["div"], p["why"]) for p in out["unchecked"]}
     assert ("SP2", "sin clave") in why and ("SP1", "fuera de hl_divs") in why
     assert not any(p["div"] != "SP2" and p["why"] == "sin clave" for p in out["unchecked"])
+
+
+# ── Exportación para la web ──────────────────────────────────────────────────
+
+def _stored(ko, home="A", away="B", **kw):
+    f = _fixture(home, away, ko=ko, hl_match_id=123, src_home="Src A", odds={"over_2_5": 1.9}, **kw)
+    pred = mp.predict_match(mp.History(_league(rounds=4)), "SP1", "2627", f["date"], home, away)
+    return {**st.preview_content(f, pred, "mp-v1_backtest"), "hash": "h", "computed_at": NOW.isoformat()}
+
+
+def test_web_export_ventana_orden_y_sin_datos_de_origen():
+    docs = [_stored(NOW + timedelta(days=2), "C", "D"),
+            _stored(NOW + timedelta(days=1)),
+            _stored(NOW - timedelta(hours=1), "B", "A"),     # empezado hace 1 h: sigue
+            _stored(NOW - timedelta(hours=3), "D", "C"),     # hace 3 h: fuera
+            _stored(NOW + timedelta(days=8), "A", "C")]      # más de 7 días: fuera
+    out = st.web_export(docs, NOW)
+    assert [m["home"] for m in out["matches"]] == ["B", "A", "C"]
+    flat = json.dumps(out)
+    for leak in ("hl_match_id", "src_home", "Src A", "odds", "p_market", "hash", "params"):
+        assert leak not in flat
+
+
+def test_web_match_esperados_lineas_y_muestra():
+    m = st.web_match(_stored(NOW + timedelta(days=1)))
+    g = m["stats"]["goals"]
+    assert g["available"] and len(g["exp"]) == 3
+    assert abs(g["exp"][2] - (g["exp"][0] + g["exp"][1])) < 0.01
+    assert set(g["blocks"]) == {"home", "away", "total"}
+    lines = g["blocks"]["total"]["lines"]
+    assert [ln[0] for ln in lines] == list(mp.LINES["goals"][1])          # ordenadas
+    assert all(0 <= ln[1] <= 1 for ln in lines)                           # p_model
+    assert g["blocks"]["home"]["label"] in (mp.LABEL_EDGE, mp.LABEL_REF, mp.LABEL_LOW_SAMPLE)
+    assert set(m["sample"]) == {"home", "away"} and m["sample"]["home"]["n_cur"] >= 1

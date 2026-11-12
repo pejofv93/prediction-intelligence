@@ -516,3 +516,62 @@ async def run_match_preview_grade(dry_run: bool = True, now: Optional[datetime] 
     summary["ok"] = not any(e.startswith("escritura") for e in summary["errors"])
     logger.info("match_preview_grade: %s", dict(counts))
     return summary
+
+
+# ── 4. Exportación para la web de Tendencias ───────────────────────────────────
+# Solo lo que pinta la ficha: partido, muestra, esperados y líneas (modelo frente a la media de
+# la liga) con su etiqueta. Fuera: cuotas, ids y nombres de origen (Highlightly incluido),
+# parámetros del modelo y hash. Los números salen del cálculo con football-data.co.uk.
+WEB_DAYS = 7
+WEB_PAST = FREEZE_BEFORE            # un partido sigue en la web hasta 2 h después de empezar
+
+
+def web_match(p: dict) -> dict:
+    stats = {}
+    for s in mp.STATS:
+        b = (p.get("stats") or {}).get(s) or {}
+        if not b.get("available"):
+            stats[s] = {"available": False}
+            continue
+        stats[s] = {
+            "available": True,
+            "exp": [b["exp_home"], b["exp_away"], b["exp_total"]],
+            "league_mean": [b["league_mean_home"], b["league_mean_away"]],
+            "blocks": {side: {"label": blk["label"], "highlight": bool(blk.get("highlight")),
+                              "lines": [[ln["line"], ln["p_model"], ln["p_league"], ln.get("league_n")]
+                                        for ln in sorted(blk["lines"].values(), key=lambda x: x["line"])]}
+                       for side, blk in b["lines"].items()},
+        }
+    teams = p.get("teams") or {}
+    return {
+        "id": p["match_id"], "div": p["div"], "kickoff_utc": p["kickoff_utc"],
+        "home": p["home_team"], "away": p["away_team"], "data_cutoff": p.get("data_cutoff"),
+        "low_sample": bool(p.get("low_sample")),
+        "sample": {side: {"n_cur": t.get("n_cur"), "n_eff": t.get("n_eff"),
+                          "insufficient": bool(t.get("insufficient"))}
+                   for side, t in teams.items()},
+        "computed_at": p.get("computed_at"), "stats": stats,
+    }
+
+
+def web_export(previews: list[dict], now: datetime, days: int = WEB_DAYS) -> dict:
+    lo, hi = now - WEB_PAST, now + timedelta(days=days)
+    keep = sorted((p for p in previews if lo <= _parse(p["kickoff_utc"]) <= hi),
+                  key=lambda p: (p["kickoff_utc"], p["div"], p["home_team"]))
+    return {"model_version": mp.MODEL_VERSION, "generated_at": now.isoformat(), "days": days,
+            "min_cur": mp.MIN_CUR, "matches": [web_match(p) for p in keep]}
+
+
+def _read_upcoming_previews(now: datetime, days: int = WEB_DAYS) -> list[dict]:
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from shared.firestore_client import col
+    lo = (now - WEB_PAST).isoformat()
+    hi = (now + timedelta(days=days)).isoformat()
+    q = (col(PREVIEWS).where(filter=FieldFilter("kickoff_utc", ">=", lo))
+         .where(filter=FieldFilter("kickoff_utc", "<=", hi)))
+    return [s.to_dict() for s in q.stream()]
+
+
+def build_web_export(now: Optional[datetime] = None, days: int = WEB_DAYS) -> dict:
+    now = now or _now()
+    return web_export(_read_upcoming_previews(now, days), now, days)

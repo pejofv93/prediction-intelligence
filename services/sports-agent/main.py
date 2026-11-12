@@ -362,6 +362,20 @@ async def run_match_previews_job(dry_run: bool = True, days: int = 3, highlightl
                                 highlightly=highlightly, hl_max=hl_max, hl_divs=divs)
 
 
+@app.get("/match-previews/web", dependencies=[Depends(verify_token)])
+async def match_previews_web(days: int = 7) -> JSONResponse:
+    """Solo lectura: fichas de los próximos `days` días (y las empezadas hace <2 h) en el formato
+    de la web de Tendencias. Lo descarga trends-web-publish; no escribe nada."""
+    from analyzers.match_preview_store import build_web_export
+    days = max(1, min(days, 14))
+    try:
+        data = await asyncio.to_thread(build_web_export, None, days)
+    except Exception:
+        logger.error("match-previews/web: error leyendo match_previews", exc_info=True)
+        raise HTTPException(status_code=500, detail="error leyendo match_previews")
+    return JSONResponse(content=data)
+
+
 @app.post("/run-match-preview-grade", dependencies=[Depends(verify_token)])
 async def run_match_preview_grade_job(dry_run: bool = True) -> StreamingResponse:
     """Ficha de partido (mp-v1): gradúa las fichas congeladas contra el CSV de resultados →
