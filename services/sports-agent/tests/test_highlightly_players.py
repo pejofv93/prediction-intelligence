@@ -105,9 +105,17 @@ def test_match_fdco_row_elige_el_partido_correcto():
 def test_presupuesto():
     assert h.requests_available(used_counter=17, remaining_reported=83) == 73   # 83 − 10 reserva
     assert h.requests_available(used_counter=5, remaining_reported=40) == 30    # la API manda si dice menos
-    assert h.requests_available(used_counter=95, remaining_reported=None) == 0
+    assert h.requests_available(used_counter=95, remaining_reported=None, limit=h.HL_DAILY_LIMIT) == 0
     assert h.split_budget(73, 48) == (48, 25)
     assert h.split_budget(20, 48) == (20, 0)
+
+
+def test_limite_pro_hasta_la_fecha_y_gratuito_despues():
+    from datetime import timedelta
+    assert h.hl_daily_limit(h.HL_PRO_UNTIL) == 7500
+    assert h.hl_daily_limit(h.HL_PRO_UNTIL + timedelta(days=1)) == 100
+    # Con PRO, la cabecera de la API sigue mandando si dice menos (p. ej. plan ya caducado).
+    assert h.requests_available(used_counter=0, remaining_reported=60, limit=7500) == 50
 
 
 def test_pick_backfill_actual_primero_y_reciente_primero():
@@ -179,7 +187,7 @@ def test_hl_get_cuenta_la_llamada_y_guarda_lo_que_queda():
 
 
 def test_hl_get_no_llama_sin_presupuesto():
-    q, c = _Quota(used=100), _Client(_Resp(200, {}))
+    q, c = _Quota(used=h.hl_daily_limit()), _Client(_Resp(200, {}))   # contador propio agotado
     with pytest.raises(h.HighlightlyBudgetExhausted):
         asyncio.run(h.hl_get(c, "k", "/matches?x=1", q))
     assert c.calls == []

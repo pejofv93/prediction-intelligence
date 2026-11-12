@@ -28,6 +28,7 @@ Colecciones (por shared.firestore_client.col, migran con el resto):
 import logging
 import re
 import unicodedata
+from datetime import date, datetime, timezone
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -37,7 +38,12 @@ logger = logging.getLogger(__name__)
 
 HL_BASE = "https://soccer.highlightly.net"
 HL_QUOTA_API = "highlightly"
-HL_DAILY_LIMIT = 100
+HL_DAILY_LIMIT = 100                 # plan gratuito (BASIC)
+HL_PRO_DAILY_LIMIT = 7500            # plan PRO, comprado un mes el 12-nov-2026
+# Último día (UTC, incluido) del mes de PRO; desde el día siguiente vuelve el límite gratuito.
+# Es solo un techo propio: el tope real lo pone la cabecera x-ratelimit-requests-remaining
+# (requests_available usa el menor de los dos), así que una fecha tardía no puede gastar de más.
+HL_PRO_UNTIL = date(2026, 12, 12)
 HL_MANUAL_RESERVE = 10
 HL_MAX_ATTEMPTS = 3
 HL_PAGE_LIMIT = 100
@@ -186,11 +192,17 @@ def compare_with_fdco(doc: dict, fdco_row: dict, match_key: Optional[str] = None
 
 # ── Reparto del presupuesto ─────────────────────────────────────────────────
 
+def hl_daily_limit(today: Optional[date] = None) -> int:
+    """Límite diario propio: el de PRO hasta HL_PRO_UNTIL (incluido), el gratuito después."""
+    today = today or datetime.now(timezone.utc).date()
+    return HL_PRO_DAILY_LIMIT if today <= HL_PRO_UNTIL else HL_DAILY_LIMIT
+
+
 def requests_available(used_counter: int, remaining_reported: Optional[int],
-                       limit: int = HL_DAILY_LIMIT, reserve: int = HL_MANUAL_RESERVE) -> int:
+                       limit: Optional[int] = None, reserve: int = HL_MANUAL_RESERVE) -> int:
     """Peticiones que el colector puede gastar hoy: el menor de lo que dice el contador propio y
     lo que dice la API (la misma clave la gastan las pruebas manuales), menos la reserva."""
-    left = limit - used_counter
+    left = (hl_daily_limit() if limit is None else limit) - used_counter
     if remaining_reported is not None:
         left = min(left, int(remaining_reported))
     return max(0, left - reserve)
