@@ -24,20 +24,33 @@ function assertPrivacyHeaders(res) {
   assert.equal(res.headers.get("X-Content-Type-Options"), "nosniff");
 }
 
-// --- Modo actual: web pública ---
+// --- Modo actual: web privada ---
 
-test("web pública: sin credenciales y sin secretos sirve todo, con noindex y cabeceras de privacidad", async () => {
-  assert.equal(PRIVATE, false);
-  for (const path of ["/", "/data/rates.json", "/app.js"]) {
-    const { res, served } = await call(onRequest, {}, null, path);
-    assert.equal(res.status, 200);
-    assert.equal(served, true);
-    assert.equal(res.headers.get("WWW-Authenticate"), null);
+test("web privada: onRequest pide credenciales y no sirve nada sin ellas", async () => {
+  assert.equal(PRIVATE, true);
+  for (const path of ["/", "/data/rates.json", "/data/previews.json", "/app.js"]) {
+    const { res, served } = await call(onRequest, ENV, null, path);
+    assert.equal(res.status, 401);
+    assert.equal(served, false);
+    assert.match(res.headers.get("WWW-Authenticate"), /^Basic realm="Tendencias"/);
     assertPrivacyHeaders(res);
   }
 });
 
-// --- Modo privado (desactivado; se reactivará con los datos de jugadores) ---
+test("web privada: onRequest con las credenciales buenas sirve, con cabeceras de privacidad", async () => {
+  const { res, served } = await call(onRequest, ENV, basic("lector", ENV.TRENDS_WEB_PASS), "/data/previews.json");
+  assert.equal(res.status, 200);
+  assert.equal(served, true);
+  assertPrivacyHeaders(res);
+});
+
+test("web privada: onRequest sin secretos configurados deniega todo (503)", async () => {
+  const { res, served } = await call(onRequest, {}, basic("lector", ENV.TRENDS_WEB_PASS));
+  assert.equal(res.status, 503);
+  assert.equal(served, false);
+});
+
+// --- Modo privado: protect() directamente ---
 
 test("privado: sin credenciales 401, pide usuario y no sirve nada", async () => {
   for (const path of ["/", "/data/rates.json", "/app.js"]) {

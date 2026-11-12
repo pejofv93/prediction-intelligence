@@ -1,16 +1,12 @@
 // Middleware de la web de Tendencias en Cloudflare Pages: se ejecuta ANTES de servir cualquier
-// ruta (la página, app.js, data/rates.json…).
+// ruta (la página, app.js, data/rates.json, data/previews.json…).
 //
-// Ahora la web es PÚBLICA (PRIVATE = false): sirve todo sin pedir credenciales, pero siempre con
-// las cabeceras de privacidad (noindex, no-store, no-referrer, nosniff).
-//
-// ⚠️ Cuando la web incluya datos de jugadores de Highlightly, debe volver a ser PRIVADA:
-//    PRIVATE = true, secretos TRENDS_WEB_USER/TRENDS_WEB_PASS en el proyecto de Pages y
-//    comprobaciones 401/401/200 en trends-web-publish (ver commit 30fb955 para la versión privada).
-//
-// En modo privado: autenticación básica con TRENDS_WEB_USER y TRENDS_WEB_PASS (secretos del
-// proyecto de Pages). Falla cerrada: si falta cualquiera de los dos, deniega TODO (503).
-export const PRIVATE = false;
+// La web es PRIVADA (PRIVATE = true, desde 12-nov-2026, antes de publicar datos de Highlightly):
+// autenticación básica con TRENDS_WEB_USER y TRENDS_WEB_PASS (secretos del proyecto de Pages,
+// los pone trends-web-publish). Falla cerrada: si falta cualquiera de los dos, deniega TODO (503).
+// Todas las respuestas llevan además las cabeceras de privacidad (noindex, no-store,
+// no-referrer, nosniff).
+export const PRIVATE = true;
 
 const REALM = 'Basic realm="Tendencias", charset="UTF-8"';
 const PRIVATE_HEADERS = {
@@ -58,7 +54,7 @@ async function withPrivateHeaders(res) {
   return out;
 }
 
-// Modo privado (desactivado mientras PRIVATE = false).
+// Modo privado (activo con PRIVATE = true).
 export async function protect(context) {
   const { request, env, next } = context;
   const user = env.TRENDS_WEB_USER;
