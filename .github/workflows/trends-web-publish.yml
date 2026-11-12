@@ -1,4 +1,8 @@
-# Publica la web de Tendencias en Cloudflare Pages. Manual, sin cron.
+# Publica la web de Tendencias en Cloudflare Pages. Sin cron propio:
+#   - a mano (confirmar=PUBLICAR), o
+#   - sola al terminar EN VERDE una pasada PROGRAMADA de sports-match-previews (workflow_run),
+#     para que la vista "Partidos" lleve las fichas recién escritas. Las pasadas manuales de
+#     sports-match-previews (dry-run, backtest…) no publican; una fallida tampoco.
 #
 # La web es PÚBLICA (sin usuario ni contraseña) pero no indexable: el middleware
 # (functions/_middleware.js) añade a todo noindex/nofollow, no-store, no-referrer y nosniff.
@@ -31,6 +35,10 @@ on:
       confirmar:
         description: "Escribe PUBLICAR"
         default: ""
+  workflow_run:
+    workflows: [sports-match-previews]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -49,15 +57,22 @@ env:
 
 jobs:
   publicar:
+    # Lanzado por sports-match-previews: solo si fue una pasada programada y terminó en verde.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'schedule')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Comprobar confirmación y secretos
         env:
           CONFIRMAR: ${{ inputs.confirmar }}
+          EVENTO: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          [ "$CONFIRMAR" = "PUBLICAR" ] || { echo "Escribe confirmar=PUBLICAR"; exit 1; }
+          # A mano exige PUBLICAR; tras sports-match-previews la condición del trabajo ya filtró.
+          [ "$EVENTO" = "workflow_run" ] || [ "$CONFIRMAR" = "PUBLICAR" ] || { echo "Escribe confirmar=PUBLICAR"; exit 1; }
           missing=""
           for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID SPORTS_AGENT_URL CLOUD_RUN_TOKEN; do
             [ -n "${!v}" ] || missing="$missing $v"
