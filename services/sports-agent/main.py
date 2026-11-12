@@ -376,6 +376,23 @@ async def match_previews_web(days: int = 7) -> JSONResponse:
     return JSONResponse(content=data)
 
 
+@app.post("/run-hl-load", dependencies=[Depends(verify_token)])
+async def run_hl_load_job(job: str, dry_run: bool = True, max_requests: int = 2000,
+                          leagues: str = "") -> StreamingResponse:
+    """Carga de Highlightly del mes PRO (solo estadísticas para la web de Tendencias; no la usa
+    el motor de apuestas). job = nt | women | women_probe | players. dry_run=true por defecto:
+    solo lista y cuenta. leagues: ids de ligas femeninas extra, separados por comas."""
+    import re
+    from collectors.highlightly_loader import run_hl_load
+    if job not in ("nt", "women", "women_probe", "players"):
+        raise HTTPException(status_code=400, detail="job = nt | women | women_probe | players")
+    if leagues and not re.fullmatch(r"\d+(,\d+)*", leagues):
+        raise HTTPException(status_code=400, detail="leagues: ids separados por comas")
+    ids = [int(x) for x in leagues.split(",")] if leagues else None
+    return _stream_with_summary(f"hl-load-{job}", run_hl_load, job=job, dry_run=dry_run,
+                                max_requests=max(0, min(max_requests, 3000)), leagues=ids)
+
+
 @app.post("/run-match-preview-grade", dependencies=[Depends(verify_token)])
 async def run_match_preview_grade_job(dry_run: bool = True) -> StreamingResponse:
     """Ficha de partido (mp-v1): gradúa las fichas congeladas contra el CSV de resultados →
