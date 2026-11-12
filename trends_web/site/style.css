@@ -67,6 +67,40 @@ button.team:hover { color: var(--accent); }
 #team h3 { font-size: 13px; margin: 14px 0 6px; }
 #team table { min-width: 420px; }
 
+/* Vista "Partidos" */
+.views { margin: 6px 0; }
+#days { margin-bottom: 12px; }
+.match-group h3 { font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+button.match-row {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; width: 100%;
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 6px; font: inherit; text-align: left; cursor: pointer;
+}
+button.match-row:hover, button.match-row.on { border-color: var(--accent); }
+button.match-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.match-row .ko { color: var(--muted); font-variant-numeric: tabular-nums; }
+.match-row .teams { font-weight: 600; flex: 1 1 auto; }
+.tag.ventaja { color: var(--accent); border-color: var(--accent); }
+.tag.referencia { color: var(--muted); }
+
+#match { margin-bottom: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+#match h2 { color: var(--accent); }
+#match .close { float: right; }
+#match p { margin: 2px 0; }
+#match .warn { color: var(--down); margin-top: 6px; }
+.stat { margin-top: 16px; }
+.stat h3 { font-size: 14px; margin: 0 0 6px; }
+#match table { min-width: 0; }
+#match td:first-child, #match th:first-child { position: static; min-width: 0; background: transparent; }
+table.exp td.pm, table.lines td.pm { font-weight: 600; }
+.blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 8px; }
+.block { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.block-title { font-weight: 600; margin: 0 0 4px; }
+table.lines th, table.lines td { padding: 3px 6px; font-size: 13px; }
+table.lines tr.hl td.pm { color: var(--accent); }
+td.gap.up { color: var(--up); }
+td.gap.down { color: var(--down); }
+
 footer { margin-top: 24px; color: var(--muted); font-size: 13px; }
 footer ul { padding-left: 18px; }
 footer b { color: var(--text); }

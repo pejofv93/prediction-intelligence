@@ -8,18 +8,21 @@
 #    comprobaciones 401/401/200 con prueba de datos falsos y retirada del despliegue fallido
 #    (versión privada de este flujo: commit 30fb955).
 #
-# Sin credenciales de GCP: los datos se calculan desde los CSV de football-data.co.uk.
-# El JSON se genera en el runner y va directo a Cloudflare: no se sube a git ni como artefacto
-# y el log solo muestra recuentos.
+# Sin credenciales de GCP: los porcentajes se calculan desde los CSV de football-data.co.uk y
+# las fichas de partido (vista "Partidos") se descargan de sports-agent GET /match-previews/web
+# (solo lectura, con CLOUD_RUN_TOKEN). Los JSON se generan en el runner y van directo a
+# Cloudflare: no se suben a git ni como artefacto y el log solo muestra recuentos.
 #
 # Orden, parando al primer fallo:
 #   1. Faltan secretos → para sin tocar Cloudflare.
 #   2. Tests del middleware y de la exportación.
 #   3. Crea el proyecto de Pages si no existe.
 #   4. Genera los datos reales, los publica y comprueba, en la URL del despliegue y en la del
-#      proyecto, que /, /data/rates.json y /app.js dan 200 sin credenciales y llevan noindex.
+#      proyecto, que /, /data/rates.json, /data/previews.json y /app.js dan 200 sin credenciales
+#      y llevan noindex.
 #
-# Secretos de GitHub: CLOUDFLARE_API_TOKEN (solo "Cloudflare Pages: Edit"), CLOUDFLARE_ACCOUNT_ID.
+# Secretos de GitHub: CLOUDFLARE_API_TOKEN (solo "Cloudflare Pages: Edit"), CLOUDFLARE_ACCOUNT_ID,
+# SPORTS_AGENT_URL y CLOUD_RUN_TOKEN (los mismos de los demás flujos de sports-agent).
 name: trends-web-publish
 
 on:
@@ -41,6 +44,8 @@ env:
   WRANGLER: npx --yes wrangler@4.151.3
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  SPORTS_AGENT_URL: ${{ secrets.SPORTS_AGENT_URL }}
+  CLOUD_RUN_TOKEN: ${{ secrets.CLOUD_RUN_TOKEN }}
 
 jobs:
   publicar:
@@ -54,7 +59,7 @@ jobs:
           set -euo pipefail
           [ "$CONFIRMAR" = "PUBLICAR" ] || { echo "Escribe confirmar=PUBLICAR"; exit 1; }
           missing=""
-          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID SPORTS_AGENT_URL CLOUD_RUN_TOKEN; do
             [ -n "${!v}" ] || missing="$missing $v"
           done
           [ -z "$missing" ] || { echo "Faltan secretos:$missing — no se toca Cloudflare"; exit 1; }
@@ -87,7 +92,7 @@ jobs:
       - name: Comprobador de la web pública
         run: |
           cat > "$RUNNER_TEMP/check.sh" <<'EOF'
-          # check.sh URL_BASE → 0 si /, /data/rates.json y /app.js dan 200 sin credenciales y llevan noindex
+          # check.sh URL_BASE → 0 si /, los dos JSON y /app.js dan 200 sin credenciales y llevan noindex
           set -uo pipefail
           base="$1"; bad=0
           # Un despliegue nuevo tarda en existir en DNS/TLS (curl da 000): se espera hasta 5 min.
@@ -95,7 +100,7 @@ jobs:
             [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base/")" != "000" ] && break
             sleep 10
           done
-          for path in / /data/rates.json /app.js; do
+          for path in / /data/rates.json /data/previews.json /app.js; do
             for i in 1 2 3 4 5 6; do   # la publicación tarda unos segundos en propagarse
               hdr=$(curl -s -o /dev/null -D - --max-time 10 "$base$path" | tr -d '\r')
               code=$(awk 'NR==1{print $2}' <<<"$hdr")
@@ -114,6 +119,16 @@ jobs:
       - name: Generar datos reales (desde los CSV)
         run: python trends_web/export_rates.py --out trends_web/site/data/rates.json
 
+      - name: Descargar fichas de partido (sports-agent, solo lectura)
+        run: |
+          set -euo pipefail
+          out=trends_web/site/data/previews.json
+          # sports-agent arranca en frío (min-instances=0): reintenta antes de rendirse.
+          curl -sS --fail --retry 3 --retry-delay 10 --retry-all-errors --max-time 120 \
+            -H "x-cloud-token: $CLOUD_RUN_TOKEN" \
+            "$SPORTS_AGENT_URL/match-previews/web?days=7" -o "$out"
+          python -c "import json,sys; d=json.load(open(sys.argv[1])); print(f\"Fichas: {len(d['matches'])} partidos ({d['model_version']}, {d['days']} días)\")" "$out"
+
       - name: Publicar y comprobar
         working-directory: trends_web
         run: |
@@ -125,6 +140,6 @@ jobs:
           ok=1
           echo "Despliegue:"; "$RUNNER_TEMP/check.sh" "$dep" || ok=0
           echo "URL del proyecto:"; "$RUNNER_TEMP/check.sh" "$prod" || ok=0
-          rm -f site/data/rates.json
+          rm -f site/data/rates.json site/data/previews.json
           [ "$ok" = 1 ] || { echo "ERROR: la web no responde 200 sin credenciales o le falta noindex"; exit 1; }
           echo "Publicada en $prod (pública, noindex)."

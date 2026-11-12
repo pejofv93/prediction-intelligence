@@ -9,10 +9,15 @@
 </head>
 <body>
   <header>
-    <h1>Tendencias por equipo</h1>
+    <h1>Tendencias</h1>
+    <div class="group views" role="tablist" aria-label="Vista">
+      <button class="pill" role="tab" id="tab-teams" aria-selected="true">Equipos</button>
+      <button class="pill" role="tab" id="tab-matches" aria-selected="false">Partidos</button>
+    </div>
     <p id="meta" class="muted">Cargando…</p>
   </header>
 
+  <div id="view-teams">
   <nav class="controls" aria-label="Filtros">
     <div class="group" id="leagues" role="tablist" aria-label="Liga"></div>
     <div class="group" id="splits" role="tablist" aria-label="Casa o fuera"></div>
@@ -51,6 +56,31 @@
       <li>Fuente: football-data.co.uk. <span id="generated" class="muted"></span></li>
     </ul>
   </footer>
+  </div>
+
+  <div id="view-matches" hidden>
+    <nav class="group" id="days" role="tablist" aria-label="Día"></nav>
+    <section id="match" hidden></section>
+    <section id="match-list"></section>
+    <footer>
+      <h2>Cómo leer la ficha</h2>
+      <ul>
+        <li><b>Esperado</b>: lo que el modelo espera del local, del visitante y del total, cruzando el ataque
+          de cada equipo con la defensa del otro (con todos sus partidos, en casa y fuera) sobre la media de la liga.</li>
+        <li><b>Cada línea</b>: probabilidad del modelo de superarla y, al lado, con qué frecuencia la supera
+          un equipo medio de la liga (o un partido medio, en el total); la diferencia va en puntos.</li>
+        <li><b>Etiqueta</b>: <span class="tag ventaja">ventaja medida</span> solo si, en el backtest de dos
+          temporadas, el modelo acertó mejor que la media de la liga en ese mercado y esa liga, y también en el
+          mercado con todas las ligas juntas; si no, <span class="tag referencia">solo referencia</span>.
+          <span class="tag insuficiente">muestra insuficiente</span> si algún equipo tiene menos de
+          <span id="min-cur">5</span> partidos esta temporada: se calcula, pero no se resalta.</li>
+        <li><b>Muestra</b>: partidos de esta temporada de cada equipo y n efectivo (la anterior cuenta la mitad;
+          un cuarto si fue en otra división). La ficha se congela 2 horas antes del partido.</li>
+        <li>Fuente: football-data.co.uk. Modelo <span id="mp-version">mp-v1</span>.
+          <span id="mp-generated" class="muted"></span></li>
+      </ul>
+    </footer>
+  </div>
 
   <script src="app.js"></script>
 </body>
