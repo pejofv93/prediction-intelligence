@@ -1,0 +1,78 @@
+# Carga de Highlightly durante el mes de plan PRO (sports-agent POST /run-hl-load). Manual.
+# Solo estadísticas para la web de Tendencias: no la usa el motor de apuestas.
+#
+#   job: nt (selecciones Europa y Sudamérica) · women (Liga F, WSL y las de `leagues`) ·
+#        women_probe (sondeo de 4 ligas femeninas, ≤8 peticiones) · players (jugadores, 8 ligas)
+#   dry_run=true (por defecto): solo lista y cuenta; no escribe ni pide detalle.
+#   Escribir exige dry_run=false Y confirmar=ESCRIBIR.
+#
+# El log solo muestra recuentos (el repositorio es público y los datos de Highlightly no
+# pueden salir de Firestore).
+name: hl-load
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Qué cargar"
+        type: choice
+        options: [nt, women, women_probe, players]
+        default: nt
+      dry_run:
+        description: "true = solo lista y cuenta"
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      max_requests:
+        description: "Tope de peticiones de esta pasada (máx. 3000)"
+        default: "2000"
+      leagues:
+        description: "women: ids de ligas femeninas extra, separados por comas (vacío = solo Liga F y WSL)"
+        default: ""
+      confirmar:
+        description: "Para dry_run=false escribe ESCRIBIR"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hl-load
+  cancel-in-progress: false
+
+jobs:
+  cargar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Comprobar entradas
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          CONFIRMAR: ${{ inputs.confirmar }}
+          MAX: ${{ inputs.max_requests }}
+          LEAGUES: ${{ inputs.leagues }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "false" ] && [ "$CONFIRMAR" != "ESCRIBIR" ]; then
+            echo "dry_run=false exige confirmar=ESCRIBIR — no se llama al servicio"; exit 1
+          fi
+          [[ "$MAX" =~ ^[0-9]+$ ]] || { echo "max_requests debe ser un número"; exit 1; }
+          [[ "$LEAGUES" =~ ^[0-9,]*$ ]] || { echo "leagues inválido"; exit 1; }
+
+      - name: Cargar (sports-agent, síncrono)
+        env:
+          JOB: ${{ inputs.job }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX: ${{ inputs.max_requests }}
+          LEAGUES: ${{ inputs.leagues }}
+        run: |
+          set -euo pipefail
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-hl-load?job=$JOB&dry_run=$DRY_RUN&max_requests=$MAX&leagues=$LEAGUES" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 3300 \
+            --no-buffer \
+            --fail --silent --show-error > out.txt
+          grep -v '^summary: ' out.txt
+          grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
+          grep -q '^done ' out.txt
+          grep -q '"ok": true' out.txt
