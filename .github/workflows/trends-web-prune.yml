@@ -1,0 +1,123 @@
+# Borra los despliegues antiguos de la web de Tendencias en Cloudflare Pages. Manual.
+#
+# Cada despliegue conserva su propia dirección (xxxx.tendencias-pi.pages.dev) con el código de
+# entonces: los anteriores al 12-nov-2026 se publicaron cuando la web era PÚBLICA y siguen
+# sirviéndose sin contraseña. Este flujo los retira antes de publicar datos de Highlightly.
+#
+#   confirmar vacío  → solo cuenta: cuántos hay, cuántos responden sin contraseña. No borra.
+#   confirmar=BORRAR → borra todos menos el de producción más reciente (el que sirve la web;
+#                      Cloudflare no deja borrar el activo), comprueba que sus direcciones ya no
+#                      sirven datos y que la web sigue pidiendo contraseña y abre con la buena.
+#
+# El repositorio y sus logs son públicos: nunca se imprimen las direcciones de los despliegues
+# (se enmascaran y solo salen recuentos). Comparte grupo con trends-web-publish para no borrar
+# mientras se publica.
+#
+# Secretos: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, TRENDS_WEB_USER, TRENDS_WEB_PASS.
+name: trends-web-prune
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmar:
+        description: "Vacío = solo contar; BORRAR = borrar los antiguos"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trends-web-publish
+  cancel-in-progress: false
+
+env:
+  PROJECT: tendencias-pi
+  WRANGLER: npx --yes wrangler@4.151.3
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  WEB_USER: ${{ secrets.TRENDS_WEB_USER }}
+  WEB_PASS: ${{ secrets.TRENDS_WEB_PASS }}
+
+jobs:
+  podar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Comprobar secretos
+        run: |
+          set -euo pipefail
+          missing=""
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID WEB_USER WEB_PASS; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          [ -z "$missing" ] || { echo "Faltan secretos:$missing"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Tests del plan de borrado
+        run: |
+          pip install --quiet pytest
+          python -m pytest -q trends_web/tests/test_prune_plan.py
+
+      - name: Contar (y borrar con BORRAR)
+        working-directory: trends_web
+        env:
+          CONFIRMAR: ${{ inputs.confirmar }}
+        run: |
+          set -uo pipefail
+          L="$RUNNER_TEMP/borrar.txt"
+          public=0; private=0; other=0; deleted=0; failed=0
+          for ronda in 1 2 3 4 5 6 7 8 9 10; do   # wrangler puede listar por páginas
+            $WRANGLER pages deployment list --project-name "$PROJECT" --json 2>/dev/null \
+              | python3 prune_plan.py "$L" || { echo "ERROR: no se pudo leer la lista"; exit 1; }
+            while read -r id url; do echo "::add-mask::$url"; echo "::add-mask::$id"; done < "$L"
+            [ -s "$L" ] || break
+            while read -r id url; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/data/rates.json")
+              case "$code" in 200) public=$((public+1));; 401) private=$((private+1));; *) other=$((other+1));; esac
+              if [ "$CONFIRMAR" = "BORRAR" ]; then
+                if $WRANGLER pages deployment delete "$id" --project-name "$PROJECT" --force >/dev/null 2>&1; then
+                  deleted=$((deleted+1)); echo "$url" >> "$RUNNER_TEMP/borrados.txt"
+                else
+                  failed=$((failed+1))
+                fi
+              fi
+            done < "$L"
+            [ "$CONFIRMAR" = "BORRAR" ] || break
+          done
+          echo "Antiguos: $((public+private+other)) · sin contraseña (200): $public · con contraseña (401): $private · otros: $other"
+          if [ "$CONFIRMAR" != "BORRAR" ]; then
+            echo "Solo recuento (confirmar=BORRAR para borrar)."; exit 0
+          fi
+          echo "Borrados: $deleted · fallidos: $failed"
+          [ "$failed" = 0 ] || { echo "ERROR: algunos no se pudieron borrar"; exit 1; }
+
+          # Las direcciones borradas ya no pueden servir datos (sin contraseña).
+          still=0
+          if [ -s "$RUNNER_TEMP/borrados.txt" ]; then
+            while read -r url; do
+              for i in 1 2 3 4 5 6 7 8 9; do
+                code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/data/rates.json")
+                [ "$code" != "200" ] && break
+                sleep 10
+              done
+              [ "$code" = "200" ] && still=$((still+1))
+            done < "$RUNNER_TEMP/borrados.txt"
+          fi
+          echo "Borrados que aún sirven datos sin contraseña tras 90 s: $still"
+
+          # La web sigue privada y abre con la contraseña buena.
+          base="https://$PROJECT.pages.dev"
+          anon=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base/data/rates.json")
+          good=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "$WEB_USER:$WEB_PASS" "$base/data/rates.json")
+          echo "Web: sin credenciales $anon · buenas $good"
+          [ "$still" = 0 ] && [ "$anon" = "401" ] && [ "$good" = "200" ] || { echo "ERROR: comprobación final"; exit 1; }
+          echo "Hecho: solo queda el despliegue activo, privado."
