@@ -4,6 +4,13 @@ on:
     - cron: '0 8 * * 1'
   workflow_dispatch:
 
+# Mismo grupo que learning-engine: el reporte lee accuracy_log y model_weights, que el
+# aprendizaje está escribiendo. /run-learning es síncrono (responde al terminar), así que
+# el grupo serializa el trabajo real: el reporte espera a que acabe el aprendizaje.
+concurrency:
+  group: learning-engine
+  cancel-in-progress: false
+
 jobs:
   trigger:
     runs-on: ubuntu-latest
