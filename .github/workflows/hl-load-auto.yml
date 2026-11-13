@@ -9,11 +9,13 @@
 # Se apaga sola: cuando una pasada no tiene nada pendiente en los tres trabajos
 # (pending_detail = 0 y ninguna temporada sin listar), desactiva este flujo. Después de
 # HL_PRO_UNTIL el presupuesto propio baja a 100 − reserva = 0 y no gasta nada aunque siga activo.
+# Se puede lanzar a mano (workflow_dispatch) si GitHub se salta el cron.
 name: hl-load-auto
 
 on:
   schedule:
     - cron: "20 */2 * * *"
+  workflow_dispatch:      # para arrancarla a mano si GitHub se salta el cron
 
 permissions:
   contents: read
