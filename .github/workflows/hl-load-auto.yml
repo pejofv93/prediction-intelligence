@@ -1,0 +1,63 @@
+# Carga automática de Highlightly cada 2 horas durante el mes de plan PRO, hasta terminar.
+# Mismo endpoint que hl-load (sports-agent POST /run-hl-load), siempre escribiendo, en orden:
+# selecciones → femenino → jugadores. Cada trabajo respeta su tope por pasada y la reserva
+# diaria de 1.000 peticiones; si la cuota se acaba, sigue en la pasada siguiente.
+#
+# Ligas femeninas extra (además de Liga F y WSL): variable de repositorio HL_WOMEN_EXTRA
+# (ids separados por comas), que solo se rellena tras el sondeo y con OK.
+#
+# Se apaga sola: cuando una pasada no tiene nada pendiente en los tres trabajos
+# (pending_detail = 0 y ninguna temporada sin listar), desactiva este flujo. Después de
+# HL_PRO_UNTIL el presupuesto propio baja a 100 − reserva = 0 y no gasta nada aunque siga activo.
+name: hl-load-auto
+
+on:
+  schedule:
+    - cron: "20 */2 * * *"
+
+permissions:
+  contents: read
+  actions: write          # solo para desactivarse al terminar
+
+concurrency:
+  group: hl-load
+  cancel-in-progress: false
+
+jobs:
+  cargar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Cargar selecciones, femenino y jugadores
+        env:
+          LEAGUES: ${{ vars.HL_WOMEN_EXTRA }}
+        run: |
+          set -euo pipefail
+          [[ "${LEAGUES:-}" =~ ^[0-9,]*$ ]] || { echo "HL_WOMEN_EXTRA inválido"; exit 1; }
+          pending_total=0
+          for job in nt women players; do
+            echo "== $job"
+            curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-hl-load?job=$job&dry_run=false&max_requests=2000&leagues=${LEAGUES:-}" \
+              -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+              --max-time 3300 --no-buffer --fail --silent --show-error > out.txt
+            grep '^summary: ' out.txt | sed 's/^summary: //' > s.json
+            python3 - <<'PY'
+          import json
+          s = json.load(open("s.json"))
+          unlisted = sum(1 for c in s.get("comps", []) if c.get("listed") is False)
+          print(f"peticiones {s.get('requests')} · detalle {s.get('fetched')} · pendientes {s.get('pending_detail')}"
+                f" · sin listar {unlisted} · errores {s.get('errors')}")
+          open("pend.txt", "w").write(str((s.get("pending_detail") or 0) + unlisted))
+          PY
+            pending_total=$((pending_total + $(cat pend.txt)))
+            grep -q '^done ' out.txt
+          done
+          echo "PENDING_TOTAL=$pending_total" >> "$GITHUB_ENV"
+
+      - name: Desactivar al terminar
+        if: env.PENDING_TOTAL == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow disable hl-load-auto.yml --repo "${{ github.repository }}"
+          echo "Carga terminada: hl-load-auto desactivado."
