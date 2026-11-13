@@ -2,7 +2,8 @@
 # Solo estadísticas para la web de Tendencias: no la usa el motor de apuestas.
 #
 #   job: nt (selecciones Europa y Sudamérica) · women (Liga F, WSL y las de `leagues`) ·
-#        women_probe (sondeo de 4 ligas femeninas, ≤8 peticiones) · players (jugadores, 8 ligas)
+#        women_probe (sondeo de 4 ligas femeninas, ≤8 peticiones) · players (jugadores, 8 ligas) ·
+#        maint (mantenimiento diario por fecha, tope 50/día; ver hl-load-daily)
 #   dry_run=true (por defecto): solo lista y cuenta; no escribe ni pide detalle.
 #   Escribir exige dry_run=false Y confirmar=ESCRIBIR.
 #
@@ -16,7 +17,7 @@ on:
       job:
         description: "Qué cargar"
         type: choice
-        options: [nt, women, women_probe, players]
+        options: [nt, women, women_probe, players, maint]
         default: nt
       dry_run:
         description: "true = solo lista y cuenta"
@@ -27,7 +28,7 @@ on:
         description: "Tope de peticiones de esta pasada (máx. 3000)"
         default: "2000"
       leagues:
-        description: "women: ids de ligas femeninas extra, separados por comas (vacío = solo Liga F y WSL)"
+        description: "women/maint: ids de ligas femeninas extra, separados por comas (vacío = solo Liga F y WSL)"
         default: ""
       confirmar:
         description: "Para dry_run=false escribe ESCRIBIR"

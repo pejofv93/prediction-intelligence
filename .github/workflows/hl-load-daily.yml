@@ -1,0 +1,60 @@
+# Mantenimiento diario de Highlightly (sports-agent POST /run-hl-load?job=maint).
+# Solo estadísticas para la web de Tendencias: no la usa el motor de apuestas.
+#
+# Lista por fecha los días que falten hasta ayer (como mucho 3) en las competiciones vivas
+# (selecciones, Liga F, WSL y las femeninas de HL_WOMEN_EXTRA, y las 8 ligas de jugadores) y pide
+# el detalle de lo terminado. Tope propio de 50 peticiones al día (de las 100 del plan gratuito);
+# lo que no quepa queda pendiente para el día siguiente.
+#
+# Al acabar el plan PRO (después del 12-dic-2026) desactiva hl-load-auto, que ya no gastaría nada.
+# El log solo muestra recuentos.
+name: hl-load-daily
+
+on:
+  schedule:
+    - cron: "40 5 * * *"
+
+permissions:
+  contents: read
+  actions: write          # solo para desactivar hl-load-auto al acabar el plan PRO
+
+concurrency:
+  group: hl-load
+  cancel-in-progress: false
+
+jobs:
+  mantener:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mantenimiento (sports-agent, síncrono)
+        env:
+          LEAGUES: ${{ vars.HL_WOMEN_EXTRA }}
+        run: |
+          set -euo pipefail
+          [[ "${LEAGUES:-}" =~ ^[0-9,]*$ ]] || { echo "HL_WOMEN_EXTRA inválido"; exit 1; }
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-hl-load?job=maint&dry_run=false&max_requests=50&leagues=${LEAGUES:-}" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1500 --no-buffer --fail --silent --show-error > out.txt
+          grep '^summary: ' out.txt | sed 's/^summary: //' > s.json
+          python3 - <<'PY'
+          import json
+          s = json.load(open("s.json"))
+          kept = sum(c.get("kept", 0) for c in s.get("comps", []))
+          print(f"días {s.get('days')} · peticiones {s.get('requests')} de {s.get('budget')} · "
+                f"partidos guardados {kept} · detalle {s.get('fetched')} · "
+                f"pendientes {s.get('pending_detail')} · errores {s.get('errors')}")
+          PY
+          grep -q '^done ' out.txt
+          grep -q '"ok": true' out.txt
+
+      - name: Desactivar hl-load-auto al acabar el plan PRO
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%F)" \> "2026-12-12" ]; then
+            gh workflow disable hl-load-auto.yml --repo "${{ github.repository }}" \
+              && echo "hl-load-auto desactivado (fin del plan PRO)." \
+              || echo "hl-load-auto ya estaba desactivado."
+          fi

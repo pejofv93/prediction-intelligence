@@ -39,11 +39,17 @@ class _Resp:
 class _Client:
     """routes: {(league, season): [partidos]}, stats: {id: respuesta}, boxes: {id: respuesta}."""
 
-    def __init__(self, routes=None, stats=None, boxes=None, page=100):
+    def __init__(self, routes=None, stats=None, boxes=None, page=100, days=None):
         self.routes, self.stats, self.boxes, self.page, self.calls = routes or {}, stats or {}, boxes or {}, page, []
+        self.days = days or {}      # {(league, "AAAA-MM-DD"): [partidos]}
 
     async def get(self, url, headers=None):
         self.calls.append(url)
+        m = re.search(r"/matches\?leagueId=(\d+)&date=([\d-]+)&limit=\d+&offset=(\d+)", url)
+        if m:
+            lst = self.days.get((int(m.group(1)), m.group(2)), [])
+            off = int(m.group(3))
+            return _Resp(200, {"data": lst[off:off + 100], "pagination": {"totalCount": len(lst)}})
         m = re.search(r"/matches\?leagueId=(\d+)&season=(\d+)&limit=\d+&offset=(\d+)", url)
         if m:
             lst = self.routes.get((int(m.group(1)), int(m.group(2))), [])
@@ -239,3 +245,97 @@ def test_paginacion_de_100_en_100():
     pages = [u for u in client.calls if "leagueId=28016&season=2020" in u]
     assert len(pages) == 2 and pages[1].endswith("offset=100")
     assert next(r for r in out["comps"] if (r["league_id"], r["season"]) == (28016, 2020))["kept"] == 150
+
+
+# ── Champions femenina y mantenimiento diario ──────────────────────────────────
+
+def test_champions_femenina_2023_2024_con_el_id_antiguo():
+    comps = {(l, y) for l, y, _ in L._comps("women", [1014325])}
+    assert {(447559, 2023), (447559, 2024), (1014325, 2025), (1014325, 2026)} <= comps
+    assert (1014325, 2023) not in comps and (1014325, 2024) not in comps
+
+
+def test_maint_days():
+    assert L.maint_days(None, NOW) == ["2026-11-10", "2026-11-11", "2026-11-12"]
+    assert L.maint_days("2026-11-11", NOW) == ["2026-11-12"]
+    assert L.maint_days("2026-11-12", NOW) == []
+    assert L.maint_days("2026-10-01", NOW) == ["2026-11-10", "2026-11-11", "2026-11-12"]
+
+
+def _sm(mid, home, away, hid, aid, day, season, desc="Finished"):
+    m = _m(mid, home, away, hid, aid, date=day, desc=desc)
+    m["league"]["season"] = season
+    return m
+
+
+def _maint_world():
+    lid = L.hp.HL_LEAGUES["SP2"]
+    days = {(5039, "2026-11-12"): [_sm(1, "Aland", "Bravia", 10, 20, "2026-11-12", 2026)],
+            (9294, "2026-11-12"): [_sm(2, "Aland", "Zeta", 10, 99, "2026-11-12", 2026),
+                                   _sm(3, "Yota", "Zeta", 98, 99, "2026-11-12", 2026)],     # sin núcleo
+            (121626, "2026-11-11"): [_sm(4, "Barcelona", "Madrid CFF", 30, 31, "2026-11-11", 2026)],
+            (lid, "2026-11-12"): [_sm(5, "Racing", "Sporting", 1, 2, "2026-11-12", 2026),
+                                  _sm(6, "Eibar", "Huesca", 3, 4, "2026-11-12", 2026, desc="Not started")]}
+    stats = {1: _stats(10, "Aland", 20, "Bravia"), 2: _stats(10, "Aland", 99, "Zeta"),
+             4: _stats(30, "Barcelona", 31, "Madrid CFF")}
+    box = [{"team": {"id": t, "name": n}, "players": [
+        {"id": 7, "name": "X", "minutesPlayed": 90, "statistics": {"shotsTotal": 2}}]}
+        for t, n in ((1, "Racing"), (2, "Sporting"))]
+    return days, stats, {5: box}
+
+
+def _maint_store():
+    store = _Store()
+    store.put(L.STATE, {"nt_core_teams": {"ids": [10, 20]}, "maint_last_day": {"day": "2026-11-10"}})
+    return store
+
+
+def test_maint_lista_por_fecha_guarda_y_pide_lo_terminado():
+    days, stats, boxes = _maint_world()
+    store, client = _maint_store(), _Client(stats=stats, boxes=boxes, days=days)
+    out = _run("maint", client, store, max_requests=3000)
+    assert out["ok"] and out["days"] == ["2026-11-11", "2026-11-12"]
+    assert out["budget"] == L.HL_MAINT_DAILY
+    assert not any("season=" in u for u in client.calls if "/matches?" in u)     # solo por fecha
+    assert out["fetched"] == {"done": 4, "empty": 0, "error": 0}
+    assert store.c[L.TEAM_STATS]["1"]["status"] == "done" and store.c[L.TEAM_STATS]["1"]["hl_season"] == 2026
+    assert "3" not in store.c[L.TEAM_STATS]                                         # ninguna selección núcleo
+    assert store.c[L.TEAM_STATS]["4"]["group"] == "women"
+    assert store.c[L.MATCHES]["5"]["status"] == "done" and store.c[L.MATCHES]["6"]["status"] == "pending"
+    assert store.c[L.STATE]["maint_last_day"]["day"] == "2026-11-12"
+    assert store.c[L.STATE]["maint_2026-11-13"]["used"] == out["requests"] == len(client.calls)
+    # Otra vez el mismo día: no hay días que listar y el tope es lo que quede de los 50.
+    client2 = _Client(stats=stats, boxes=boxes, days=days)
+    out2 = _run("maint", client2, store, max_requests=3000)
+    assert out2["days"] == [] and client2.calls == []
+    assert out2["budget"] == L.HL_MAINT_DAILY - out["requests"]
+
+
+def test_maint_tope_deja_pendientes_para_la_pasada_siguiente():
+    days, stats, boxes = _maint_world()
+    store = _maint_store()
+    n_list = 2 * len(L._maint_comps(None))          # dos días, una página por competición
+    out = _run("maint", _Client(stats=stats, boxes=boxes, days=days), store, max_requests=n_list + 1)
+    assert out["fetched"]["done"] == 1
+    assert len(store.c[L.STATE]["maint_backlog"]["items"]) == 3
+    # Al día siguiente: lista solo el día nuevo y termina lo que quedó.
+    out2 = _run("maint", _Client(stats=stats, boxes=boxes, days=days), store, max_requests=3000,
+                now=NOW + timedelta(days=1))
+    assert out2["days"] == ["2026-11-13"] and out2["fetched"]["done"] == 3
+    assert store.c[L.STATE]["maint_backlog"]["items"] == []
+
+
+def test_maint_sin_presupuesto_para_listar_no_avanza_el_dia():
+    days, stats, boxes = _maint_world()
+    store = _maint_store()
+    out = _run("maint", _Client(stats=stats, boxes=boxes, days=days), store, max_requests=5)
+    assert out["requests"] == 5
+    assert store.c[L.STATE]["maint_last_day"]["day"] == "2026-11-10"
+
+
+def test_maint_dry_run_no_escribe():
+    days, stats, boxes = _maint_world()
+    store = _maint_store()
+    writes = store.writes
+    out = _run("maint", _Client(stats=stats, boxes=boxes, days=days), store, dry_run=True, max_requests=3000)
+    assert out["ok"] and store.writes == writes and out["would_fetch"] == 4

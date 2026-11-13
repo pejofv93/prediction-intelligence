@@ -7,6 +7,9 @@ Tendencias: no lo lee el motor de apuestas, Polymarket ni nada que use cuotas.
 Trabajos (job):
   nt           selecciones masculinas senior de Europa y Sudamérica → /statistics por partido
   women        Liga F y WSL (y las ligas femeninas que se pasen en `leagues`) → /statistics
+  maint        mantenimiento diario (sirve con la cuota gratuita): lista por fecha los días que
+               falten hasta ayer (como mucho 3) en las competiciones vivas de los tres trabajos y
+               pide el detalle de lo terminado, con un tope propio de HL_MAINT_DAILY al día
   women_probe  sondeo: 1 listado + 1 /statistics de Frauen-Bundesliga, Serie A, D1 y Champions
   players      box score (jugadores) de los clubes de las 8 ligas → /box-score por partido
 
@@ -38,7 +41,7 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -51,6 +54,9 @@ HL_LOAD_RESERVE = 1000          # lo que la carga deja siempre libre (fichas SP2
 HL_LOAD_MAX_PER_RUN = 3000      # tope por pasada aunque quede cuota
 HL_LOAD_CONCURRENCY = 5         # peticiones a la vez (el plan PRO admite 12/s)
 HL_RELIST_HOURS = 20            # una temporada con partidos sin terminar se vuelve a listar tras 20 h
+HL_MAINT_DAILY = 50             # mantenimiento: tope propio al día (de las 100 gratuitas; el resto,
+                                # para las fichas SP2 y las pruebas a mano)
+HL_MAINT_MAX_DAYS = 3           # mantenimiento: días que recupera como mucho si no corrió
 
 TEAM_STATS, MATCHES, PLAYERS, STATE = "hl_team_stats", "hl_matches", "hl_match_players", "hl_load_state"
 
@@ -66,7 +72,13 @@ NT_OTHER = [(4188, 2020), (4188, 2024),           # Euro
 WOMEN_BASE = [(lid, y) for lid in (121626, 38228) for y in (2023, 2024, 2025, 2026)]   # Liga F, WSL
 WOMEN_PROBE = {70566: "Frauen-Bundesliga", 119073: "Serie A Women", 55248: "Feminine Division 1",
                1014325: "UEFA Women's Champions League"}
+# Ediciones de cada liga extra. La Champions femenina cambió de id con el formato de liga (2025):
+# 2023 y 2024 están en 447559 (15 campos: córners, tarjetas, remates y faltas; sin xG).
+WOMEN_EXTRA_SEASONS = {1014325: [(447559, 2023), (447559, 2024), (1014325, 2025), (1014325, 2026)]}
 PLAYER_SEASONS = ("2425", "2526", "2627")
+# Mantenimiento: competiciones vivas. Se lista por fecha, así que las temporadas nuevas de estas
+# ligas entran solas. Las fases finales (Euro, Copa América, Mundial) se añaden a mano cuando toquen.
+MAINT_NT = [(28016, True), (817744, True), (5039, True), (29718, True), (9294, False)]
 
 _YOUTH_WOMEN = re.compile(r"\bU\s?-?\d{2}\b|\bunder[- ]?\d{2}\b|olympic|women|femenin|f[ée]minin|frauen|\bW$",
                           re.IGNORECASE)
@@ -219,11 +231,19 @@ class _Budget:
 
 
 async def _list_all(client, api_key, quota, budget: _Budget, league_id: int, season: int) -> Optional[list]:
+    return await _list_pages(client, api_key, quota, budget, f"leagueId={league_id}&season={season}")
+
+
+async def _list_day(client, api_key, quota, budget: _Budget, league_id: int, day: str) -> Optional[list]:
+    return await _list_pages(client, api_key, quota, budget, f"leagueId={league_id}&date={day}")
+
+
+async def _list_pages(client, api_key, quota, budget: _Budget, query: str) -> Optional[list]:
     out, offset = [], 0
     while True:
         if not budget.take():
             return None
-        raw = await hp.hl_get(client, api_key, f"/matches?leagueId={league_id}&season={season}"
+        raw = await hp.hl_get(client, api_key, f"/matches?{query}"
                               f"&limit={hp.HL_PAGE_LIMIT}&offset={offset}", quota=quota)
         if raw is None:
             return None
@@ -239,7 +259,8 @@ def _comps(job: str, leagues: Optional[list]) -> list[tuple[int, int, bool]]:
     if job == "nt":
         return [(l, y, True) for l, y in NT_CORE] + [(l, y, False) for l, y in NT_OTHER]
     if job == "women":
-        extra = [(l, y) for l in (leagues or []) if l in WOMEN_PROBE for y in (2023, 2024, 2025, 2026)]
+        extra = [c for l in (leagues or []) if l in WOMEN_PROBE
+                 for c in WOMEN_EXTRA_SEASONS.get(l, [(l, y) for y in (2023, 2024, 2025, 2026)])]
         return [(l, y, True) for l, y in WOMEN_BASE + extra]
     if job == "players":
         return [(lid, hp.hl_season(s), True) for lid in hp.HL_LEAGUES.values() for s in PLAYER_SEASONS]
@@ -261,17 +282,22 @@ async def run_hl_load(job: str, dry_run: bool = True, max_requests: int = HL_LOA
         from shared.api_quota_manager import QuotaManager, daily_period
         quota = QuotaManager()
         qd = quota._get_doc(f"{hp.HL_QUOTA_API}_{daily_period(hp.HL_QUOTA_API)}")
-        avail = hp.requests_available(qd.get("used", 0), qd.get("remaining_reported"), reserve=HL_LOAD_RESERVE)
+        avail = hp.requests_available(qd.get("used", 0), qd.get("remaining_reported"),
+                                      reserve=hp.HL_MANUAL_RESERVE if job == "maint" else HL_LOAD_RESERVE)
     else:
         avail = max_requests
+    store = store or FirestoreStore()
+    if job == "maint":     # tope propio del día, aunque se lance varias veces
+        avail = min(avail, max(0, HL_MAINT_DAILY - _maint_used(store, now)))
     budget = _Budget(min(max_requests, HL_LOAD_MAX_PER_RUN, avail))
     summary["budget"] = budget.left
-    store = store or FirestoreStore()
     own_client = client is None
     client = client or httpx.AsyncClient(timeout=hp._HTTP_TIMEOUT)
     try:
         if job == "women_probe":
             summary["probe"] = await _probe(client, api_key, quota, budget)
+        elif job == "maint":
+            await _maint(dry_run, leagues, now, api_key, quota, store, client, budget, summary)
         else:
             await _load(job, dry_run, leagues, now, api_key, quota, store, client, budget, summary)
     except hp.HighlightlyBudgetExhausted:
@@ -303,48 +329,16 @@ async def _load(job, dry_run, leagues, now, api_key, quota, store, client, budge
                 row["listed"] = False
                 summary["comps"].append(row)
                 break     # sin presupuesto o error: se sigue en la próxima pasada (CORE va primero)
-            if job == "players":
-                div = next(d for d, lid in hp.HL_LEAGUES.items() if lid == league_id)
-                fdco = f"{season % 100:02d}{(season + 1) % 100:02d}"
-                metas = []
-                for m in listing:
-                    mm = hp.match_meta_from_listing(m, div, fdco)
-                    mm.update({"league_id": league_id, "hl_season": season, "status": "pending", "attempts": 0,
-                               "finished": ((m.get("state") or {}).get("description") or "").startswith("Finished")})
-                    metas.append(mm)
-            else:
-                metas = [listing_meta(m, job, league_id, season) for m in listing]
-                if job == "nt":
-                    if is_core:
-                        core_ids |= {i for x in metas for i in (x["home_team_id"], x["away_team_id"])
-                                     if i is not None and is_senior_men(
-                                         x["home_team"] if i == x["home_team_id"] else x["away_team"])}
-                    metas = [x for x in metas if keep_nt(x, core_ids, is_core)]
-            known = store.existing(coll, [x["match_id"] for x in metas if x["match_id"] is not None])
-            new = {str(x["match_id"]): x for x in metas
-                   if x["match_id"] is not None and str(x["match_id"]) not in known}
-            # Un partido ya guardado que acaba de terminar: se marca para pedirlo.
-            for x in metas:
-                k = known.get(str(x["match_id"]))
-                if k and x["finished"] and not k.get("finished"):
-                    new[str(x["match_id"])] = {**k, "finished": True, "goals_home": x.get("goals_home"),
-                                               "goals_away": x.get("goals_away"), "state": x.get("state")}
-            all_finished = bool(metas) and all(x["finished"] for x in metas)
-            row.update({"listed": True, "listed_total": len(listing), "kept": len(metas),
-                        "finished": sum(1 for x in metas if x["finished"]), "new": len(new)})
+            row["listed"] = True
+            docs = _ingest(job, listing, league_id, season, is_core, core_ids, store, dry_run, row)
             if not dry_run:
-                store.put(coll, new)
-                store.put(STATE, {key: {"listed_at": now.isoformat(), "all_finished": all_finished,
-                                        "kept": len(metas)}})
-            docs = []
-            for x in metas:
-                mid = str(x["match_id"])
-                docs.append(new[mid] if mid in new else {**x, **known[mid]} if mid in known else x)
+                store.put(STATE, {key: {"listed_at": now.isoformat(), "all_finished": row["all_finished"],
+                                        "kept": row["kept"]}})
+            row.pop("all_finished")
         else:
             row["listed"] = "ya listada"
             docs = store.by_league_season(coll, league_id, season)
-        pend = [d for d in docs if d.get("finished") and d.get("status") in ("pending", "error")
-                and d.get("attempts", 0) < hp.HL_MAX_ATTEMPTS]
+        pend = _pending(docs)
         row["pending_detail"] = len(pend)
         pending_all.extend(pend)
         summary["comps"].append(row)
@@ -356,6 +350,132 @@ async def _load(job, dry_run, leagues, now, api_key, quota, store, client, budge
         summary["would_fetch"] = min(len(pending_all), budget.left)
         return
     await _fetch_details(job, to_fetch(pending_all, budget.left), api_key, quota, store, client, budget, summary)
+
+
+def _ingest(job, listing, league_id, season, is_core, core_ids: set, store, dry_run, row: dict) -> list[dict]:
+    """Listado de una competición → docs (nuevos, ya guardados y los que acaban de terminar).
+    Guarda los nuevos salvo en dry-run y rellena los recuentos en row. En las CORE amplía core_ids."""
+    coll = MATCHES if job == "players" else TEAM_STATS
+    if job == "players":
+        div = next(d for d, lid in hp.HL_LEAGUES.items() if lid == league_id)
+        fdco = f"{season % 100:02d}{(season + 1) % 100:02d}"
+        metas = []
+        for m in listing:
+            mm = hp.match_meta_from_listing(m, div, fdco)
+            mm.update({"league_id": league_id, "hl_season": season, "status": "pending", "attempts": 0,
+                       "finished": ((m.get("state") or {}).get("description") or "").startswith("Finished")})
+            metas.append(mm)
+    else:
+        metas = [listing_meta(m, job, league_id, season) for m in listing]
+        if job == "nt":
+            if is_core:
+                core_ids |= {i for x in metas for i in (x["home_team_id"], x["away_team_id"])
+                             if i is not None and is_senior_men(
+                                 x["home_team"] if i == x["home_team_id"] else x["away_team"])}
+            metas = [x for x in metas if keep_nt(x, core_ids, is_core)]
+    known = store.existing(coll, [x["match_id"] for x in metas if x["match_id"] is not None])
+    new = {str(x["match_id"]): x for x in metas
+           if x["match_id"] is not None and str(x["match_id"]) not in known}
+    # Un partido ya guardado que acaba de terminar: se marca para pedirlo.
+    for x in metas:
+        k = known.get(str(x["match_id"]))
+        if k and x["finished"] and not k.get("finished"):
+            new[str(x["match_id"])] = {**k, "finished": True, "goals_home": x.get("goals_home"),
+                                       "goals_away": x.get("goals_away"), "state": x.get("state")}
+    row.update({"listed_total": len(listing), "kept": len(metas),
+                "finished": sum(1 for x in metas if x["finished"]), "new": len(new),
+                "all_finished": bool(metas) and all(x["finished"] for x in metas)})
+    if not dry_run:
+        store.put(coll, new)
+    docs = []
+    for x in metas:
+        mid = str(x["match_id"])
+        docs.append(new[mid] if mid in new else {**x, **known[mid]} if mid in known else x)
+    return docs
+
+
+def _pending(docs: list[dict]) -> list[dict]:
+    return [d for d in docs if d.get("finished") and d.get("status") in ("pending", "error")
+            and d.get("attempts", 0) < hp.HL_MAX_ATTEMPTS]
+
+
+# ── Mantenimiento ──────────────────────────────────────────────────────────────
+
+def maint_days(last_day: Optional[str], now: datetime) -> list[str]:
+    """Días a listar: del siguiente al último hecho hasta ayer, como mucho HL_MAINT_MAX_DAYS."""
+    yesterday = (now - timedelta(days=1)).date()
+    first = yesterday - timedelta(days=HL_MAINT_MAX_DAYS - 1)
+    if last_day:
+        first = max(first, date.fromisoformat(last_day) + timedelta(days=1))
+    return [(first + timedelta(days=i)).isoformat() for i in range((yesterday - first).days + 1)]
+
+
+def _maint_comps(leagues) -> list[tuple[str, int, bool]]:
+    women = [121626, 38228] + [l for l in (leagues or []) if l in WOMEN_PROBE]
+    return ([("nt", l, core) for l, core in MAINT_NT] + [("women", l, True) for l in women]
+            + [("players", l, True) for l in hp.HL_LEAGUES.values()])
+
+
+def _maint_used(store, now: datetime) -> int:
+    return (store.get(STATE, f"maint_{now.date().isoformat()}") or {}).get("used", 0)
+
+
+async def _maint(dry_run, leagues, now, api_key, quota, store, client, budget, summary):
+    """Lista por fecha los días pendientes y pide el detalle de lo terminado, lo más reciente
+    primero. Lo que no quepa queda en hl_load_state/maint_backlog para la pasada siguiente."""
+    core_ids = set((store.get(STATE, "nt_core_teams") or {}).get("ids", []))
+    last = (store.get(STATE, "maint_last_day") or {}).get("day")
+    days = maint_days(last, now)
+    pend: dict = {"nt": {}, "women": {}, "players": {}}
+    for it in (store.get(STATE, "maint_backlog") or {}).get("items", []):
+        coll = MATCHES if it["job"] == "players" else TEAM_STATS
+        pend[it["job"]].update(store.existing(coll, [it["match_id"]]))
+    done_day = last
+    for day in days:
+        complete = True
+        for job, league_id, is_core in _maint_comps(leagues):
+            listing = await _list_day(client, api_key, quota, budget, league_id, day)
+            if listing is None:      # sin presupuesto o error: ese día se repite en la pasada siguiente
+                complete = False
+                break
+            by_season: dict = {}
+            for m in listing:
+                by_season.setdefault((m.get("league") or {}).get("season"), []).append(m)
+            for season, ms in by_season.items():
+                if season is None:
+                    continue
+                row = {"job": job, "league_id": league_id, "season": int(season), "day": day}
+                docs = _ingest(job, ms, league_id, int(season), is_core, core_ids, store, dry_run, row)
+                row.pop("all_finished")
+                pend[job].update({str(d["match_id"]): d for d in _pending(docs)})
+                summary["comps"].append(row)
+        if not complete:
+            break
+        done_day = day
+    pend = {job: {k: d for k, d in v.items() if _pending([d])} for job, v in pend.items()}
+    summary["days"] = days
+    summary["pending_detail"] = sum(len(v) for v in pend.values())
+    if dry_run:
+        summary["would_fetch"] = min(summary["pending_detail"], budget.left)
+        return
+    fetched = {"done": 0, "empty": 0, "error": 0}
+    for job in ("nt", "women", "players"):
+        picks = to_fetch(list(pend[job].values()), budget.left)
+        if not picks:
+            continue
+        sub: dict = {}
+        await _fetch_details(job, picks, api_key, quota, store, client, budget, sub)
+        for k, v in sub["fetched"].items():
+            fetched[k] += v
+        got = {str(d["match_id"]) for d in picks}
+        pend[job] = {k: d for k, d in pend[job].items() if k not in got}
+    summary["fetched"] = fetched
+    store.put(STATE, {
+        "maint_backlog": {"items": [{"job": j, "match_id": k} for j in pend for k in pend[j]],
+                          "updated_at": now.isoformat()},
+        f"maint_{now.date().isoformat()}": {"used": _maint_used(store, now) + budget.used}})
+    if done_day and done_day != last:
+        store.put(STATE, {"maint_last_day": {"day": done_day}})
 
 
 async def _fetch_details(job, picks, api_key, quota, store, client, budget, summary):
