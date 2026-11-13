@@ -129,18 +129,31 @@ jobs:
             [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base/")" != "000" ] && break
             sleep 10
           done
+          # Recién publicado, Cloudflare puede dar 404 o respuestas incoherentes unos segundos
+          # (13-nov: portada 404 con las credenciales buenas, 404 con las erróneas). Se repite
+          # hasta 90 s por URL. Pero un 2xx sin credenciales o con las erróneas es una fuga:
+          # falla AL MOMENTO, sin reintentar.
+          deadline=$((SECONDS + 90))
           for path in / /data/rates.json /data/previews.json /app.js; do
-            for i in 1 2 3 4 5 6; do   # la publicación tarda unos segundos en propagarse
+            while :; do
               anon=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$base$path")
-              [ "$anon" = "401" ] && break
-              sleep 10
+              if [[ "$anon" == 2* ]]; then
+                echo "  $path → sin credenciales $anon: FUGA, se para sin reintentar"; exit 1
+              fi
+              wrong=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "nadie:incorrecta" "$base$path")
+              if [[ "$wrong" == 2* ]]; then
+                echo "  $path → credenciales erróneas $wrong: FUGA, se para sin reintentar"; exit 1
+              fi
+              hdr=$(curl -s -o /dev/null -D - --max-time 10 -u "$WEB_USER:$WEB_PASS" "$base$path" | tr -d '\r')
+              good=$(awk 'NR==1{print $2}' <<<"$hdr")
+              robots=$(grep -i '^x-robots-tag:' <<<"$hdr" | cut -d' ' -f2- )
+              ok=0
+              [ "$anon" = "401" ] && [ "$wrong" = "401" ] && [ "$good" = "200" ] && [[ "$robots" == *noindex* ]] && ok=1
+              [ "$ok" = 1 ] || [ "$SECONDS" -ge "$deadline" ] && break
+              sleep 5
             done
-            wrong=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "nadie:incorrecta" "$base$path")
-            hdr=$(curl -s -o /dev/null -D - --max-time 10 -u "$WEB_USER:$WEB_PASS" "$base$path" | tr -d '\r')
-            good=$(awk 'NR==1{print $2}' <<<"$hdr")
-            robots=$(grep -i '^x-robots-tag:' <<<"$hdr" | cut -d' ' -f2- )
             echo "  $path → sin credenciales $anon · erróneas $wrong · buenas ${good:-000} · X-Robots-Tag: ${robots:-falta}"
-            [ "$anon" = "401" ] && [ "$wrong" = "401" ] && [ "$good" = "200" ] && [[ "$robots" == *noindex* ]] || bad=1
+            [ "$ok" = 1 ] || bad=1
           done
           exit $bad
           EOF
