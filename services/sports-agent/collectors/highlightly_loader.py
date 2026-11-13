@@ -61,7 +61,7 @@ NT_CORE = [(28016, 2020), (28016, 2024),          # clasificación del Mundial, 
            (29718, 2022), (29718, 2026)]          # clasificación del Mundial, Sudamérica
 NT_OTHER = [(4188, 2020), (4188, 2024),           # Euro
             (8443, 2021), (8443, 2024),           # Copa América
-            (1635, 2022),                         # Mundial
+            (1635, 2022), (1635, 2026),           # Mundial
             *[(9294, y) for y in range(2020, 2027)]]   # amistosos de selecciones
 WOMEN_BASE = [(lid, y) for lid in (121626, 38228) for y in (2023, 2024, 2025, 2026)]   # Liga F, WSL
 WOMEN_PROBE = {70566: "Frauen-Bundesliga", 119073: "Serie A Women", 55248: "Feminine Division 1",
