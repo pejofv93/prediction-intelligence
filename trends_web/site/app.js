@@ -5,13 +5,15 @@
 // texto entra por textContent.
 
 const SPLITS = [["all", "Todos"], ["home", "En casa"], ["away", "Fuera"]];
+const SAMPLES = [["all", "Toda la muestra"], ["cur", "Solo esta temporada"]];
+const MIN_CUR_ONLY = 5;   // "solo esta temporada": por debajo, la celda sale en gris
 const LABELS = { encima: "por encima", debajo: "por debajo", en_linea: "en línea con la liga",
                  insuficiente: "muestra insuficiente", sin_liga: "sin media de liga" };
 const DIV_NAMES = { SP1: "LaLiga", SP2: "Segunda", I1: "Serie A", E0: "Premier", F1: "Ligue 1",
                     P1: "Primeira", D1: "Bundesliga", N1: "Eredivisie", E1: "Championship",
                     I2: "Serie B", F2: "Ligue 2", D2: "2. Bundesliga" };
 
-const state = { view: "teams", div: null, split: 0, market: null, sort: -1, desc: false, byGap: false,
+const state = { view: "teams", div: null, split: 0, market: null, sample: "all", sort: -1, desc: false, byGap: false,
                 day: null, match: null };
 let DATA = null;
 let PREV = null;          // data/previews.json
@@ -46,8 +48,9 @@ function readHash() {
   }
   state.view = "teams";
   if (!DATA) return;
-  const [div, split, market] = raw.split("/");
+  const [div, split, market, sample] = raw.split("/");
   if (div && DATA.leagues[div]) state.div = div;
+  state.sample = sample === "temporada" ? "cur" : "all";
   const s = SPLITS.findIndex(([k]) => k === split);
   if (s >= 0) state.split = s;
   if (market && marketMeta(market)) state.market = market;
@@ -55,7 +58,7 @@ function readHash() {
 function writeHash() {
   const h = state.view === "matches"
     ? `#partidos${state.match ? "/" + state.match : ""}`
-    : `#${state.div}/${SPLITS[state.split][0]}/${state.market}`;
+    : `#${state.div}/${SPLITS[state.split][0]}/${state.market}${state.sample === "cur" ? "/temporada" : ""}`;
   if (location.hash !== h) history.replaceState(null, "", h);
 }
 
@@ -70,13 +73,35 @@ function renderControls() {
         (d) => d === state.div, (d) => { state.div = d; closeTeam(); render(); });
   pills($("splits"), SPLITS.map(([k, l], i) => [i, l]), (i) => i === state.split,
         (i) => { state.split = i; render(); });
+  pills($("samples"), SAMPLES, (k) => k === state.sample,
+        (k) => { state.sample = k; if ($("team").hidden === false) closeTeam(); render(); });
+  $("by-gap").disabled = state.sample === "cur";     // sin media de liga en ese modo
+  $("sample-note").hidden = state.sample !== "cur";
   for (const [scope, id] of [["equipo", "markets-team"], ["partido", "markets-match"]]) {
     pills($(id), DATA.markets.filter((m) => m.scope === scope).map((m) => [m.key, m.label]),
           (k) => k === state.market, (k) => { state.market = k; state.sort = -1; render(); });
   }
 }
 
+// "Solo esta temporada": porcentaje bruto con los partidos de este año (sin la anterior ni ajuste a la media).
+function curOnly(c) {
+  if (!c || c[2] == null || c[6] == null) return null;
+  const [, , nCur, , , , hits] = c;
+  return { p: nCur ? hits / nCur : null, hits, n: nCur, low: nCur < MIN_CUR_ONLY };
+}
+
+function cellNodeCur(c) {
+  const k = curOnly(c);
+  if (!k || !k.n) return el("div", { class: "cell vacia", text: k ? "sin partidos esta temporada" : "sin datos" });
+  return el("div", { class: `cell actual${k.low ? " insuficiente" : ""}`,
+                     title: k.low ? "muestra insuficiente" : "solo esta temporada" },
+    el("span", { class: "p", text: pct(k.p) }),
+    el("span", { class: "n", text: `${k.hits}/${k.n} partidos esta temporada` }),
+    k.low ? el("span", { class: "n", text: "muestra insuficiente" }) : null);
+}
+
 function cellNode(c) {
+  if (state.sample === "cur") return cellNodeCur(c);
   if (!c || c[0] == null) return el("div", { class: "cell vacia", text: "sin datos" });
   const [p, pl, nCur, nPrev, nW, label] = c;
   const gap = pts(p, pl);
@@ -91,6 +116,11 @@ function cellNode(c) {
 
 function sortKey(team, lineIdx) {
   const c = team.r[state.market][lineIdx][state.split];
+  if (state.sample === "cur") {
+    const k = curOnly(c);
+    if (!k || k.p == null) return -Infinity;
+    return k.low ? -1e9 + k.p : k.p;                         // gris al final, sin mezclarse
+  }
   if (!c || c[0] == null) return -Infinity;
   if (c[5] === "insuficiente") return -1e9 + (c[0] || 0);   // al final, sin mezclarse
   return state.byGap ? (pts(c[0], c[1]) ?? -Infinity) : c[0];
@@ -101,7 +131,7 @@ function renderTable() {
   const m = marketMeta(state.market);
   $("table-title").textContent =
     `${lg.name} · ${m.label} ${m.scope === "partido" ? "(total del partido)" : "(del equipo)"} · ` +
-    `${SPLITS[state.split][1]} · más de…`;
+    `${SPLITS[state.split][1]} · ${state.sample === "cur" ? "solo esta temporada · " : ""}más de…`;
 
   const teams = [...lg.teams];
   if (state.sort < 0) {

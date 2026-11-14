@@ -66,7 +66,8 @@ def _r(x: Optional[float]) -> Optional[float]:
 
 def compact(docs: dict[str, dict], cur_by_div: dict[str, list[dict]], generated_at: str) -> dict:
     """Docs de build_rate_docs → JSON compacto de la página.
-    Celda = [p_adj, p_liga, partidos_actual, partidos_anterior, n_efectivo, fiabilidad]."""
+    Celda = [p_adj, p_liga, partidos_actual, partidos_anterior, n_efectivo, fiabilidad,
+             aciertos_actual] — el último sirve al modo "solo esta temporada" (porcentaje bruto)."""
     lines_by_market = {m: [fd.line_key(x) for x in lines] for m, _, lines in fd.MARKETS}
     out = {
         "generated_at": generated_at,
@@ -85,7 +86,7 @@ def compact(docs: dict[str, dict], cur_by_div: dict[str, list[dict]], generated_
             for k, _, _ in MARKET_LABELS:
                 m = doc["markets"][k]["lines"]
                 r[k] = [[[_r(c["p_adj"]), _r(c["p_league"]), c["n_cur"], c["n_prev"], round(c["n_w"], 2),
-                          reliability(c)] for c in (m[lk][s] for s in SPLITS)]
+                          reliability(c), c["hits_cur"]] for c in (m[lk][s] for s in SPLITS)]
                         for lk in lines_by_market[k]]
             teams.append({
                 "team": doc["team"], "slug": doc["team_slug"],

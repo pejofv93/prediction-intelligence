@@ -21,6 +21,7 @@
   <nav class="controls" aria-label="Filtros">
     <div class="group" id="leagues" role="tablist" aria-label="Liga"></div>
     <div class="group" id="splits" role="tablist" aria-label="Casa o fuera"></div>
+    <div class="group" id="samples" role="tablist" aria-label="Muestra"></div>
     <div class="group markets">
       <span class="label">Del equipo</span><span id="markets-team"></span>
     </div>
@@ -32,6 +33,9 @@
 
   <main>
     <section id="team" hidden></section>
+    <p id="sample-note" class="note" hidden>Solo esta temporada: porcentaje bruto con los partidos de este año,
+      sin la temporada anterior ni ajuste a la media de la liga. <b>Es descriptivo</b>: para predecir, el backtest
+      dice que la mezcla con la temporada anterior acierta más. En gris, menos de 5 partidos.</p>
     <p id="table-title" class="table-title"></p>
     <div class="table-wrap"><table id="grid"></table></div>
   </main>
@@ -43,6 +47,9 @@
         cuando la muestra es pequeña. Debajo, la media de la liga, la diferencia en puntos <b>frente a la media de la liga</b>
         y la muestra: partidos de esta temporada + de la anterior (que cuenta la mitad; un cuarto si fue en otra división)
         y el n efectivo.</li>
+      <li><b>Solo esta temporada</b>: aciertos / partidos de este año (por ejemplo 7/11 = 64 %), sin la temporada
+        anterior ni ajuste a la media de la liga; en gris si hay menos de 5 partidos. Es descriptivo: en el backtest,
+        mezclar con la temporada anterior predice mejor.</li>
       <li><b>Fiabilidad</b>: <span class="tag encima">por encima</span> o <span class="tag debajo">por debajo</span>
         de la liga si la diferencia es de al menos <span id="gap-pts">5</span> puntos y la muestra es suficiente;
         <span class="tag en_linea">en línea con la liga</span> si es menor;

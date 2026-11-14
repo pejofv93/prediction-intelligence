@@ -55,6 +55,8 @@ button.team:hover { color: var(--accent); }
 .cell.debajo .gap { color: var(--down); }
 .cell.insuficiente { opacity: .45; }
 .cell.vacia { color: var(--muted); }
+.note { font-size: 13px; color: var(--muted); border-left: 3px solid var(--muted); padding-left: 8px; margin: 8px 0; }
+.toggle:has(input:disabled) { opacity: .5; }
 
 .tag { border-radius: 4px; padding: 0 5px; font-size: 12px; border: 1px solid var(--line); white-space: nowrap; }
 .tag.encima { color: var(--up); border-color: var(--up); }

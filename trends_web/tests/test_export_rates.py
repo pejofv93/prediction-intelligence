@@ -44,10 +44,12 @@ def test_formato_compacto_y_celdas():
     a = next(t for t in lg["teams"] if t["team"] == "A")
     assert a["mc"] == 12 and a["mp"] == 6 and a["prev_div"] == "SP1" and a["prev_w"] == 0.5
     # córners +3,5 (primera línea), lado "all": la celda trae p_adj, p_liga, muestra y etiqueta
-    p_adj, p_liga, n_cur, n_prev, n_w, label = a["r"]["corners_for"][0][0]
+    p_adj, p_liga, n_cur, n_prev, n_w, label, hits_cur = a["r"]["corners_for"][0][0]
     src = docs["SP1_a"]["markets"]["corners_for"]["lines"]["over_3_5"]["all"]
     assert (p_adj, p_liga, n_cur, n_prev) == (round(src["p_adj"], 3), round(src["p_league"], 3), 12, 6)
     assert n_w == 15.0 and label == er.reliability(src)
+    # aciertos de esta temporada para el modo "solo esta temporada": 9 de 12 con más de 3,5 córners
+    assert hits_cur == src["hits_cur"] == 9
     # las 11 pestañas, con sus líneas legibles
     keys = [m["key"] for m in data["markets"]]
     assert keys == [k for k, _, _ in er.MARKET_LABELS] and data["markets"][0]["lines"][0] == "3,5"
