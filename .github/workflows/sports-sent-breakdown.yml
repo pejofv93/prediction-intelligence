@@ -1,0 +1,35 @@
+# ¿Dónde se pierde lo ENVIADO en Sports? SOLO LECTURA: lee alerts_sent (sports_sent),
+# predictions (baloncesto con la marca alerted) y odds_history (cierre aproximado 1X2).
+# No escribe nada. Imprime solo agregados. Manual, sin cron.
+name: sports-sent-breakdown
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desglose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Desglose de lo enviado (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+        run: python scripts/ops/sent_breakdown.py
