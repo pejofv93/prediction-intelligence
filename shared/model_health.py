@@ -54,6 +54,8 @@ def _sports_alerted_graded() -> list[dict]:
     sent = []
     for doc in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
         a = doc.to_dict() or {}
+        if str(a.get("sport") or "").lower() in ("basketball", "nba"):
+            continue  # baloncesto va por la marca (abajo); desde el 14-nov también está aquí
         if a.get("correct") not in (True, False):
             continue  # pendiente o push
         sent.append({
@@ -119,6 +121,8 @@ def sent_tier_stats() -> dict:
             if a.get("correct") not in (True, False):
                 out["tennis_ungraded"] += 1
             continue
+        if str(a.get("sport") or "").lower() in ("basketball", "nba"):
+            continue  # registrado desde el 14-nov; el informe por nivel sigue sin él, como antes
         try:
             tier = _sent_tier(float(a.get("ev") or 0))
         except (TypeError, ValueError):

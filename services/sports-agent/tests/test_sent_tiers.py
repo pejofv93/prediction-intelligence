@@ -61,3 +61,23 @@ def test_tenis_enviado_se_cuenta_y_sin_envios_no_hay_bloque():
                    "tennis_ungraded": 3, "since": None})
     assert "Baloncesto fuera; tenis sin graduar (3 enviadas)." in txt
     assert "Enviadas por nivel" not in _report({"fuerte": zero, "detectada": zero, "moderada": zero})
+
+
+def test_baloncesto_en_alerts_sent_no_entra_en_niveles_ni_duplica(monkeypatch):
+    # Desde el 14-nov el baloncesto también se registra en sports_sent; el informe por nivel
+    # sigue como antes (sin baloncesto) y el aviso de salud lo cuenta solo por la marca.
+    st = _stats(monkeypatch, [
+        {"sport": "basketball", "ev": 0.25, "odds": 2.0, "correct": True},
+        {"sport": "football", "ev": 0.25, "odds": 2.0, "correct": False},
+    ])
+    assert st["fuerte"] == {"sent": 1, "graded": 1, "wins": 0, "pnl": -1.0}
+
+    import shared.model_health as mh
+    sent = [{"sport": "basketball", "correct": True, "odds": 2.0}] + \
+           [{"sport": "football", "correct": False, "odds": 2.0}] * 20
+    monkeypatch.setattr(mh, "iter_all", lambda *a, **k: [_doc(d) for d in sent])
+    q = MagicMock()
+    q.where.return_value.stream.return_value = [_doc({"sport": "basketball", "correct": True, "odds": 1.9})]
+    monkeypatch.setattr(mh, "col", lambda name: q)
+    out = mh._sports_alerted_graded()
+    assert len(out) == 21 and sum(1 for x in out if x["correct"]) == 1   # 20 fútbol + 1 marca

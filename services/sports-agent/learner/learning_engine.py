@@ -1355,6 +1355,7 @@ async def run_daily_learning() -> None:
             await grade_sent_alerts()
         except Exception:
             logger.error("run_daily_learning: error graduando alertas enviadas", exc_info=True)
+        _refresh_segment_history()
         try:
             await _maybe_evaluate_filters(now)
         except Exception:
@@ -1564,6 +1565,7 @@ async def run_daily_learning() -> None:
         await grade_sent_alerts()
     except Exception:
         logger.error("run_daily_learning: error graduando alertas enviadas", exc_info=True)
+    _refresh_segment_history()
 
     try:
         await _maybe_evaluate_filters(now)
@@ -1798,6 +1800,30 @@ async def grade_filter_blocks(max_age_days: int = 30, max_docs: int = 3000) -> d
 _SENT_GRADABLE_MARKETS: frozenset[str] = frozenset({"h2h"}) | _SCORE_GRADED_MARKETS
 
 
+def _refresh_segment_history() -> None:
+    """Historial por segmento de lo enviado (línea 📚 de las alertas). Nunca lanza."""
+    try:
+        from shared.segment_history import refresh_segment_history
+        refresh_segment_history()
+    except Exception:
+        logger.error("run_daily_learning: error recalculando el historial por segmento", exc_info=True)
+
+
+def _grade_sent_basket(prediction_id: str) -> "bool | str | None":
+    """Baloncesto enviado: copia el resultado del doc de predictions (su doc no se reescribe
+    tras alertar: lo que se gradúa es lo que se vio). True/False, "push" o None si pendiente."""
+    try:
+        snap = col("predictions").document(prediction_id).get()
+    except Exception:
+        return None
+    p = snap.to_dict() if snap.exists else None
+    if not p:
+        return None
+    if p.get("push") or p.get("result") == "push":
+        return "push"
+    return p["correct"] if p.get("correct") in (True, False) else None
+
+
 async def grade_sent_alerts(max_age_days: int = 30) -> dict:
     """
     Gradúa lo REALMENTE enviado en fútbol (alerts_sent, type=sports_sent): la selección
@@ -1807,6 +1833,7 @@ async def grade_sent_alerts(max_age_days: int = 30) -> dict:
       correct — True | False | None (push)
       graded_at
     Un reenvío no es apuesta nueva: es el mismo doc (campo resends).
+    Baloncesto (registrado desde el 14-nov): copia el resultado de su doc de predictions.
     Tenis queda pendiente: no hay fuente de resultados de tenis (match_results es fútbol).
     Devuelve un resumen. Nunca lanza.
     """
@@ -1822,6 +1849,21 @@ async def grade_sent_alerts(max_age_days: int = 30) -> dict:
         for doc in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
             data = doc.to_dict() or {}
             if data.get("result") is not None:
+                continue
+            if str(data.get("sport") or "").lower() in ("basketball", "nba"):
+                res = _grade_sent_basket(str(data.get("prediction_id") or ""))
+                if res is None:
+                    continue
+                correct = None if res == "push" else res
+                try:
+                    col("alerts_sent").document(doc.id).update({
+                        "result": "push" if res == "push" else ("win" if res else "loss"),
+                        "correct": correct, "graded_at": now, "graded_from": "predictions",
+                    })
+                    summary["graduados"] += 1
+                    summary["aciertos"] += int(correct is True)
+                except Exception:
+                    logger.error("grade_sent_alerts: error escribiendo %s", doc.id, exc_info=True)
                 continue
             if str(data.get("sport") or "football").lower() != "football":
                 summary["sin_fuente"] += 1

@@ -181,6 +181,73 @@ def _format_match_date_madrid(match_date) -> str:
         return f"📅 {date_str} a las {time_str} Madrid"
 
 
+def _shown_intensity(prediction: dict) -> str:
+    """Emoji del nivel que ve el canal: el del motor; si no viene, sobre EV (≥0,15 / ≥0,10).
+    Lo usan el formato y el registro en alerts_sent (el historial agrupa por lo que se vio)."""
+    emoji = str(prediction.get("intensity") or "")
+    if emoji in ("🔥", "✅", "📊"):
+        return emoji
+    edge = float(prediction.get("edge") or 0)
+    _ev_raw = prediction.get("ev")
+    ev = float(_ev_raw) if _ev_raw is not None else edge
+    return "🔥" if ev >= 0.15 else "✅" if ev >= 0.10 else "📊"
+
+
+# Historial por segmento (model_weights/segment_history, lo recalcula el aprendizaje nocturno).
+# Se lee como mucho cada 30 min; si falla, la alerta sale sin la línea.
+_SEG_TTL_S = 1800
+_seg_cache: dict = {"at": None, "doc": None}
+_SPORT_NAME = {"football": "Fútbol", "basketball": "Baloncesto", "tennis": "Tenis"}
+
+
+def _segment_history_doc() -> dict | None:
+    now = datetime.now(timezone.utc)
+    if _seg_cache["at"] and (now - _seg_cache["at"]).total_seconds() < _SEG_TTL_S:
+        return _seg_cache["doc"]
+    try:
+        from shared.firestore_client import col
+        from shared.segment_history import DOC
+        snap = col(DOC[0]).document(DOC[1]).get()
+        doc = snap.to_dict() if snap.exists else None
+        _seg_cache["doc"] = doc if isinstance(doc, dict) else None
+    except Exception:
+        logger.warning("segment_history: no se pudo leer — alerta sin historial", exc_info=True)
+        _seg_cache["doc"] = None
+    _seg_cache["at"] = now
+    return _seg_cache["doc"]
+
+
+def _pct(x: float) -> str:
+    return f"{x * 100:.0f} %".replace("-", "−")
+
+
+def _segment_history_line(prediction: dict, history: dict | None) -> str:
+    """Línea informativa con el historial del segmento de la alerta ("" sin datos).
+    Sin corchetes ni guiones bajos: el mensaje va en Markdown."""
+    from shared.segment_history import pick, sport_of, verdict
+    if not history:
+        return ""
+    key, s, n_sport = pick(history, prediction)
+    sport = sport_of(prediction.get("sport"))
+    if s is None:
+        return f"📚 Historial: muestra corta ({n_sport} graduadas en {_SPORT_NAME.get(sport, sport)})"
+    _sp, league, market, tier = key.split("|")
+    parts = [_SPORT_NAME.get(sport, sport)]
+    if league != "*":
+        parts.append(_LEAGUE_LABEL.get(league, league))
+    if market != "*":
+        parts.append(_MARKET_LABEL.get(market, market.replace("_", " ")))
+    if tier != "*":
+        parts.append(tier)
+    label = _escape_md(" · ".join(parts))
+    ci = (f" (IC95 {_pct(s['roi_lo'])} a {_pct(s['roi_hi'])})"
+          if s.get("roi_lo") is not None else "")
+    since = str(history.get("since") or "")[:10]
+    since = f"{since[8:10]}/{since[5:7]}" if len(since) == 10 else "?"
+    return (f"📚 Historial desde {since} ({label}): {s['wins']}/{s['n']} = {_pct(s['wins'] / s['n'])}"
+            f" · esperado por cuota {_pct(s['expected'])} · ROI {_pct(s['roi'])}{ci} · {verdict(s)}")
+
+
 def _format_alert_unified(prediction: dict) -> str:
     """Formato unificado para todos los deportes y mercados."""
     sport = prediction.get("sport", "football")
@@ -204,14 +271,7 @@ def _format_alert_unified(prediction: dict) -> str:
         "✅": "✅ SEÑAL DETECTADA",
         "📊": "📊 SEÑAL MODERADA",
     }
-    intensity = _INTENSITY_BY_EMOJI.get(str(prediction.get("intensity") or ""))
-    if intensity is None:
-        if ev >= 0.15:
-            intensity = "🔥 SEÑAL FUERTE"
-        elif ev >= 0.10:
-            intensity = "✅ SEÑAL DETECTADA"
-        else:
-            intensity = "📊 SEÑAL MODERADA"
+    intensity = _INTENSITY_BY_EMOJI[_shown_intensity(prediction)]
 
     sport_emoji = _SPORT_EMOJI.get(sport, "🏟")
     league_label = _escape_md(_LEAGUE_LABEL.get(league_code, league_code))
@@ -852,7 +912,7 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
 
 def _record_sports_sent(prediction: dict) -> None:
     """
-    Registro de lo REALMENTE enviado (fútbol, tenis) en alerts_sent, type=sports_sent.
+    Registro de lo REALMENTE enviado (fútbol, tenis, baloncesto) en alerts_sent, type=sports_sent.
     Fuente de verdad de "qué se alertó", como en Polymarket: predictions.alerted se pierde
     cuando el análisis reescribe el doc, y tenis nunca lo marca. Un doc por predicción y
     selección: un reenvío suma resends y guarda la última cuota/EV, sin crear apuesta nueva;
@@ -890,7 +950,7 @@ def _record_sports_sent(prediction: dict) -> None:
             "selection": selection, "team_to_back": prediction.get("team_to_back"),
             "line": prediction.get("line"),
             "home_team": prediction.get("home_team"), "away_team": prediction.get("away_team"),
-            "odds": odds, "ev": ev,
+            "odds": odds, "ev": ev, "intensity": _shown_intensity(prediction),
             "match_date": str(prediction.get("match_date") or ""),
             "sent_at": now, "last_sent_at": now, "last_odds": odds, "last_ev": ev,
             "resends": 0, "result": None, "correct": None,
@@ -938,6 +998,17 @@ async def send_sports_alert(prediction: dict) -> str:
             f"{_resend_from_odds:.2f} → {float(prediction.get('odds') or 0):.2f}\n" + text
         )
 
+    # Historial del segmento (solo informa; la alerta sale igual si no hay datos).
+    try:
+        _hist_line = _segment_history_line(prediction, _segment_history_doc())
+    except Exception:
+        logger.warning("send_sports_alert: historial por segmento falló — alerta sin él", exc_info=True)
+        _hist_line = ""
+    if _hist_line:
+        _footer = "\n\n⚠️ Apuesta responsablemente"
+        head, sep, tail = text.rpartition(_footer)
+        text = f"{head}\n{_hist_line}{sep}{tail}" if sep else f"{text}\n{_hist_line}"
+
     # Sin línea "Confianza histórica real": comparaba la confianza (acuerdo entre las señales
     # del modelo, 1 − desviación; en mercados alternativos, su probabilidad) con el acierto de
     # todas las predicciones del tramo, enviadas o no. Un 95 % de acuerdo en un visitante a
@@ -949,8 +1020,8 @@ async def send_sports_alert(prediction: dict) -> str:
         logger.error("send_sports_alert: fallo al enviar (%s)", key)
         return "rejected"
 
-    if str(prediction.get("sport", "")).lower() not in _BBALL_SPORTS:
-        _record_sports_sent(prediction)  # baloncesto ya tiene su slot por partido
+    # Todos los deportes (baloncesto desde el 14-nov): fuente única del historial por segmento.
+    _record_sports_sent(prediction)
 
     await asyncio.sleep(1.1)  # Telegram: max 1 msg/seg por chat
     logger.info("send_sports_alert: alerta enviada para %s (edge=%.3f)", key, edge)
