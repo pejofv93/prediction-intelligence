@@ -10,9 +10,8 @@ Cuota y nivel del PRIMER envío; un reenvío no es apuesta nueva. 1u por señal.
 
 Segmentos, del más concreto al más general (la alerta usa el primero con MIN_N graduadas):
   deporte|liga|mercado|nivel → deporte|*|mercado|nivel → deporte|*|mercado|* → deporte|*|*|*
-Nivel = el que se vio en la alerta (campo intensity: 🔥 fuerte, ✅ detectada, 📊 moderada);
-sin ese campo (envíos anteriores al 14-nov) se reconstruye sobre el EV con los cortes del
-motor (_intensity_emoji: >0,15 fuerte, >0,08 detectada).
+Nivel = el que se vio en la alerta (shared/signal_tier: campo intensity; sin él, envíos
+anteriores al 14-nov, se reconstruye sobre el EV con los cortes del motor).
 
 refresh_segment_history() lo recalcula y lo guarda en model_weights/segment_history (solo
 agregados); lo llama el aprendizaje nocturno tras graduar lo enviado.
@@ -31,7 +30,6 @@ MIN_N_VERDICT = 30  # por debajo, "muestra corta" aunque se muestre
 Z95 = 1.96
 DOC = ("model_weights", "segment_history")
 
-_TIER_BY_EMOJI = {"🔥": "fuerte", "✅": "detectada", "📊": "moderada"}
 BASKET = ("basketball", "nba")
 
 
@@ -47,15 +45,9 @@ def _as_dt(v):
 
 
 def tier_of(intensity, ev) -> str:
-    """Nivel mostrado en la alerta; si no se guardó, el del motor sobre el EV."""
-    t = _TIER_BY_EMOJI.get(str(intensity or ""))
-    if t:
-        return t
-    try:
-        ev = float(ev or 0)
-    except (TypeError, ValueError):
-        ev = 0.0
-    return "fuerte" if ev > 0.15 else "detectada" if ev > 0.08 else "moderada"
+    """Nivel mostrado en la alerta (mismo significado en todas partes: shared/signal_tier)."""
+    from shared.signal_tier import tier_of as _tier_of
+    return _tier_of(intensity, ev)
 
 
 def sport_of(raw) -> str:

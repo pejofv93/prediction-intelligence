@@ -3559,10 +3559,10 @@ _MARKET_EMOJI: dict[str, str] = {
 
 
 def _intensity_emoji(ev: float) -> str:
-    """Tier de intensidad sobre EV — la misma magnitud con la que decide el gate."""
-    if ev > 0.15: return "🔥"
-    if ev > 0.08: return "✅"
-    return "📊"
+    """Tier de intensidad sobre EV — la misma magnitud con la que decide el gate. Los cortes
+    viven en shared/signal_tier (los mismos para la alerta, el historial y el informe)."""
+    from shared.signal_tier import emoji_from_ev
+    return emoji_from_ev(ev)
 
 
 def _build_alert_payload(prediction: dict, enriched_match: dict) -> dict:

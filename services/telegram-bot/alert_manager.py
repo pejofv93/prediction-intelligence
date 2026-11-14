@@ -182,15 +182,12 @@ def _format_match_date_madrid(match_date) -> str:
 
 
 def _shown_intensity(prediction: dict) -> str:
-    """Emoji del nivel que ve el canal: el del motor; si no viene, sobre EV (≥0,15 / ≥0,10).
-    Lo usan el formato y el registro en alerts_sent (el historial agrupa por lo que se vio)."""
-    emoji = str(prediction.get("intensity") or "")
-    if emoji in ("🔥", "✅", "📊"):
-        return emoji
-    edge = float(prediction.get("edge") or 0)
+    """Emoji del nivel que ve el canal (shared/signal_tier: el del generador; si no viene, sobre
+    el EV con los cortes del motor). Lo usan el formato y el registro en alerts_sent."""
+    from shared.signal_tier import shown_emoji
     _ev_raw = prediction.get("ev")
-    ev = float(_ev_raw) if _ev_raw is not None else edge
-    return "🔥" if ev >= 0.15 else "✅" if ev >= 0.10 else "📊"
+    ev = _ev_raw if _ev_raw is not None else prediction.get("edge")
+    return shown_emoji(prediction.get("intensity"), ev)
 
 
 # Historial por segmento (model_weights/segment_history, lo recalcula el aprendizaje nocturno).

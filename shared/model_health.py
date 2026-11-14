@@ -23,6 +23,7 @@ from typing import Optional
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.firestore_client import col, iter_all
+from shared.signal_tier import tier_of
 from shared.shadow_engine import (
     _POLY_SENT_STATUSES, _as_utc_dt, _poly_alert_selection, _poly_decimal_odds,
 )
@@ -87,23 +88,13 @@ def _sports_alerted_graded() -> list[dict]:
 _TIER_MIN_GRADED = 20  # graduadas por nivel antes de mostrar win rate y ROI
 
 
-def _sent_tier(ev: float) -> Optional[str]:
-    """Nivel por el EV/edge del primer envío (mismos cortes que el mensaje de alerta)."""
-    if ev > 0.20:
-        return "fuerte"
-    if ev > 0.12:
-        return "detectada"
-    if ev > 0.08:
-        return "moderada"
-    return None
-
-
 def sent_tier_stats() -> dict:
     """
     ROI por nivel sobre lo REALMENTE enviado en Sports: alerts_sent type=sports_sent.
 
     Un doc por predicción y selección (un reenvío suma resends, no es apuesta nueva).
-    Nivel, cuota y EV son los del PRIMER envío (odds/ev; last_odds/last_ev son del último).
+    Nivel = el que se vio en la alerta (shared/signal_tier: campo intensity; en envíos
+    anteriores al 14-nov, reconstruido sobre el EV del primer envío). Cuota del PRIMER envío.
     1u por envío; los push no cuentan. Baloncesto no escribe sports_sent (va por slot de
     partido) y queda fuera; tenis se registra pero no hay fuente de resultados → sin graduar.
     Devuelve {fuerte|detectada|moderada: {sent, graded, wins, pnl}, tennis_ungraded, since}.
@@ -123,13 +114,7 @@ def sent_tier_stats() -> dict:
             continue
         if str(a.get("sport") or "").lower() in ("basketball", "nba"):
             continue  # registrado desde el 14-nov; el informe por nivel sigue sin él, como antes
-        try:
-            tier = _sent_tier(float(a.get("ev") or 0))
-        except (TypeError, ValueError):
-            tier = None
-        if tier is None:
-            continue
-        bucket = out[tier]
+        bucket = out[tier_of(a.get("intensity"), a.get("ev"))]
         bucket["sent"] += 1
         if a.get("correct") not in (True, False):
             continue  # pendiente o push

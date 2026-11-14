@@ -25,12 +25,15 @@ def test_nivel_y_cuota_del_primer_envio(monkeypatch):
          "sent_at": datetime(2026, 10, 23, tzinfo=timezone.utc)},
         {"sport": "football", "ev": 0.15, "odds": 2.0, "correct": None, "result": "push"},  # push
         {"sport": "football", "ev": 0.10, "odds": 2.0, "correct": None},  # pendiente
-        {"sport": "football", "ev": 0.05, "odds": 2.0, "correct": True},  # sin nivel
+        {"sport": "football", "ev": 0.05, "odds": 2.0, "correct": True},  # EV bajo → moderada
+        # el nivel que se vio en la alerta manda sobre el EV
+        {"sport": "football", "ev": 0.30, "intensity": "📊", "odds": 1.5, "correct": False},
         {"sport": "tennis", "ev": 0.30, "odds": 2.0, "correct": None},  # tenis sin graduar
     ])
+    # sin intensity, cortes del motor sobre el EV (shared/signal_tier): > 0,15 / > 0,08
     assert st["fuerte"] == {"sent": 1, "graded": 1, "wins": 1, "pnl": 2.0}
-    assert st["detectada"] == {"sent": 2, "graded": 1, "wins": 0, "pnl": -1.0}
-    assert st["moderada"] == {"sent": 1, "graded": 0, "wins": 0, "pnl": 0.0}
+    assert st["detectada"] == {"sent": 3, "graded": 1, "wins": 0, "pnl": -1.0}
+    assert st["moderada"] == {"sent": 2, "graded": 2, "wins": 1, "pnl": 0.0}
     assert st["tennis_ungraded"] == 1
     assert st["since"] == t0
 

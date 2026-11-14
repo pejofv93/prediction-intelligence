@@ -49,13 +49,10 @@ def as_dt(v):
     return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
 
 
-def tier(ev) -> str:
-    """Mismos cortes que el mensaje de alerta y el informe diario (model_health._sent_tier)."""
-    try:
-        ev = float(ev or 0)
-    except (TypeError, ValueError):
-        return "sin nivel"
-    return "fuerte" if ev > 0.20 else "detectada" if ev > 0.12 else "moderada" if ev > 0.08 else "sin nivel"
+def tier(intensity, ev) -> str:
+    """Nivel que se vio en la alerta (shared/signal_tier), el mismo del informe y el historial."""
+    from shared.signal_tier import tier_of
+    return tier_of(intensity, ev)
 
 
 def band(odds: float) -> str:
@@ -137,6 +134,7 @@ def collect():
         bets.append({
             "sport": sport, "league": a.get("league") or "?",
             "market": str(a.get("market_type") or "h2h").lower(), "ev": a.get("ev"),
+            "intensity": a.get("intensity"),
             "odds": odds, "ok": a["correct"] is True, "at": sent_at,
             "match_id": str(a.get("match_id") or ""), "kickoff": as_dt(a.get("match_date")),
             "side": h2h_side(a) if str(a.get("market_type") or "h2h").lower() == "h2h" else None,
@@ -164,6 +162,7 @@ def collect():
             "sport": "basketball", "league": p.get("league") or "?",
             "market": str(p.get("market_type") or "h2h").lower(),
             "ev": p.get("ev") if p.get("ev") is not None else p.get("edge"),
+            "intensity": p.get("intensity"),
             "odds": odds, "ok": p["correct"] is True, "at": created,
             "match_id": "", "kickoff": None, "side": None,
         })
@@ -228,12 +227,12 @@ def main() -> None:
 
     dims = {
         "deporte": lambda b: b["sport"],
-        "nivel": lambda b: tier(b["ev"]),
+        "nivel": lambda b: tier(b["intensity"], b["ev"]),
         "tramo de cuota": lambda b: band(b["odds"]),
         "mercado": lambda b: f"{b['sport'][:4]}·{b['market']}",
         "liga": lambda b: f"{b['sport'][:4]}·{b['league']}",
         "semana": lambda b: b["at"].strftime("%G-W%V"),
-        "nivel × cuota": lambda b: f"{tier(b['ev'])} · {band(b['odds'])}",
+        "nivel × cuota": lambda b: f"{tier(b['intensity'], b['ev'])} · {band(b['odds'])}",
         "liga × mercado (n>=10)": lambda b: f"{b['league']} · {b['market']}",
     }
     for name, key in dims.items():

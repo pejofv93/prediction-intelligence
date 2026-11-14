@@ -90,6 +90,8 @@ def test_si_el_historial_falla_la_alerta_sale_igual(monkeypatch):
 
 def test_nivel_mostrado_se_guarda_igual_que_en_el_mensaje():
     assert alert_manager._shown_intensity({"intensity": "✅", "ev": 0.5}) == "✅"
-    assert alert_manager._shown_intensity({"ev": 0.15}) == "🔥"
-    assert alert_manager._shown_intensity({"edge": 0.10}) == "✅"
+    # sin nivel en la señal: cortes del motor (shared/signal_tier), > 0,15 / > 0,08
+    assert alert_manager._shown_intensity({"ev": 0.16}) == "🔥"
+    assert alert_manager._shown_intensity({"ev": 0.15}) == "✅"
+    assert alert_manager._shown_intensity({"edge": 0.09}) == "✅"
     assert alert_manager._shown_intensity({"ev": 0.02}) == "📊"
