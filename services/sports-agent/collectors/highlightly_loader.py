@@ -12,6 +12,8 @@ Trabajos (job):
                pide el detalle de lo terminado, con un tope propio de HL_MAINT_DAILY al día
   women_probe  sondeo: 1 listado + 1 /statistics de Frauen-Bundesliga, Serie A, D1 y Champions
   players      box score (jugadores) de los clubes de las 8 ligas → /box-score por partido
+  cups         copas y supercopas de esos países (CUPS, 2020-2026): solo cruces entre dos equipos
+               de las 8 ligas (sacados de players) → /statistics. Va después de players.
 
 Cada pasada: 1) lista los partidos de cada (competición, temporada) pendiente, 2) pide el
 detalle de los partidos terminados que falten, del más reciente al más antiguo, hasta el tope
@@ -31,7 +33,8 @@ Selecciones — qué equipos entran:
     menos una de ellas. La lista sale de los datos, sin mantenerla a mano.
 
 Colecciones (por shared.firestore_client.col, migran con el resto):
-  hl_team_stats/{match_id}        nt y women: partido + estadísticas de equipo de los dos lados
+  hl_team_stats/{match_id}        nt, women y cups (group = "cups"): partido + estadísticas de
+                                  equipo de los dos lados
   hl_matches/{match_id}           players: partido + estado del box score (como highlightly_players)
   hl_match_players/{match_id}     players: un doc por partido con los jugadores de los dos equipos
   hl_load_state/{clave}           avance del listado por (trabajo, competición, temporada) y la
@@ -79,6 +82,20 @@ PLAYER_SEASONS = ("2425", "2526", "2627")
 # Mantenimiento: competiciones vivas. Se lista por fecha, así que las temporadas nuevas de estas
 # ligas entran solas. Las fases finales (Euro, Copa América, Mundial) se añaden a mano cuando toquen.
 MAINT_NT = [(28016, True), (817744, True), (5039, True), (29718, True), (9294, False)]
+# Copas y supercopas de los países de las 8 ligas (ids verificados el 14-nov-2026). Solo se guardan
+# los cruces entre dos equipos que ya tenemos en las ligas (hl_matches de players), con estadísticas
+# de equipo: para fichas de copa "solo referencia" y para medir la diferencia con la liga.
+CUPS = {122477: "Copa del Rey", 473940: "Supercopa de España",
+        39079: "FA Cup", 41632: "League Cup", 450112: "Community Shield",
+        117371: "Coppa Italia", 466281: "Supercoppa",
+        69715: "DFB-Pokal", 450963: "DFL-Supercup",
+        56950: "Coupe de France", 448410: "Trophée des Champions",
+        82480: "Taça de Portugal", 83331: "Taça da Liga", 468834: "Supertaça",
+        77374: "KNVB Beker", 462877: "Johan Cruijff Schaal"}
+CUP_SEASONS = (2026, 2025, 2024, 2023, 2022, 2021, 2020)   # la más reciente primero
+CUP_CURRENT_SEASON = 2026
+CUP_TEAMS_MAX_DAYS = 7          # la lista de equipos de liga se recalcula como mucho cada 7 días
+CUP_TEAMS_MIN = 100             # menos equipos = players sin cargar: no se lista nada
 
 _YOUTH_WOMEN = re.compile(r"\bU\s?-?\d{2}\b|\bunder[- ]?\d{2}\b|olympic|women|femenin|f[ée]minin|frauen|\bW$",
                           re.IGNORECASE)
@@ -264,6 +281,8 @@ def _comps(job: str, leagues: Optional[list]) -> list[tuple[int, int, bool]]:
         return [(l, y, True) for l, y in WOMEN_BASE + extra]
     if job == "players":
         return [(lid, hp.hl_season(s), True) for lid in hp.HL_LEAGUES.values() for s in PLAYER_SEASONS]
+    if job == "cups":
+        return [(lid, y, True) for y in CUP_SEASONS for lid in CUPS]
     raise ValueError(f"job desconocido: {job}")
 
 
@@ -317,6 +336,12 @@ async def _load(job, dry_run, leagues, now, api_key, quota, store, client, budge
     coll = MATCHES if job == "players" else TEAM_STATS
     core_doc = (store.get(STATE, "nt_core_teams") or {}) if job == "nt" else {}
     core_ids = set(core_doc.get("ids", []))
+    if job == "cups":     # en copas, core_ids = equipos de las 8 ligas
+        core_ids = cup_team_ids(store, now, dry_run)
+        summary["cup_teams"] = len(core_ids)
+        if len(core_ids) < CUP_TEAMS_MIN:
+            summary["errors"].append(f"solo {len(core_ids)} equipos de liga: carga players antes que cups")
+            return
     pending_all: list[dict] = []
     for league_id, season, is_core in _comps(job, leagues):
         key = f"{job}_{league_id}_{season}"
@@ -373,6 +398,8 @@ def _ingest(job, listing, league_id, season, is_core, core_ids: set, store, dry_
                              if i is not None and is_senior_men(
                                  x["home_team"] if i == x["home_team_id"] else x["away_team"])}
             metas = [x for x in metas if keep_nt(x, core_ids, is_core)]
+        elif job == "cups":
+            metas = [x for x in metas if x["home_team_id"] in core_ids and x["away_team_id"] in core_ids]
     known = store.existing(coll, [x["match_id"] for x in metas if x["match_id"] is not None])
     new = {str(x["match_id"]): x for x in metas
            if x["match_id"] is not None and str(x["match_id"]) not in known}
@@ -385,6 +412,9 @@ def _ingest(job, listing, league_id, season, is_core, core_ids: set, store, dry_
     row.update({"listed_total": len(listing), "kept": len(metas),
                 "finished": sum(1 for x in metas if x["finished"]), "new": len(new),
                 "all_finished": bool(metas) and all(x["finished"] for x in metas)})
+    if job == "cups":     # se mira el listado entero: una edición pasada sin cruces nuestros no se relista
+        fin = [((m.get("state") or {}).get("description") or "").startswith("Finished") for m in listing]
+        row["all_finished"] = all(fin) if fin else season < CUP_CURRENT_SEASON
     if not dry_run:
         store.put(coll, new)
     docs = []
@@ -397,6 +427,24 @@ def _ingest(job, listing, league_id, season, is_core, core_ids: set, store, dry_
 def _pending(docs: list[dict]) -> list[dict]:
     return [d for d in docs if d.get("finished") and d.get("status") in ("pending", "error")
             and d.get("attempts", 0) < hp.HL_MAX_ATTEMPTS]
+
+
+def cup_team_ids(store, now: datetime, dry_run: bool) -> set:
+    """Equipos de las 8 ligas (ids de Highlightly) sacados de hl_matches de players, guardados en
+    hl_load_state/cups_team_ids y recalculados como mucho cada CUP_TEAMS_MAX_DAYS."""
+    doc = store.get(STATE, "cups_team_ids") or {}
+    if doc.get("ids") and doc.get("updated_at") and \
+            now - datetime.fromisoformat(doc["updated_at"]) < timedelta(days=CUP_TEAMS_MAX_DAYS):
+        return set(doc["ids"])
+    ids = set()
+    for lid in hp.HL_LEAGUES.values():
+        for s in PLAYER_SEASONS:
+            for d in store.by_league_season(MATCHES, lid, hp.hl_season(s)):
+                ids |= {d.get("home_team_id"), d.get("away_team_id")}
+    ids.discard(None)
+    if not dry_run and len(ids) >= CUP_TEAMS_MIN:
+        store.put(STATE, {"cups_team_ids": {"ids": sorted(ids), "updated_at": now.isoformat()}})
+    return ids
 
 
 # ── Mantenimiento ──────────────────────────────────────────────────────────────

@@ -339,3 +339,52 @@ def test_maint_dry_run_no_escribe():
     writes = store.writes
     out = _run("maint", _Client(stats=stats, boxes=boxes, days=days), store, dry_run=True, max_requests=3000)
     assert out["ok"] and store.writes == writes and out["would_fetch"] == 4
+
+
+# ── Copas ──────────────────────────────────────────────────────────────────────
+
+def _cups_store(n_teams=120):
+    store = _Store()
+    lid = L.hp.HL_LEAGUES["SP1"]
+    store.put(L.MATCHES, {f"9{i}": {"league_id": lid, "hl_season": 2026, "home_team_id": i,
+                                    "away_team_id": i + 1} for i in range(1, n_teams, 2)})
+    return store
+
+
+def _cups_world():
+    routes = {(122477, 2026): [_m(1, "Racing", "Sporting", 1, 2), _m(2, "Racing", "Aldeano", 1, 999),
+                               _m(3, "Eibar", "Huesca", 3, 4, desc="Not started")]}
+    return routes, {1: _stats(1, "Racing", 2, "Sporting")}
+
+
+def test_cups_sin_equipos_de_liga_no_lista_nada():
+    client = _Client()
+    out = _run("cups", client, _cups_store(n_teams=10))
+    assert not out["ok"] and "players" in out["errors"][0] and client.calls == []
+
+
+def test_cups_guarda_solo_cruces_entre_equipos_de_liga_y_pide_lo_terminado():
+    routes, stats = _cups_world()
+    store, client = _cups_store(), _Client(routes=routes, stats=stats)
+    out = _run("cups", client, store)
+    assert out["ok"] and out["cup_teams"] == 120
+    assert out["fetched"] == {"done": 1, "empty": 0, "error": 0}
+    ts = store.c[L.TEAM_STATS]
+    assert set(ts) == {"1", "3"} and ts["1"]["group"] == "cups" and ts["1"]["status"] == "done"
+    assert ts["3"]["status"] == "pending"                                     # sin jugar
+    st = store.c[L.STATE]
+    assert len(st["cups_team_ids"]["ids"]) == 120
+    assert st["cups_122477_2026"]["all_finished"] is False                   # quedan partidos por jugar
+    assert st["cups_122477_2025"]["all_finished"] is True                    # edición pasada vacía: no se relista
+    # Al día siguiente no se relistan las ediciones pasadas.
+    client2 = _Client(routes=routes, stats=stats)
+    _run("cups", client2, store, now=NOW + timedelta(days=1))
+    assert all("season=2026" in u for u in client2.calls if "/matches?" in u)
+
+
+def test_cups_dry_run_no_escribe():
+    routes, stats = _cups_world()
+    store = _cups_store()
+    writes = store.writes
+    out = _run("cups", _Client(routes=routes, stats=stats), store, dry_run=True)
+    assert out["ok"] and store.writes == writes and out["would_fetch"] == 1

@@ -6,6 +6,10 @@
 # el detalle de lo terminado. Tope propio de 50 peticiones al día (de las 100 del plan gratuito);
 # lo que no quepa queda pendiente para el día siguiente.
 #
+# Dos horas: 05:40 y 17:40 UTC (respaldo, porque GitHub se salta crons). No gasta de más: el
+# tope de 50 es por día UTC (hl_load_state/maint_<fecha>); si la de la mañana ya corrió, la de la
+# tarde no tiene días que listar y solo pide lo que quede pendiente con lo que sobre de los 50.
+#
 # Al acabar el plan PRO (después del 12-dic-2026) desactiva hl-load-auto, que ya no gastaría nada.
 # El log solo muestra recuentos.
 name: hl-load-daily
@@ -13,6 +17,7 @@ name: hl-load-daily
 on:
   schedule:
     - cron: "40 5 * * *"
+    - cron: "40 17 * * *"   # respaldo
 
 permissions:
   contents: read

@@ -3,7 +3,8 @@
 #
 #   job: nt (selecciones Europa y Sudamérica) · women (Liga F, WSL y las de `leagues`) ·
 #        women_probe (sondeo de 4 ligas femeninas, ≤8 peticiones) · players (jugadores, 8 ligas) ·
-#        maint (mantenimiento diario por fecha, tope 50/día; ver hl-load-daily)
+#        maint (mantenimiento diario por fecha, tope 50/día; ver hl-load-daily) ·
+#        cups (copas y supercopas: cruces entre equipos de las 8 ligas; después de players)
 #   dry_run=true (por defecto): solo lista y cuenta; no escribe ni pide detalle.
 #   Escribir exige dry_run=false Y confirmar=ESCRIBIR.
 #
@@ -17,7 +18,7 @@ on:
       job:
         description: "Qué cargar"
         type: choice
-        options: [nt, women, women_probe, players, maint]
+        options: [nt, women, women_probe, players, maint, cups]
         default: nt
       dry_run:
         description: "true = solo lista y cuenta"
