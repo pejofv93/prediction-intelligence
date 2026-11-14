@@ -239,12 +239,13 @@ def _meets_min(split: str, n_w: float, n_cur: int) -> bool:
     return n_w >= MIN_N_EFF_SPLIT
 
 
-def league_base_rates(cur_rows: list[dict], prev_rows_same_div: list[dict]) -> dict:
-    """{market: {line_key: {split: p_liga}}} con la misma ponderación por temporada."""
+def league_base_rates(cur_rows: list[dict], prev_rows_same_div: list[dict], markets=None) -> dict:
+    """{market: {line_key: {split: p_liga}}} con la misma ponderación por temporada.
+    markets: lista como MARKETS (por defecto MARKETS; la web de Tendencias añade los de goles)."""
     weighted = [(r, WEIGHT_CURRENT, "cur") for r in cur_rows] + \
                [(r, WEIGHT_PREV_SAME_DIV, "prev") for r in prev_rows_same_div]
     base: dict = {}
-    for market, key, lines in MARKETS:
+    for market, key, lines in (markets or MARKETS):
         base[market] = {}
         for line in lines:
             base[market][line_key(line)] = {}
@@ -254,9 +255,9 @@ def league_base_rates(cur_rows: list[dict], prev_rows_same_div: list[dict]) -> d
     return base
 
 
-def team_rates(team_weighted: list[tuple[dict, float, str]], base: dict) -> dict:
+def team_rates(team_weighted: list[tuple[dict, float, str]], base: dict, markets=None) -> dict:
     out: dict = {}
-    for market, key, lines in MARKETS:
+    for market, key, lines in (markets or MARKETS):
         out[market] = {"source": _MARKET_SOURCE.get(market, "football-data.co.uk"), "lines": {}}
         for line in lines:
             lk = line_key(line)
@@ -284,11 +285,12 @@ def team_rates(team_weighted: list[tuple[dict, float, str]], base: dict) -> dict
 
 
 def build_rate_docs(cur_by_div: dict[str, list[dict]], prev_by_div: dict[str, list[dict]],
-                    cur_season: str, prev_season: str) -> dict[str, dict]:
+                    cur_season: str, prev_season: str, markets=None) -> dict[str, dict]:
     """
     cur_by_div:  filas equipo-partido de la temporada actual por división PRINCIPAL.
     prev_by_div: filas de la temporada anterior por división (principales + inferiores).
     Devuelve {doc_id: doc} para fdco_team_market_rates (sin updated_at).
+    markets: por defecto MARKETS (lo que guarda el colector); la web de Tendencias pasa más.
     """
     prev_team_div: dict[str, str] = {}
     for div, rows in prev_by_div.items():
@@ -302,7 +304,7 @@ def build_rate_docs(cur_by_div: dict[str, list[dict]], prev_by_div: dict[str, li
     for div, cur_rows in cur_by_div.items():
         if div not in MAIN_DIVS:
             continue
-        base = league_base_rates(cur_rows, prev_by_div.get(div, []))
+        base = league_base_rates(cur_rows, prev_by_div.get(div, []), markets)
         for team in sorted({r["team"] for r in cur_rows}):
             mine_cur = [r for r in cur_rows if r["team"] == team]
             prev_div = prev_team_div.get(team)
@@ -322,7 +324,7 @@ def build_rate_docs(cur_by_div: dict[str, list[dict]], prev_by_div: dict[str, li
                 "weights": {"current": WEIGHT_CURRENT, "previous_same_div": WEIGHT_PREV_SAME_DIV,
                             "previous_other_div": WEIGHT_PREV_OTHER_DIV, "shrink_k": SHRINK_K},
                 "cards_convention": mine_cur[0]["cards_convention"] if mine_cur else None,
-                "markets": team_rates(weighted, base),
+                "markets": team_rates(weighted, base, markets),
             }
     return docs
 

@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from export_rates import build  # noqa: E402
+from export_rates import EXPORT_ONLY, build  # noqa: E402
 
 TOL = 1e-4  # Firestore guarda 4 decimales
 FIELDS = ("p_adj", "p_league", "n_cur", "n_prev", "meets_min_sample")
@@ -28,6 +28,8 @@ def compare_doc(mine: dict, stored: dict) -> tuple[int, int, float, list[str]]:
     max_gap = 0.0
     examples = []
     for market, m in mine["markets"].items():
+        if market in EXPORT_ONLY:      # goles: solo en la web, el colector no los guarda
+            continue
         for lk, splits in m["lines"].items():
             for split, c in splits.items():
                 s = ((stored.get("markets") or {}).get(market, {}).get("lines", {}).get(lk, {}).get(split))

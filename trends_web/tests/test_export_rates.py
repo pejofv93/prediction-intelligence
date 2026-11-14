@@ -9,14 +9,14 @@ import export_rates as er  # noqa: E402
 from collectors import fdco_team_matches as fd  # noqa: E402
 
 
-def _row(team, opp, side, date, corners, cards=1, fouls=11, shots=12, sot=4, ga=1, div="SP1", season="2627"):
+def _row(team, opp, side, date, corners, cards=1, fouls=11, shots=12, sot=4, ga=1, gf=1, div="SP1", season="2627"):
     key = "_".join([date] + sorted([team, opp]))   # las dos filas de un partido comparten clave
     return {"div": div, "season": season, "match_date": date, "match_key": key,
             "team": team, "team_slug": fd.slugify(team), "opponent": opp, "side": side,
             "corners_for": corners, "cards_for": cards, "fouls_for": fouls, "shots_for": shots,
             "sot_for": sot, "saves_derived": 3, "corners_total": corners + 4, "cards_total": cards + 2,
             "fouls_total": fouls + 10, "shots_total": shots + 10, "sot_total": sot + 3,
-            "goals_against": ga, "cards_convention": "second_yellow_counts_yellow_plus_red"}
+            "goals_for": gf, "goals_against": ga, "cards_convention": "second_yellow_counts_yellow_plus_red"}
 
 
 def test_fiabilidad():
@@ -33,7 +33,9 @@ def _docs():
                   + [_row("B", "A", "away" if i % 2 else "home", f"2026-09-{i + 1:02d}", corners=4)
                      for i in range(12)]}
     prev = {"SP1": [_row("A", "B", "home", f"2025-09-{i + 1:02d}", corners=6, season="2526") for i in range(6)]}
-    return fd.build_rate_docs(cur, prev, "2627", "2526"), cur
+    for rows in (*cur.values(), *prev.values()):
+        er.add_goal_fields(rows)
+    return fd.build_rate_docs(cur, prev, "2627", "2526", er.ALL_MARKETS), cur
 
 
 def test_formato_compacto_y_celdas():
@@ -52,7 +54,9 @@ def test_formato_compacto_y_celdas():
     assert hits_cur == src["hits_cur"] == 9
     # las 11 pestañas, con sus líneas legibles
     keys = [m["key"] for m in data["markets"]]
-    assert keys == [k for k, _, _ in er.MARKET_LABELS] and data["markets"][0]["lines"][0] == "3,5"
+    assert keys == [k for k, _, _ in er.MARKET_LABELS] and data["markets"][0]["lines"] == ["0,5", "1,5", "2,5"]
+    assert set(keys) == {m for m, _, _ in er.ALL_MARKETS}       # ningún mercado calculado se queda fuera
+    assert {m["key"] for m in data["markets"] if m.get("binary")} == {"btts", "clean_sheet"}
     assert next(m for m in data["markets"] if m["key"] == "saves_derived")["source"] == "derivada"
     # ligas sin datos salen vacías, no se inventan
     assert data["leagues"]["E0"]["teams"] == [] and data["leagues"]["E0"]["data_through"] is None
@@ -68,3 +72,32 @@ def test_comparacion_detecta_igual_y_distinto():
     stored["markets"]["corners_for"]["lines"]["over_3_5"]["all"]["p_adj"] += 0.01
     cells, diff, gap, ex = cr.compare_doc(mine, stored)
     assert diff == 1 and abs(gap - 0.01) < 1e-9 and ex == ["SP1·A·corners_for·over_3_5·all"]
+
+
+def test_mercados_de_goles():
+    rows = er.add_goal_fields([
+        {"goals_for": 2, "goals_against": 1}, {"goals_for": 0, "goals_against": 0},
+        {"goals_for": 3, "goals_against": 0}, {"goals_for": None, "goals_against": 2},
+    ])
+    assert [(r["goals_total"], r["btts"], r["clean_sheet"]) for r in rows] == \
+        [(3, 1, 0), (0, 0, 1), (3, 0, 1), (None, None, 0)]
+    # A marca 2 y no encaja en 8 de 12 partidos de esta temporada (los otros 4: 0-1)
+    cur = {"SP1": [_row("A", "B", "home" if i % 2 else "away", f"2026-09-{i + 1:02d}", corners=5,
+                        gf=2 if i < 8 else 0, ga=0 if i < 8 else 1) for i in range(12)]}
+    er.add_goal_fields(cur["SP1"])
+    docs = fd.build_rate_docs(cur, {}, "2627", "2526", er.ALL_MARKETS)
+    m = docs["SP1_a"]["markets"]
+    assert m["goals_for"]["lines"]["over_1_5"]["all"]["hits_cur"] == 8
+    assert m["clean_sheet"]["lines"]["over_0_5"]["all"]["hits_cur"] == 8
+    assert m["btts"]["lines"]["over_0_5"]["all"]["hits_cur"] == 0
+    assert m["goals_total"]["lines"]["over_1_5"]["all"]["hits_cur"] == 8
+    # por defecto el colector sigue con sus 11 mercados (fdco_team_market_rates no cambia)
+    assert set(fd.build_rate_docs(cur, {}, "2627", "2526")["SP1_a"]["markets"]) == {m for m, _, _ in fd.MARKETS}
+
+
+def test_comparacion_ignora_los_mercados_solo_web():
+    import compare_rates as cr
+    docs, _ = _docs()
+    mine = docs["SP1_a"]
+    stored = {**mine, "markets": {k: v for k, v in mine["markets"].items() if k not in er.EXPORT_ONLY}}
+    assert cr.compare_doc(mine, stored)[1] == 0

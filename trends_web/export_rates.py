@@ -30,14 +30,33 @@ LEAGUE_NAMES = {
     "SP1": "LaLiga", "SP2": "Segunda", "I1": "Serie A", "E0": "Premier League",
     "F1": "Ligue 1", "P1": "Primeira Liga", "D1": "Bundesliga", "N1": "Eredivisie",
 }
+# Mercados de goles: solo en la web (el colector y fdco_team_market_rates no cambian). Se calculan
+# con las mismas funciones (ponderación, ajuste a la media, muestra mínima) sobre tres campos que
+# se añaden a cada fila equipo-partido: goals_total, btts (1/0) y clean_sheet (1/0, sin encajar).
+# Ambos marcan y portería a cero son sí/no: línea 0,5 sobre el 1/0.
+GOAL_MARKETS: list[tuple[str, str, tuple[float, ...]]] = [
+    ("goals_for",     "goals_for",     (0.5, 1.5, 2.5)),
+    ("goals_against", "goals_against", (0.5, 1.5, 2.5)),
+    ("clean_sheet",   "clean_sheet",   (0.5,)),
+    ("goals_total",   "goals_total",   (1.5, 2.5, 3.5, 4.5)),
+    ("btts",          "btts",          (0.5,)),
+]
+EXPORT_ONLY = {m for m, _, _ in GOAL_MARKETS}
+ALL_MARKETS = GOAL_MARKETS + fd.MARKETS
+BINARY = {"clean_sheet", "btts"}
 # (clave, etiqueta, ámbito) en el orden de las pestañas
 MARKET_LABELS = [
+    ("goals_for", "Goles marcados", "equipo"),
+    ("goals_against", "Goles encajados", "equipo"),
+    ("clean_sheet", "Portería a cero", "equipo"),
     ("corners_for", "Córners", "equipo"),
     ("cards_for", "Tarjetas", "equipo"),
     ("fouls_for", "Faltas cometidas", "equipo"),
     ("shots_for", "Remates", "equipo"),
     ("sot_for", "Remates a puerta", "equipo"),
     ("saves_derived", "Paradas (derivadas)", "equipo"),
+    ("goals_total", "Goles", "partido"),
+    ("btts", "Ambos marcan", "partido"),
     ("corners_total", "Córners", "partido"),
     ("cards_total", "Tarjetas", "partido"),
     ("fouls_total", "Faltas", "partido"),
@@ -45,6 +64,17 @@ MARKET_LABELS = [
     ("sot_total", "Remates a puerta", "partido"),
 ]
 SPLITS = ("all", "home", "away")
+
+
+def add_goal_fields(rows: list[dict]) -> list[dict]:
+    """Añade goals_total, btts y clean_sheet a cada fila equipo-partido (en sitio)."""
+    for r in rows:
+        gf, ga = r.get("goals_for"), r.get("goals_against")
+        ok = gf is not None and ga is not None
+        r["goals_total"] = gf + ga if ok else None
+        r["btts"] = int(gf > 0 and ga > 0) if ok else None
+        r["clean_sheet"] = int(ga == 0) if ga is not None else None
+    return rows
 
 
 def reliability(cell: dict) -> str:
@@ -68,13 +98,14 @@ def compact(docs: dict[str, dict], cur_by_div: dict[str, list[dict]], generated_
     """Docs de build_rate_docs → JSON compacto de la página.
     Celda = [p_adj, p_liga, partidos_actual, partidos_anterior, n_efectivo, fiabilidad,
              aciertos_actual] — el último sirve al modo "solo esta temporada" (porcentaje bruto)."""
-    lines_by_market = {m: [fd.line_key(x) for x in lines] for m, _, lines in fd.MARKETS}
+    lines_by_market = {m: [fd.line_key(x) for x in lines] for m, _, lines in ALL_MARKETS}
     out = {
         "generated_at": generated_at,
         "league_gap": LEAGUE_GAP,
         "markets": [{"key": k, "label": lab, "scope": sc,
                      "lines": [lk.replace("over_", "").replace("_", ",") for lk in lines_by_market[k]],
-                     "source": "derivada" if k == "saves_derived" else "football-data.co.uk"}
+                     "source": "derivada" if k == "saves_derived" else "football-data.co.uk",
+                     **({"binary": True} if k in BINARY else {})}
                     for k, lab, sc in MARKET_LABELS],
         "leagues": {},
     }
@@ -132,20 +163,21 @@ async def load_rows(today: Optional[date] = None, csv_dir: Optional[str] = None)
                 if raw is None:
                     failed.append(f"{div}_{season}")
                 else:
-                    target[div] = fd._to_team_rows(raw, div, season)
+                    target[div] = add_goal_fields(fd._to_team_rows(raw, div, season))
         main_teams = {r["team"] for rows in cur_by_div.values() for r in rows}
         for div in fd.LOWER_DIVS:
             raw = await raw_rows(div, prev_season)
             if raw is None:
                 failed.append(f"{div}_{prev_season}")
             else:
-                prev_by_div[div] = [r for r in fd._to_team_rows(raw, div, prev_season) if r["team"] in main_teams]
+                prev_by_div[div] = add_goal_fields(
+                    [r for r in fd._to_team_rows(raw, div, prev_season) if r["team"] in main_teams])
     return cur_by_div, prev_by_div, cur_season, prev_season, failed
 
 
 def build(today: Optional[date] = None, csv_dir: Optional[str] = None):
     cur_by_div, prev_by_div, cur_season, prev_season, failed = asyncio.run(load_rows(today, csv_dir))
-    docs = fd.build_rate_docs(cur_by_div, prev_by_div, cur_season, prev_season)
+    docs = fd.build_rate_docs(cur_by_div, prev_by_div, cur_season, prev_season, ALL_MARKETS)
     return docs, cur_by_div, failed
 
 

@@ -38,6 +38,8 @@ const signed = (x) => (x > 0 ? `+${x}` : `${x}`);
 const num = (x) => (x == null ? "—" : Number(x).toLocaleString("es-ES", { maximumFractionDigits: 2 }));
 
 function marketMeta(key) { return DATA.markets.find((m) => m.key === key); }
+// Ambos marcan / portería a cero: sí/no (línea 0,5 sobre 1/0) → columna "Sí" en vez de "+0,5".
+const lineHead = (m, ln) => (m.binary ? "Sí" : `+${ln}`);
 
 function readHash() {
   const raw = decodeURIComponent(location.hash.slice(1));
@@ -131,7 +133,8 @@ function renderTable() {
   const m = marketMeta(state.market);
   $("table-title").textContent =
     `${lg.name} · ${m.label} ${m.scope === "partido" ? "(total del partido)" : "(del equipo)"} · ` +
-    `${SPLITS[state.split][1]} · ${state.sample === "cur" ? "solo esta temporada · " : ""}más de…`;
+    `${SPLITS[state.split][1]} · ${state.sample === "cur" ? "solo esta temporada · " : ""}` +
+    (m.binary ? "% de partidos" : "más de…");
 
   const teams = [...lg.teams];
   if (state.sort < 0) {
@@ -144,8 +147,8 @@ function renderTable() {
     el("th", {}, el("button", { text: "Equipo", "data-active": String(state.sort < 0),
                                 onclick: () => { state.sort = -1; render(); } })),
     ...m.lines.map((ln, i) => el("th", {},
-      el("button", { text: `+${ln}`, "data-active": String(state.sort === i),
-                     "aria-label": `Más de ${ln}: ordenar de mayor a menor`,
+      el("button", { text: lineHead(m, ln), "data-active": String(state.sort === i),
+                     "aria-label": `${m.binary ? m.label : "Más de " + ln}: ordenar de mayor a menor`,
                      onclick: () => { state.sort = i; render(); } }))));
   const body = teams.map((t) => el("tr", {},
     el("td", {},
@@ -167,10 +170,10 @@ function openTeam(t) {
   const blocks = DATA.markets.map((m) => el("div", {},
     el("h3", { text: `${m.label} ${m.scope === "partido" ? "(total del partido)" : "(del equipo)"}` }),
     el("div", { class: "table-wrap" }, el("table", {},
-      el("thead", {}, el("tr", {}, el("th", { text: "Más de" }),
+      el("thead", {}, el("tr", {}, el("th", { text: m.binary ? "" : "Más de" }),
                          ...SPLITS.map(([, l]) => el("th", { text: l })))),
       el("tbody", {}, ...m.lines.map((ln, i) => el("tr", {},
-        el("td", { text: `+${ln}` }),
+        el("td", { text: lineHead(m, ln) }),
         ...SPLITS.map((_, s) => el("td", {}, cellNode(t.r[m.key][i][s]))))))))));
   sec.replaceChildren(
     el("button", { class: "pill close", text: "Cerrar", onclick: closeTeam }),
