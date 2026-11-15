@@ -7,6 +7,11 @@ Parametrizacion:
   mu_away     = attack_away * defense_home
 
 fit_attack_defense ajusta ataque y defensa por equipo via maxima verosimilitud.
+  Optimizador: L-BFGS-B con gradiente analítico y una penalización (FIT_PRIOR_L2) hacia los
+  valores de arranque, que encoge a los equipos con poca muestra, fija la escala (ataque×c y
+  defensa/c dan las mismas predicciones) y evita parámetros infinitos. Hasta el 15-nov-2026 era
+  Nelder-Mead con maxiter 2000 sobre ~40 parámetros: no convergía y diferencias de redondeo
+  movían la probabilidad hasta 4-5 puntos.
 predict_match_probs construye la matriz de marcadores 9x9 y calcula outcome probs.
 """
 import logging
@@ -18,6 +23,13 @@ from scipy.stats import poisson
 from shared.config import MIN_MATCHES_TO_FIT
 
 logger = logging.getLogger(__name__)
+
+# Penalización por parámetro (en log) hacia el arranque en frío. Elegida con el Brier 1X2 frente a
+# Pinnacle en 2019/20-2022/23 (8 ligas de football-data.co.uk; probados 0,01-100): 5 fue la mejor.
+# Sin ella (o muy baja) el ajuste convergido sobreajusta los ~40 partidos y empeora el Brier.
+FIT_PRIOR_L2 = 5.0
+FIT_GTOL = 1e-8
+FIT_MAXITER = 1000
 
 # Parametros de arranque en frio (cold start)
 # Se sobreescriben con datos reales cuando hay suficientes partidos.
@@ -90,36 +102,40 @@ def fit_attack_defense(matches: list[dict]) -> dict:
     x0[n:2*n] = np.log(COLD_START_PARAMS["default_defense"])
     x0[-1] = np.log(1.0 + COLD_START_PARAMS["home_advantage"])
 
-    def neg_log_likelihood(params: np.ndarray) -> float:
-        attacks = np.exp(params[:n])
-        defenses = np.exp(params[n:2*n])
-        home_mult = np.exp(params[-1])  # = 1 + home_advantage
+    hi = np.array([team_idx[str(m["home_team_id"])] for m in valid_matches])
+    ai = np.array([team_idx[str(m["away_team_id"])] for m in valid_matches])
+    gh = np.array([int(m["goals_home"]) for m in valid_matches], dtype=float)
+    ga = np.array([int(m["goals_away"]) for m in valid_matches], dtype=float)
 
-        ll = 0.0
-        for m in valid_matches:
-            hi = team_idx[str(m["home_team_id"])]
-            ai = team_idx[str(m["away_team_id"])]
-            gh = int(m["goals_home"])
-            ga = int(m["goals_away"])
-
-            lambda_h = attacks[hi] * defenses[ai] * home_mult
-            mu_a = attacks[ai] * defenses[hi]
-
-            # Evitar log(0) en pmf
-            lambda_h = max(lambda_h, 1e-6)
-            mu_a = max(mu_a, 1e-6)
-
-            ll += poisson.logpmf(gh, lambda_h) + poisson.logpmf(ga, mu_a)
-
-        return -ll
+    def objective(params: np.ndarray) -> tuple[float, np.ndarray]:
+        """−log-verosimilitud (sin constantes) + penalización suave, y su gradiente."""
+        log_a, log_d, log_h = params[:n], params[n:2*n], params[-1]
+        log_lam = log_a[hi] + log_d[ai] + log_h
+        log_mu = log_a[ai] + log_d[hi]
+        lam, mu = np.exp(log_lam), np.exp(log_mu)
+        diff = params - x0
+        f = float(np.sum(lam - gh * log_lam) + np.sum(mu - ga * log_mu)) + FIT_PRIOR_L2 * float(diff @ diff)
+        r_lam, r_mu = lam - gh, mu - ga
+        g = np.zeros_like(params)
+        np.add.at(g, hi, r_lam)            # ataque del local
+        np.add.at(g, n + ai, r_lam)        # defensa del visitante
+        np.add.at(g, ai, r_mu)             # ataque del visitante
+        np.add.at(g, n + hi, r_mu)         # defensa del local
+        g[-1] = float(np.sum(r_lam))       # ventaja de campo
+        g += 2.0 * FIT_PRIOR_L2 * diff
+        return f, g
 
     try:
         result_opt = minimize(
-            neg_log_likelihood,
+            objective,
             x0,
-            method="Nelder-Mead",
-            options={"maxiter": 2000, "xatol": 1e-5, "fatol": 1e-5},
+            jac=True,
+            method="L-BFGS-B",
+            bounds=[(-5.0, 5.0)] * (2 * n + 1),
+            options={"maxiter": FIT_MAXITER, "gtol": FIT_GTOL},
         )
+        if not result_opt.success:
+            logger.warning("fit_attack_defense: L-BFGS-B no convergió (%s)", result_opt.message)
         opt_params = result_opt.x
         attacks_fit = np.exp(opt_params[:n])
         defenses_fit = np.exp(opt_params[n:2*n])
