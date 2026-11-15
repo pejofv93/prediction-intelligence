@@ -196,8 +196,24 @@ const dayLabel = (k) => new Date(`${k}T12:00:00`).toLocaleDateString("es-ES",
   { weekday: "short", day: "numeric", month: "short" });
 const hhmm = (iso) => new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
 const leagueName = (div) => DIV_NAMES[div] || div;
-const highlights = (m) => Object.values(m.stats).filter((s) => s.available)
-  .reduce((n, s) => n + Object.values(s.blocks).filter((b) => b.highlight).length, 0);
+// Línea destacada: como mucho UNA por mercado y lado (local, visitante, total), la que más se
+// separa de la liga, y solo si llega a STANDOUT_PTS puntos (los que se ven en la ficha) en un
+// mercado con ventaja medida (block.highlight, que ya es falso con muestra insuficiente).
+// Las líneas de un mismo mercado se encienden juntas: contarlas todas inflaría la marca.
+const STANDOUT_PTS = 10;
+function standoutLine(block) {
+  if (!block.highlight) return null;
+  let best = null;
+  for (const [ln, pm, pl] of block.lines) {
+    const gap = pts(pm, pl);
+    if (gap != null && Math.abs(gap) >= STANDOUT_PTS && (!best || Math.abs(gap) > Math.abs(best.gap)))
+      best = { ln, gap };
+  }
+  return best;
+}
+const standoutCount = (m) => Object.values(m.stats).filter((s) => s.available)
+  .reduce((n, s) => n + Object.values(s.blocks).filter((b) => standoutLine(b)).length, 0);
+const standoutText = (n) => `${n} ${n === 1 ? "línea destacada" : "líneas destacadas"}`;
 
 function mpTag(label) { return el("span", { class: `tag ${MP_TAGS[label] || ""}`, text: label }); }
 
@@ -222,13 +238,13 @@ function renderMatchList() {
   list.replaceChildren(...[...byDiv].map(([div, ms]) => el("div", { class: "match-group" },
     el("h3", { text: leagueName(div) }),
     ...ms.map((m) => {
-      const n = highlights(m);
+      const n = standoutCount(m);
       return el("button", { class: `match-row${m.id === state.match ? " on" : ""}`,
                             onclick: () => { state.match = m.id; render(); scrollToMatch(); } },
         el("span", { class: "ko", text: hhmm(m.kickoff_utc) }),
         el("span", { class: "teams", text: `${m.home} – ${m.away}` }),
         m.low_sample ? mpTag("muestra insuficiente")
-          : n ? el("span", { class: "tag ventaja", text: `${n} con ventaja medida` }) : null);
+          : n ? el("span", { class: "tag ventaja", text: standoutText(n) }) : null);
     }))));
 }
 
@@ -238,6 +254,7 @@ function sampleText(m, side) {
 }
 
 function linesTable(title, block) {
+  const best = standoutLine(block);
   return el("div", { class: "block" },
     el("p", { class: "block-title" }, `${title} `, mpTag(block.label)),
     el("table", { class: "lines" },
@@ -246,8 +263,10 @@ function linesTable(title, block) {
       el("tbody", {}, ...block.lines.map(([ln, pm, pl, nl]) => {
         const gap = pts(pm, pl);
         const cls = gap == null || Math.abs(gap) < 5 ? "" : gap > 0 ? "up" : "down";
-        return el("tr", { class: block.highlight ? "hl" : "" },
-          el("td", { text: `+${ln}` }),
+        const star = Boolean(best) && best.ln === ln;
+        return el("tr", { class: [block.highlight ? "hl" : "", star ? "star" : ""].join(" ").trim(),
+                          title: star ? `Destacada: modelo a ${STANDOUT_PTS} puntos o más de la liga` : "" },
+          el("td", { text: `${star ? "★ " : ""}+${ln}` }),
           el("td", { class: "pm", text: pct(pm) }),
           el("td", { text: pct(pl) }),
           el("td", { class: `gap ${cls}`, text: gap == null ? "—" : `${signed(gap)} pts` }),
@@ -281,6 +300,7 @@ function renderMatch() {
         linesTable(m.home, s.blocks.home), linesTable(m.away, s.blocks.away),
         linesTable("Total del partido", s.blocks.total)));
   });
+  const nStar = standoutCount(m);
   sec.replaceChildren(...[    // replaceChildren pintaría un null como texto "null"
     el("button", { class: "pill close", text: "Cerrar", onclick: () => { state.match = null; render(); } }),
     el("h2", { text: `${m.home} – ${m.away}` }),
@@ -288,7 +308,10 @@ function renderMatch() {
     el("p", { class: "muted", text: sampleText(m, "home") }),
     el("p", { class: "muted", text: sampleText(m, "away") }),
     m.low_sample ? el("p", { class: "warn",
-      text: "Muestra insuficiente: algún equipo tiene pocos partidos esta temporada. Se calcula, pero no se resalta." }) : null,
+      text: "Muestra insuficiente: algún equipo tiene pocos partidos esta temporada. Se calcula, pero no se resalta." })
+      : el("p", { class: nStar ? "standout" : "muted",
+          text: nStar ? `★ ${standoutText(nStar)}: en cada mercado y lado con ventaja medida, la línea que más se separa de la liga, si llega a ${STANDOUT_PTS} puntos.`
+                      : `Ninguna línea destacada (en mercados con ventaja medida, ninguna se separa ${STANDOUT_PTS} puntos o más de la liga).` }),
     ...stats].filter(Boolean));
   sec.hidden = false;
 }
