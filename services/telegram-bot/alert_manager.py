@@ -214,6 +214,45 @@ def _segment_history_doc() -> dict | None:
     return _seg_cache["doc"]
 
 
+# Ajustes de la revisión mensual de niveles (shared/tier_review, model_weights/tier_adjustments).
+# Solo existen si el usuario aprobó una propuesta (sports-tier-review, confirmar=APLICAR).
+_adj_cache: dict = {"at": None, "factors": {}}
+
+
+def _tier_factors() -> dict:
+    now = datetime.now(timezone.utc)
+    if _adj_cache["at"] and (now - _adj_cache["at"]).total_seconds() < _SEG_TTL_S:
+        return _adj_cache["factors"]
+    try:
+        from shared.tier_review import current_factors
+        f = current_factors()
+        _adj_cache["factors"] = f if isinstance(f, dict) else {}
+    except Exception:
+        logger.warning("tier_adjustments: no se pudo leer — alerta sin ajuste", exc_info=True)
+        _adj_cache["factors"] = {}
+    _adj_cache["at"] = now
+    return _adj_cache["factors"]
+
+
+def _apply_tier_adjustment(prediction: dict) -> tuple[dict, str]:
+    """(señal con nivel y Kelly ajustados, línea explicativa) o (señal intacta, "").
+    Solo baja la etiqueta y el Kelly mostrados; EV, cuota y el envío no cambian."""
+    try:
+        from shared.tier_review import adjust
+        adj = adjust(prediction, _tier_factors())
+    except Exception:
+        logger.warning("send_sports_alert: ajuste de nivel falló — alerta sin ajuste", exc_info=True)
+        return prediction, ""
+    if not adj:
+        return prediction, ""
+    out = {**prediction, "intensity": adj["intensity"], "intensity_model": adj["intensity_model"],
+           "kelly_fraction": adj["kelly_fraction"], "kelly_model": adj["kelly_model"]}
+    line = (f"🔧 Revisión mensual aprobada: nivel {adj['intensity_model']} → {adj['intensity']}, "
+            f"Kelly {adj['kelly_model'] * 100:.1f} % → {adj['kelly_fraction'] * 100:.1f} % "
+            f"(este segmento ha cumplido {adj['k'] * 100:.0f} % de la ventaja que veía el modelo)")
+    return out, line
+
+
 def _pct(x: float) -> str:
     return f"{x * 100:.0f} %".replace("-", "−")
 
@@ -948,6 +987,8 @@ def _record_sports_sent(prediction: dict) -> None:
             "line": prediction.get("line"),
             "home_team": prediction.get("home_team"), "away_team": prediction.get("away_team"),
             "odds": odds, "ev": ev, "intensity": _shown_intensity(prediction),
+            # nivel del modelo antes de la revisión mensual (la revisión agrupa por este)
+            "intensity_model": prediction.get("intensity_model") or _shown_intensity(prediction),
             "match_date": str(prediction.get("match_date") or ""),
             "sent_at": now, "last_sent_at": now, "last_odds": odds, "last_ev": ev,
             "resends": 0, "result": None, "correct": None,
@@ -988,6 +1029,7 @@ async def send_sports_alert(prediction: dict) -> str:
     elif not _claim_alert_slot(key, "sports"):
         return "duplicate"
 
+    prediction, _adj_line = _apply_tier_adjustment(prediction)
     text = _format_alert_unified(prediction)
     if _resend_from_odds is not None:
         text = (
@@ -1001,10 +1043,11 @@ async def send_sports_alert(prediction: dict) -> str:
     except Exception:
         logger.warning("send_sports_alert: historial por segmento falló — alerta sin él", exc_info=True)
         _hist_line = ""
-    if _hist_line:
+    _extra = "\n".join(x for x in (_adj_line, _hist_line) if x)
+    if _extra:
         _footer = "\n\n⚠️ Apuesta responsablemente"
         head, sep, tail = text.rpartition(_footer)
-        text = f"{head}\n{_hist_line}{sep}{tail}" if sep else f"{text}\n{_hist_line}"
+        text = f"{head}\n{_extra}{sep}{tail}" if sep else f"{text}\n{_extra}"
 
     # Sin línea "Confianza histórica real": comparaba la confianza (acuerdo entre las señales
     # del modelo, 1 − desviación; en mercados alternativos, su probabilidad) con el acierto de

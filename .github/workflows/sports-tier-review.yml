@@ -1,0 +1,65 @@
+# Revisión mensual de niveles de Sports (opción a, shared/tier_review). El día 1 de cada mes
+# PROPONE (guarda la propuesta y manda el resumen a Telegram); nunca aplica sola.
+# Aplicar o revertir: solo a mano, con accion=aplicar + confirmar=APLICAR o
+# accion=revertir + confirmar=REVERTIR. Solo cambia la etiqueta de nivel y el Kelly que se
+# muestran en la alerta; si una señal se envía lo sigue decidiendo el motor.
+name: sports-tier-review
+
+on:
+  schedule:
+    - cron: "0 8 1 * *"       # día 1 de cada mes, 08:00 UTC: proponer
+  workflow_dispatch:
+    inputs:
+      accion:
+        description: "proponer | aplicar | revertir"
+        required: true
+        default: "proponer"
+        type: choice
+        options: ["proponer", "aplicar", "revertir"]
+      confirmar:
+        description: "APLICAR o REVERTIR (obligatorio para esas acciones)"
+        required: false
+        default: ""
+      enviar:
+        description: "true = mandar el resumen a Telegram General"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sports-tier-review
+  cancel-in-progress: false
+
+jobs:
+  revision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Revisión de niveles
+        env:
+          ACCION: ${{ github.event_name == 'schedule' && 'proponer' || inputs.accion }}
+          CONFIRMAR: ${{ inputs.confirmar }}
+          ENVIAR: ${{ github.event_name == 'schedule' && 'true' || inputs.enviar }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/ops/tier_review.py

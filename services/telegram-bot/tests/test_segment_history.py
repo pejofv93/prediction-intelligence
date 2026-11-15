@@ -95,3 +95,23 @@ def test_nivel_mostrado_se_guarda_igual_que_en_el_mensaje():
     assert alert_manager._shown_intensity({"ev": 0.15}) == "✅"
     assert alert_manager._shown_intensity({"edge": 0.09}) == "✅"
     assert alert_manager._shown_intensity({"ev": 0.02}) == "📊"
+
+
+def test_ajuste_aprobado_baja_nivel_y_kelly_y_se_explica(monkeypatch):
+    monkeypatch.setattr(alert_manager, "_tier_factors", lambda: {"football|h2h|fuerte": 0.5})
+    pred = {"sport": "football", "market_type": "h2h", "intensity": "🔥", "odds": 2.5, "ev": 0.25,
+            "kelly_fraction": 0.05}
+    out, line = alert_manager._apply_tier_adjustment(pred)
+    assert out["intensity"] == "✅" and out["intensity_model"] == "🔥" and out["ev"] == 0.25
+    assert line.startswith("🔧 Revisión mensual aprobada: nivel 🔥 → ✅")
+    # sin ajustes aprobados: la señal no cambia
+    monkeypatch.setattr(alert_manager, "_tier_factors", lambda: {})
+    assert alert_manager._apply_tier_adjustment(pred) == (pred, "")
+
+
+def test_ajuste_que_falla_no_toca_la_alerta(monkeypatch):
+    def boom():
+        raise RuntimeError("x")
+    monkeypatch.setattr(alert_manager, "_tier_factors", boom)
+    pred = {"sport": "football", "intensity": "🔥", "odds": 2.0, "ev": 0.3}
+    assert alert_manager._apply_tier_adjustment(pred) == (pred, "")
