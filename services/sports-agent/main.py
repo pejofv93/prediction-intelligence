@@ -357,7 +357,8 @@ async def run_women_backtest_job(dry_run: bool = True) -> StreamingResponse:
 async def run_women_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = True) -> StreamingResponse:
     """Fútbol femenino (mp-w1): fichas "solo referencia" de los próximos `days` días en
     match_previews_women. Lista de partidos: un listado de temporada por liga en Highlightly cada
-    20 h como mucho (tope propio de 12 al día). dry_run=true por defecto. Resumen solo con recuentos."""
+    20 h como mucho (tope propio: 30 al día con el plan PRO, 12 después). dry_run=true por defecto:
+    no escribe fichas, pero guarda el listado nuevo para no repetirlo. Resumen solo con recuentos."""
     if not 1 <= days <= 3:
         raise HTTPException(status_code=400, detail="days 1-3")
     from analyzers.match_preview_women_live import run_women_previews

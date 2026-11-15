@@ -31,10 +31,42 @@ def test_lista_desde_listado_filtra_terminados_y_ventana():
 
 
 def test_tope_diario_y_cabecera():
-    assert wl.women_fixtures_budget(0, None) == 12
-    assert wl.women_fixtures_budget(10, None) == 2
-    assert wl.women_fixtures_budget(0, 5) == 5
-    assert wl.women_fixtures_budget(20, 50) == 0
+    from datetime import date
+    assert wl.women_fixtures_cap(date(2026, 11, 15)) == 30
+    assert wl.women_fixtures_cap(date(2026, 12, 12)) == 30          # último día PRO, incluido
+    assert wl.women_fixtures_cap(date(2026, 12, 13)) == 12
+    assert wl.women_fixtures_budget(0, None, cap=12) == 12
+    assert wl.women_fixtures_budget(10, None, cap=12) == 2
+    assert wl.women_fixtures_budget(0, 5, cap=30) == 5
+    assert wl.women_fixtures_budget(20, 50, cap=12) == 0
+    assert wl.women_fixtures_budget(9, None, cap=30) == 21
+
+
+def test_dry_run_guarda_el_listado_pero_no_las_fichas(monkeypatch):
+    docs = [d for d in _docs() if d["season"] < 2026 or d["date"] < "2026-09-01T030"]
+    bt = _backtest(docs)
+    fx = _fixture(docs)
+
+    async def fake_list(now, api_key, quota, state, client=None):
+        return {"fixtures": [fx], "listed": ["WLF"], "from_state": [], "not_listed": [], "hl_requests": 3,
+                "errors": [], "by_div_state": {"WLF": {"listed_at": now.isoformat(), "fixtures": [fx]}}}
+
+    writes = []
+    monkeypatch.setattr(wl, "list_women_fixtures", fake_list)
+    monkeypatch.setattr(wl, "_set_docs", lambda c, d: writes.append((c, d)))
+    s = asyncio.run(wl.run_women_previews(dry_run=True, now=NOW, docs=docs, backtest=bt, existing={}, state={}))
+    assert s["would_write"] == 1 and s["state_saved"]
+    assert [c for c, _ in writes] == ["match_previews_state"]          # ninguna ficha
+    assert writes[0][1]["women"]["by_div"]["WLF"]["fixtures"] == [fx]
+
+    async def from_state(now, api_key, quota, state, client=None):   # sin listar nada nuevo
+        return {"fixtures": [fx], "listed": [], "from_state": ["WLF"], "not_listed": [], "hl_requests": 0,
+                "errors": [], "by_div_state": state.get("by_div", {})}
+
+    writes.clear()
+    monkeypatch.setattr(wl, "list_women_fixtures", from_state)
+    s = asyncio.run(wl.run_women_previews(dry_run=True, now=NOW, docs=docs, backtest=bt, existing={}, state={}))
+    assert not s["state_saved"] and writes == []
 
 
 def test_sin_clave_usa_lo_guardado_y_no_relista_lo_reciente():

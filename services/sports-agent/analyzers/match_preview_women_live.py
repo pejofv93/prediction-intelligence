@@ -5,9 +5,11 @@ Fútbol femenino (mp-w1) — Paso 4: lista de partidos, fichas y graduación. Mi
 match_preview_store (mp-v1): dry_run=True por defecto, mismo hash y congelado (2 h antes).
 
   Lista de partidos: un listado de temporada por liga en Highlightly, como mucho una vez cada
-      RELIST_H horas y con un tope propio de HL_WOMEN_FIXTURES_DAILY peticiones al día (contador
-      highlightly_women_fixtures). Se guarda en match_previews_state/women; entre listados se
-      usa lo guardado.
+      RELIST_H horas y con un tope propio al día (contador highlightly_women_fixtures): 30 mientras
+      dura el plan PRO (hasta HL_PRO_UNTIL incluido) y 12 después. Se guarda en
+      match_previews_state/women; entre listados se usa lo guardado. El dry-run también guarda
+      el listado (única escritura del dry-run, además de los contadores de cuota), para que la
+      escritura real no repita las peticiones.
   Fichas → match_previews_women/{div}_{fecha}_{id Highlightly}: SIEMPRE "solo referencia" (no se
       usan las etiquetas del backtest) hasta medirlas en directo. Líneas y dispersión: las
       guardadas en match_preview_metrics/mp-w1_backtest (sin ese documento no hay fichas).
@@ -41,7 +43,8 @@ logger = logging.getLogger(__name__)
 PREVIEWS_W, GRADES_W = "match_previews_women", "match_preview_grades_women"
 STATE_DOC = ("match_previews_state", "women")
 HL_WOMEN_FIXTURES_API = "highlightly_women_fixtures"    # contador propio
-HL_WOMEN_FIXTURES_DAILY = 12      # tope al día: un listado de temporada por liga (≈ 2-3 páginas)
+HL_WOMEN_FIXTURES_DAILY = 12      # tope al día con el plan gratuito: un listado por liga (≈ 2-3 páginas)
+HL_WOMEN_FIXTURES_DAILY_PRO = 30  # tope al día mientras dura el plan PRO
 RELIST_H = 20                     # una liga listada hace menos no se vuelve a listar
 LIST_AHEAD_DAYS = 7               # partidos que se guardan del listado
 LABEL_POLICY = "solo referencia hasta medirlo en directo"
@@ -83,9 +86,16 @@ def fixtures_from_listing(listing: list[dict], league_id: int, hl_season: int, n
     return out
 
 
+def women_fixtures_cap(today=None) -> int:
+    """30 hasta el fin del plan PRO (HL_PRO_UNTIL, incluido); 12 después."""
+    from collectors.highlightly_players import HL_PRO_UNTIL
+    today = today or datetime.now(timezone.utc).date()
+    return HL_WOMEN_FIXTURES_DAILY_PRO if today <= HL_PRO_UNTIL else HL_WOMEN_FIXTURES_DAILY
+
+
 def women_fixtures_budget(used_today: int, remaining_reported: Optional[int],
-                          cap: int = HL_WOMEN_FIXTURES_DAILY) -> int:
-    left = cap - int(used_today or 0)
+                          cap: Optional[int] = None) -> int:
+    left = (women_fixtures_cap() if cap is None else cap) - int(used_today or 0)
     if remaining_reported is not None:
         left = min(left, int(remaining_reported))
     return max(0, left)
@@ -172,7 +182,8 @@ async def run_women_previews(dry_run: bool = True, now: Optional[datetime] = Non
                              highlightly: bool = True, fixtures: Optional[list[dict]] = None,
                              docs: Optional[list[dict]] = None, backtest: Optional[dict] = None,
                              existing: Optional[dict] = None, state: Optional[dict] = None) -> dict:
-    """Fichas de los próximos `days` días. fixtures/docs/backtest/existing/state: para tests."""
+    """Fichas de los próximos `days` días. fixtures/docs/backtest/existing/state: para tests.
+    En dry-run no escribe fichas, pero sí guarda el listado nuevo de Highlightly (si lo hubo)."""
     now = now or datetime.now(timezone.utc)
     summary: dict = {"ok": True, "dry_run": dry_run, "now": now.isoformat(), "counts": {}, "by_div": {},
                      "errors": []}
@@ -233,15 +244,19 @@ async def run_women_previews(dry_run: bool = True, now: Optional[datetime] = Non
     summary["by_div"] = {mw.DIV_NAMES[d]: dict(v) for d, v in sorted(by_div.items())}
     summary["fixtures_window"] = len(todo)
     summary["would_write" if dry_run else "written"] = len(to_write)
-    if not dry_run:
-        try:
+    # El listado se guarda también en dry-run si se pidió algo a Highlightly: ya está pagado y
+    # así la escritura real no lo repite (y no se queda sin tope, como pasó el 15-nov).
+    save_state = new_state is not None and (not dry_run or summary.get("listed"))
+    try:
+        if not dry_run:
             _set_docs(PREVIEWS_W, to_write)
-            if new_state is not None:
-                _set_docs(STATE_DOC[0], {STATE_DOC[1]: new_state})
-        except Exception:
-            logger.error("women_previews: error escribiendo", exc_info=True)
-            summary["errors"].append("escritura fallida (ver logs del servicio)")
-            summary["ok"] = False
+        if save_state:
+            _set_docs(STATE_DOC[0], {STATE_DOC[1]: new_state})
+    except Exception:
+        logger.error("women_previews: error escribiendo", exc_info=True)
+        summary["errors"].append("escritura fallida (ver logs del servicio)")
+        summary["ok"] = False
+    summary["state_saved"] = bool(save_state) and summary["ok"]
     logger.info("women_previews: %s; escribe %d", dict(counts), len(to_write))
     return summary
 
