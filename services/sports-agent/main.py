@@ -353,6 +353,27 @@ async def run_women_backtest_job(dry_run: bool = True) -> StreamingResponse:
     return _stream_with_summary("women-backtest", run_women_backtest, dry_run=dry_run)
 
 
+@app.post("/run-women-previews", dependencies=[Depends(verify_token)])
+async def run_women_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = True) -> StreamingResponse:
+    """Fútbol femenino (mp-w1): fichas "solo referencia" de los próximos `days` días en
+    match_previews_women. Lista de partidos: un listado de temporada por liga en Highlightly cada
+    20 h como mucho (tope propio de 12 al día). dry_run=true por defecto. Resumen solo con recuentos."""
+    if not 1 <= days <= 3:
+        raise HTTPException(status_code=400, detail="days 1-3")
+    from analyzers.match_preview_women_live import run_women_previews
+    return _stream_with_summary("women-previews", run_women_previews, dry_run=dry_run, days=days,
+                                highlightly=highlightly)
+
+
+@app.post("/run-women-grade", dependencies=[Depends(verify_token)])
+async def run_women_grade_job(dry_run: bool = True) -> StreamingResponse:
+    """Fútbol femenino (mp-w1): gradúa las fichas congeladas con las estadísticas del
+    mantenimiento diario de Highlightly → match_preview_grades_women y mp-w1_live. dry_run=true
+    por defecto. Resumen solo con recuentos."""
+    from analyzers.match_preview_women_live import run_women_grade
+    return _stream_with_summary("women-grade", run_women_grade, dry_run=dry_run)
+
+
 @app.post("/run-match-previews", dependencies=[Depends(verify_token)])
 async def run_match_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = False,
                                  hl_max: int = 3, hl_divs: str = "") -> StreamingResponse:

@@ -11,7 +11,10 @@ const LABELS = { encima: "por encima", debajo: "por debajo", en_linea: "en líne
                  insuficiente: "muestra insuficiente", sin_liga: "sin media de liga" };
 const DIV_NAMES = { SP1: "LaLiga", SP2: "Segunda", I1: "Serie A", E0: "Premier", F1: "Ligue 1",
                     P1: "Primeira", D1: "Bundesliga", N1: "Eredivisie", E1: "Championship",
-                    I2: "Serie B", F2: "Ligue 2", D2: "2. Bundesliga" };
+                    I2: "Serie B", F2: "Ligue 2", D2: "2. Bundesliga",
+                    // Femenino (mp-w1, Highlightly)
+                    WLF: "Liga F", WSL: "WSL", WFBL: "Frauen-Bundesliga", WSA: "Serie A fem.",
+                    WD1: "D1 Arkema" };
 
 const state = { view: "teams", div: null, split: 0, market: null, sample: "all", sort: -1, desc: false, byGap: false,
                 day: null, match: null };
@@ -195,7 +198,9 @@ const dayKey = (iso) => new Date(iso).toLocaleDateString("sv-SE");          // A
 const dayLabel = (k) => new Date(`${k}T12:00:00`).toLocaleDateString("es-ES",
   { weekday: "short", day: "numeric", month: "short" });
 const hhmm = (iso) => new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+const isWomen = (m) => m.group === "women";
 const leagueName = (div) => DIV_NAMES[div] || div;
+const groupTitle = (m) => (isWomen(m) ? `Femenino · ${leagueName(m.div)}` : leagueName(m.div));
 // Línea destacada: como mucho UNA por mercado y lado (local, visitante, total), la que más se
 // separa de la liga, y solo si llega a STANDOUT_PTS puntos (los que se ven en la ficha) en un
 // mercado con ventaja medida (block.highlight, que ya es falso con muestra insuficiente).
@@ -234,9 +239,11 @@ function renderMatchList() {
   }
   const todays = PREV.matches.filter((m) => dayKey(m.kickoff_utc) === state.day);
   const byDiv = new Map();
-  for (const m of todays) byDiv.set(m.div, [...(byDiv.get(m.div) || []), m]);
+  // Primero las ligas masculinas y después el grupo "Femenino", cada una en orden de hora.
+  for (const m of [...todays.filter((x) => !isWomen(x)), ...todays.filter(isWomen)])
+    byDiv.set(m.div, [...(byDiv.get(m.div) || []), m]);
   list.replaceChildren(...[...byDiv].map(([div, ms]) => el("div", { class: "match-group" },
-    el("h3", { text: leagueName(div) }),
+    el("h3", { text: groupTitle(ms[0]) }),
     ...ms.map((m) => {
       const n = standoutCount(m);
       return el("button", { class: `match-row${m.id === state.match ? " on" : ""}`,
@@ -304,7 +311,9 @@ function renderMatch() {
   sec.replaceChildren(...[    // replaceChildren pintaría un null como texto "null"
     el("button", { class: "pill close", text: "Cerrar", onclick: () => { state.match = null; render(); } }),
     el("h2", { text: `${m.home} – ${m.away}` }),
-    el("p", { class: "muted", text: `${leagueName(m.div)} · ${kickoff} (${TZ}) · datos hasta ${m.data_cutoff || "—"}` }),
+    el("p", { class: "muted", text: `${groupTitle(m)} · ${kickoff} (${TZ}) · datos hasta ${m.data_cutoff || "—"}` }),
+    isWomen(m) ? el("p", { class: "warn",
+      text: `Fútbol femenino (modelo ${m.model_version}, datos de Highlightly): solo referencia hasta medirlo en directo.` }) : null,
     el("p", { class: "muted", text: sampleText(m, "home") }),
     el("p", { class: "muted", text: sampleText(m, "away") }),
     m.low_sample ? el("p", { class: "warn",

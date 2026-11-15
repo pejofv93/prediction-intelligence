@@ -203,13 +203,17 @@ def market_prob_over25(odds: Optional[dict]) -> Optional[float]:
 
 def predict_match(hist: History, div: str, season: str, match_date: str, home: str, away: str,
                   labels: Optional[dict[tuple[str, str], str]] = None,
-                  odds: Optional[dict] = None, k: float = SHRINK_K) -> dict:
+                  odds: Optional[dict] = None, k: float = SHRINK_K, lines: Optional[dict] = None,
+                  dispersion: Optional[dict] = None) -> dict:
     """
     Ficha del partido con lo jugado ANTES de match_date (fecha ISO del partido).
+    lines/dispersion: None = las de mp-v1 (LINES, DISPERSION); el femenino pasa las suyas.
     labels: {(mercado, div): "ventaja medida" | "solo referencia"} (de match_preview_metrics);
             lo que no esté = "solo referencia".
     """
     labels = labels or {}
+    lines_all = LINES if lines is None else lines
+    disp_all = DISPERSION if dispersion is None else dispersion
     hh = hist.team_history(home, div, season, match_date)
     ha = hist.team_history(away, div, season, match_date)
     used = [m for _, m, _ in hh + ha if m["season"] == season]
@@ -232,7 +236,7 @@ def predict_match(hist: History, div: str, season: str, match_date: str, home: s
         teams["home"]["attack"][s], teams["home"]["defence"][s] = round(ah, 4), round(dh, 4)
         teams["away"]["attack"][s], teams["away"]["defence"][s] = round(aa, 4), round(da, 4)
         lam, mu = lh * ah * da, la * aa * dh
-        team_lines, total_lines = LINES[s]
+        team_lines, total_lines = lines_all[s]
         block = {"available": True, "league_mean_home": round(lh, 3), "league_mean_away": round(la, 3),
                  "exp_home": round(lam, 3), "exp_away": round(mu, 3), "exp_total": round(lam + mu, 3),
                  "n_eff_home": round(nh, 2), "n_eff_away": round(na, 2), "lines": {}}
@@ -240,7 +244,7 @@ def predict_match(hist: History, div: str, season: str, match_date: str, home: s
                                          ("total", None, lam + mu, total_lines)):
             mk = market_key(s, scope)
             label = labels.get((mk, div), LABEL_REF)
-            r = DISPERSION.get((s, scope))
+            r = disp_all.get((s, scope))
             out = {}
             for ln in lines:
                 pm = p_over(ln, mean, r)
@@ -266,7 +270,7 @@ def predict_match(hist: History, div: str, season: str, match_date: str, home: s
         "model_version": MODEL_VERSION,
         "params": {"k": k, "weights": [W_CUR, W_PREV_SAME, W_PREV_OTHER], "min_cur": MIN_CUR,
                    "min_league_matches": MIN_LEAGUE_MATCHES,
-                   "dispersion": {f"{a}_{b}": v for (a, b), v in DISPERSION.items()}},
+                   "dispersion": {f"{a}_{b}": v for (a, b), v in disp_all.items()}},
         "div": div, "season": season, "match_date": match_date,
         "data_cutoff": max((m["date"] for m in used), default=None),
         "low_sample": low_sample, "teams": teams, "stats": stats,

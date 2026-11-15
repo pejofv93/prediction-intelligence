@@ -545,6 +545,8 @@ def web_match(p: dict) -> dict:
     teams = p.get("teams") or {}
     return {
         "id": p["match_id"], "div": p["div"], "kickoff_utc": p["kickoff_utc"],
+        # Femenino (mp-w1, Highlightly): grupo propio y siempre "solo referencia".
+        "group": p.get("group") or "men", "model_version": p.get("model_version") or mp.MODEL_VERSION,
         "home": p["home_team"], "away": p["away_team"], "data_cutoff": p.get("data_cutoff"),
         "low_sample": bool(p.get("low_sample")),
         "sample": {side: {"n_cur": t.get("n_cur"), "n_eff": t.get("n_eff"),
@@ -562,16 +564,23 @@ def web_export(previews: list[dict], now: datetime, days: int = WEB_DAYS) -> dic
             "min_cur": mp.MIN_CUR, "matches": [web_match(p) for p in keep]}
 
 
-def _read_upcoming_previews(now: datetime, days: int = WEB_DAYS) -> list[dict]:
+def _read_upcoming_previews(now: datetime, days: int = WEB_DAYS, collection: str = PREVIEWS) -> list[dict]:
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     lo = (now - WEB_PAST).isoformat()
     hi = (now + timedelta(days=days)).isoformat()
-    q = (col(PREVIEWS).where(filter=FieldFilter("kickoff_utc", ">=", lo))
+    q = (col(collection).where(filter=FieldFilter("kickoff_utc", ">=", lo))
          .where(filter=FieldFilter("kickoff_utc", "<=", hi)))
     return [s.to_dict() for s in q.stream()]
 
 
 def build_web_export(now: Optional[datetime] = None, days: int = WEB_DAYS) -> dict:
+    """Fichas de mp-v1 y, en el grupo "Femenino", las de mp-w1 (match_previews_women). Si las
+    femeninas no se pueden leer, la web sale solo con las de mp-v1."""
     now = now or _now()
-    return web_export(_read_upcoming_previews(now, days), now, days)
+    previews = _read_upcoming_previews(now, days)
+    try:
+        previews += _read_upcoming_previews(now, days, collection="match_previews_women")
+    except Exception:
+        logger.error("web_export: no se pudieron leer las fichas femeninas", exc_info=True)
+    return web_export(previews, now, days)

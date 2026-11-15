@@ -5,6 +5,8 @@
 # partidos del día siguiente) y 02:00 UTC (solo refresca). Cada pasada escribe fichas
 # (Highlightly solo SP2, como mucho 3 peticiones, sin repetir lo mirado en 20 h) y después gradúa.
 # Las dos son idempotentes: no reescriben si no cambia el hash y nunca tocan una ficha congelada.
+# Femenino (mp-w1, datos de Highlightly): paso aparte después, que no bloquea la publicación de la
+# web si falla (continue-on-error); su resumen solo lleva recuentos (nada de equipos ni partidos).
 name: sports-match-previews
 on:
   schedule:
@@ -15,7 +17,7 @@ on:
       job:
         description: "Qué ejecutar"
         type: choice
-        options: [previews, backtest, grade, women_backtest]
+        options: [previews, backtest, grade, women_backtest, women_previews, women_grade]
         default: previews
       dry_run:
         description: "true = solo calcula y cuenta"
@@ -66,6 +68,8 @@ jobs:
             backtest) path="run-match-preview-backtest?dry_run=$DRY_RUN" ;;
             grade)    path="run-match-preview-grade?dry_run=$DRY_RUN" ;;
             women_backtest) path="run-women-backtest?dry_run=$DRY_RUN" ;;   # solo agregados en el log
+            women_previews) path="run-women-previews?dry_run=$DRY_RUN&highlightly=$HL" ;;
+            women_grade)    path="run-women-grade?dry_run=$DRY_RUN" ;;
           esac
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
@@ -83,6 +87,25 @@ jobs:
           set -euo pipefail
           for path in "run-match-previews?dry_run=false&highlightly=true&hl_max=3&hl_divs=SP2" \
                       "run-match-preview-grade?dry_run=false"; do
+            echo "== $path"
+            curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
+              -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+              --max-time 1100 \
+              --no-buffer \
+              --fail --silent --show-error > out.txt
+            grep -v '^summary: ' out.txt
+            grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
+            grep -q '^done ' out.txt
+            grep -q '^summary: {"ok": true' out.txt
+          done
+
+      - name: Programado — femenino, fichas y graduación (escriben; no bloquea)
+        if: ${{ github.event_name == 'schedule' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for path in "run-women-previews?dry_run=false&highlightly=true" \
+                      "run-women-grade?dry_run=false"; do
             echo "== $path"
             curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
               -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
