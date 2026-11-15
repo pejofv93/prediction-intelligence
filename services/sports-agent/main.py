@@ -344,6 +344,15 @@ async def run_match_preview_backtest_job(dry_run: bool = True) -> StreamingRespo
     return _stream_with_summary("match-preview-backtest", run_match_preview_backtest, dry_run=dry_run)
 
 
+@app.post("/run-women-backtest", dependencies=[Depends(verify_token)])
+async def run_women_backtest_job(dry_run: bool = True) -> StreamingResponse:
+    """Fútbol femenino (mp-w1): backtest con los datos de Highlightly (solo estadísticas) →
+    match_preview_metrics/mp-w1_backtest, con las líneas y la dispersión que usarán las fichas.
+    dry_run=true por defecto. El resumen solo lleva agregados por liga y mercado."""
+    from analyzers.match_preview_women_store import run_women_backtest
+    return _stream_with_summary("women-backtest", run_women_backtest, dry_run=dry_run)
+
+
 @app.post("/run-match-previews", dependencies=[Depends(verify_token)])
 async def run_match_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = False,
                                  hl_max: int = 3, hl_divs: str = "") -> StreamingResponse:

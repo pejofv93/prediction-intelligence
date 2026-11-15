@@ -15,7 +15,7 @@ on:
       job:
         description: "Qué ejecutar"
         type: choice
-        options: [previews, backtest, grade]
+        options: [previews, backtest, grade, women_backtest]
         default: previews
       dry_run:
         description: "true = solo calcula y cuenta"
@@ -65,6 +65,7 @@ jobs:
             previews) path="run-match-previews?dry_run=$DRY_RUN&highlightly=$HL&hl_max=$HL_MAX&hl_divs=$HL_DIVS" ;;
             backtest) path="run-match-preview-backtest?dry_run=$DRY_RUN" ;;
             grade)    path="run-match-preview-grade?dry_run=$DRY_RUN" ;;
+            women_backtest) path="run-women-backtest?dry_run=$DRY_RUN" ;;   # solo agregados en el log
           esac
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
