@@ -93,7 +93,9 @@ def matches_from_team_rows(rows: Iterable[dict]) -> list[dict]:
 class History:
     """Índices sobre los partidos ya jugados (temporada actual y anterior, 8 ligas + segundas)."""
 
-    def __init__(self, matches: list[dict]):
+    def __init__(self, matches: list[dict], prev_divs: Optional[Iterable[str]] = None):
+        # Divisiones de las que cuenta la temporada anterior de un equipo (None = las de fdco).
+        self.prev_divs = frozenset(prev_divs) if prev_divs is not None else frozenset(MAIN_DIVS) | frozenset(LOWER_DIVS)
         self.by_ds: dict[tuple[str, str], list[dict]] = defaultdict(list)
         self.by_team_season: dict[tuple[str, str], list[dict]] = defaultdict(list)
         for m in matches:
@@ -130,7 +132,7 @@ class History:
             if m["div"] == div and m["date"] < before:
                 hist.append((W_CUR, m, "h" if m["home"] == team else "a"))
         for m in self.by_team_season.get((team, prev_season(season)), []):
-            if m["div"] in MAIN_DIVS or m["div"] in LOWER_DIVS:
+            if m["div"] in self.prev_divs:
                 w = W_PREV_SAME if m["div"] == div else W_PREV_OTHER
                 hist.append((w, m, "h" if m["home"] == team else "a"))
         return hist
@@ -274,10 +276,13 @@ def predict_match(hist: History, div: str, season: str, match_date: str, home: s
 # ── Backtest walk-forward y etiquetas por mercado y liga ───────────────────────
 
 def backtest_rows(hist: History, seasons: Iterable[str], divs: Iterable[str] = tuple(MAIN_DIVS),
-                  k: float = SHRINK_K) -> list[tuple]:
+                  k: float = SHRINK_K, lines: Optional[dict] = None, dispersion: Optional[dict] = None) -> list[tuple]:
     """Cada partido de `seasons` predicho solo con lo anterior (los dos equipos con al menos
     MIN_CUR partidos de la temporada actual). Fila por línea:
-    (season, div, mercado, línea, y(0/1), p_liga, p_modelo, match_key)."""
+    (season, div, mercado, línea, y(0/1), p_liga, p_modelo, match_key).
+    lines/dispersion: None = las de mp-v1 (LINES, DISPERSION); el femenino pasa las suyas."""
+    lines = LINES if lines is None else lines
+    dispersion = DISPERSION if dispersion is None else dispersion
     rows = []
     for season in seasons:
         for div in divs:
@@ -296,21 +301,21 @@ def backtest_rows(hist: History, seasons: Iterable[str], divs: Iterable[str] = t
                     ah, dh, _ = hist.indices(hh, s, d, season, k)
                     aa, da, _ = hist.indices(ha, s, d, season, k)
                     lam, mu = lh * ah * da, la * aa * dh
-                    team_lines, total_lines = LINES[s]
+                    team_lines, total_lines = lines[s]
                     for side, mean in (("h", lam), ("a", mu)):
                         for ln in team_lines:
                             pl, _ = hist.league_line_rate(div, season, d, s, side, ln)
                             if pl is None:
                                 continue
                             rows.append((season, div, market_key(s, "team"), ln, int(m[side][s] > ln), pl,
-                                         p_over(ln, mean, DISPERSION.get((s, "team"))), mk_id))
+                                         p_over(ln, mean, dispersion.get((s, "team"))), mk_id))
                     yt = m["h"][s] + m["a"][s]
                     for ln in total_lines:
                         pl, _ = hist.league_line_rate(div, season, d, s, None, ln)
                         if pl is None:
                             continue
                         rows.append((season, div, market_key(s, "total"), ln, int(yt > ln), pl,
-                                     p_over(ln, lam + mu, DISPERSION.get((s, "total"))), mk_id))
+                                     p_over(ln, lam + mu, dispersion.get((s, "total"))), mk_id))
     return rows
 
 
