@@ -1,0 +1,42 @@
+# ¿Cuántas señales de fútbol salen por pasada de análisis? (scripts/ops/signal_count.py)
+# SOLO LECTURA: alerts_sent (sports_sent) y predictions. No escribe nada. Solo agregados
+# (franja, número y versión del Poisson). Manual, sin cron.
+name: sports-signal-count
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Ventana en días'
+        required: false
+        default: '8'
+
+permissions:
+  contents: read
+
+jobs:
+  recuento:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Señales por pasada (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          DAYS: ${{ inputs.days }}
+        run: python scripts/ops/signal_count.py
