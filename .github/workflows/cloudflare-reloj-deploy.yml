@@ -1,0 +1,70 @@
+# Despliega el Worker "reloj-dispatch" (cloudflare/reloj-dispatch) y le carga sus secretos desde
+# GitHub, sin que pasen por el código ni por el log. Manual, con confirmación.
+#
+# Secretos de GitHub:
+#   CLOUDFLARE_WORKERS_TOKEN  token de Cloudflare con SOLO "Workers Scripts: Edit" (cuenta)
+#   CLOUDFLARE_ACCOUNT_ID     ya existe (Pages)
+#   TELEGRAM_BOT_URL, CLOUD_RUN_TOKEN  ya existen
+name: cloudflare-reloj-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmar:
+        description: "Escribe DESPLEGAR"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-reloj
+  cancel-in-progress: false
+
+env:
+  WRANGLER: npx --yes wrangler@4.151.3
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+jobs:
+  desplegar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cloudflare/reloj-dispatch
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comprobar confirmación y secretos
+        env:
+          CONFIRMAR: ${{ inputs.confirmar }}
+          URL: ${{ secrets.TELEGRAM_BOT_URL }}
+          TOK: ${{ secrets.CLOUD_RUN_TOKEN }}
+        run: |
+          [ "$CONFIRMAR" = "DESPLEGAR" ] || { echo "Falta confirmar=DESPLEGAR"; exit 1; }
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID URL TOK; do
+            [ -n "${!v}" ] || { echo "Falta el secreto de $v"; exit 1; }
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Desplegar el Worker (el cron se activa con el despliegue)
+        run: |
+          set -o pipefail
+          $WRANGLER deploy 2>&1 | sed -E 's#https?://[^ ]+#<url>#g; s#[0-9a-f]{32}#<id>#g'
+
+      - name: Cargar secretos (por stdin, sin eco)
+        env:
+          URL: ${{ secrets.TELEGRAM_BOT_URL }}
+          TOK: ${{ secrets.CLOUD_RUN_TOKEN }}
+        run: |
+          printf '%s' "$URL" | $WRANGLER secret put DISPATCH_URL >/dev/null
+          printf '%s' "$TOK" | $WRANGLER secret put CLOUD_RUN_TOKEN >/dev/null
+          echo "secretos cargados: DISPATCH_URL, CLOUD_RUN_TOKEN"
+
+      - name: Comprobar (sin valores)
+        run: |
+          $WRANGLER secret list --format json | python3 -c "import json,sys;print('secretos en el Worker:', sorted(s['name'] for s in json.load(sys.stdin)))"

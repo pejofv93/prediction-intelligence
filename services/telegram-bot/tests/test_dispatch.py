@@ -120,7 +120,7 @@ def env(monkeypatch):
 def test_lanza_una_vez_por_franja_aunque_llamen_dos_relojes(env):
     colls, fired, _ = env
     r1 = dp.run_dispatch(T(16, 7, 2), mode="live")
-    r2 = dp.run_dispatch(T(16, 7, 7), mode="live")            # Cloud Scheduler 5 min después
+    r2 = dp.run_dispatch(T(16, 7, 7), mode="live")            # el reloj de Cloudflare 5 min después
     r3 = dp.run_dispatch(T(16, 7, 7), mode="live")            # respaldo de GitHub a la vez
     assert sorted(r1["lanzadas"]) == ["a@07:00", "b@07:00"]
     assert r2["lanzadas"] == [] and r2["ya_lanzadas"] == 2 and r3["ya_lanzadas"] == 2
@@ -153,22 +153,23 @@ def test_live_sin_token_no_lanza(env, monkeypatch):
 
 
 def test_origen_de_la_llamada():
-    assert dp.source_of("Google-Cloud-Scheduler") == "scheduler"
+    assert dp.source_of("reloj-cloudflare/1") == "cloudflare"
+    assert dp.source_of("Google-Cloud-Scheduler") == "otro"
     assert dp.source_of("curl/8.5.0") == "respaldo"
     assert dp.source_of("Mozilla/5.0") == "otro" and dp.source_of("") == "otro"
 
 
 def test_recuento_de_llamadas_de_la_ultima_hora():
     now = T(16, 11, 7)
-    by_hour = {T(16, 10): ["05:scheduler", "10:scheduler", "55:scheduler", "07:respaldo"],
-               T(16, 11): ["00:scheduler", "05:scheduler", "07:respaldo"]}
+    by_hour = {T(16, 10): ["05:cloudflare", "10:cloudflare", "55:cloudflare", "07:respaldo"],
+               T(16, 11): ["00:cloudflare", "05:cloudflare", "07:respaldo"]}
     # 10:05 y 10:07 quedan fuera (más de 60 min); 10:10, 10:55, 11:00, 11:05 → 4 del reloj
-    assert dp.count_calls(by_hour, now) == {"scheduler": 4, "respaldo": 1}
+    assert dp.count_calls(by_hour, now) == {"cloudflare": 4, "respaldo": 1}
 
 
 def test_la_respuesta_lleva_origen_y_latidos(env):
-    r = dp.run_dispatch(T(16, 7, 2), mode="dry_run", source="scheduler")
-    assert r["origen"] == "scheduler" and r["llamadas_ultima_hora"] == {"scheduler": 1}
+    r = dp.run_dispatch(T(16, 7, 2), mode="dry_run", source="cloudflare")
+    assert r["origen"] == "cloudflare" and r["llamadas_ultima_hora"] == {"cloudflare": 1}
 
 
 def test_modo_por_defecto_es_dry_run():

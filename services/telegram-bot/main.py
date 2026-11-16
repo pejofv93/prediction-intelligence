@@ -364,7 +364,7 @@ async def _bg_daily_report() -> None:
 async def dispatch(request: Request) -> JSONResponse:
     """
     Repartidor de pasadas programadas (dispatcher.py + shared/dispatch_schedule.py).
-    Lo llaman Cloud Scheduler cada 5 min y dispatch-fallback.yml cada hora; idempotente.
+    Lo llaman el Worker de Cloudflare (cada 5 min) y dispatch-fallback.yml cada hora; idempotente.
     La respuesta incluye cuántas llamadas hubo en la última hora por origen.
     """
     import asyncio

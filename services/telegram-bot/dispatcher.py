@@ -1,6 +1,6 @@
 """
 Repartidor: lanza por workflow_dispatch los workflows a los que les toca según
-shared/dispatch_schedule.py. Lo llaman Cloud Scheduler (cada 5 min) y, de respaldo, un
+shared/dispatch_schedule.py. Lo llaman el Worker de Cloudflare reloj-dispatch (cada 5 min) y, de respaldo, un
 workflow de GitHub cada hora; las dos llamadas pueden solaparse sin duplicar nada.
 
 Una franja = un documento `dispatch_claims/{tarea}_{AAAAMMDDHHMM}` creado con create()
@@ -72,8 +72,8 @@ def _prune(coll, now: datetime) -> int:
 
 def source_of(user_agent: str) -> str:
     ua = (user_agent or "").lower()
-    if "google-cloud-scheduler" in ua:
-        return "scheduler"
+    if ua.startswith("reloj-cloudflare"):
+        return "cloudflare"
     if ua.startswith("curl"):
         return "respaldo"
     return "otro"

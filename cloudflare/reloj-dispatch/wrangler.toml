@@ -1,0 +1,13 @@
+# Worker "reloj-dispatch" (plan gratuito de Workers). Solo Cron Trigger; sin rutas ni dominio.
+# Secretos (wrangler secret put): DISPATCH_URL, CLOUD_RUN_TOKEN.
+name = "reloj-dispatch"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+workers_dev = false          # sin URL pública *.workers.dev
+preview_urls = false
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true               # registros en el panel (solo el código HTTP)
