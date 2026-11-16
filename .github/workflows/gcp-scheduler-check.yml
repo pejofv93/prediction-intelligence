@@ -1,0 +1,71 @@
+# ¿Puede la cuenta de despliegue (GCP_SA_KEY) crear un trabajo de Cloud Scheduler?
+# SOLO LECTURA: lista APIs activas, trabajos de Cloud Scheduler ya existentes en el proyecto
+# y qué permisos tiene la cuenta. No activa, crea ni cambia nada. No imprime la cuenta ni
+# claves. Manual, sin cron.
+name: gcp-scheduler-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PROJECT: prediction-intelligence
+    steps:
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: APIs activas (las que importan)
+        run: |
+          gcloud services list --enabled --project "$PROJECT" --format="value(config.name)" 2>&1 \
+            | grep -E "cloudscheduler|run\.googleapis|firestore|iam\.googleapis|serviceusage|cloudresourcemanager|cloudbuild|artifactregistry|^ERROR" \
+            || echo "(ninguna de la lista o sin permiso para listar)"
+          echo "--- Cloud Scheduler activa: $(gcloud services list --enabled --project "$PROJECT" --filter='config.name=cloudscheduler.googleapis.com' --format='value(config.name)' 2>/dev/null | grep -c cloudscheduler || true)"
+
+      - name: Trabajos de Cloud Scheduler en el proyecto
+        run: |
+          for loc in europe-west1 europe-southwest1 us-central1; do
+            echo "== $loc"
+            gcloud scheduler jobs list --project "$PROJECT" --location "$loc" \
+              --format="table(name.basename(), schedule, state)" 2>&1 | sed 's/^/  /' || true
+          done
+
+      - name: Permisos de la cuenta de despliegue
+        run: |
+          TOKEN=$(gcloud auth print-access-token)
+          cat > perms.json <<'EOF'
+          {"permissions": [
+            "cloudscheduler.jobs.create", "cloudscheduler.jobs.list", "cloudscheduler.jobs.update",
+            "cloudscheduler.jobs.run", "cloudscheduler.locations.list",
+            "serviceusage.services.enable", "serviceusage.services.list",
+            "iam.serviceAccounts.actAs", "resourcemanager.projects.getIamPolicy",
+            "run.services.get", "run.services.update", "datastore.entities.create"
+          ]}
+          EOF
+          curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d @perms.json \
+            "https://cloudresourcemanager.googleapis.com/v1/projects/$PROJECT:testIamPermissions" > granted.json
+          python3 - <<'PY'
+          import json
+          asked = json.load(open("perms.json"))["permissions"]
+          got = set(json.load(open("granted.json")).get("permissions", []))
+          for p in asked:
+              print(("SÍ " if p in got else "no ") + p)
+          PY
+          rm -f perms.json granted.json
+
+      - name: Roles de la cuenta en el proyecto (si se pueden leer)
+        run: |
+          SA=$(gcloud config get-value account 2>/dev/null)
+          gcloud projects get-iam-policy "$PROJECT" --flatten="bindings[].members" \
+            --filter="bindings.members:serviceAccount:$SA" --format="value(bindings.role)" 2>&1 \
+            | sed 's/^/  /' || echo "  (sin permiso para leer la política)"
