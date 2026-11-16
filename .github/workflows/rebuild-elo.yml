@@ -64,8 +64,6 @@ on:
         description: 'Solo el repartidor (/dispatch): true = hacer lo mismo que el cron'
         required: false
         default: 'false'
-  schedule:
-    - cron: '0 3 * * *'   # 03:00 UTC diario — SOLO siembra de historial (--seed-only)
 
 jobs:
   run:

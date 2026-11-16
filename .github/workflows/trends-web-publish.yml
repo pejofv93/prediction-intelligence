@@ -60,11 +60,13 @@ env:
 
 jobs:
   publicar:
-    # Lanzado por sports-match-previews: solo si fue una pasada programada y terminó en verde.
+    # Lanzado por sports-match-previews: solo si fue una pasada programada (cron o repartidor,
+    # que la titula "fichas programadas") y terminó en verde.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'schedule')
+       (github.event.workflow_run.event == 'schedule' ||
+        github.event.workflow_run.display_title == 'fichas programadas'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

@@ -1,8 +1,6 @@
 name: poly-backtest
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 3 1 * *'  # Mensual, dia 1 a las 03:00 UTC (tras sports-backtest 02:00)
 
 jobs:
   trigger:

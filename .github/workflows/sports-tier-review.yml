@@ -6,8 +6,6 @@
 name: sports-tier-review
 
 on:
-  schedule:
-    - cron: "0 8 1 * *"       # día 1 de cada mes, 08:00 UTC: proponer
   workflow_dispatch:
     inputs:
       accion:

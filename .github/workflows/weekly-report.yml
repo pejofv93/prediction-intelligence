@@ -1,7 +1,5 @@
 name: weekly-report
 on:
-  schedule:
-    - cron: '0 8 * * 1'
   workflow_dispatch:
 
 # Mismo grupo que learning-engine: el reporte lee accuracy_log y model_weights, que el

@@ -36,7 +36,7 @@ def test_que_toca_a_las_siete_de_un_lunes():
     names = {n for n, _ in ds.due(T(16, 7, 2))}
     assert {"sports-analyze", "daily-report", "polymarket-scan", "oracle-a1-retry",
             "sports-fdco-collect"} <= names
-    assert "sports-collect" not in names                      # 06:00, ya fuera del margen de 60 min
+    assert "sports-collect" not in names                      # 05:30, ya fuera del margen de 60 min
     assert "weekly-report" not in names                       # es a las 08:00
     assert "weekly-report" in {n for n, _ in ds.due(T(16, 8, 3))}
 
@@ -49,7 +49,11 @@ def test_frecuencias_acordadas():
             n += ds.matches(task.cron, t)
             t += timedelta(minutes=1)
         return n
-    assert per_day("sports-analyze") == 4 and per_day("sports-collect") == 4
+    assert per_day("sports-analyze") == 4
+    assert per_day("sports-collect") == 2 and per_day("sports-enrich") == 2     # ritmo 17-nov
+    assert ds.matches(ds.TASKS["sports-collect"].cron, T(17, 5, 30))
+    assert ds.matches(ds.TASKS["sports-enrich"].cron, T(17, 18, 20))
+    assert "hl-load-auto" not in ds.TASKS                                      # apagada, conserva su cron
     assert per_day("match-previews") == 2 and per_day("hl-load-daily") == 2
     assert per_day("oracle-a1-retry") == 96
     assert per_day("polymarket-scan") == 4 and per_day("polymarket-analyze") == 3
@@ -97,9 +101,15 @@ class _Coll:
         return _Doc(self.store, key)
 
 
+def _slots(coll):
+    """Reclamaciones de franja (sin el marcador de inicio del modo live)."""
+    return {k: v for k, v in coll.store.items() if k != "_inicio_live"}
+
+
 @pytest.fixture
 def env(monkeypatch):
     colls = {"live": _Coll(), "dry": _Coll()}
+    colls["live"].store["_inicio_live"] = {"inicio": T(1, 0)}   # ya en live; la siembra se prueba aparte
     fired = []
     monkeypatch.setattr(dp, "_claims", lambda mode: colls["live" if mode == "live" else "dry"])
     monkeypatch.setattr(dp, "_prune", lambda coll, now: 0)
@@ -125,14 +135,14 @@ def test_lanza_una_vez_por_franja_aunque_llamen_dos_relojes(env):
     assert sorted(r1["lanzadas"]) == ["a@07:00", "b@07:00"]
     assert r2["lanzadas"] == [] and r2["ya_lanzadas"] == 2 and r3["ya_lanzadas"] == 2
     assert fired == [("a.yml", {}), ("b.yml", {"programado": "true"})]
-    assert all(d["status"] == "fired" for d in colls["live"].store.values())
+    assert all(d["status"] == "fired" for k, d in colls["live"].store.items() if k != "_inicio_live")
 
 
 def test_si_github_falla_se_reintenta_en_la_siguiente_llamada(env):
     colls, fired, state = env
     state["ok"] = False
     r1 = dp.run_dispatch(T(16, 7, 2), mode="live")
-    assert r1["lanzadas"] == [] and len(r1["fallidas"]) == 2 and colls["live"].store == {}
+    assert r1["lanzadas"] == [] and len(r1["fallidas"]) == 2 and _slots(colls["live"]) == {}
     state["ok"] = True
     r2 = dp.run_dispatch(T(16, 7, 7), mode="live")
     assert sorted(r2["lanzadas"]) == ["a@07:00", "b@07:00"]
@@ -142,7 +152,20 @@ def test_dry_run_no_llama_a_github_ni_toca_las_reclamaciones_reales(env):
     colls, fired, _ = env
     r = dp.run_dispatch(T(16, 7, 2), mode="dry_run")
     assert sorted(r["lanzadas"]) == ["a@07:00", "b@07:00"] and fired == []
-    assert colls["live"].store == {} and len(colls["dry"].store) == 2
+    assert _slots(colls["live"]) == {} and len(colls["dry"].store) == 2
+
+
+def test_primera_llamada_live_siembra_sin_lanzar(env):
+    colls, fired, _ = env
+    del colls["live"].store["_inicio_live"]                    # primera vez en live
+    r1 = dp.run_dispatch(T(16, 7, 2), mode="live")            # justo tras el cambio a live
+    assert r1["lanzadas"] == [] and sorted(r1["sembradas"]) == ["a@07:00", "b@07:00"]
+    assert fired == []
+    r2 = dp.run_dispatch(T(16, 7, 7), mode="live")            # no repite las sembradas
+    assert r2["lanzadas"] == [] and r2["ya_lanzadas"] == 2 and "sembradas" not in r2
+    r3 = dp.run_dispatch(T(17, 7, 2), mode="live")            # la franja siguiente sí se lanza
+    assert sorted(r3["lanzadas"]) == ["a@07:00", "b@07:00"] and len(fired) == 2
+    assert colls["live"].store["_inicio_live"]["inicio"] == T(16, 7, 2)
 
 
 def test_live_sin_token_no_lanza(env, monkeypatch):
@@ -172,5 +195,5 @@ def test_la_respuesta_lleva_origen_y_latidos(env):
     assert r["origen"] == "cloudflare" and r["llamadas_ultima_hora"] == {"cloudflare": 1}
 
 
-def test_modo_por_defecto_es_dry_run():
-    assert ds.DISPATCH_MODE == "dry_run"
+def test_modo_activo_es_live():
+    assert ds.DISPATCH_MODE == "live"

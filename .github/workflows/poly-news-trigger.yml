@@ -1,7 +1,5 @@
 name: poly-news-trigger
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:

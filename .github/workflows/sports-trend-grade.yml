@@ -1,9 +1,5 @@
 name: sports-trend-grade
 on:
-  schedule:
-    # 06:20 UTC — justo tras sports-fdco-collect (06:00), para graduar con el CSV
-    # ya actualizado con los resultados córners/tarjetas del día anterior.
-    - cron: '20 6 * * *'
   workflow_dispatch:
 
 jobs:

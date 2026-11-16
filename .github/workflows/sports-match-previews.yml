@@ -8,10 +8,9 @@
 # Femenino (mp-w1, datos de Highlightly): paso aparte después, que no bloquea la publicación de la
 # web si falla (continue-on-error); su resumen solo lleva recuentos (nada de equipos ni partidos).
 name: sports-match-previews
+# Las pasadas del repartidor se llaman "fichas programadas": trends-web-publish las reconoce así.
+run-name: ${{ inputs.programado == 'true' && 'fichas programadas' || github.workflow }}
 on:
-  schedule:
-    - cron: "0 16 * * *"
-    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       job:

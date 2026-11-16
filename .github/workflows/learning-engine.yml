@@ -1,7 +1,5 @@
 name: learning-engine
 on:
-  schedule:
-    - cron: '0 2 * * *'
   workflow_dispatch:
 
 # Una sola ejecución a la vez: dos solapadas leían model_weights al empezar y la segunda

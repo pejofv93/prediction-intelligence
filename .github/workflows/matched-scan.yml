@@ -4,8 +4,6 @@ name: matched-scan
 # the_odds_api_matched (MATCHED_MONTHLY_CREDIT_BUDGET, def 200/mes) corta si se agota.
 # Cadencia conservadora (1×/día) para no competir con el value engine por los 500/mes.
 on:
-  schedule:
-    - cron: '30 6 * * *'
   workflow_dispatch:
 
 jobs:

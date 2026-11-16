@@ -1,8 +1,5 @@
 name: polymarket-learn
 on:
-  schedule:
-    # 03:30 UTC — después del resolver (03:00) para que los outcomes ya estén resueltos
-    - cron: '30 3 * * *'
   workflow_dispatch:
 
 jobs:

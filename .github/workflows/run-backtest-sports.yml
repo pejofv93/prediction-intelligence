@@ -1,8 +1,6 @@
 name: run-backtest-sports
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 2 1 * *'  # Mensual, dia 1 a las 02:00 UTC
 
 jobs:
   trigger:

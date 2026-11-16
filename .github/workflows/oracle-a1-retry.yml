@@ -13,8 +13,6 @@
 name: oracle-a1-retry
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:

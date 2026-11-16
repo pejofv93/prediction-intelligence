@@ -1,6 +1,6 @@
 """
-Horario del repartidor (/dispatch en telegram-bot). Un reloj externo gratuito (Cloud
-Scheduler cada 5 min, con respaldo horario en GitHub) llama al repartidor; este lanza por
+Horario del repartidor (/dispatch en telegram-bot). Un reloj externo gratuito (Worker de
+Cloudflare reloj-dispatch cada 5 min, con respaldo horario en GitHub) llama al repartidor; este lanza por
 workflow_dispatch los workflows a los que les toca. Motivo: los cron de GitHub del repo
 llegaban 5-8 h tarde y perdían la mitad de las pasadas (auditoría 16-nov-2026), mientras
 que workflow_dispatch arranca al momento.
@@ -12,7 +12,11 @@ Cada tarea: workflow, expresión cron (UTC, 5 campos), retraso máximo y paráme
 Frecuencias (decididas por el usuario el 16-nov-2026):
   - A su hora: Sports (recogida, enriquecimiento, análisis, fdco, tendencias, ELO, matched),
     fichas, aprendizaje, informes y mantenimiento de Highlightly.
+  - Recogida y enriquecimiento de Sports, 2 al día (17-nov-2026): con las 4 pasadas a su hora
+    sports-agent doblaría su tiempo de Cloud Run; así queda como con el cron de GitHub.
+    Análisis, 4 al día.
   - Polymarket: al ritmo real que tenía con el cron de GitHub (no al nominal).
+  - hl-load-auto no está: se apagó sola al terminar la carga (15-nov-2026) y conserva su cron.
   - oracle-a1-retry: cada 15 minutos.
 """
 from dataclasses import dataclass, field
@@ -20,7 +24,7 @@ from datetime import datetime, timedelta
 
 # Modo del repartidor: "dry_run" anota lo que lanzaría sin llamar a GitHub; "live" lanza.
 # Pasar a "live" va en el mismo commit que quita los `schedule:` de estos workflows.
-DISPATCH_MODE = "dry_run"
+DISPATCH_MODE = "live"
 
 
 @dataclass(frozen=True)
@@ -35,8 +39,8 @@ SCHEDULED = {"programado": "true"}   # para los workflows que distinguen el lanz
 
 TASKS: dict[str, Task] = {
     # ── Sports, a su hora ──────────────────────────────────────────────────────────
-    "sports-collect":       Task("sports-collect.yml",        "0 */6 * * *"),
-    "sports-enrich":        Task("sports-enrich.yml",         "30 */6 * * *"),
+    "sports-collect":       Task("sports-collect.yml",        "30 5,17 * * *"),
+    "sports-enrich":        Task("sports-enrich.yml",         "20 6,18 * * *"),
     "sports-analyze":       Task("sports-analyze.yml",        "0 1,7,13,19 * * *"),
     "sports-fdco-collect":  Task("sports-fdco-collect.yml",   "0 6 * * *", 120),
     "sports-trend-grade":   Task("sports-trend-grade.yml",    "20 6 * * *", 120),
@@ -52,7 +56,6 @@ TASKS: dict[str, Task] = {
     "run-backtest-sports":  Task("run-backtest-sports.yml",   "0 2 1 * *", 360),
     # ── Highlightly (mantenimiento), a su hora ─────────────────────────────────────
     "hl-load-daily":        Task("hl-load-daily.yml",         "40 5,17 * * *", 120),
-    "hl-load-auto":         Task("hl-load-auto.yml",          "20 */2 * * *", 60),
     # ── Polymarket, al ritmo real medido (≈ 3-4 al día, no el nominal) ──────────────
     "polymarket-scan":      Task("polymarket-scan.yml",       "0 1,7,13,19 * * *"),
     "poly-news-trigger":    Task("poly-news-trigger.yml",     "10 1,7,13,19 * * *"),

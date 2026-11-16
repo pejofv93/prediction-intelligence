@@ -1,7 +1,5 @@
 name: polymarket-analyze
 on:
-  schedule:
-    - cron: '0 4,10,16,22 * * *'
   workflow_dispatch:
 
 jobs:

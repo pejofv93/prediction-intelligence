@@ -43,6 +43,17 @@ def _claim(coll, name: str, slot: datetime, now: datetime) -> bool:
         raise
 
 
+def _first_live(coll, now: datetime) -> bool:
+    """True solo en la primera llamada en modo live (crea el documento `_inicio_live`)."""
+    try:
+        coll.document("_inicio_live").create({"inicio": now})
+        return True
+    except Exception as exc:
+        if type(exc).__name__ in ("AlreadyExists", "Conflict"):
+            return False
+        raise
+
+
 def _fire(workflow: str, inputs: dict, token: str) -> tuple[bool, str]:
     try:
         r = httpx.post(f"{GITHUB_API}/repos/{REPO}/actions/workflows/{workflow}/dispatches",
@@ -121,11 +132,18 @@ def run_dispatch(now: datetime | None = None, mode: str | None = None, source: s
         return out
     try:
         coll = _claims(mode)
+        # Primera llamada en modo live: las franjas aún vigentes las pudo lanzar ya el cron de
+        # GitHub (se quitó en el mismo commit), así que se dan por lanzadas sin repetirlas.
+        first_live = mode == "live" and _first_live(coll, now)
         for name, slot in ds.due(now):
             if not _claim(coll, name, slot, now):
                 out["ya_lanzadas"] += 1
                 continue
             label = f"{name}@{slot:%H:%M}"
+            if first_live:
+                coll.document(f"{name}_{slot:%Y%m%d%H%M}").update({"status": "sembrada"})
+                out.setdefault("sembradas", []).append(label)
+                continue
             if mode != "live":
                 out["lanzadas"].append(label)
                 continue

@@ -1,7 +1,5 @@
 name: daily-report
 on:
-  schedule:
-    - cron: '0 7 * * *'  # 07:00 UTC = 09:00 Europe/Madrid (CEST)
   workflow_dispatch:
 jobs:
   report:

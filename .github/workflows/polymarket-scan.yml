@@ -1,7 +1,5 @@
 name: polymarket-scan
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
