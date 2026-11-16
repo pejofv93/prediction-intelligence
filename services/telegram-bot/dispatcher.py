@@ -63,15 +63,58 @@ def _prune(coll, now: datetime) -> int:
     for d in coll.where(filter=FieldFilter("claimed_at", "<", cutoff)).limit(500).stream():
         d.reference.delete()
         n += 1
+    from shared.firestore_client import col
+    for d in col("dispatch_heartbeat").where(filter=FieldFilter("updated_at", "<", cutoff)).limit(200).stream():
+        d.reference.delete()
+        n += 1
     return n
 
 
-def run_dispatch(now: datetime | None = None, mode: str | None = None) -> dict:
+def source_of(user_agent: str) -> str:
+    ua = (user_agent or "").lower()
+    if "google-cloud-scheduler" in ua:
+        return "scheduler"
+    if ua.startswith("curl"):
+        return "respaldo"
+    return "otro"
+
+
+def _heartbeat(now: datetime, source: str) -> dict:
+    """Anota la llamada (un doc por hora) y cuenta las de los últimos 60 min por origen."""
+    from google.cloud.firestore_v1 import ArrayUnion
+    from shared.firestore_client import col
+    hb = col("dispatch_heartbeat")
+    hb.document(f"{now:%Y%m%d%H}").set(
+        {"calls": ArrayUnion([f"{now:%M}:{source}"]), "updated_at": now}, merge=True)
+    by_hour = {}
+    for h in (now - timedelta(hours=1), now):
+        snap = hb.document(f"{h:%Y%m%d%H}").get()
+        by_hour[h] = ((snap.to_dict() or {}).get("calls") or []) if snap.exists else []
+    return count_calls(by_hour, now)
+
+
+def count_calls(by_hour: dict, now: datetime) -> dict[str, int]:
+    """{hora: ["MM:origen", ...]} → llamadas por origen en los últimos 60 minutos."""
+    counts: dict[str, int] = {}
+    for h, calls in by_hour.items():
+        for c in calls:
+            minute, src = c.split(":", 1)
+            t = h.replace(minute=int(minute), second=0, microsecond=0)
+            if now - timedelta(minutes=60) < t <= now:
+                counts[src] = counts.get(src, 0) + 1
+    return counts
+
+
+def run_dispatch(now: datetime | None = None, mode: str | None = None, source: str = "otro") -> dict:
     now = now or datetime.now(timezone.utc)
     mode = mode or ds.DISPATCH_MODE
     token = os.environ.get("GITHUB_DISPATCH_TOKEN", "")
-    out = {"mode": mode, "now": now.isoformat(timespec="minutes"),
+    out = {"mode": mode, "now": now.isoformat(timespec="minutes"), "origen": source,
            "lanzadas": [], "ya_lanzadas": 0, "fallidas": [], "podadas": 0}
+    try:
+        out["llamadas_ultima_hora"] = _heartbeat(now, source)
+    except Exception:
+        logger.warning("dispatch: no se pudo anotar el latido", exc_info=True)
     if mode == "live" and not token:
         out["error"] = "falta GITHUB_DISPATCH_TOKEN"
         logger.error("dispatch: modo live sin token — no se lanza nada")

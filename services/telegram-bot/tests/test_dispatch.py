@@ -103,6 +103,7 @@ def env(monkeypatch):
     fired = []
     monkeypatch.setattr(dp, "_claims", lambda mode: colls["live" if mode == "live" else "dry"])
     monkeypatch.setattr(dp, "_prune", lambda coll, now: 0)
+    monkeypatch.setattr(dp, "_heartbeat", lambda now, source: {source: 1})
     monkeypatch.setattr(ds, "TASKS", {"a": ds.Task("a.yml", "0 7 * * *"),
                                       "b": ds.Task("b.yml", "0 7 * * *", inputs={"programado": "true"})})
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "t")
@@ -149,6 +150,25 @@ def test_live_sin_token_no_lanza(env, monkeypatch):
     monkeypatch.delenv("GITHUB_DISPATCH_TOKEN")
     r = dp.run_dispatch(T(16, 7, 2), mode="live")
     assert r["error"] == "falta GITHUB_DISPATCH_TOKEN" and fired == []
+
+
+def test_origen_de_la_llamada():
+    assert dp.source_of("Google-Cloud-Scheduler") == "scheduler"
+    assert dp.source_of("curl/8.5.0") == "respaldo"
+    assert dp.source_of("Mozilla/5.0") == "otro" and dp.source_of("") == "otro"
+
+
+def test_recuento_de_llamadas_de_la_ultima_hora():
+    now = T(16, 11, 7)
+    by_hour = {T(16, 10): ["05:scheduler", "10:scheduler", "55:scheduler", "07:respaldo"],
+               T(16, 11): ["00:scheduler", "05:scheduler", "07:respaldo"]}
+    # 10:05 y 10:07 quedan fuera (más de 60 min); 10:10, 10:55, 11:00, 11:05 → 4 del reloj
+    assert dp.count_calls(by_hour, now) == {"scheduler": 4, "respaldo": 1}
+
+
+def test_la_respuesta_lleva_origen_y_latidos(env):
+    r = dp.run_dispatch(T(16, 7, 2), mode="dry_run", source="scheduler")
+    assert r["origen"] == "scheduler" and r["llamadas_ultima_hora"] == {"scheduler": 1}
 
 
 def test_modo_por_defecto_es_dry_run():

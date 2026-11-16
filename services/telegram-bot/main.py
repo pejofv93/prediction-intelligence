@@ -361,14 +361,16 @@ async def _bg_daily_report() -> None:
 
 
 @app.post("/dispatch", dependencies=[Depends(verify_token)])
-async def dispatch() -> JSONResponse:
+async def dispatch(request: Request) -> JSONResponse:
     """
     Repartidor de pasadas programadas (dispatcher.py + shared/dispatch_schedule.py).
     Lo llaman Cloud Scheduler cada 5 min y dispatch-fallback.yml cada hora; idempotente.
+    La respuesta incluye cuántas llamadas hubo en la última hora por origen.
     """
     import asyncio
-    from dispatcher import run_dispatch
-    res = await asyncio.get_event_loop().run_in_executor(None, run_dispatch)
+    from dispatcher import run_dispatch, source_of
+    src = source_of(request.headers.get("user-agent", ""))
+    res = await asyncio.get_event_loop().run_in_executor(None, lambda: run_dispatch(source=src))
     return JSONResponse(res, status_code=500 if res.get("error") else 200)
 
 
