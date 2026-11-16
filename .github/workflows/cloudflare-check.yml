@@ -1,0 +1,44 @@
+# ¿Qué permite el token de Cloudflare guardado en GitHub? SOLO LECTURA: solo peticiones GET a
+# la API de Cloudflare. Imprime códigos HTTP y sí/no; nunca ids, nombres, correos ni el token.
+# Manual, sin cron.
+name: cloudflare-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Permisos y plan (solo GET)
+        run: |
+          set -u
+          api() {   # $1 = ruta; imprime "código ok/errores" sin el cuerpo
+            curl -sS -o body.json -w "%{http_code}" -H "Authorization: Bearer $CF_TOKEN" \
+              "https://api.cloudflare.com/client/v4$1"
+          }
+          show() {  # $1 = etiqueta, $2 = ruta
+            code=$(api "$2")
+            ok=$(python3 -c "import json;d=json.load(open('body.json'));print(d.get('success'))" 2>/dev/null || echo "?")
+            errs=$(python3 -c "import json;d=json.load(open('body.json'));print(','.join(str(e.get('code')) for e in d.get('errors') or []))" 2>/dev/null || echo "")
+            echo "$1: HTTP $code · success=$ok ${errs:+· errores=$errs}"
+          }
+          show "Token válido (verify)"                     "/user/tokens/verify"
+          python3 -c "import json;print('  estado del token:', json.load(open('body.json')).get('result',{}).get('status'))" || true
+          show "Pages: listar proyectos"                   "/accounts/$CF_ACCOUNT/pages/projects"
+          show "Workers: listar scripts (lectura)"         "/accounts/$CF_ACCOUNT/workers/scripts"
+          show "Workers: subdominio workers.dev"           "/accounts/$CF_ACCOUNT/workers/subdomain"
+          show "Cuenta: datos"                             "/accounts/$CF_ACCOUNT"
+          show "Facturación: suscripciones de la cuenta"   "/accounts/$CF_ACCOUNT/subscriptions"
+          show "Facturación: perfil de pago del usuario"   "/user/billing/profile"
+          rm -f body.json
+          echo
+          echo "Nota: la API no deja comprobar 'editar Workers' ni 'crear secretos' sin escribir."
+          echo "Si 'listar scripts' da 403, el token tampoco puede crearlos."
