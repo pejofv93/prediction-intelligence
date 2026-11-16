@@ -142,6 +142,8 @@ def generate_weekly_report(
         lines.append(f"Peor señal: {worst_match} +{worst_edge:.0%} ❌")
     if league_line and league_line != "—":
         lines.append(f"Por liga: {league_line}")
+    from shared.clv_summary import report_lines as _clv_lines
+    lines += _clv_lines(week_stats.get("clv_close") or {})
 
     lines += [
         "",

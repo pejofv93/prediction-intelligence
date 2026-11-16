@@ -549,6 +549,19 @@ async def send_weekly_report() -> JSONResponse:
             logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
             shadow_metrics = {}
 
+        # CLV real al cierre de lo enviado (fútbol 1X2), separado por versión del Poisson
+        clv_close: dict = {}
+        try:
+            from shared.clv_summary import summarize
+            from shared.firestore_client import iter_all
+            def _clv() -> dict:
+                docs = (d.to_dict() or {} for d in
+                        iter_all("alerts_sent", where=("type", "==", "sports_sent")))
+                return summarize(list(docs), now)
+            clv_close = await asyncio.get_event_loop().run_in_executor(None, _clv)
+        except Exception:
+            logger.warning("send-weekly-report: error calculando el CLV al cierre", exc_info=True)
+
         # Sports: si accuracy_log está vacío, calcular desde week_preds directamente.
         # IMPORTANTE: solo contar predicciones RESUELTAS (correct != None).
         # Las pendientes (correct=None) son partidos futuros — no son fallos.
@@ -601,6 +614,7 @@ async def send_weekly_report() -> JSONResponse:
             # Cabecera de Sports: ROI de shadow_trades cerrados en la misma semana que el win rate
             "roi_sports_week": sports_week.get("roi", 0.0),
             "n_sports_week": sports_week.get("n", 0),
+            "clv_close": clv_close,
             "roi_poly": shadow_metrics.get("roi_poly", 0.0),
             "win_rate": shadow_metrics.get("win_rate", 0.0),
             "win_rate_sports": shadow_metrics.get("win_rate_sports", 0.0),

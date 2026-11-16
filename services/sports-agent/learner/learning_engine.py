@@ -1565,6 +1565,12 @@ async def run_daily_learning() -> None:
         await grade_sent_alerts()
     except Exception:
         logger.error("run_daily_learning: error graduando alertas enviadas", exc_info=True)
+    # CLV real: cuota enviada frente al cierre de football-data.co.uk (fútbol 1X2)
+    try:
+        from learner.closing_clv import run_closing_clv
+        await run_closing_clv()
+    except Exception:
+        logger.error("run_daily_learning: error buscando la cuota de cierre", exc_info=True)
     _refresh_segment_history()
 
     try:
