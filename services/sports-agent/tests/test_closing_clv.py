@@ -29,6 +29,8 @@ def test_cierre_sin_margen_y_clv():
     assert out["close_p_fair"] == pytest.approx(p, abs=1e-5)
     assert out["clv_close"] == pytest.approx(2.20 * p - 1, abs=1e-5)
     assert (out["close_odds_avg"], out["close_odds_max"], out["close_odds_b365"]) == (2.0, 2.1, 1.95)
+    assert out["clv_close_max"] == pytest.approx(2.20 / 2.10 - 1, abs=1e-5)
+    assert cc.closing_from_row({**ROW, "MaxCH": ""}, "H", 2.2)["clv_close_max"] is None
     assert out["close_odds_pinnacle"] is None and out["close_source"] == "fdco-media-cierre"
 
 
@@ -126,7 +128,7 @@ def test_dry_run_no_escribe(monkeypatch):
 
 def test_resumen_por_version_con_intervalo():
     src = {"close_source": "fdco-media-cierre"}
-    docs = ([_alert(clv_close=x, **src) for x in (0.02, -0.04, 0.01)]
+    docs = ([_alert(clv_close=x, clv_close_max=x - 0.03, **src) for x in (0.02, -0.04, 0.01)]
             + [_alert(clv_close=x, poisson_fit="lbfgs-l2-v1", **src) for x in (0.05, 0.03)]
             + [_alert(), _alert(close_status="sin_cierre"),
                _alert(clv_close=0.9, sent_at=NOW - timedelta(days=40)),     # fuera de la ventana
@@ -137,8 +139,13 @@ def test_resumen_por_version_con_intervalo():
     assert old["lo"] < old["mean"] < old["hi"] and old["pos"] == pytest.approx(2 / 3)
     assert new["n"] == 2 and new["mean"] == pytest.approx(0.04)
     assert s["pending"] == 1
+    mx = s["groups_max"]
+    assert set(mx) == {"nelder-mead-2000"} and mx["nelder-mead-2000"]["n"] == 3
+    assert mx["nelder-mead-2000"]["mean"] == pytest.approx(-0.01 / 3 - 0.03)
     lines = cs.report_lines(s)
-    assert lines[0].startswith("CLV real al cierre (media del mercado")
-    assert "Poisson anterior" in lines[1] and "Poisson nuevo" in lines[2]
+    assert lines[0] == "CLV real al cierre (enviadas 1X2, 4 semanas):"
+    assert lines[1] == " Frente a media sin margen:"
+    assert "Poisson anterior" in lines[2] and "Poisson nuevo" in lines[3]
+    assert lines[4] == " Frente a cuota máxima:" and "Poisson anterior" in lines[5]
     assert lines[-1] == "  Pendientes de cierre: 1"
     assert cs.report_lines(cs.summarize([], NOW)) == []

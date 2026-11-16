@@ -14,6 +14,8 @@ close_source lo dice.
 Escribe en el doc de alerts_sent (solo campos nuevos; no toca result/correct):
   close_odds_avg, close_odds_max, close_odds_b365, close_odds_pinnacle (None si no hay),
   close_p_fair, clv_close, close_source, close_checked_at
+  clv_close_max = cuota_enviada / MaxC_sel − 1 (frente a la mejor cuota al cierre, en
+  bruto: la comparación más dura, porque la enviada suele ser la mejor entre casas)
 y close_status = "sin_cierre" si a los SIN_CIERRE_DAYS días el CSV sigue sin el partido.
 Nunca lanza. Devuelve solo recuentos (sin equipos ni partidos).
 """
@@ -97,9 +99,11 @@ def closing_from_row(row: dict, side: str, odds_sent: float) -> dict | None:
     i = "HDA".index(side)
     inv = [1.0 / o for o in ref]
     p_fair = inv[i] / sum(inv)
+    close_max = _f(row.get(f"MaxC{side}"))
     return {
         "close_odds_avg": avg[i],
-        "close_odds_max": _f(row.get(f"MaxC{side}")),
+        "close_odds_max": close_max,
+        "clv_close_max": round(odds_sent / close_max - 1.0, 5) if close_max else None,
         "close_odds_b365": _f(row.get(f"B365C{side}")),
         "close_odds_pinnacle": pin[i],
         "close_p_fair": round(p_fair, 5),

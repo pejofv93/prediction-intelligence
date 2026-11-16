@@ -18,10 +18,22 @@ def _dt(v):
         return None
 
 
+def _stats(v: list[float]) -> dict:
+    n = len(v)
+    mean = sum(v) / n
+    sd = math.sqrt(sum((x - mean) ** 2 for x in v) / (n - 1)) if n > 1 else 0.0
+    half = Z90 * sd / math.sqrt(n) if n > 1 else 0.0
+    return {"n": n, "mean": mean, "lo": mean - half, "hi": mean + half,
+            "pos": sum(1 for x in v if x > 0) / n}
+
+
 def summarize(docs: list[dict], now: datetime, window_days: int = WINDOW_DAYS) -> dict:
-    """{"groups": {fit: {n, mean, lo, hi, pos}}, "pending": n, "source": str|None}."""
+    """{"groups": {fit: {n, mean, lo, hi, pos}} frente a la media sin margen,
+        "groups_max": lo mismo frente a la cuota máxima al cierre,
+        "pending": n, "source": str|None}."""
     since = now - timedelta(days=window_days)
     vals: dict[str, list[float]] = {}
+    vals_max: dict[str, list[float]] = {}
     pending, sources = 0, set()
     for d in docs:
         if str(d.get("sport") or "football").lower() not in ("football", "soccer"):
@@ -36,18 +48,15 @@ def summarize(docs: list[dict], now: datetime, window_days: int = WINDOW_DAYS) -
             if d.get("close_status") != "sin_cierre":
                 pending += 1
             continue
-        vals.setdefault(d.get("poisson_fit") or FIT_OLD, []).append(float(clv))
+        fit = d.get("poisson_fit") or FIT_OLD
+        vals.setdefault(fit, []).append(float(clv))
+        if d.get("clv_close_max") is not None:
+            vals_max.setdefault(fit, []).append(float(d["clv_close_max"]))
         if d.get("close_source"):
             sources.add(d["close_source"])
-    groups = {}
-    for fit, v in vals.items():
-        n = len(v)
-        mean = sum(v) / n
-        sd = math.sqrt(sum((x - mean) ** 2 for x in v) / (n - 1)) if n > 1 else 0.0
-        half = Z90 * sd / math.sqrt(n) if n > 1 else 0.0
-        groups[fit] = {"n": n, "mean": mean, "lo": mean - half, "hi": mean + half,
-                       "pos": sum(1 for x in v if x > 0) / n}
-    return {"groups": groups, "pending": pending,
+    return {"groups": {f: _stats(v) for f, v in vals.items()},
+            "groups_max": {f: _stats(v) for f, v in vals_max.items()},
+            "pending": pending,
             "source": ", ".join(sorted(sources)) if sources else None}
 
 
@@ -55,14 +64,21 @@ def report_lines(s: dict) -> list[str]:
     """Líneas del informe semanal (vacío si no hay nada en la ventana)."""
     if not s or (not s.get("groups") and not s.get("pending")):
         return []
-    ref = "Pinnacle" if "pinnacle" in (s.get("source") or "") else "media del mercado"
-    lines = [f"CLV real al cierre ({ref}, enviadas 1X2, 4 semanas):"]
+    ref = "Pinnacle sin margen" if "pinnacle" in (s.get("source") or "") else "media sin margen"
+    lines = ["CLV real al cierre (enviadas 1X2, 4 semanas):"]
     names = {FIT_OLD: "Poisson anterior", "lbfgs-l2-v1": "Poisson nuevo"}
-    for fit in sorted(s["groups"], key=lambda f: (f != FIT_OLD, f)):
-        g = s["groups"][fit]
+
+    def _fmt(g: dict) -> str:
         ci = f" [{g['lo']:+.1%}, {g['hi']:+.1%}]" if g["n"] > 1 else ""
-        lines.append(f"  {names.get(fit, fit)}: {g['mean']:+.1%}{ci} · n={g['n']} · "
-                     f"{g['pos']:.0%} por encima del cierre")
+        return f"{g['mean']:+.1%}{ci} · n={g['n']} · {g['pos']:.0%} por encima"
+
+    for label, key in ((ref, "groups"), ("cuota máxima", "groups_max")):
+        groups = s.get(key) or {}
+        if not groups:
+            continue
+        lines.append(f" Frente a {label}:")
+        for fit in sorted(groups, key=lambda f: (f != FIT_OLD, f)):
+            lines.append(f"  {names.get(fit, fit)}: {_fmt(groups[fit])}")
     if s.get("pending"):
         lines.append(f"  Pendientes de cierre: {s['pending']}")
     return lines
