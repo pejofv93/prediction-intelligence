@@ -987,6 +987,7 @@ async def generate_football_extra_signals(
         "league": league,
         "elo_sufficient": enriched_match.get("elo_sufficient", True),
         "h2h_sufficient": enriched_match.get("h2h_sufficient", True),
+        "poisson_fit": enriched_match.get("poisson_fit"),
     }
 
     signals_out: list[dict] = []

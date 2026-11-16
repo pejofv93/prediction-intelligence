@@ -31,6 +31,13 @@ FIT_PRIOR_L2 = 5.0
 FIT_GTOL = 1e-8
 FIT_MAXITER = 1000
 
+# Versión del ajuste, guardada en cada predicción (poisson_fit) y en alerts_sent para separar
+# antes y después en el historial por segmento, la revisión mensual y la tabla de confianza.
+# Predicciones sin el campo (o con el anterior) = Nelder-Mead sin converger.
+FIT_VERSION = "lbfgs-l2-v1"          # desde el 16-nov-2026
+FIT_VERSION_PREVIOUS = "nelder-mead-2000"
+FIT_VERSION_SINCE = "2026-11-16"
+
 # Parametros de arranque en frio (cold start)
 # Se sobreescriben con datos reales cuando hay suficientes partidos.
 COLD_START_PARAMS = {

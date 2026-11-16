@@ -20,7 +20,9 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from shared.config import MIN_MATCHES_TO_FIT, SUPPORTED_FOOTBALL_LEAGUES
 from shared.firestore_client import col, iter_all
 
-from enrichers.poisson_model import fit_attack_defense, predict_match_probs, predict_match_probs_from_xg
+from enrichers.poisson_model import (
+    FIT_VERSION, fit_attack_defense, predict_match_probs, predict_match_probs_from_xg,
+)
 from enrichers.elo_rating import elo_win_probability, get_team_elo, expected_score, HOME_ADVANTAGE, DEFAULT_ELO
 
 
@@ -425,6 +427,7 @@ async def enrich_match(match: dict) -> dict:
     poisson_away_win: float | None = None
     home_xg: float | None = None
     away_xg: float | None = None
+    poisson_fit: str | None = None  # versión del ajuste si hay Poisson real
     elo_home_win_prob: float | None = None
     home_elo: float | None = None
     away_elo: float | None = None
@@ -453,6 +456,7 @@ async def enrich_match(match: dict) -> dict:
                 poisson_away_win = probs["away_win"]
                 home_xg = probs["home_xg"]
                 away_xg = probs["away_xg"]
+                poisson_fit = FIT_VERSION
 
                 # Blend con xG real de Sofascore si está disponible
                 # w_xg crece con el número de partidos con xG (máx 60% a partir de 10 partidos)
@@ -523,6 +527,7 @@ async def enrich_match(match: dict) -> dict:
         "poisson_away_win": poisson_away_win,
         "home_xg": home_xg,
         "away_xg": away_xg,
+        "poisson_fit": poisson_fit,
         "elo_home_win_prob": elo_home_win_prob,
         "home_elo": home_elo,
         "away_elo": away_elo,

@@ -1506,7 +1506,7 @@ async def _generate_oddsapiio_extra_signals(
                         },
                         "signals": {}, "data_source": "poisson_btts", "odds_source": "oddsapiio",
                         "match_date": match_date, "weights_version": weights_version,
-                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                        "created_at": now, "poisson_fit": enriched_match.get("poisson_fit"), "result": None, "correct": None, "error_type": None,
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
@@ -1582,7 +1582,7 @@ async def _generate_oddsapiio_extra_signals(
                         },
                         "signals": {}, "data_source": "poisson_totals", "odds_source": "oddsapiio",
                         "match_date": match_date, "weights_version": weights_version,
-                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                        "created_at": now, "poisson_fit": enriched_match.get("poisson_fit"), "result": None, "correct": None, "error_type": None,
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
@@ -1659,7 +1659,7 @@ async def _generate_oddsapiio_extra_signals(
                         },
                         "signals": {}, "data_source": "poisson_ah", "odds_source": "oddsapiio",
                         "match_date": match_date, "weights_version": weights_version,
-                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                        "created_at": now, "poisson_fit": enriched_match.get("poisson_fit"), "result": None, "correct": None, "error_type": None,
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
@@ -1743,7 +1743,7 @@ async def _generate_oddsapiio_extra_signals(
                     },
                     "signals": {}, "data_source": "poisson_cs", "odds_source": "oddsapiio",
                     "match_date": match_date, "weights_version": weights_version,
-                    "created_at": now, "result": None, "correct": None, "error_type": None,
+                    "created_at": now, "poisson_fit": enriched_match.get("poisson_fit"), "result": None, "correct": None, "error_type": None,
                 }
                 try:
                     col("predictions").document(doc_id).set(pred)
@@ -1808,7 +1808,7 @@ async def _generate_oddsapiio_extra_signals(
                         },
                         "signals": {}, "data_source": "poisson_ht", "odds_source": "oddsapiio",
                         "match_date": match_date, "weights_version": weights_version,
-                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                        "created_at": now, "poisson_fit": enriched_match.get("poisson_fit"), "result": None, "correct": None, "error_type": None,
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
@@ -1871,7 +1871,7 @@ async def _generate_oddsapiio_extra_signals(
                         },
                         "signals": {}, "data_source": "poisson_corners", "odds_source": "oddsapiio",
                         "match_date": match_date, "weights_version": weights_version,
-                        "created_at": now, "result": None, "correct": None, "error_type": None,
+                        "created_at": now, "poisson_fit": enriched_match.get("poisson_fit"), "result": None, "correct": None, "error_type": None,
                     }
                     try:
                         col("predictions").document(doc_id).set(pred)
@@ -3243,6 +3243,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             "h2h_sufficient": enriched_match.get("h2h_sufficient", True),
             "odds_source": odds_data.get("source", "theoddsapi"),
             "weights_version": weights_version,
+            "poisson_fit": enriched_match.get("poisson_fit"),
             "created_at": datetime.now(timezone.utc),
             "result": None,
             "correct": None,
@@ -3364,6 +3365,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                             "data_source": "poisson_totals",
                             "match_date": match_date,
                             "weights_version": weights_version,
+                            "poisson_fit": enriched_match.get("poisson_fit"),
                             "created_at": datetime.now(timezone.utc),
                             "result": None,
                             "correct": None,
@@ -3513,6 +3515,7 @@ async def _generate_poisson_signal(
         "factors": result_home["signals"] if prob_home >= prob_away else result_away["signals"],
         "signals": {},
         "weights_version": weights_version,
+        "poisson_fit": enriched_match.get("poisson_fit"),
         "created_at": datetime.now(timezone.utc),
         "result": None,
         "correct": None,
