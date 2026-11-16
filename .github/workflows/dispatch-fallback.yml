@@ -1,0 +1,28 @@
+# Respaldo del repartidor: llama a /dispatch de telegram-bot cada hora. El reloj principal es
+# Cloud Scheduler (cada 5 min); si falla, esto mantiene las pasadas (con el retraso de GitHub).
+# El repartidor no repite franjas, así que llamar de más no duplica nada.
+name: dispatch-fallback
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dispatch-fallback
+  cancel-in-progress: false
+
+jobs:
+  repartir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Llamar al repartidor
+        run: |
+          curl -X POST "${{ secrets.TELEGRAM_BOT_URL }}/dispatch" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 110 --fail --silent --show-error
+          echo

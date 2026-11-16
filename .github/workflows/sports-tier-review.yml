@@ -26,6 +26,9 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      programado:
+        description: "Solo el repartidor (/dispatch): true = hacer lo mismo que el cron"
+        default: "false"
 
 permissions:
   contents: read
@@ -55,9 +58,9 @@ jobs:
 
       - name: Revisión de niveles
         env:
-          ACCION: ${{ github.event_name == 'schedule' && 'proponer' || inputs.accion }}
+          ACCION: ${{ (github.event_name == 'schedule' || inputs.programado == 'true') && 'proponer' || inputs.accion }}
           CONFIRMAR: ${{ inputs.confirmar }}
-          ENVIAR: ${{ github.event_name == 'schedule' && 'true' || inputs.enviar }}
+          ENVIAR: ${{ (github.event_name == 'schedule' || inputs.programado == 'true') && 'true' || inputs.enviar }}
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}

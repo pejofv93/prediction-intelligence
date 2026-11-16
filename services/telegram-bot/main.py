@@ -360,6 +360,18 @@ async def _bg_daily_report() -> None:
         logger.error("daily-report: error — %s", e, exc_info=True)
 
 
+@app.post("/dispatch", dependencies=[Depends(verify_token)])
+async def dispatch() -> JSONResponse:
+    """
+    Repartidor de pasadas programadas (dispatcher.py + shared/dispatch_schedule.py).
+    Lo llaman Cloud Scheduler cada 5 min y dispatch-fallback.yml cada hora; idempotente.
+    """
+    import asyncio
+    from dispatcher import run_dispatch
+    res = await asyncio.get_event_loop().run_in_executor(None, run_dispatch)
+    return JSONResponse(res, status_code=500 if res.get("error") else 200)
+
+
 @app.post("/send-weekly-report", dependencies=[Depends(verify_token)])
 async def send_weekly_report() -> JSONResponse:
     """

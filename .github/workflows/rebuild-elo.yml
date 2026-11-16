@@ -60,6 +60,10 @@ on:
         default: 'true'
         type: choice
         options: ['true', 'false']
+      programado:
+        description: 'Solo el repartidor (/dispatch): true = hacer lo mismo que el cron'
+        required: false
+        default: 'false'
   schedule:
     - cron: '0 3 * * *'   # 03:00 UTC diario — SOLO siembra de historial (--seed-only)
 
@@ -85,7 +89,7 @@ jobs:
       - name: Resolver parámetros
         id: params
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.programado }}" = "true" ]; then
             echo "mode=rebuild" >> "$GITHUB_OUTPUT"
             echo "confirm=true" >> "$GITHUB_OUTPUT"
             echo "seed_only=true" >> "$GITHUB_OUTPUT"
