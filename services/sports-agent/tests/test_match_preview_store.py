@@ -247,3 +247,23 @@ def test_web_match_esperados_lineas_y_muestra():
     assert all(0 <= ln[1] <= 1 for ln in lines)                           # p_model
     assert g["blocks"]["home"]["label"] in (mp.LABEL_EDGE, mp.LABEL_REF, mp.LABEL_LOW_SAMPLE)
     assert set(m["sample"]) == {"home", "away"} and m["sample"]["home"]["n_cur"] >= 1
+
+
+def _run_with_failed(monkeypatch, failed):
+    async def fake_load(season, client=None):
+        return _league(rounds=4), failed
+    monkeypatch.setattr(st, "load_matches", fake_load)
+    return asyncio.run(st.run_match_previews(dry_run=True, now=NOW, fixtures=_fixtures(_fixture()),
+                                            matches=None, labels_doc={"metrics": {}}, existing={}))
+
+
+def test_csv_que_falta_de_otra_liga_solo_avisa(monkeypatch):
+    out = _run_with_failed(monkeypatch, ["F1_2627"])
+    assert out["ok"] is True and out["counts"] == {"nueva": 1} and out["would_write"] == 1
+    assert any(e.startswith("aviso: faltan CSV") for e in out["errors"])
+
+
+def test_csv_que_falta_de_la_misma_liga_deja_sin_ficha_y_falla(monkeypatch):
+    out = _run_with_failed(monkeypatch, ["SP1_2627"])
+    assert out["ok"] is False and out["counts"] == {"sin_ficha_historial": 1} and out["would_write"] == 0
+    assert any("1 fichas sin escribir" in e for e in out["errors"])

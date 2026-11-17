@@ -307,10 +307,13 @@ async def run_match_previews(dry_run: bool = True, now: Optional[datetime] = Non
     summary["unmatched_teams"] = fixtures.get("unmatched_teams", [])
     summary["review_ded_ppl"] = _mapping_review(fixtures)
 
+    failed: list[str] = []
     if matches is None:
         matches, failed = await load_matches(season)
-        if failed:
-            summary["errors"].append(f"faltan CSV de historial: {failed}")
+    # Ligas principales sin su CSV (temporada actual o anterior): sus fichas no se escriben, porque
+    # saldrían con medio historial. Las demás ligas siguen. Si falta una segunda de la temporada
+    # anterior, solo pierden historial los recién ascendidos (lo marca low_sample): aviso.
+    no_hist = {f.split("_")[0] for f in failed if f.split("_")[0] in MAIN_DIVS}
     hist = mp.History(matches)
 
     if labels_doc is None:
@@ -328,6 +331,10 @@ async def run_match_previews(dry_run: bool = True, now: Optional[datetime] = Non
     counts: dict[str, int] = defaultdict(int)
     for f in fx:
         mid = f["match_id"]
+        if f["div"] in no_hist:
+            counts["sin_ficha_historial"] += 1
+            summary["previews"].append({"match_id": mid, "action": "sin ficha: falta el CSV de historial"})
+            continue
         if not f.get("team_matched", True):
             counts["sin_ficha_nombre"] += 1
             summary["previews"].append({"match_id": mid, "action": "sin ficha: equipo sin emparejar",
@@ -354,6 +361,11 @@ async def run_match_previews(dry_run: bool = True, now: Optional[datetime] = Non
                              "written_after_freeze": action == "tarde", "n_writes": prev.get("n_writes", 0) + 1}
     summary["counts"] = dict(counts)
     summary["would_write" if dry_run else "written"] = len(to_write)
+    if failed:
+        n_lost = counts.get("sin_ficha_historial", 0)
+        # "faltan …" marca la pasada como fallida (ok=false) solo si deja fichas sin escribir.
+        summary["errors"].append(f"faltan CSV de historial: {failed} ({n_lost} fichas sin escribir)"
+                                 if n_lost else f"aviso: faltan CSV de historial: {failed} (sin fichas afectadas)")
 
     if not dry_run:
         try:

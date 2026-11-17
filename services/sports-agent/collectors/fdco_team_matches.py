@@ -331,18 +331,30 @@ def build_rate_docs(cur_by_div: dict[str, list[dict]], prev_by_div: dict[str, li
 
 # ── Descarga ─────────────────────────────────────────────────────────────────
 
+# football-data.co.uk da a veces 5xx/504 sueltos (17-nov-2026: un CSV que fallaba bajaba bien
+# segundos después). Se reintenta con espera; un 404 (CSV que no existe) no se reintenta.
+_RETRY_DELAYS = (5.0, 15.0)
+
+
 async def fetch_csv_rows(client: httpx.AsyncClient, div: str, season: str) -> Optional[list[dict]]:
-    """Filas crudas del CSV; None si la descarga falla (distinto de 0 partidos)."""
+    """Filas crudas del CSV; None si la descarga falla tras los reintentos (distinto de 0 partidos)."""
     url = _FDCO_URL.format(season=season, div=div)
-    try:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            logger.warning("fdco_team_matches: HTTP %d en %s", resp.status_code, url)
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        last = attempt == len(_RETRY_DELAYS)
+        try:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return list(csv.DictReader(io.StringIO(resp.text.lstrip("﻿"))))
+            logger.warning("fdco_team_matches: HTTP %d en %s (intento %d)", resp.status_code, url, attempt + 1)
+            if resp.status_code == 404:
+                return None
+        except Exception as exc:
+            logger.warning("fdco_team_matches: %s descargando %s (intento %d)",
+                           type(exc).__name__, url, attempt + 1, exc_info=last)
+        if last:
             return None
-        return list(csv.DictReader(io.StringIO(resp.text.lstrip("﻿"))))
-    except Exception:
-        logger.error("fdco_team_matches: error descargando %s", url, exc_info=True)
-        return None
+        await asyncio.sleep(_RETRY_DELAYS[attempt])
+    return None
 
 
 def _to_team_rows(raw: list[dict], div: str, season: str) -> list[dict]:

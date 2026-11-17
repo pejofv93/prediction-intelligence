@@ -86,7 +86,10 @@ jobs:
       - name: Programado — fichas y graduación (escriben)
         if: ${{ github.event_name == 'schedule' || inputs.programado == 'true' }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # Cada paso corre aunque falle el anterior (la graduación no depende de las fichas nuevas);
+          # el paso sale en rojo al final si alguno falló.
+          fallos=""
           for path in "run-match-previews?dry_run=false&highlightly=true&hl_max=3&hl_divs=SP2" \
                       "run-match-preview-grade?dry_run=false"; do
             echo "== $path"
@@ -94,15 +97,16 @@ jobs:
               -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
               --max-time 1100 \
               --no-buffer \
-              --fail --silent --show-error > out.txt
+              --fail --silent --show-error > out.txt || fallos="$fallos ${path%%\?*}(curl)"
             grep -v '^summary: ' out.txt
             grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
-            grep -q '^done ' out.txt
-            grep -q '^summary: {"ok": true' out.txt
+            { grep -q '^done ' out.txt && grep -q '^summary: {"ok": true' out.txt; } || fallos="$fallos ${path%%\?*}"
           done
+          [ -z "$fallos" ] || { echo "fallaron:$fallos"; exit 1; }
 
       - name: Programado — femenino, fichas y graduación (escriben; no bloquea)
-        if: ${{ github.event_name == 'schedule' || inputs.programado == 'true' }}
+        # También si falló el paso masculino: son independientes.
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.programado == 'true') }}
         continue-on-error: true
         run: |
           set -euo pipefail
