@@ -422,9 +422,10 @@ def poly_alerted_metrics(resolved_from: datetime = None, resolved_to: datetime =
 
     resolved_from/resolved_to acotan por resolved_at (p. ej. resueltas esta semana).
     """
-    out = {"roi": 0.0, "win_rate": 0.0, "n": 0, "wins": 0, "pnl": 0.0, "pending": 0,
+    out = {"roi": 0.0, "win_rate": 0.0, "n": 0, "wins": 0, "pnl": 0.0, "pending": 0, "markets": 0,
            "by_direction": {"BUY_YES": {"n": 0, "wins": 0, "pnl": 0.0, "roi": 0.0},
                             "BUY_NO": {"n": 0, "wins": 0, "pnl": 0.0, "roi": 0.0}}}
+    markets: set = set()
     try:
         for doc in iter_all("alerts_sent", where=("type", "==", "polymarket")):
             a = doc.to_dict() or {}
@@ -446,6 +447,7 @@ def poly_alerted_metrics(resolved_from: datetime = None, resolved_to: datetime =
             mp = a.get("market_price_yes", a.get("last_price"))
             odds = _poly_decimal_odds(sel, float(mp)) if mp is not None else 2.0
             pnl = (odds - 1.0) if result == "win" else -1.0
+            markets.add(str(a.get("market_id")))
             for bucket in (out, out["by_direction"][sel]):
                 bucket["n"] += 1
                 bucket["pnl"] += pnl
@@ -455,6 +457,7 @@ def poly_alerted_metrics(resolved_from: datetime = None, resolved_to: datetime =
             bucket["pnl"] = round(bucket["pnl"], 4)
             bucket["roi"] = round(bucket["pnl"] / bucket["n"], 4) if bucket["n"] else 0.0
         out["win_rate"] = round(out["wins"] / out["n"], 4) if out["n"] else 0.0
+        out["markets"] = len(markets)
     except Exception as e:
         logger.error("shadow: error calculando emitido real desde alerts_sent: %s", e)
     return out
@@ -642,6 +645,7 @@ def calculate_metrics(trades: list = None) -> dict:
             "n_poly_alerted": by_source["polymarket_alerted"]["n"],
             "pnl_poly_alerted": by_source["polymarket_alerted"]["pnl"],
             "pending_poly_alerted": by_source["polymarket_alerted"]["pending"],
+            "markets_poly_alerted": by_source["polymarket_alerted"].get("markets", 0),
             "roi_last20": roi_last20,
             "last_20_win_rate": last_20_win_rate,
             "avg_edge": avg_edge,

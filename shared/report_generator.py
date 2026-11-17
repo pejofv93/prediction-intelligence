@@ -123,6 +123,11 @@ def generate_weekly_report(
     wr_poly_alerted_bk = float(week_stats.get("win_rate_poly_alerted", 0.0))
     n_poly_alerted_bk = int(week_stats.get("n_poly_alerted", 0))
     pending_poly_alerted_bk = int(week_stats.get("pending_poly_alerted", 0))
+    markets_poly_alerted_bk = int(week_stats.get("markets_poly_alerted", 0))
+    pnl_poly_movement = float(week_stats.get("pnl_poly_movement", 0.0))
+    n_poly_movement = int(week_stats.get("n_poly_movement", 0))
+    roi_basket_week = float(week_stats.get("roi_basket_week", 0.0))
+    n_basket_week = int(week_stats.get("n_basket_week", 0))
 
     pending = int(week_stats.get("predictions_pending", 0))
     pending_note = f" (+{pending} pendientes)" if pending > 0 else ""
@@ -131,10 +136,13 @@ def generate_weekly_report(
         f"📊 REPORTE SEMANAL — Semana {week}",
         "",
         "⚽ SPORTS:",
-        f"Resueltas: {total} | ✅ {correct} | ❌ {failed}{pending_note}",
+        # Fútbol: "Resueltas" (accuracy_log) y "cerradas" (shadow_trades) son el mismo grupo.
+        f"Resueltas (fútbol): {total} | ✅ {correct} | ❌ {failed}{pending_note}",
         f"Win rate: {accuracy:.0%} | ROI semana: "
         + (f"{roi_sports_week:+.1%} ({n_sports_week} cerradas)" if n_sports_week else "— (0 cerradas)"),
     ]
+    if n_basket_week:
+        lines.append(f"🏀 Baloncesto: {n_basket_week} cerradas | ROI semana {roi_basket_week:+.1%}")
 
     if best_match and best_match != "N/A":
         lines.append(f"Mejor señal: {best_match} +{best_edge:.0%} ✅")
@@ -177,13 +185,17 @@ def generate_weekly_report(
         lines += [
             "",
             "💰 Bankroll virtual:",
-            f"Saldo: {bankroll_current:.2f}u | Win rate global: {win_rate:.0%}",
-            f"P&L: ⚽ Sports {pnl_sports_bk:+.2f}u | 🔮 Polymarket {pnl_poly_bk:+.2f}u",
+            f"Saldo: {bankroll_current:.2f}u (50u iniciales + P&L) | Win rate global: {win_rate:.0%}",
+            f"P&L: ⚽ Sports {pnl_sports_bk:+.2f}u | 🔮 Polymarket {pnl_poly_bk:+.2f}u"
+            + (f" | 📉 Movimientos Polymarket {pnl_poly_movement:+.2f}u" if n_poly_movement else ""),
             f"📈 ROI acumulado total: {roi_total:+.1%}",
             f"  ⚽ Sports (acumulado): {roi_sports:+.1%} (win rate {wr_sports_bk:.0%}, {n_sports_bk} señales)",
-            f"  🔮 Polymarket — ledger crudo: {roi_poly_bk:+.1%} (win rate {wr_poly_bk:.0%}, {n_poly_bk} señales)",
-            f"  🔮 Polymarket — emitido real (alertado, 1u/alerta): {roi_poly_alerted_bk:+.1%} "
-            f"(win rate {wr_poly_alerted_bk:.0%}, {n_poly_alerted_bk} resueltas, {pending_poly_alerted_bk} pendientes)",
+            f"  🔮 Polymarket — ledger crudo: {roi_poly_bk:+.1%} "
+            f"(win rate {wr_poly_bk:.0%}, {n_poly_bk} operaciones virtuales cerradas)",
+            f"  🔮 Polymarket — emitido real (1u por envío): {roi_poly_alerted_bk:+.1%} "
+            f"(win rate {wr_poly_alerted_bk:.0%}, {n_poly_alerted_bk} envíos graduados"
+            + (f" de {markets_poly_alerted_bk} mercados" if markets_poly_alerted_bk else "")
+            + f", {pending_poly_alerted_bk} pendientes)",
         ]
 
     return "\n".join(lines)

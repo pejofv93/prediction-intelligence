@@ -39,3 +39,25 @@ def test_cabecera_con_roi_de_la_semana_y_acumulado_etiquetado():
 
 def test_cabecera_sin_cerradas_en_la_semana():
     assert "ROI semana: — (0 cerradas)" in _report({"accuracy": 0.0})
+
+
+def test_cabecera_futbol_y_baloncesto_aparte():
+    txt = _report({"predictions_total": 25, "predictions_correct": 9, "accuracy": 0.36,
+                   "roi_sports_week": -0.1, "n_sports_week": 25,
+                   "roi_basket_week": 0.05, "n_basket_week": 81})
+    assert "Resueltas (fútbol): 25 | ✅ 9 | ❌ 16" in txt
+    assert "ROI semana: -10.0% (25 cerradas)" in txt
+    assert "🏀 Baloncesto: 81 cerradas | ROI semana +5.0%" in txt
+
+
+def test_saldo_cuadra_con_movimientos_y_etiquetas_polymarket():
+    txt = _report({"closed_trades": 1800, "bankroll_current": -326.59,
+                   "pnl_sports": -90.32, "pnl_poly": -230.10,
+                   "pnl_poly_movement": -56.17, "n_poly_movement": 80,
+                   "n_poly": 878, "n_poly_alerted": 941, "markets_poly_alerted": 704,
+                   "pending_poly_alerted": 12})
+    assert "Saldo: -326.59u (50u iniciales + P&L)" in txt
+    assert "| 📉 Movimientos Polymarket -56.17u" in txt
+    assert "878 operaciones virtuales cerradas" in txt
+    assert "941 envíos graduados de 704 mercados, 12 pendientes" in txt
+    assert "Movimientos" not in _report({"closed_trades": 1, "n_poly_movement": 0})

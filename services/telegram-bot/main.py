@@ -57,6 +57,18 @@ _MARKET_LABELS: dict[str, str] = {
 }
 
 
+def _is_basketball_pred(pred: dict) -> bool:
+    """Mismo criterio que learning_engine._is_basketball."""
+    return (str(pred.get("sport", "")).lower() in ("basketball", "nba")
+            or str(pred.get("league", "")).upper() in ("NBA", "ACB", "EUROLEAGUE"))
+
+
+def _trade_is_basketball(trade: dict) -> bool:
+    """shadow_trade de baloncesto: por la señal guardada o, si falta, por la liga (category)."""
+    return (_is_basketball_pred(trade.get("signal_data") or {})
+            or str(trade.get("category") or "").upper() in ("NBA", "ACB", "EUROLEAGUE"))
+
+
 def _describe_bet(pred: dict) -> str:
     """
     "Equipo A vs Equipo B (mercado: selección)" para best_match/worst_match del reporte
@@ -69,6 +81,8 @@ def _describe_bet(pred: dict) -> str:
     away = pred.get("away_team", "?")
     market = str(pred.get("market_type") or "h2h").lower()
     label = _MARKET_LABELS.get(market, market or "1X2")
+    if market == "totals" and _is_basketball_pred(pred):
+        label = "Más/Menos puntos"
     selection = pred.get("team_to_back") or pred.get("selection") or "?"
     return f"{home} vs {away} ({label}: {selection})"
 
@@ -527,7 +541,8 @@ async def send_weekly_report() -> JSONResponse:
         poly_best_edge = 0.0
         if alerted_poly:
             best_poly = max(alerted_poly, key=lambda p: abs(float(p.get("edge") or 0)))
-            poly_best_market = str(best_poly.get("question") or "")[:40]
+            _q = str(best_poly.get("question") or "")
+            poly_best_market = _q if len(_q) <= 120 else _q[:119].rstrip() + "…"
             poly_best_edge = abs(float(best_poly.get("edge") or 0))
 
         # Confianza media REAL de las señales emitidas esta semana (no la media de
@@ -551,14 +566,28 @@ async def send_weekly_report() -> JSONResponse:
         # Bankroll virtual (shadow trades) — ejecutar en executor para no bloquear event loop
         # Una sola lectura de shadow_trades: acumulado (bloque de bankroll) y ROI de Sports
         # de la semana (cabecera, mismo periodo que el win rate de accuracy_log).
+        # La cabecera de Sports es de fútbol (como "Resueltas", que sale de accuracy_log y no
+        # cuenta baloncesto); el baloncesto va en su propia línea.
         sports_week: dict = {}
+        basket_week: dict = {}
+        movement: dict = {"pnl": 0.0, "n": 0}
         try:
             from shared.shadow_engine import _iter_all_shadow_trades, calculate_metrics, period_metrics
-            def _metrics() -> tuple[dict, dict]:
+            def _metrics() -> tuple[dict, dict, dict, dict]:
                 _trades = _iter_all_shadow_trades()
-                return calculate_metrics(_trades), period_metrics(_trades, "sports", week_start, week_end)
+                _foot = [t for t in _trades if not _trade_is_basketball(t)]
+                _bask = [t for t in _trades if _trade_is_basketball(t)]
+                # El saldo suma TODAS las sources; polymarket_movement (seguidor de precios)
+                # no salía en ninguna línea de P&L.
+                _mov = [t for t in _trades if t.get("source") == "polymarket_movement"
+                        and t.get("pnl_virtual") is not None]
+                return (calculate_metrics(_trades),
+                        period_metrics(_foot, "sports", week_start, week_end),
+                        period_metrics(_bask, "sports", week_start, week_end),
+                        {"pnl": round(sum(float(t["pnl_virtual"]) for t in _mov), 4), "n": len(_mov)})
 
-            shadow_metrics, sports_week = await asyncio.get_event_loop().run_in_executor(None, _metrics)
+            shadow_metrics, sports_week, basket_week, movement = (
+                await asyncio.get_event_loop().run_in_executor(None, _metrics))
         except Exception:
             logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
             shadow_metrics = {}
@@ -628,6 +657,10 @@ async def send_weekly_report() -> JSONResponse:
             # Cabecera de Sports: ROI de shadow_trades cerrados en la misma semana que el win rate
             "roi_sports_week": sports_week.get("roi", 0.0),
             "n_sports_week": sports_week.get("n", 0),
+            "roi_basket_week": basket_week.get("roi", 0.0),
+            "n_basket_week": basket_week.get("n", 0),
+            "pnl_poly_movement": movement["pnl"],
+            "n_poly_movement": movement["n"],
             "clv_close": clv_close,
             "roi_poly": shadow_metrics.get("roi_poly", 0.0),
             "win_rate": shadow_metrics.get("win_rate", 0.0),
@@ -643,6 +676,7 @@ async def send_weekly_report() -> JSONResponse:
             "n_poly_alerted": shadow_metrics.get("n_poly_alerted", 0),
             "pnl_poly_alerted": shadow_metrics.get("pnl_poly_alerted", 0.0),
             "pending_poly_alerted": shadow_metrics.get("pending_poly_alerted", 0),
+            "markets_poly_alerted": shadow_metrics.get("markets_poly_alerted", 0),
             "closed_trades": shadow_metrics.get("closed_trades", 0),
             "streak": shadow_metrics.get("streak", 0),
         }
