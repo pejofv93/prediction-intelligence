@@ -1,0 +1,61 @@
+# Dos consultas de SOLO LECTURA (manual, sin cron). No escribe nada.
+#  - fichas: aciertos de las fichas graduadas por liga y mercado (scripts/ops/previews_grade_summary.py).
+#  - collect: tiempo de cada paso de sports-collect desde los logs de Cloud Run de sports-agent
+#    (scripts/ops/collect_step_times.py). El log solo lleva pasos, minutos y recuentos.
+name: ops-readonly
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "fichas: graduadas desde (AAAA-MM-DD)"
+        default: "2026-11-15"
+      days:
+        description: "collect: días de logs"
+        default: "16"
+
+permissions:
+  contents: read
+
+jobs:
+  consultar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Fichas graduadas por liga y mercado
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          SINCE: ${{ inputs.since }}
+        run: python scripts/ops/previews_grade_summary.py
+
+      - name: Tiempo por paso de sports-collect (logs de Cloud Run)
+        env:
+          PYTHONIOENCODING: utf-8
+          DAYS: ${{ inputs.days }}
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND textPayload:"collect"' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 20000 --format json > logs.json \
+            2> err.txt || { echo "no se pudieron leer los logs:"; grep -oE "PERMISSION_DENIED|permission[^.]*" err.txt | head -2; exit 1; }
+          echo "entradas leídas: $(python3 -c 'import json;print(len(json.load(open("logs.json"))))')"
+          LOGS_FILE=logs.json python scripts/ops/collect_step_times.py
+          rm -f logs.json err.txt
