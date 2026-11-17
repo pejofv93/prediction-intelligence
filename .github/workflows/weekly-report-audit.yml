@@ -1,0 +1,50 @@
+# Cuadre de las cifras del informe semanal con sus fuentes (scripts/ops/weekly_report_audit.py).
+# SOLO LECTURA: accuracy_log, shadow_trades y alerts_sent. No escribe nada.
+# El log lleva solo agregados; el detalle de las BUY_NO va en un artefacto de 1 día
+# (el repo es público). Manual, sin cron.
+name: weekly-report-audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      week_end:
+        description: "Lunes de cierre de la semana (AAAA-MM-DD); vacío = última semana completa"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  cuadre:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Cuadre (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          WEEK_END: ${{ inputs.week_end }}
+          DETAIL_FILE: detalle.json
+        run: python scripts/ops/weekly_report_audit.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: detalle-buy-no
+          path: detalle.json
+          retention-days: 1
