@@ -1,25 +1,57 @@
 name: sports-collect
+# El collect corre en Cloud Run y el workflow espera hasta 40 min (curl --max-time 2400).
+# Si curl corta por tiempo (código 28) el collect NO ha terminado: el trabajo sale en rojo y
+# avisa por Telegram. No se reintenta (sería otra pasada de 40 min); el reintento queda para
+# fallos de red o del runner.
 on:
   workflow_dispatch:
-
 jobs:
   trigger:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    continue-on-error: true
+    outputs:
+      timeout: ${{ steps.collect.outputs.timeout }}
     steps:
       - name: Trigger Cloud Run (sync)
+        id: collect
         run: |
+          set +e
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-collect" \
             -H "Content-Type: application/json" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
             --max-time 2400 \
             --no-buffer \
             --fail --silent --show-error
+          rc=$?
+          [ "$rc" -eq 28 ] && echo "timeout=true" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: Avisar por Telegram si se cortó a los 40 min
+        if: ${{ failure() && steps.collect.outputs.timeout == 'true' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          text = ("⚠️ sports-collect cortado a los 40 min (curl 28): el collect no terminó a tiempo "
+                  "y puede faltar la parte final (UEFA, clasificaciones, limpieza).\n" + os.environ["RUN_URL"])
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_TOKEN']}/sendMessage",
+              data=json.dumps({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text,
+                               "disable_web_page_preview": True}).encode(),
+              headers={"Content-Type": "application/json"})
+          try:
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  print("Telegram: HTTP", r.status)
+          except Exception as e:  # sin str(e): llevaría la URL con el token
+              print("Telegram: error", type(e).__name__)
+          PY
 
   retry:
     needs: trigger
-    if: ${{ needs.trigger.result == 'failure' }}
+    if: ${{ failure() && needs.trigger.outputs.timeout != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

@@ -1007,6 +1007,17 @@ async def _cleanup_stale_odds_cache() -> int:
     return deleted
 
 
+# Caché de football-data.org (10 peticiones/min) en el collect, 2 pasadas al día (05:30 y 17:30).
+# Con 6 h nunca había caché entre pasadas: 3 peticiones por partido (2 equipos + H2H), unos 0,35 min
+# por partido, y con jornada completa (80-90 partidos) el paso de fútbol pasaba de 35 min y el
+# collect se cortaba a los 40 (logs 6-17 nov 2026).
+#  - Equipos: 20 h → cada equipo se pide una vez al día (la pasada siguiente, a 12 h, lo salta).
+#    Tras jugar, sus datos se actualizan en la primera pasada que caiga 20 h después de la anterior.
+#  - H2H: 7 días. Solo cambia cuando esos dos equipos se enfrentan.
+TEAM_STATS_TTL_H = 20
+H2H_TTL_H = 7 * 24
+
+
 async def _is_stats_fresh(collection: str, doc_id: str, ttl_hours: int) -> bool:
     """True si el doc existe en Firestore y updated_at tiene menos de ttl_hours."""
     from shared.firestore_client import col
@@ -1093,7 +1104,7 @@ async def _collect_football() -> None:
         # Stats equipo local
         if home_id not in team_ids_seen:
             try:
-                if await _is_stats_fresh("team_stats", str(home_id), ttl_hours=6):
+                if await _is_stats_fresh("team_stats", str(home_id), ttl_hours=TEAM_STATS_TTL_H):
                     logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", home_id)
                     skipped_teams += 1
                 else:
@@ -1110,7 +1121,7 @@ async def _collect_football() -> None:
         # Stats equipo visitante
         if away_id not in team_ids_seen:
             try:
-                if await _is_stats_fresh("team_stats", str(away_id), ttl_hours=6):
+                if await _is_stats_fresh("team_stats", str(away_id), ttl_hours=TEAM_STATS_TTL_H):
                     logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", away_id)
                     skipped_teams += 1
                 else:
@@ -1129,7 +1140,7 @@ async def _collect_football() -> None:
         if pair not in h2h_pairs_seen:
             try:
                 pair_key = f"{pair[0]}_{pair[1]}"
-                if await _is_stats_fresh("h2h_data", pair_key, ttl_hours=6):
+                if await _is_stats_fresh("h2h_data", pair_key, ttl_hours=H2H_TTL_H):
                     logger.debug("collect.football: h2h(%s) cache vigente — omitiendo", pair_key)
                     skipped_h2h += 1
                 else:
