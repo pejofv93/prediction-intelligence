@@ -6,6 +6,8 @@ sobre mercados ya cerrados (partidos terminados, endDate días después).
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import pytest
+
 from scanner import _parse_gamma_ts, market_closed_reason
 
 _NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
@@ -53,6 +55,7 @@ def test_parse_gamma_ts_formats():
     assert _parse_gamma_ts("basura") is None
 
 
+@pytest.mark.asyncio
 async def test_analyze_market_skips_closed_market_before_llm(monkeypatch):
     import scanner
     from tests.test_groq_analyzer import _col_mock, _enriched, _market_doc
@@ -73,6 +76,7 @@ async def test_analyze_market_skips_closed_market_before_llm(monkeypatch):
     groq.assert_not_called()
 
 
+@pytest.mark.asyncio
 async def test_analyze_market_skips_when_gamma_unavailable(monkeypatch):
     import scanner
     from tests.test_groq_analyzer import _col_mock, _enriched, _market_doc
@@ -91,6 +95,7 @@ async def test_analyze_market_skips_when_gamma_unavailable(monkeypatch):
     groq.assert_not_called()
 
 
+@pytest.mark.asyncio
 async def test_gamma_streak_alerts_once_and_recovers(monkeypatch):
     """3 ciclos caídos seguidos → un aviso; el 4º no repite; al volver, aviso de recuperación."""
     import scanner
@@ -131,6 +136,7 @@ async def test_gamma_streak_alerts_once_and_recovers(monkeypatch):
     assert r["streak"] == 0 and len(sent) == 2 and "vuelve" in sent[1]
 
 
+@pytest.mark.asyncio
 async def test_gamma_cycle_without_calls_is_noop():
     import scanner
     scanner.reset_gamma_calls()
