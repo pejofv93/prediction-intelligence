@@ -5,6 +5,9 @@
 #   - Si pi-migracion ya existe (no terminada): no hace nada y se deshabilita.
 #   - Si la crea: se deshabilita. La IP y el OCID NO salen en el log; consúltalos en local.
 #   - "Out of host capacity": termina en verde y espera a la siguiente ejecución.
+#   - Límite de peticiones de Oracle (HTTP 429 TooManyRequests): igual, en verde y sin deshabilitarse.
+#     Desde el 17-nov lo lanza el repartidor cada 15 min de verdad (antes GitHub se saltaba casi
+#     todas) y Oracle devolvió un 429 el 18-nov a las 07:15.
 #   - Cualquier otro error: se deshabilita y termina en rojo (no reintenta a ciegas).
 #
 # El repo es público y sus logs también: no se imprime ningún OCID, huella, IP ni nada del
@@ -104,9 +107,20 @@ jobs:
           print(out.replace("\n", " ")[:300])'
           }
 
-          # 1) ¿Ya existe?
           E="$RUNNER_TEMP/oci/stderr"
+          # Límite de peticiones (429): no es un error real; se sigue en la próxima ejecución.
+          throttled() {
+            if grep -qE '"status": 429|TooManyRequests' "$E"; then
+              echo "Oracle limita las peticiones (429) en: $1; siguiente intento en la próxima ejecución."
+              echo "result=throttled" >> "$GITHUB_OUTPUT"
+              return 0
+            fi
+            return 1
+          }
+
+          # 1) ¿Ya existe?
           if ! list=$(oci compute instance list --compartment-id "$COMPARTMENT" --all --output json 2>"$E"); then
+            throttled "listar instancias" && exit 0
             echo "Error al listar instancias: $(clean <"$E")"
             echo "result=error" >> "$GITHUB_OUTPUT"; exit 0
           fi
@@ -124,6 +138,7 @@ jobs:
           # 2) AD de este intento: alterna AD-1 / AD-2 según el número de ejecución
           if ! ads=$(oci iam availability-domain list --compartment-id "$OCI_TENANCY_OCID" \
                        --query 'data[].name' --output json 2>"$E"); then
+            throttled "listar ADs" && exit 0
             echo "Error al listar ADs: $(clean <"$E")"
             echo "result=error" >> "$GITHUB_OUTPUT"; exit 0
           fi
@@ -153,12 +168,13 @@ jobs:
             echo "Sin capacidad en AD-$((idx + 1)); siguiente intento en la próxima ejecución."
             echo "result=capacity" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          throttled "lanzar la VM" && exit 0
           echo "Error distinto de capacidad (no reintento): $(clean <"$E")"
           echo "result=error" >> "$GITHUB_OUTPUT"
 
       - name: Deshabilitar este workflow
-        # todo lo que no sea "sin capacidad" lo para: ya existe, creada, error o fallo previo
-        if: always() && steps.intento.outputs.result != 'capacity'
+        # todo lo que no sea "sin capacidad" o "429" lo para: ya existe, creada, error o fallo previo
+        if: always() && steps.intento.outputs.result != 'capacity' && steps.intento.outputs.result != 'throttled'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -166,7 +182,7 @@ jobs:
           echo "Workflow deshabilitado (motivo: ${{ steps.intento.outputs.result }})."
 
       - name: Fallar si hubo error
-        if: always() && steps.intento.outputs.result != 'capacity' && steps.intento.outputs.result != 'exists' && steps.intento.outputs.result != 'created'
+        if: always() && !contains(fromJSON('["capacity","throttled","exists","created"]'), steps.intento.outputs.result)
         run: |
           echo "Parado por un error distinto de 'Out of host capacity' (resultado: '${{ steps.intento.outputs.result }}'). Revisa los pasos anteriores."
           exit 1
