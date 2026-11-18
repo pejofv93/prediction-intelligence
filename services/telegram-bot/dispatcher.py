@@ -8,6 +8,11 @@ Una franja = un documento `dispatch_claims/{tarea}_{AAAAMMDDHHMM}` creado con cr
 borra el documento para que la siguiente llamada lo reintente dentro del retraso máximo.
 En modo dry_run se usa la colección `dispatch_claims_dry` y no se llama a GitHub.
 Nunca lanza: devuelve un resumen (tareas y franjas, sin tokens).
+
+Workflow desactivado en GitHub (HTTP 422 y su estado en GitHub es disabled_*, p. ej. oracle-a1-retry se apagó solo el
+18-nov-2026): la franja se da por cerrada (status "desactivado", sin reintentos cada 5 min) y se
+avisa UNA vez por Telegram (`out["avisos"]`, lo envía /dispatch). El aviso se rearma cuando ese
+workflow vuelve a lanzarse bien (se borra `dispatch_alerts/{workflow}`).
 """
 import logging
 import os
@@ -23,6 +28,7 @@ GITHUB_API = "https://api.github.com"
 REPO = os.environ.get("DISPATCH_REPO", "pejofv93/prediction-intelligence")
 REF = "main"
 CLAIM_KEEP_DAYS = 3
+DISABLED = "desactivado"
 
 
 def _claims(mode: str):
@@ -54,16 +60,54 @@ def _first_live(coll, now: datetime) -> bool:
         raise
 
 
+def _gh_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"}
+
+
+def _is_disabled(workflow: str, token: str) -> bool:
+    """Estado real del workflow en GitHub (GET, solo lectura): disabled_manually, disabled_inactivity…
+    No depende del texto del 422, que no se guardó cuando se apagó oracle-a1-retry (18-nov)."""
+    try:
+        r = httpx.get(f"{GITHUB_API}/repos/{REPO}/actions/workflows/{workflow}",
+                      headers=_gh_headers(token), timeout=15.0)
+        return r.status_code == 200 and str(r.json().get("state", "")).startswith("disabled")
+    except Exception:
+        return False
+
+
 def _fire(workflow: str, inputs: dict, token: str) -> tuple[bool, str]:
     try:
         r = httpx.post(f"{GITHUB_API}/repos/{REPO}/actions/workflows/{workflow}/dispatches",
-                       headers={"Authorization": f"Bearer {token}",
-                                "Accept": "application/vnd.github+json",
-                                "X-GitHub-Api-Version": "2022-11-28"},
-                       json={"ref": REF, "inputs": inputs}, timeout=15.0)
+                       headers=_gh_headers(token), json={"ref": REF, "inputs": inputs}, timeout=15.0)
+        if r.status_code == 422 and _is_disabled(workflow, token):
+            return False, DISABLED
         return r.status_code == 204, f"HTTP {r.status_code}"
     except Exception as exc:  # red, DNS...
         return False, type(exc).__name__
+
+
+def _alerts():
+    from shared.firestore_client import col
+    return col("dispatch_alerts")
+
+
+def _alert_once(workflow: str, now: datetime) -> bool:
+    """True solo la primera vez que se ve desactivado (hasta que vuelva a lanzarse bien)."""
+    try:
+        _alerts().document(workflow).create({"workflow": workflow, "since": now, "reason": DISABLED})
+        return True
+    except Exception as exc:
+        if type(exc).__name__ in ("AlreadyExists", "Conflict"):
+            return False
+        raise
+
+
+def _alert_clear(workflow: str) -> None:
+    try:
+        _alerts().document(workflow).delete()
+    except Exception:
+        logger.warning("dispatch: no se pudo rearmar el aviso de %s", workflow, exc_info=True)
 
 
 def _prune(coll, now: datetime) -> int:
@@ -121,7 +165,8 @@ def run_dispatch(now: datetime | None = None, mode: str | None = None, source: s
     mode = mode or ds.DISPATCH_MODE
     token = os.environ.get("GITHUB_DISPATCH_TOKEN", "")
     out = {"mode": mode, "now": now.isoformat(timespec="minutes"), "origen": source,
-           "lanzadas": [], "ya_lanzadas": 0, "fallidas": [], "podadas": 0}
+           "lanzadas": [], "ya_lanzadas": 0, "fallidas": [], "desactivadas": [], "avisos": [],
+           "podadas": 0}
     try:
         out["llamadas_ultima_hora"] = _heartbeat(now, source)
     except Exception:
@@ -153,6 +198,15 @@ def run_dispatch(now: datetime | None = None, mode: str | None = None, source: s
             if ok:
                 ref.update({"status": "fired", "fired_at": now})
                 out["lanzadas"].append(label)
+                _alert_clear(task.workflow)
+            elif why == DISABLED:
+                ref.update({"status": DISABLED})     # sin reintentos: no se va a activar solo
+                out["desactivadas"].append(label)
+                if _alert_once(task.workflow, now):
+                    out["avisos"].append(
+                        f"⚠️ Repartidor: GitHub rechaza {task.workflow} porque está desactivado. "
+                        f"No se lanzará hasta que se active (gh workflow enable {task.workflow}). "
+                        f"Este aviso sale una sola vez.")
             else:
                 ref.delete()          # la siguiente llamada lo reintenta
                 out["fallidas"].append(f"{label} ({why})")

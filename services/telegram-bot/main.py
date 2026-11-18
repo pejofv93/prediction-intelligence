@@ -385,6 +385,11 @@ async def dispatch(request: Request) -> JSONResponse:
     from dispatcher import run_dispatch, source_of
     src = source_of(request.headers.get("user-agent", ""))
     res = await asyncio.get_event_loop().run_in_executor(None, lambda: run_dispatch(source=src))
+    if res.get("avisos"):
+        from alert_manager import send_message
+        for text in res["avisos"]:
+            if not await send_message(text, message_thread_id=TELEGRAM_DAILY_THREAD_ID):
+                logger.error("dispatch: Telegram no aceptó el aviso de workflow desactivado")
     return JSONResponse(res, status_code=500 if res.get("error") else 200)
 
 

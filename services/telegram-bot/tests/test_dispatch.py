@@ -114,6 +114,8 @@ def env(monkeypatch):
     monkeypatch.setattr(dp, "_claims", lambda mode: colls["live" if mode == "live" else "dry"])
     monkeypatch.setattr(dp, "_prune", lambda coll, now: 0)
     monkeypatch.setattr(dp, "_heartbeat", lambda now, source: {source: 1})
+    alerts = _Coll()
+    monkeypatch.setattr(dp, "_alerts", lambda: alerts)
     monkeypatch.setattr(ds, "TASKS", {"a": ds.Task("a.yml", "0 7 * * *"),
                                       "b": ds.Task("b.yml", "0 7 * * *", inputs={"programado": "true"})})
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "t")
@@ -121,9 +123,12 @@ def env(monkeypatch):
 
     def fake_fire(workflow, inputs, token):
         fired.append((workflow, dict(inputs)))
+        if state.get("disabled"):
+            return False, dp.DISABLED
         return state["ok"], "HTTP 204" if state["ok"] else "HTTP 500"
 
     monkeypatch.setattr(dp, "_fire", fake_fire)
+    state["alerts"] = alerts
     return colls, fired, state
 
 
@@ -197,3 +202,34 @@ def test_la_respuesta_lleva_origen_y_latidos(env):
 
 def test_modo_activo_es_live():
     assert ds.DISPATCH_MODE == "live"
+
+
+def test_workflow_desactivado_avisa_una_vez_y_no_reintenta(env):
+    colls, fired, state = env
+    state["disabled"] = True
+    r1 = dp.run_dispatch(T(16, 7, 2), mode="live")
+    assert sorted(r1["desactivadas"]) == ["a@07:00", "b@07:00"] and r1["fallidas"] == []
+    assert len(r1["avisos"]) == 2 and "a.yml" in r1["avisos"][0] and "una sola vez" in r1["avisos"][0]
+    r2 = dp.run_dispatch(T(16, 7, 7), mode="live")            # misma franja: ya cerrada, sin llamar
+    assert r2["ya_lanzadas"] == 2 and len(fired) == 2 and r2["avisos"] == []
+    r3 = dp.run_dispatch(T(17, 7, 2), mode="live")            # franja siguiente: sin aviso repetido
+    assert len(r3["desactivadas"]) == 2 and r3["avisos"] == []
+    state["disabled"] = False                                  # se reactiva → se rearma el aviso
+    r4 = dp.run_dispatch(T(18, 7, 2), mode="live")
+    assert len(r4["lanzadas"]) == 2 and state["alerts"].store == {}
+
+
+def test_fire_422_se_confirma_con_el_estado_del_workflow(monkeypatch):
+    class R:
+        def __init__(self, code, js=None):
+            self.status_code, self._js = code, js or {}
+        def json(self):
+            return self._js
+    state = {"wf": "disabled_manually"}
+    monkeypatch.setattr(dp.httpx, "post", lambda *a, **k: R(422))
+    monkeypatch.setattr(dp.httpx, "get", lambda *a, **k: R(200, {"state": state["wf"]}))
+    assert dp._fire("x.yml", {}, "t") == (False, dp.DISABLED)
+    state["wf"] = "active"                     # 422 por otra cosa (p. ej. input inválido)
+    assert dp._fire("x.yml", {}, "t") == (False, "HTTP 422")
+    monkeypatch.setattr(dp.httpx, "post", lambda *a, **k: R(204))
+    assert dp._fire("x.yml", {}, "t") == (True, "HTTP 204")
