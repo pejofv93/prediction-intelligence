@@ -45,3 +45,18 @@ jobs:
           DAYS: ${{ inputs.days }}
           SINCE: ${{ inputs.since }}
         run: python scripts/ops/signal_count.py
+
+      - name: Señales moderadas por versión (solo lectura; detalle en artefacto)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          SINCE: ${{ inputs.since }}
+          DETAIL_FILE: detalle.json
+        run: python scripts/ops/moderate_signals.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: detalle-moderadas
+          path: detalle.json
+          retention-days: 1

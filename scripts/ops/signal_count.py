@@ -65,6 +65,7 @@ def main() -> int:
     seg_sent: Counter = Counter()
     seg_written: Counter = Counter()
     first_new = None
+    sent_matches: list[tuple] = []
 
     def seg(d: dict) -> tuple:
         ev = d.get("ev") if d.get("ev") is not None else d.get("edge")
@@ -78,6 +79,7 @@ def main() -> int:
             continue
         sent[(slot_of(t), d.get("poisson_fit") or "nelder-mead-2000")] += 1
         seg_sent[seg(d)] += 1
+        sent_matches.append((str(d.get("match_id") or ""), d.get("poisson_fit"), d.get("league")))
         if d.get("poisson_fit") and (first_new is None or t < first_new):
             first_new = t
 
@@ -116,31 +118,38 @@ def main() -> int:
               f"escritas {sum(v for k, v in seg_written.items() if k[0] == fit):3d}")
 
     # Enviadas por cada 100 partidos analizados. Denominador: partidos de fútbol distintos en
-    # enriched_matches (un doc por partido, sin borrar) con fecha en la ventana (hasta +2 días, lo
-    # que ya puede estar analizado); versión = poisson_fit del doc (sin campo = Nelder-Mead).
-    # Numerador: envíos por la versión que llevan. No depende del nº de pasadas ni del parón.
-    analyzed: Counter = Counter()
-    analyzed_lg: Counter = Counter()
-    hi = now + timedelta(days=2)
+    # enriched_matches (un doc por partido, sin borrar) con fecha desde la ventana hasta +7 días
+    # (lo que el análisis ya mira). Versión del partido por cuándo se enriqueció por última vez
+    # (enriched_at desde la primera señal lbfgs → nuevo): poisson_fit falta también en el nuevo
+    # cuando no hay ajuste real. Numerador: solo envíos de esos mismos partidos (match_id).
+    match_fit: dict[str, tuple[str, str]] = {}
+    hi = now + timedelta(days=7)
     for doc in iter_all("enriched_matches"):
         d = doc.to_dict() or {}
         md = _dt(d.get("match_date"))
         if md is None or not (since <= md < hi) or not is_football(d):
             continue
-        fit = d.get("poisson_fit") or "nelder-mead-2000"
-        analyzed[fit] += 1
-        analyzed_lg[(fit, str(d.get("league") or "?"))] += 1
+        ea = _dt(d.get("enriched_at"))
+        fit = "lbfgs-l2-v1" if (d.get("poisson_fit") or (ea and ea >= split)) else "nelder-mead-2000"
+        match_fit[doc.id] = (fit, str(d.get("league") or "?"))
+    analyzed = Counter(f for f, _ in match_fit.values())
+    analyzed_lg = Counter(match_fit.values())
+    sent_m: Counter = Counter()
+    for (mid, fit, lg) in sent_matches:
+        if mid in match_fit:
+            sent_m[match_fit[mid]] += 1
     print()
-    print("Enviadas por cada 100 partidos analizados (partidos distintos en enriched_matches):")
+    print("Enviadas por cada 100 partidos analizados (partidos distintos en enriched_matches; "
+          "envíos de esos partidos):")
     for fit in ("nelder-mead-2000", "lbfgs-l2-v1"):
-        n_sent = sum(v for k, v in seg_sent.items() if k[0] == fit)
+        n_sent = sum(v for k, v in sent_m.items() if k[0] == fit)
         rate = f"{100 * n_sent / analyzed[fit]:.1f}" if analyzed[fit] else "—"
         print(f"  {fit:18} enviadas {n_sent:3d} · partidos {analyzed[fit]:5d} · por 100: {rate}")
+    print(f"  (envíos sin su partido en enriched_matches: {len(sent_matches) - sum(sent_m.values())})")
     print("  por liga (versión · liga · enviadas · partidos · por 100):")
     for fit, lg in sorted(analyzed_lg):
-        n_sent = sum(v for k, v in seg_sent.items() if k[0] == fit and k[1] == lg)
-        print(f"    {fit:18} {lg:6} {n_sent:3d} {analyzed_lg[(fit, lg)]:5d} "
-              f"{100 * n_sent / analyzed_lg[(fit, lg)]:6.1f}")
+        n = sent_m[(fit, lg)]
+        print(f"    {fit:18} {lg:6} {n:3d} {analyzed_lg[(fit, lg)]:5d} {100 * n / analyzed_lg[(fit, lg)]:6.1f}")
     return 0
 
 
