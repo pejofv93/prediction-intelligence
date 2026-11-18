@@ -57,6 +57,9 @@ def is_football(d: dict) -> bool:
 def main() -> int:
     days = int(os.environ.get("DAYS") or 8)
     since = datetime.now(timezone.utc) - timedelta(days=days)
+    if os.environ.get("SINCE"):                     # AAAA-MM-DD: sustituye a DAYS
+        since = datetime.fromisoformat(os.environ["SINCE"]).replace(tzinfo=timezone.utc)
+        days = (datetime.now(timezone.utc) - since).days
 
     sent: Counter = Counter()
     seg_sent: Counter = Counter()
@@ -111,6 +114,33 @@ def main() -> int:
     for fit in ("nelder-mead-2000", "lbfgs-l2-v1"):
         print(f"  TOTAL {fit:12} enviadas {sum(v for k, v in seg_sent.items() if k[0] == fit):3d} · "
               f"escritas {sum(v for k, v in seg_written.items() if k[0] == fit):3d}")
+
+    # Enviadas por cada 100 partidos analizados. Denominador: partidos de fútbol distintos en
+    # enriched_matches (un doc por partido, sin borrar) con fecha en la ventana (hasta +2 días, lo
+    # que ya puede estar analizado); versión = poisson_fit del doc (sin campo = Nelder-Mead).
+    # Numerador: envíos por la versión que llevan. No depende del nº de pasadas ni del parón.
+    analyzed: Counter = Counter()
+    analyzed_lg: Counter = Counter()
+    hi = now + timedelta(days=2)
+    for doc in iter_all("enriched_matches"):
+        d = doc.to_dict() or {}
+        md = _dt(d.get("match_date"))
+        if md is None or not (since <= md < hi) or not is_football(d):
+            continue
+        fit = d.get("poisson_fit") or "nelder-mead-2000"
+        analyzed[fit] += 1
+        analyzed_lg[(fit, str(d.get("league") or "?"))] += 1
+    print()
+    print("Enviadas por cada 100 partidos analizados (partidos distintos en enriched_matches):")
+    for fit in ("nelder-mead-2000", "lbfgs-l2-v1"):
+        n_sent = sum(v for k, v in seg_sent.items() if k[0] == fit)
+        rate = f"{100 * n_sent / analyzed[fit]:.1f}" if analyzed[fit] else "—"
+        print(f"  {fit:18} enviadas {n_sent:3d} · partidos {analyzed[fit]:5d} · por 100: {rate}")
+    print("  por liga (versión · liga · enviadas · partidos · por 100):")
+    for fit, lg in sorted(analyzed_lg):
+        n_sent = sum(v for k, v in seg_sent.items() if k[0] == fit and k[1] == lg)
+        print(f"    {fit:18} {lg:6} {n_sent:3d} {analyzed_lg[(fit, lg)]:5d} "
+              f"{100 * n_sent / analyzed_lg[(fit, lg)]:6.1f}")
     return 0
 
 

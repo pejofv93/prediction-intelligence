@@ -10,6 +10,10 @@ on:
         description: 'Ventana en días'
         required: false
         default: '8'
+      since:
+        description: 'Desde (AAAA-MM-DD); si se rellena, sustituye a days'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -39,4 +43,5 @@ jobs:
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           PYTHONIOENCODING: utf-8
           DAYS: ${{ inputs.days }}
+          SINCE: ${{ inputs.since }}
         run: python scripts/ops/signal_count.py
