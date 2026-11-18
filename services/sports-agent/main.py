@@ -1011,11 +1011,20 @@ async def _cleanup_stale_odds_cache() -> int:
 # Con 6 h nunca había caché entre pasadas: 3 peticiones por partido (2 equipos + H2H), unos 0,35 min
 # por partido, y con jornada completa (80-90 partidos) el paso de fútbol pasaba de 35 min y el
 # collect se cortaba a los 40 (logs 6-17 nov 2026).
-#  - Equipos: 20 h → cada equipo se pide una vez al día (la pasada siguiente, a 12 h, lo salta).
-#    Tras jugar, sus datos se actualizan en la primera pasada que caiga 20 h después de la anterior.
+#  - Equipos: solo si han jugado desde la última descarga (collectors/team_refresh.py; 18-nov:
+#    con 20 h fijas, 105 partidos dieron ~29 min de fútbol y 38 de collect).
 #  - H2H: 7 días. Solo cambia cuando esos dos equipos se enfrentan.
-TEAM_STATS_TTL_H = 20
 H2H_TTL_H = 7 * 24
+
+
+async def _stats_updated_at(collection: str, doc_id: str):
+    """updated_at del doc (None si no existe o no se puede leer)."""
+    from shared.firestore_client import col
+    try:
+        doc = col(collection).document(doc_id).get()
+        return (doc.to_dict() or {}).get("updated_at") if doc.exists else None
+    except Exception:
+        return None
 
 
 async def _is_stats_fresh(collection: str, doc_id: str, ttl_hours: int) -> bool:
@@ -1038,7 +1047,8 @@ async def _is_stats_fresh(collection: str, doc_id: str, ttl_hours: int) -> bool:
 async def _collect_football() -> None:
     """
     Recolecta partidos de futbol europeo via football-data.org.
-    Caché TTL 6h: si team_stats o h2h_data tienen menos de 6h → omite llamada API.
+    Equipos: solo los que han jugado desde la última descarga (collectors/team_refresh.py).
+    H2H: caché de 7 días.
     Rate limit: RATE_LIMIT_DELAY=6.5s ya integrado en cada llamada HTTP.
     """
     from collectors.football_api import (
@@ -1085,6 +1095,25 @@ async def _collect_football() -> None:
     await save_upcoming_matches(matches)
     logger.info("collect.football: %d partidos guardados", len(matches))
 
+    # Partidos terminados (últimos 30 días): antes del bucle, para saber quién ha jugado desde su
+    # última descarga. Las mismas peticiones que ya se hacían después; se reutiliza abajo.
+    from collectors.football_api import get_finished_matches
+    from collectors.team_refresh import last_kickoff_by_team, needs_refresh
+    finished: list[dict] = []
+    try:
+        finished = await get_finished_matches(days_back=30)
+    except Exception:
+        logger.error("collect.football: error leyendo partidos terminados", exc_info=True)
+    last_played = last_kickoff_by_team(finished)
+    _now_refresh = datetime.now(timezone.utc)
+    refresh_reasons: dict[str, int] = {}
+
+    async def _needs_team(team_id: int) -> bool:
+        need, why = needs_refresh(await _stats_updated_at("team_stats", str(team_id)),
+                                  last_played.get(team_id), bool(finished), _now_refresh)
+        refresh_reasons[why] = refresh_reasons.get(why, 0) + 1
+        return need
+
     team_ids_seen: set[int] = set()
     h2h_pairs_seen: set[tuple[int, int]] = set()
     skipped_teams = 0
@@ -1104,8 +1133,8 @@ async def _collect_football() -> None:
         # Stats equipo local
         if home_id not in team_ids_seen:
             try:
-                if await _is_stats_fresh("team_stats", str(home_id), ttl_hours=TEAM_STATS_TTL_H):
-                    logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", home_id)
+                if not await _needs_team(home_id):
+                    logger.debug("collect.football: team_stats(%d) sin jugar desde la descarga — omitiendo", home_id)
                     skipped_teams += 1
                 else:
                     raw_home = await _team_history(home_id)
@@ -1121,8 +1150,8 @@ async def _collect_football() -> None:
         # Stats equipo visitante
         if away_id not in team_ids_seen:
             try:
-                if await _is_stats_fresh("team_stats", str(away_id), ttl_hours=TEAM_STATS_TTL_H):
-                    logger.debug("collect.football: team_stats(%d) cache vigente — omitiendo", away_id)
+                if not await _needs_team(away_id):
+                    logger.debug("collect.football: team_stats(%d) sin jugar desde la descarga — omitiendo", away_id)
                     skipped_teams += 1
                 else:
                     raw_away = await _team_history(away_id)
@@ -1157,13 +1186,11 @@ async def _collect_football() -> None:
         len(team_ids_seen), skipped_teams, len(h2h_pairs_seen), skipped_h2h,
         _backfilled, _prev_season,
     )
+    logger.info("collect.football: equipos por motivo %s", refresh_reasons)
 
-    # Actualizar resultados de partidos terminados (últimos 30 días)
-    finished: list[dict] = []
+    # Actualizar resultados de partidos terminados (últimos 30 días; bajados antes del bucle)
     try:
-        from collectors.football_api import get_finished_matches
         from collectors.firestore_writer import update_finished_matches
-        finished = await get_finished_matches(days_back=30)
         updated = await update_finished_matches(finished)
         logger.info("RESULTS_UPDATE: %d partidos actualizados a FINISHED", updated)
     except Exception:
