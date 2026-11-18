@@ -5,6 +5,7 @@ Cada pasada empieza en "collect: iniciando pipeline". El tiempo de un paso es lo
 su primer mensaje hasta el primer mensaje del paso siguiente. Solo nombre del paso, minutos y
 recuentos (los números de los mensajes "N partidos ..."): nada de equipos, URLs ni errores.
 """
+import ast
 import json
 import os
 import re
@@ -14,17 +15,28 @@ from datetime import datetime
 
 STEP = re.compile(r"(collect(?:\.[a-z0-9_]+)?): ")
 COUNT = re.compile(r": (\d+) (partidos|resultados|ligas)")
+# "collect.football: equipos por motivo {'ha_jugado': 12, ...}" (collectors/team_refresh.py)
+REASONS = re.compile(r"equipos por motivo (\{[^}]*\})")
+REASON_KEYS = {"sin_historial", "7_dias", "sin_lista_20h", "ha_jugado", "sin_jugar", "sin_resultados_72h", "reciente"}
 
 
 def main() -> int:
     raw = json.load(open(os.environ.get("LOGS_FILE", "logs.json"), encoding="utf-8"))
     ev = []
+    reasons: dict = {}
     for e in raw:
         msg = e.get("textPayload") or (e.get("jsonPayload") or {}).get("message") or ""
         m = STEP.search(msg)
         if not m:
             continue
         rest = msg[m.end():]
+        rm = REASONS.search(msg)
+        if rm:
+            try:
+                d = ast.literal_eval(rm.group(1))
+                reasons[e["timestamp"]] = {k: int(v) for k, v in d.items() if k in REASON_KEYS}
+            except (ValueError, SyntaxError):
+                pass
         c = COUNT.match(": " + rest)
         tag = "inicio" if rest.startswith("iniciando") else "fin" if rest.startswith("completado") else ""
         ev.append((datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")), m.group(1), tag,
@@ -64,6 +76,11 @@ def main() -> int:
         total = f"{(end - r['start']).total_seconds() / 60:.1f} min" if end else "SIN TERMINAR"
         print(f"\n{r['start']:%a %d-%m %H:%M}  total {total}")
         print("   " + " · ".join(parts))
+        nxt_start = next((x["start"] for x in runs if x["start"] > r["start"]), None)
+        for ts, d in sorted(reasons.items()):
+            t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if t >= r["start"] and (nxt_start is None or t < nxt_start):
+                print(f"   equipos por motivo: {d} (pedidos {sum(v for k, v in d.items() if k not in ('sin_jugar', 'reciente'))})")
     print("\nMediana por paso (min):")
     for step, v in sorted(tot.items(), key=lambda kv: -sorted(kv[1])[len(kv[1]) // 2]):
         v = sorted(v)
