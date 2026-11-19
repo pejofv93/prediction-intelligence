@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import CalcES from './CalcES'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -655,6 +656,7 @@ function TabTracker({ refreshKey }: { refreshKey: number }) {
 // ─── Main component ────────────────────────────────────────────────────────────
 
 const TABS = [
+  { id: 'calc_es', label: '🇪🇸 Calculadora ES' },
   { id: 'calc', label: '🧮 Calculadora' },
   { id: 'signals', label: '🎯 Señales' },
   { id: 'bonos', label: '🎁 Bonos' },
@@ -698,6 +700,7 @@ export default function MatchedBetting() {
         ))}
       </div>
 
+      {activeTab === 'calc_es' && <CalcES />}
       {activeTab === 'calc' && <TabCalculadora onBetSaved={handleBetSaved} />}
       {activeTab === 'signals' && <TabSenales />}
       {activeTab === 'bonos' && <TabBonos />}
