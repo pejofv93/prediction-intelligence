@@ -82,9 +82,22 @@ def test_pildoras_por_equipo_entre_60_y_90():
     p["stats"]["goals"] = {"available": True, "lines": {
         "home": _block([(0.5, 0.95)]), "away": _block([(0.5, 0.66), (1.5, 0.29)]), "total": _block([(2.5, 0.46)])}}
     pills = ts.match_pills(p)
-    assert pills[0] == {"text": "Espanol marca al menos 1 gol", "p": 0.66, "star": False}
-    assert {"text": "Ath Bilbao más de 5,5 córners", "p": 0.60, "star": True} in pills
+    assert pills[0] == {"text": "Espanol marca al menos 1 gol", "p": 0.66, "star": False, "edge": False}
+    assert {"text": "Ath Bilbao más de 5,5 córners", "p": 0.60, "star": True, "edge": False} in pills
     assert not any("3,5 córners" in x["text"] for x in pills)          # la línea MÁS ALTA que pasa
     assert not any(x["p"] > 0.90 for x in pills) and len(pills) <= 5
     txt = ts.match_block(p)
     assert "  ▸ Espanol marca al menos 1 gol · 66 %" in txt and "  ★ Ath Bilbao más de 5,5 córners · 60 %" in txt
+
+
+def test_pildoras_primero_mercados_con_ventaja_medida():
+    p = _preview()
+    p["stats"]["corners"]["lines"]["home"] = _block([(4.5, 0.62)])
+    p["stats"]["corners"]["lines"]["home"]["market_label"] = "ventaja medida"
+    p["stats"]["corners"]["lines"]["away"] = _block([(3.5, 0.61)])          # sin ventaja: solo completa
+    p["stats"]["goals"] = {"available": True, "lines": {
+        "home": _block([(0.5, 0.80)]), "away": _block([(0.5, 0.75)]), "total": _block([(2.5, 0.46)])}}
+    p["stats"]["goals"]["lines"]["home"]["market_label"] = "solo referencia"
+    texts = [x["text"] for x in ts.match_pills(p)]
+    assert texts == ["Ath Bilbao más de 4,5 córners", "Ath Bilbao marca al menos 1 gol",
+                     "Espanol marca al menos 1 gol", "Espanol más de 3,5 córners"]

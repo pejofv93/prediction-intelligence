@@ -77,6 +77,9 @@ def _pct(p: float) -> str:
 # Píldoras "Tendencias del partido" (las mismas que la ficha de la web): solo mercados por equipo;
 # en cada mercado y equipo, la línea MÁS ALTA con el modelo entre el 60 % y el 90 %; como mucho 5,
 # de mayor a menor; ★ si el modelo se separa 10 puntos o más de la media de la liga en esa línea.
+# Primero los mercados con "ventaja medida" en la liga (etiqueta del backtest guardada en la ficha
+# de Firestore); los demás solo completan hasta 5.
+EDGE = "ventaja medida"
 PILL_MIN, PILL_MAX, PILL_MAX_N, STAR_PTS = 0.60, 0.90, 5, 10      # STAR_PTS en puntos, como la web
 PILL_NOUN = {"corners": "córners", "cards": "tarjetas", "fouls": "faltas", "shots": "remates",
              "sot": "remates a puerta", "goals": "goles"}
@@ -98,8 +101,10 @@ def match_pills(p: dict) -> list[dict]:
                     else f"{team} más de {_line(v['line'])} {PILL_NOUN[key]}")
             star = (v.get("p_league") is not None
                     and abs(round((v["p_model"] - v["p_league"]) * 100)) >= STAR_PTS)
-            out.append({"text": text, "p": v["p_model"], "star": star})
-    return sorted(out, key=lambda x: -x["p"])[:PILL_MAX_N]
+            blk = (b.get("lines") or {}).get(side) or {}
+            edge = (blk.get("market_label") or blk.get("label")) == EDGE
+            out.append({"text": text, "p": v["p_model"], "star": star, "edge": edge})
+    return sorted(out, key=lambda x: (not x["edge"], -x["p"]))[:PILL_MAX_N]
 
 
 def match_block(p: dict) -> str:

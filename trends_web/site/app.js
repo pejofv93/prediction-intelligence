@@ -282,7 +282,8 @@ function initials(name) {
 
 // Píldoras "Tendencias del partido": solo mercados por equipo; en cada mercado y equipo, la línea
 // MÁS ALTA con el modelo entre el 60 % y el 90 %; como mucho 5, de mayor a menor; ★ si el modelo se
-// separa 10 puntos o más de la media de la liga en esa línea. Lo mismo en el resumen de Telegram.
+// separa 10 puntos o más de la media de la liga en esa línea. Primero los mercados con "ventaja
+// medida" en la liga (etiqueta del backtest); los demás solo completan. Lo mismo en Telegram.
 const PILL_MIN = 0.60, PILL_MAX = 0.90, PILL_MAX_N = 5;
 const PILL_NOUN = { corners: "córners", cards: "tarjetas", fouls: "faltas", shots: "remates",
                     sot: "remates a puerta", goals: "goles" };
@@ -299,10 +300,11 @@ function matchPills(m) {
       if (!ok.length) continue;
       const [ln, pm, pl] = ok.reduce((x, y) => (y[0] > x[0] ? y : x));
       const gap = pts(pm, pl);
-      out.push({ side, text: pillText(m[side], stat, ln), p: pm, star: gap != null && Math.abs(gap) >= STANDOUT_PTS });
+      out.push({ side, text: pillText(m[side], stat, ln), p: pm, star: gap != null && Math.abs(gap) >= STANDOUT_PTS,
+                 edge: s.blocks[side].label === "ventaja medida" });
     }
   }
-  return out.sort((a, b) => b.p - a.p).slice(0, PILL_MAX_N);
+  return out.sort((a, b) => (b.edge - a.edge) || (b.p - a.p)).slice(0, PILL_MAX_N);
 }
 
 function sideLine(block) {
@@ -376,7 +378,7 @@ function renderMatch() {
     el("section", { class: "trends", "aria-label": "Tendencias del partido" },
       el("div", { class: "trends-head" },
         el("h2", { text: "Tendencias del partido" }),
-        el("span", { class: "muted", text: "Lo más probable según el modelo, de más a menos" })),
+        el("span", { class: "muted", text: "Primero los mercados con ventaja medida en esta liga; dentro, de más a menos probable" })),
       pills.length
         ? el("div", { class: "pills" }, ...pills.map((x) => el("span", { class: `tpill${x.star ? " star" : ""}`,
             title: x.star ? `El modelo se separa ${STANDOUT_PTS} puntos o más de la media de la liga` : "" },
