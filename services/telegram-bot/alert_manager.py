@@ -991,6 +991,8 @@ def _record_sports_sent(prediction: dict) -> None:
             "intensity_model": prediction.get("intensity_model") or _shown_intensity(prediction),
             # versión del ajuste Poisson (None = sin Poisson real o anterior al 16-nov-2026)
             "poisson_fit": prediction.get("poisson_fit"),
+            # mínimo de EV que aplicó el generador (None = mercado sin mínimo o anterior al 19-nov-2026)
+            "min_ev": prediction.get("min_ev"),
             "match_date": str(prediction.get("match_date") or ""),
             "sent_at": now, "last_sent_at": now, "last_odds": odds, "last_ev": ev,
             "resends": 0, "result": None, "correct": None,

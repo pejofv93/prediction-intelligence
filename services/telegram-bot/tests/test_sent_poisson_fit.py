@@ -39,3 +39,12 @@ def test_sin_poisson_queda_none(monkeypatch):
     doc = _record(monkeypatch, {"match_id": "m2", "team_to_back": "B", "odds": 2.0, "ev": 0.1,
                                 "sport": "tennis"})
     assert doc["poisson_fit"] is None
+
+
+def test_guarda_min_ev_aplicado(monkeypatch):
+    doc = _record(monkeypatch, {"match_id": "m3", "team_to_back": "C", "odds": 2.0, "ev": 0.1,
+                                "sport": "football", "min_ev": 0.096})
+    assert doc["min_ev"] == 0.096
+    doc = _record(monkeypatch, {"match_id": "m4", "team_to_back": "D", "odds": 2.0, "ev": 0.1,
+                                "sport": "tennis"})
+    assert doc["min_ev"] is None

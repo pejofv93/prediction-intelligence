@@ -32,14 +32,17 @@ LEAGUE_NAME_TO_CODE = {
 
 
 def effective_thresholds(doc: dict | None) -> dict[str, float]:
-    """Misma fusión que value_bet_engine._load_backtest_thresholds (h2h pisa a la config)."""
+    """Misma fusión que value_bet_engine.merge_backtest_thresholds: max(config, Firestore h2h)."""
     merged = dict(LEAGUE_MIN_EDGE)
     for league_name, markets in (doc or {}).items():
         code = LEAGUE_NAME_TO_CODE.get(league_name)
-        if not code or not isinstance(markets, dict):
+        if not code or not isinstance(markets, dict) or markets.get("h2h") is None:
             continue
-        if markets.get("h2h") is not None:
-            merged[code] = float(markets["h2h"])
+        try:
+            thr = float(markets["h2h"])
+        except (TypeError, ValueError):
+            continue
+        merged[code] = max(thr, float(LEAGUE_MIN_EDGE.get(code, SPORTS_MIN_EDGE)))
     return merged
 
 

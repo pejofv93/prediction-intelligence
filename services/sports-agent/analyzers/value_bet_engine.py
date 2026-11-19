@@ -517,10 +517,27 @@ _LEAGUE_NAME_TO_CODE: dict[str, str] = {
 }
 
 
+def merge_backtest_thresholds(base: dict[str, float], doc: dict | None) -> dict[str, float]:
+    """Mínimo de EV h2h por liga: max(config, Firestore). El backtest de backtest_engine solo
+    puede SUBIR el mínimo de la config, nunca bajarlo (19-nov-2026: con 0 apuestas recomendaba
+    0,08 y pisaba el 0,096 de SA/BL1/FL1; así pasó la señal de Sassuolo con EV 0,085)."""
+    merged = dict(base)
+    for league_name, markets in (doc or {}).items():
+        code = _LEAGUE_NAME_TO_CODE.get(league_name)
+        if not code or not isinstance(markets, dict) or markets.get("h2h") is None:
+            continue
+        try:
+            thr = float(markets["h2h"])
+        except (TypeError, ValueError):
+            continue
+        merged[code] = max(thr, float(base.get(code, SPORTS_MIN_EDGE)))
+    return merged
+
+
 def _load_backtest_thresholds() -> dict[str, float]:
     """
     Lee model_weights/backtest_thresholds de Firestore (TTL 6h).
-    Mapea league names → league codes. Merge con LEAGUE_MIN_EDGE como base.
+    Mapea league names → league codes. Fusión max(LEAGUE_MIN_EDGE, Firestore h2h).
     Si Firestore no tiene datos aún → devuelve LEAGUE_MIN_EDGE directamente.
     """
     global _BACKTEST_THRESHOLDS_CACHE, _BACKTEST_THRESHOLDS_LOADED_AT
@@ -533,16 +550,8 @@ def _load_backtest_thresholds() -> dict[str, float]:
         return _BACKTEST_THRESHOLDS_CACHE
     try:
         doc = col("model_weights").document("backtest_thresholds").get()
-        merged = dict(LEAGUE_MIN_EDGE)
+        merged = merge_backtest_thresholds(LEAGUE_MIN_EDGE, doc.to_dict() if doc.exists else None)
         if doc.exists:
-            data = doc.to_dict()
-            for league_name, markets in data.items():
-                code = _LEAGUE_NAME_TO_CODE.get(league_name)
-                if not code or not isinstance(markets, dict):
-                    continue
-                h2h_thr = markets.get("h2h")
-                if h2h_thr is not None:
-                    merged[code] = float(h2h_thr)
             logger.info(
                 "_load_backtest_thresholds: cargados desde Firestore — %s",
                 {k: v for k, v in merged.items() if k in _LEAGUE_NAME_TO_CODE.values()},
@@ -2306,7 +2315,6 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
     league = enriched_match.get("league", "")
     match_date = enriched_match.get("match_date") or enriched_match.get("date")
     data_quality = enriched_match.get("data_quality", "partial")
-    _min_edge = _load_backtest_thresholds().get(league, SPORTS_MIN_EDGE)
 
     # Si faltan nombres o liga (docs enriquecidos antes del fix), leerlos de upcoming_matches
     if not home_team or not away_team or not league:
@@ -2320,6 +2328,10 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                 match_date = match_date or um.get("match_date") or um.get("date")
         except Exception:
             logger.warning("generate_signal(%s): no se pudo resolver nombre de equipo desde upcoming_matches", match_id)
+
+    # Mínimo de EV de la liga DESPUÉS de rellenar la liga desde upcoming_matches: antes se
+    # calculaba con league vacío y caía en SPORTS_MIN_EDGE aunque luego la liga se conociera.
+    _min_edge = _load_backtest_thresholds().get(league, SPORTS_MIN_EDGE)
 
     # Ligas donde Poisson puede faltar: se permite continuar con ELO o form como proxy.
     # Copa/BSA: datos históricos insuficientes en fase de grupos.
@@ -3251,6 +3263,8 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
             "external_context": external_ctx["notes"],
             "odds_movement": odds_movement,
             "intensity": _signal_intensity,
+            # mínimo de EV aplicado a esta señal (max(config, Firestore) de su liga)
+            "min_ev": round(float(_min_edge), 4),
         }
 
 
@@ -3354,6 +3368,7 @@ async def generate_signal(enriched_match: dict) -> list[dict]:
                             "calculated_prob": sel_prob,
                             "edge": sel_edge,
                             "ev": round(sel_ev_t, 4),
+                            "min_ev": round(float(_min_edge), 4),
                             "confidence": sel_confidence,
                             "kelly_fraction": sel_kelly,
                             "factors": {
