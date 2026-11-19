@@ -38,6 +38,10 @@ const pts = (p, l) => (p == null || l == null ? null : Math.round((p - l) * 100)
 const signed = (x) => (x > 0 ? `+${x}` : `${x}`);
 const num = (x) => (x == null ? "—" : Number(x).toLocaleString("es-ES", { maximumFractionDigits: 2 }));
 
+// Nombre de pantalla en español ("Ath Bilbao" → "Athletic"): lo pone export_rates.py desde
+// shared/team_display_names.py; un rates.json antiguo sin "name" enseña el del CSV.
+const teamName = (t) => t.name || t.team;
+
 function marketMeta(key) { return DATA.markets.find((m) => m.key === key); }
 // Ambos marcan / portería a cero: sí/no (línea 0,5 sobre 1/0) → columna "Sí" en vez de "+0,5".
 const lineHead = (m, ln) => (m.binary ? "Sí" : `+${ln}`);
@@ -116,7 +120,7 @@ function renderTable() {
 
   const teams = [...lg.teams];
   if (state.sort < 0) {
-    teams.sort((a, b) => a.team.localeCompare(b.team, "es"));
+    teams.sort((a, b) => teamName(a).localeCompare(teamName(b), "es"));
   } else {
     teams.sort((a, b) => sortKey(b, state.sort) - sortKey(a, state.sort));
   }
@@ -130,7 +134,7 @@ function renderTable() {
                      onclick: () => { state.sort = i; render(); } }))));
   const body = teams.map((t) => el("tr", {},
     el("td", {},
-      el("button", { class: "team", text: t.team, onclick: () => openTeam(t) }),
+      el("button", { class: "team", text: teamName(t), onclick: () => openTeam(t) }),
       el("span", { class: "team-sub", text: teamSub(t) })),
     ...m.lines.map((_, i) => el("td", {}, cellNode(t.r[state.market][i][state.split])))));
   $("grid").replaceChildren(el("thead", {}, head), el("tbody", {}, ...body));
@@ -150,7 +154,7 @@ function openTeam(t) {
         ...SPLITS.map((_, s) => el("td", {}, cellNode(t.r[m.key][i][s]))))))))));
   sec.replaceChildren(
     el("button", { class: "pill close", text: "Cerrar", onclick: closeTeam }),
-    el("h2", { text: t.team }),
+    el("h2", { text: teamName(t) }),
     el("p", { class: "muted", text: `${DATA.leagues[state.div].name} · ${teamSub(t)}` }),
     ...blocks);
   sec.hidden = false;
@@ -266,6 +270,9 @@ function linesTable(title, block) {
 
 // ── Ficha "Duelo" (propuesta C, 19-nov-2026) ─────────────────────────────────
 // Escudos: círculo de color con iniciales (nada de logos reales). El color sale del nombre.
+// Nombre e iniciales llegan ya en previews.json (shared/team_display_names.py: m.home/m.away de
+// pantalla y m.badges); initials() es el respaldo para un previews.json antiguo y sigue el mismo
+// criterio que badge_initials() en Python (lo comprueba trends_web/tests/initials.test.mjs).
 const BADGE_COLORS = ["#B42318", "#1D4ED8", "#7C3AED", "#B45309", "#0F766E", "#334155", "#BE185D", "#4D7C0F"];
 function badgeColor(name, avoid) {
   let h = 0;
@@ -275,8 +282,12 @@ function badgeColor(name, avoid) {
   return c;
 }
 function initials(name) {
-  const w = name.replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter(Boolean);
+  let w = name.replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter(Boolean);
   if (!w.length) return "?";
+  if (w.length > 1) {                       // sin partículas en minúscula: "Sporting de Portugal" → SP
+    const big = w.filter((x) => x !== x.toLowerCase() || x === x.toUpperCase());
+    if (big.length) w = big;
+  }
   return (w.length === 1 ? w[0].slice(0, 3) : w.slice(0, 3).map((x) => x[0]).join("")).toUpperCase();
 }
 
@@ -344,9 +355,9 @@ function marketCard(m, k, colors) {
         linesTable(m.home, s.blocks.home), linesTable(m.away, s.blocks.away))));
 }
 
-function teamSide(name, n, color) {
+function teamSide(name, n, color, badge) {
   return el("div", { class: "duel-team" },
-    el("div", { class: "badge", "aria-hidden": "true", style: `background:${color}`, text: initials(name) }),
+    el("div", { class: "badge", "aria-hidden": "true", style: `background:${color}`, text: badge || initials(name) }),
     el("div", { class: "duel-name", text: name }),
     el("div", { class: "duel-sub", text: `${n ?? "—"} partidos esta temporada` }));
 }
@@ -362,12 +373,12 @@ function renderMatch() {
     el("div", { class: "duel" },
       el("button", { class: "pill close", text: "Cerrar", onclick: () => { state.match = null; render(); } }),
       el("div", { class: "duel-grid" },
-        teamSide(m.home, (m.sample.home || {}).n_cur, c1),
+        teamSide(m.home, (m.sample.home || {}).n_cur, c1, (m.badges || [])[0]),
         el("div", { class: "duel-mid" },
           el("div", { class: "duel-sub", text: groupTitle(m) }),
           el("div", { class: "duel-time", text: hhmm(m.kickoff_utc) }),
           el("div", { class: "duel-sub", text: ko.toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "short" }) })),
-        teamSide(m.away, (m.sample.away || {}).n_cur, c2))),
+        teamSide(m.away, (m.sample.away || {}).n_cur, c2, (m.badges || [])[1]))),
     isWomen(m) ? el("p", { class: "warn",
       text: `Fútbol femenino (modelo ${m.model_version}, datos de Highlightly): solo referencia hasta medirlo en directo.` }) : null,
     isCup(m) ? el("p", { class: "warn",

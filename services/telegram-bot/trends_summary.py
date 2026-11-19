@@ -12,6 +12,8 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from shared.team_display_names import display_name
+
 WEB_URL = "https://tendencias-pi.pages.dev"
 MAX_LEN = 3800                          # Telegram admite 4096
 STATS = (("corners", "Córners"), ("cards", "Tarjetas"), ("fouls", "Faltas"),
@@ -85,13 +87,19 @@ PILL_NOUN = {"corners": "córners", "cards": "tarjetas", "fouls": "faltas", "sho
              "sot": "remates a puerta", "goals": "goles"}
 
 
+def names(p: dict) -> tuple[str, str]:
+    """Nombres de pantalla en español ("Ath Bilbao" → "Athletic"); solo presentación."""
+    return display_name(p["home_team"], p.get("group")), display_name(p["away_team"], p.get("group"))
+
+
 def match_pills(p: dict) -> list[dict]:
     out = []
+    home, away = names(p)
     for key, _ in STATS:
         b = (p.get("stats") or {}).get(key) or {}
         if not b.get("available"):
             continue
-        for side, team in (("home", p["home_team"]), ("away", p["away_team"])):
+        for side, team in (("home", home), ("away", away)):
             lines = [v for v in (((b.get("lines") or {}).get(side) or {}).get("lines") or {}).values()
                      if PILL_MIN <= v["p_model"] <= PILL_MAX]
             if not lines:
@@ -109,7 +117,8 @@ def match_pills(p: dict) -> list[dict]:
 
 def match_block(p: dict) -> str:
     ko = madrid(_parse(p["kickoff_utc"]))
-    out = [f"{ko:%H:%M} {p['home_team']} – {p['away_team']}"
+    home, away = names(p)
+    out = [f"{ko:%H:%M} {home} – {away}"
            + ("  (muestra insuficiente)" if p.get("low_sample") else "")]
     if not p.get("low_sample"):
         for x in match_pills(p):

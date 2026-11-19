@@ -33,7 +33,7 @@ def _preview(home="Ath Bilbao", away="Espanol", div="SP1", ko="2026-11-20T20:00:
 
 def test_bloque_de_partido_por_equipo_y_total_de_referencia():
     txt = ts.match_block(_preview())
-    assert txt.startswith("21:00 Ath Bilbao – Espanol")                     # hora de Madrid
+    assert txt.startswith("21:00 Athletic – Espanyol")                  # hora de Madrid y nombres de pantalla
     assert "  Córners: local +6,5: 47 % · visit. +3,5: 45 % (total +9,5: 54 %)" in txt
     assert "Goles" not in txt and "cuota" not in txt.lower()
 
@@ -72,7 +72,7 @@ def test_copa_en_su_propio_mensaje_entre_ligas_y_femenino():
     heads = [m.splitlines()[0] for m in msgs]
     assert heads[0].endswith("· Primeira") and heads[1].endswith("· Copas · Taça de Portugal")
     assert heads[2].endswith("· Femenino · Liga F")
-    assert "Guimaraes – Sp Braga" in msgs[1] and "Benfica" not in msgs[1]
+    assert "Vitória Guimarães – Braga" in msgs[1] and "Benfica" not in msgs[1]
 
 
 def test_pildoras_por_equipo_entre_60_y_90():
@@ -82,12 +82,12 @@ def test_pildoras_por_equipo_entre_60_y_90():
     p["stats"]["goals"] = {"available": True, "lines": {
         "home": _block([(0.5, 0.95)]), "away": _block([(0.5, 0.66), (1.5, 0.29)]), "total": _block([(2.5, 0.46)])}}
     pills = ts.match_pills(p)
-    assert pills[0] == {"text": "Espanol marca al menos 1 gol", "p": 0.66, "star": False, "edge": False}
-    assert {"text": "Ath Bilbao más de 5,5 córners", "p": 0.60, "star": True, "edge": False} in pills
+    assert pills[0] == {"text": "Espanyol marca al menos 1 gol", "p": 0.66, "star": False, "edge": False}
+    assert {"text": "Athletic más de 5,5 córners", "p": 0.60, "star": True, "edge": False} in pills
     assert not any("3,5 córners" in x["text"] for x in pills)          # la línea MÁS ALTA que pasa
     assert not any(x["p"] > 0.90 for x in pills) and len(pills) <= 5
     txt = ts.match_block(p)
-    assert "  ▸ Espanol marca al menos 1 gol · 66 %" in txt and "  ★ Ath Bilbao más de 5,5 córners · 60 %" in txt
+    assert "  ▸ Espanyol marca al menos 1 gol · 66 %" in txt and "  ★ Athletic más de 5,5 córners · 60 %" in txt
 
 
 def test_pildoras_primero_mercados_con_ventaja_medida():
@@ -99,5 +99,15 @@ def test_pildoras_primero_mercados_con_ventaja_medida():
         "home": _block([(0.5, 0.80)]), "away": _block([(0.5, 0.75)]), "total": _block([(2.5, 0.46)])}}
     p["stats"]["goals"]["lines"]["home"]["market_label"] = "solo referencia"
     texts = [x["text"] for x in ts.match_pills(p)]
-    assert texts == ["Ath Bilbao más de 4,5 córners", "Ath Bilbao marca al menos 1 gol",
-                     "Espanol marca al menos 1 gol", "Espanol más de 3,5 córners"]
+    assert texts == ["Athletic más de 4,5 córners", "Athletic marca al menos 1 gol",
+                     "Espanyol marca al menos 1 gol", "Espanyol más de 3,5 córners"]
+
+
+def test_nombres_de_pantalla_sin_tocar_la_ficha():
+    p = _preview(home="Athletic Club", away="RCD Espanyol de Barcelona")
+    assert ts.match_block(p).startswith("21:00 Athletic – Espanyol")
+    assert p["home_team"] == "Athletic Club"                                    # solo presentación
+    w = {**_preview(div="WLF", home="Barcelona W", away="Madrid CFF"), "group": "women"}
+    assert ts.match_block(w).startswith("21:00 Barcelona – Madrid CFF")
+    c = {**_preview(div="D1", home="FC Koln", away="M'gladbach"), "group": "cups", "cup": "DFB-Pokal"}
+    assert "Colonia – Mönchengladbach" in ts.build_messages([c], date(2026, 11, 20))[0]

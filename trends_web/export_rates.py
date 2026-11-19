@@ -18,10 +18,12 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "services", "sports-agent")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))   # shared/
 
 import httpx  # noqa: E402
 
 from collectors import fdco_team_matches as fd  # noqa: E402
+from shared.team_display_names import display_name  # noqa: E402
 
 # Diferencia con la media de la liga por debajo de la cual se dice "en línea con la liga"
 LEAGUE_GAP = 0.05
@@ -120,7 +122,8 @@ def compact(docs: dict[str, dict], cur_by_div: dict[str, list[dict]], generated_
                           reliability(c), c["hits_cur"]] for c in (m[lk][s] for s in SPLITS)]
                         for lk in lines_by_market[k]]
             teams.append({
-                "team": doc["team"], "slug": doc["team_slug"],
+                # team = nombre del CSV (clave); name = nombre de pantalla en español
+                "team": doc["team"], "name": display_name(doc["team"]), "slug": doc["team_slug"],
                 "mc": doc["matches_current"], "mp": doc["matches_previous"],
                 "prev_div": doc["previous_div"], "prev_w": doc["previous_weight"],
                 "cards": doc["cards_convention"], "r": r,

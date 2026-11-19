@@ -34,6 +34,7 @@ from typing import Optional
 import httpx
 
 from analyzers import match_preview as mp
+from shared.team_display_names import badge_initials, display_name
 from collectors.fdco_team_matches import (
     LOWER_DIVS, MAIN_DIVS, _to_team_rows, current_season_end_year, fetch_csv_rows, season_code,
 )
@@ -560,13 +561,18 @@ def web_match(p: dict) -> dict:
                        for side, blk in b["lines"].items()},
         }
     teams = p.get("teams") or {}
+    # Nombres de pantalla en español ("Ath Bilbao" → "Athletic") e iniciales del escudo: solo
+    # presentación; match_id, home_team/away_team guardados y la graduación no cambian.
+    home = display_name(p["home_team"], p.get("group"))
+    away = display_name(p["away_team"], p.get("group"))
     return {
         "id": p["match_id"], "div": p["div"], "kickoff_utc": p["kickoff_utc"],
         # Femenino (mp-w1, Highlightly): grupo propio y siempre "solo referencia".
         "group": p.get("group") or "men", "model_version": p.get("model_version") or mp.MODEL_VERSION,
         # Copas (mp-v1-cups): nombre de la copa; div es la liga de los dos equipos.
         **({"cup": p.get("cup")} if p.get("group") == "cups" else {}),
-        "home": p["home_team"], "away": p["away_team"], "data_cutoff": p.get("data_cutoff"),
+        "home": home, "away": away, "badges": [badge_initials(home), badge_initials(away)],
+        "data_cutoff": p.get("data_cutoff"),
         "low_sample": bool(p.get("low_sample")),
         # Solo esta temporada en la web (la anterior la usa el modelo por dentro, no se enseña).
         "sample": {side: {"n_cur": t.get("n_cur"), "insufficient": bool(t.get("insufficient"))}

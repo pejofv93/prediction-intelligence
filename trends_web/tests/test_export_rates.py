@@ -62,6 +62,17 @@ def test_formato_compacto_y_celdas():
     assert data["leagues"]["E0"]["teams"] == [] and data["leagues"]["E0"]["data_through"] is None
 
 
+def test_nombre_de_pantalla_sin_tocar_la_clave():
+    rows = [_row("Ath Bilbao", "Espanol", "home" if i % 2 else "away", f"2026-09-{i + 1:02d}", corners=5)
+            for i in range(8)] + [_row("Espanol", "Ath Bilbao", "away" if i % 2 else "home",
+                                       f"2026-09-{i + 1:02d}", corners=4) for i in range(8)]
+    er.add_goal_fields(rows)
+    docs = fd.build_rate_docs({"SP1": rows}, {}, "2627", "2526", er.ALL_MARKETS)
+    teams = er.compact(docs, {"SP1": rows}, "2026-11-09T12:00Z")["leagues"]["SP1"]["teams"]
+    assert [(t["team"], t["name"], t["slug"]) for t in teams] == [
+        ("Ath Bilbao", "Athletic", fd.slugify("Ath Bilbao")), ("Espanol", "Espanyol", fd.slugify("Espanol"))]
+
+
 def test_comparacion_detecta_igual_y_distinto():
     import compare_rates as cr
     docs, _ = _docs()
