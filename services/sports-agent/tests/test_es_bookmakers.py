@@ -24,6 +24,13 @@ def test_marcas_genericas_y_casas_sin_licencia_no():
         assert not es.is_es_licensed(name), name
 
 
+def test_betano_fuera_sin_web_de_juego_en_la_dgoj():
+    # Kaizen Gaming XYZ figura en la DGOJ pero "No posee un sitio web que ofrezca juego".
+    for name in ("Betano", "Betano ES", "betano_es", "betano.es"):
+        assert not es.is_es_licensed(name), name
+        assert not es.is_es_sportsbook(name), name
+
+
 def test_casas_solo_espanolas_por_nombre_comercial():
     assert es.is_es_licensed("Sportium")
     assert es.is_es_licensed("Kirolbet")
