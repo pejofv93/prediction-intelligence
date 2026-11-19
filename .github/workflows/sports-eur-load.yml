@@ -1,0 +1,52 @@
+# Baloncesto en Tendencias (Fase 1): carga del historial de Euroliga (estadísticas de equipo
+# por partido: feed incrowdsports + live.euroleague.net/api/Boxscore) → eur_games.
+# SOLO manual. dry_run=true por defecto (descarga y cuenta, no escribe). Escribir exige
+# dry_run=false Y confirmar=ESCRIBIR. El log solo lleva agregados.
+name: sports-eur-load
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Temporadas (E2024,E2025,E2026); vacío = las 3 últimas"
+        default: ""
+      max_games:
+        description: "Tope de boxscores por temporada (0 = todos)"
+        default: "0"
+      dry_run:
+        description: "true = solo descarga y cuenta"
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      confirmar:
+        description: "Para dry_run=false escribe ESCRIBIR"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Comprobar confirmación
+        if: ${{ inputs.dry_run == 'false' && inputs.confirmar != 'ESCRIBIR' }}
+        run: |
+          echo "dry_run=false exige confirmar=ESCRIBIR — no se llama al servicio"
+          exit 1
+      - name: Trigger Cloud Run (sync)
+        env:
+          SEASONS: ${{ inputs.seasons }}
+          MAX_GAMES: ${{ inputs.max_games }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-eur-boxscores" -G \
+            --data-urlencode "seasons=${SEASONS}" \
+            --data-urlencode "max_games=${MAX_GAMES}" \
+            --data-urlencode "dry_run=${DRY_RUN}" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1700 \
+            --no-buffer \
+            --fail --silent --show-error | tee out.txt
+          grep -q '^done ' out.txt
+          grep -q '^summary: {"ok": true' out.txt

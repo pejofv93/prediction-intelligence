@@ -294,6 +294,78 @@ async def run_fdco_team_matches_job(seasons: str = "current", dry_run: bool = Tr
     return StreamingResponse(_stream(), media_type="text/plain")
 
 
+@app.post("/run-eur-boxscores", dependencies=[Depends(verify_token)])
+async def run_eur_boxscores_job(seasons: str = "", dry_run: bool = True, max_games: int = 0,
+                                only_missing: bool = True) -> StreamingResponse:
+    """
+    Baloncesto en Tendencias (Fase 1): estadísticas de equipo por partido de Euroliga
+    (feed incrowdsports + live.euroleague.net/api/Boxscore) → eur_games / eur_games_state.
+    Aislado: no lo lee ningún analizador todavía.
+
+    seasons: 'E2024,E2025,E2026' (vacío = las 3 últimas). dry_run=true por defecto (descarga,
+    calcula y cuenta, no escribe). max_games: tope de boxscores por temporada (0 = todos).
+    La última línea del stream es 'summary: {...}' (solo agregados).
+    """
+    season_list = [s.strip().upper() for s in seasons.split(",") if s.strip()] or None
+    if season_list and not all(len(s) == 5 and s[0] == "E" and s[1:].isdigit() for s in season_list):
+        raise HTTPException(status_code=400, detail="seasons: códigos tipo E2025 separados por comas")
+    result: dict = {}
+
+    async def _job() -> None:
+        try:
+            from collectors.euroleague_boxscores import run_eur_boxscores
+            result.update(await run_eur_boxscores(season_list, dry_run=dry_run,
+                                                  max_games=max_games, only_missing=only_missing))
+        except Exception as e:
+            logger.error("eur-boxscores: error no controlado — %s", e, exc_info=True)
+            result.update({"ok": False, "errors": [str(e)]})
+
+    async def _stream():
+        async for line in _stream_job(_job, "eur-boxscores"):
+            yield line
+        if result:
+            import json
+            yield "summary: " + json.dumps(result, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(_stream(), media_type="text/plain")
+
+
+@app.post("/run-tennis-data", dependencies=[Depends(verify_token)])
+async def run_tennis_data_job(years: str = "", dry_run: bool = True) -> StreamingResponse:
+    """
+    Tenis en Tendencias (Fase 1): resultados ATP/WTA con juegos por set desde
+    tennis-data.co.uk (enlaces leídos de alldata.php) → tennis_tournaments / tennis_data_state.
+    Aislado: no lo lee ningún analizador todavía.
+
+    years: '2024,2025,2026' (vacío = los 3 últimos). dry_run=true por defecto.
+    La última línea del stream es 'summary: {...}' (solo agregados).
+    """
+    try:
+        year_list = [int(y) for y in years.split(",") if y.strip()] or None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="years: años separados por comas")
+    if year_list and not all(2013 <= y <= 2100 for y in year_list):
+        raise HTTPException(status_code=400, detail="years: solo hay .xlsx desde 2013")
+    result: dict = {}
+
+    async def _job() -> None:
+        try:
+            from collectors.tennis_data import run_tennis_data
+            result.update(await run_tennis_data(year_list, dry_run=dry_run))
+        except Exception as e:
+            logger.error("tennis-data: error no controlado — %s", e, exc_info=True)
+            result.update({"ok": False, "errors": [str(e)]})
+
+    async def _stream():
+        async for line in _stream_job(_job, "tennis-data"):
+            yield line
+        if result:
+            import json
+            yield "summary: " + json.dumps(result, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(_stream(), media_type="text/plain")
+
+
 @app.post("/run-trends", dependencies=[Depends(verify_token)])
 async def run_trends() -> StreamingResponse:
     """
