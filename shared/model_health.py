@@ -309,6 +309,9 @@ def format_daily_report(
     wr_poly_alerted = float(shadow_metrics.get("win_rate_poly_alerted") or 0.0)
     n_poly_alerted = int(shadow_metrics.get("n_poly_alerted") or 0)
     pending_poly_alerted = int(shadow_metrics.get("pending_poly_alerted") or 0)
+    markets_poly_alerted = int(shadow_metrics.get("markets_poly_alerted") or 0)
+    pnl_poly_movement = float(shadow_metrics.get("pnl_poly_movement") or 0.0)
+    n_poly_movement = int(shadow_metrics.get("n_poly_movement") or 0)
 
     # Estado del modelo basado en win rate real (no en pesos internos)
     if closed_trades < 10:
@@ -357,14 +360,20 @@ def format_daily_report(
     # P&L simulado con Kelly — desglose de aportación por subsistema
     pnl_simulated = round((bankroll - 50.0), 2)
     pnl_sign = "+" if pnl_simulated >= 0 else ""
-    lines.append(f"💰 Bankroll virtual: {bankroll:.2f}€ ({pnl_sign}{pnl_simulated:.2f}€ P&L)")
-    lines.append(f"  ⚽ Sports: {pnl_sports:+.2f}€ | 🔮 Polymarket: {pnl_poly:+.2f}€")
+    # En unidades (u), como el semanal. El saldo suma TODAS las sources: también los movimientos de
+    # Polymarket (seguidor de precios), que no son ni Sports ni Polymarket.
+    lines.append(f"💰 Bankroll virtual: {bankroll:.2f}u (50u iniciales {pnl_sign}{pnl_simulated:.2f}u P&L)")
+    lines.append(f"  ⚽ Sports: {pnl_sports:+.2f}u | 🔮 Polymarket: {pnl_poly:+.2f}u"
+                 + (f" | 📉 Movimientos Polymarket: {pnl_poly_movement:+.2f}u" if n_poly_movement else ""))
     lines.append(f"📈 ROI total: {roi_total:+.1%}")
     lines.append(f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports:.0%}, {n_sports} señales)")
-    lines.append(f"  🔮 Polymarket — ledger crudo: {roi_poly:+.1%} (win rate {wr_poly:.0%}, {n_poly} señales)")
+    lines.append(f"  🔮 Polymarket — ledger crudo: {roi_poly:+.1%} "
+                 f"(win rate {wr_poly:.0%}, {n_poly} operaciones virtuales cerradas)")
     lines.append(
-        f"  🔮 Polymarket — emitido real (alertado, 1u/alerta): {roi_poly_alerted:+.1%} "
-        f"(win rate {wr_poly_alerted:.0%}, {n_poly_alerted} resueltas, {pending_poly_alerted} pendientes)"
+        f"  🔮 Polymarket — emitido real (1u por envío): {roi_poly_alerted:+.1%} "
+        f"(win rate {wr_poly_alerted:.0%}, {n_poly_alerted} envíos graduados"
+        + (f" de {markets_poly_alerted} mercados" if markets_poly_alerted else "")
+        + f", {pending_poly_alerted} pendientes)"
     )
 
     if avg_clv != 0.0:

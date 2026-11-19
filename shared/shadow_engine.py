@@ -580,6 +580,8 @@ def calculate_metrics(trades: list = None) -> dict:
             "sports": _roi_for("sports"),
             "polymarket": _roi_for("polymarket"),
             "polymarket_alerted": _emitted,
+            # seguidor de precios: entra en el saldo pero no en Sports ni en Polymarket
+            "polymarket_movement": _roi_for("polymarket_movement"),
         }
 
         # By category
@@ -646,6 +648,8 @@ def calculate_metrics(trades: list = None) -> dict:
             "pnl_poly_alerted": by_source["polymarket_alerted"]["pnl"],
             "pending_poly_alerted": by_source["polymarket_alerted"]["pending"],
             "markets_poly_alerted": by_source["polymarket_alerted"].get("markets", 0),
+            "pnl_poly_movement": by_source["polymarket_movement"]["pnl"],
+            "n_poly_movement": by_source["polymarket_movement"]["n"],
             "roi_last20": roi_last20,
             "last_20_win_rate": last_20_win_rate,
             "avg_edge": avg_edge,
