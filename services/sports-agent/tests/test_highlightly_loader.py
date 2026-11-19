@@ -341,6 +341,104 @@ def test_maint_dry_run_no_escribe():
     assert out["ok"] and store.writes == writes and out["would_fetch"] == 4
 
 
+# ── Mantenimiento: copas (fichas mp-v1-cups) ────────────────────────────────────
+
+class _CupStore(_Store):
+    """Almacén con fichas de copa (match_previews_cups) y escritura sin merge."""
+
+    def __init__(self, previews=()):
+        super().__init__()
+        self.previews = list(previews)
+
+    def cup_previews(self, lo, hi):
+        return [p for p in self.previews if lo <= p["kickoff_utc"] <= hi]
+
+    def all_docs(self, coll):
+        return list(self.c.get(coll, {}).values())
+
+    def replace(self, coll, docs):
+        for k, v in docs.items():
+            self.c.setdefault(coll, {})[str(k)] = dict(v)
+            self.writes += 1
+
+
+def _cup_preview(hl_id=50, day="2026-11-12"):
+    """Ficha de copa mínima (como la escribe run_cup_previews): una línea fija y una "extra"."""
+    blk = {"market": "corners_team", "label": "medido en backtest", "highlight": False,
+           "lines": {"over_4_5": {"line": 4.5, "p_model": 0.55, "p_league": 0.5},
+                     "over_3_5": {"line": 3.5, "p_model": 0.6, "p_league": 0.55, "extra": True}}}
+    return {"match_id": f"ES_{day}_{hl_id}", "div": "SP1", "cup": "Copa del Rey", "cup_id": 122477,
+            "country": "ES", "season": "2627", "date": day, "kickoff_utc": f"{day}T19:45:00+00:00",
+            "home_team": "Racing", "away_team": "Sporting", "hl_match_id": hl_id, "hash": "h",
+            "computed_at": f"{day}T02:00:00+00:00", "data_cutoff": "2026-11-09",
+            "stats": {"corners": {"available": True, "lines": {"home": blk}}}}
+
+
+def _cup_maint_world():
+    days, stats, boxes = _maint_world()
+    days[(122477, "2026-11-12")] = [_sm(50, "Racing", "Sporting", 1, 2, "2026-11-12", 2026),
+                                    _sm(51, "Otro", "Más", 7, 8, "2026-11-12", 2026)]     # sin ficha
+    stats[50] = _stats(1, "Racing", 2, "Sporting", corners=(6, 2))
+    stats[51] = _stats(7, "Otro", 8, "Más")
+    return days, stats, boxes
+
+
+def test_maint_copas_lista_solo_lo_que_tiene_ficha_y_gradua():
+    days, stats, boxes = _cup_maint_world()
+    base = _Client(stats=stats, boxes=boxes, days=days)
+    _run("maint", base, _maint_store(), max_requests=3000)               # sin fichas de copa
+    store = _CupStore([_cup_preview()])
+    store.put(L.STATE, {"nt_core_teams": {"ids": [10, 20]}, "maint_last_day": {"day": "2026-11-10"}})
+    client = _Client(stats=stats, boxes=boxes, days=days)
+    out = _run("maint", client, store, max_requests=3000)
+    assert out["ok"]
+    # Extra: 1 listado (Copa del Rey, 12-nov) + 1 /statistics del cruce con ficha
+    assert len(client.calls) - len(base.calls) == 2 and out["requests"] == len(client.calls)
+    assert sum("leagueId=122477&date=2026-11-12" in u for u in client.calls) == 1
+    assert not any("leagueId=122477&date=2026-11-11" in u for u in client.calls)   # ese día sin fichas
+    assert any(u.endswith("/statistics/50") for u in client.calls)
+    assert not any(u.endswith("/statistics/51") for u in client.calls)
+    ts = store.c[L.TEAM_STATS]
+    assert ts["50"]["group"] == "cups" and ts["50"]["status"] == "done" and "51" not in ts
+    g = store.c["match_preview_grades_cups"]["ES_2026-11-12_50"]
+    assert g["status"] == "graduada" and [ln["line"] for ln in g["lines"]] == [4.5]   # sin la "extra"
+    assert g["lines"][0]["value"] == 6 and g["lines"][0]["y"] == 1
+    live = store.c["match_preview_metrics"]["mp-v1-cups_live"]
+    assert live["n_graduated"] == 1 and live["n_by_market"] == {"corners_team": 1}
+    assert out["cup_grade"]["counts"] == {"graduada": 1} and out["cup_grade"]["star_markets"] == []
+    # Al día siguiente: nada de copas que listar ni que graduar otra vez.
+    client2 = _Client(stats=stats, boxes=boxes, days=days)
+    out2 = _run("maint", client2, store, max_requests=3000, now=NOW + timedelta(days=1))
+    assert not any("leagueId=122477" in u for u in client2.calls)
+    assert out2["cup_grade"]["counts"] == {} and out2["cup_grade"]["n_graduated"] == 1
+
+
+def test_maint_copas_dry_run_no_escribe_ni_pide_detalle():
+    days, stats, boxes = _cup_maint_world()
+    store = _CupStore([_cup_preview()])
+    store.put(L.STATE, {"nt_core_teams": {"ids": [10, 20]}, "maint_last_day": {"day": "2026-11-10"}})
+    writes = store.writes
+    client = _Client(stats=stats, boxes=boxes, days=days)
+    out = _run("maint", client, store, dry_run=True, max_requests=3000)
+    assert out["ok"] and store.writes == writes and out["would_fetch"] == 5
+    assert not any("/statistics/" in u for u in client.calls)
+    assert out["cup_grade"]["counts"] == {"esperando estadísticas": 1} and out["cup_grade"]["would_write"] == 0
+
+
+def test_maint_copas_fallo_de_graduacion_no_tumba_el_mantenimiento():
+    days, stats, boxes = _cup_maint_world()
+
+    class _Broken(_CupStore):
+        def all_docs(self, coll):
+            raise RuntimeError("firestore caído")
+
+    store = _Broken([_cup_preview()])
+    store.put(L.STATE, {"nt_core_teams": {"ids": [10, 20]}, "maint_last_day": {"day": "2026-11-10"}})
+    out = _run("maint", _Client(stats=stats, boxes=boxes, days=days), store, max_requests=3000)
+    assert out["ok"] and out["cup_grade"]["ok"] is False
+    assert store.c[L.STATE]["maint_last_day"]["day"] == "2026-11-12"
+
+
 # ── Copas ──────────────────────────────────────────────────────────────────────
 
 def _cups_store(n_teams=120):

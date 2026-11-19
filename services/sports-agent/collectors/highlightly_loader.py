@@ -9,7 +9,10 @@ Trabajos (job):
   women        Liga F y WSL (y las ligas femeninas que se pasen en `leagues`) → /statistics
   maint        mantenimiento diario (sirve con la cuota gratuita): lista por fecha los días que
                falten hasta ayer (como mucho 3) en las competiciones vivas de los tres trabajos y
-               pide el detalle de lo terminado, con un tope propio de HL_MAINT_DAILY al día
+               pide el detalle de lo terminado, con un tope propio de HL_MAINT_DAILY al día.
+               Copas (fichas mp-v1-cups): solo los (copa, día) de esos días con alguna ficha de
+               copa, y el detalle solo de esos cruces; después gradúa las fichas de copa
+               (match_preview_cups_live.run_cup_grade). Sin fichas de copa no gasta nada más.
   women_probe  sondeo: 1 listado + 1 /statistics de Frauen-Bundesliga, Serie A, D1 y Champions
   players      box score (jugadores) de los clubes de las 8 ligas → /box-score por partido
   cups         copas y supercopas de esos países (CUPS, 2020-2026): solo cruces entre dos equipos
@@ -62,6 +65,8 @@ HL_MAINT_DAILY = 50             # mantenimiento: tope propio al día (de las 100
 HL_MAINT_MAX_DAYS = 3           # mantenimiento: días que recupera como mucho si no corrió
 
 TEAM_STATS, MATCHES, PLAYERS, STATE = "hl_team_stats", "hl_matches", "hl_match_players", "hl_load_state"
+CUP_PREVIEWS = "match_previews_cups"     # fichas de copa: el mantenimiento gradúa las suyas
+CUP_GRADE_LOOKBACK_DAYS = 14             # = GRADE_LOOKBACK_DAYS de match_preview_store
 
 # (id de liga, temporada, ¿CORE?) — ids verificados el 12-nov-2026.
 NT_CORE = [(28016, 2020), (28016, 2024),          # clasificación del Mundial, Europa
@@ -223,6 +228,28 @@ class FirestoreStore:
             for doc_id, doc in items[k:k + 400]:
                 batch.set(col(coll).document(str(doc_id)), doc, merge=True)
             batch.commit()
+
+    def replace(self, coll: str, docs: dict) -> None:
+        """Como put, pero sustituye el documento entero (sin merge)."""
+        from shared.firestore_client import col, get_client
+        items = list(docs.items())
+        for k in range(0, len(items), 400):
+            batch = get_client().batch()
+            for doc_id, doc in items[k:k + 400]:
+                batch.set(col(coll).document(str(doc_id)), doc)
+            batch.commit()
+
+    def all_docs(self, coll: str) -> list[dict]:
+        from shared.firestore_client import col
+        return [s.to_dict() for s in col(coll).stream()]
+
+    def cup_previews(self, lo: str, hi: str) -> list[dict]:
+        """Fichas de copa (match_previews_cups) con kickoff_utc entre lo y hi (ISO)."""
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        from shared.firestore_client import col
+        q = (col(CUP_PREVIEWS).where(filter=FieldFilter("kickoff_utc", ">=", lo))
+             .where(filter=FieldFilter("kickoff_utc", "<=", hi)))
+        return [s.to_dict() for s in q.stream()]
 
     def by_league_season(self, coll: str, league_id: int, season) -> list[dict]:
         from google.cloud.firestore_v1.base_query import FieldFilter
@@ -468,24 +495,57 @@ def _maint_used(store, now: datetime) -> int:
     return (store.get(STATE, f"maint_{now.date().isoformat()}") or {}).get("used", 0)
 
 
+def _cup_previews(store, now: datetime) -> list[dict]:
+    """Fichas de copa de los últimos CUP_GRADE_LOOKBACK_DAYS días (lectura; sin Highlightly). Un
+    almacén sin fichas de copa (tests antiguos) → []."""
+    read = getattr(store, "cup_previews", None)
+    if read is None:
+        return []
+    try:
+        return read((now - timedelta(days=CUP_GRADE_LOOKBACK_DAYS)).isoformat(), now.isoformat())
+    except Exception:       # sin fichas de copa el mantenimiento sigue igual que antes
+        logger.error("hl_load(maint): no se pudieron leer las fichas de copa", exc_info=True)
+        return []
+
+
+def cup_targets(previews: list[dict], days: list[str]) -> dict[str, dict[int, set]]:
+    """{día: {copa: {ids de Highlightly}}} de las fichas de copa de esos días: lo único que el
+    mantenimiento lista y pide de copas."""
+    out: dict = {}
+    want = set(days)
+    for p in previews:
+        if p.get("date") in want and p.get("cup_id") is not None and p.get("hl_match_id") is not None:
+            out.setdefault(p["date"], {}).setdefault(int(p["cup_id"]), set()).add(p["hl_match_id"])
+    return out
+
+
 async def _maint(dry_run, leagues, now, api_key, quota, store, client, budget, summary):
     """Lista por fecha los días pendientes y pide el detalle de lo terminado, lo más reciente
-    primero. Lo que no quepa queda en hl_load_state/maint_backlog para la pasada siguiente."""
+    primero. Lo que no quepa queda en hl_load_state/maint_backlog para la pasada siguiente.
+    Copas: solo los cruces con ficha (cup_targets); su detalle va primero (son pocos y gradúan)."""
     core_ids = set((store.get(STATE, "nt_core_teams") or {}).get("ids", []))
     last = (store.get(STATE, "maint_last_day") or {}).get("day")
     days = maint_days(last, now)
-    pend: dict = {"nt": {}, "women": {}, "players": {}}
+    cup_prev = _cup_previews(store, now)
+    targets = cup_targets(cup_prev, days)
+    pend: dict = {"cups": {}, "nt": {}, "women": {}, "players": {}}
     for it in (store.get(STATE, "maint_backlog") or {}).get("items", []):
         coll = MATCHES if it["job"] == "players" else TEAM_STATS
         pend[it["job"]].update(store.existing(coll, [it["match_id"]]))
     done_day = last
     for day in days:
         complete = True
-        for job, league_id, is_core in _maint_comps(leagues):
+        comps = _maint_comps(leagues) + [("cups", lid, True) for lid in sorted(targets.get(day, {}))]
+        for job, league_id, is_core in comps:
             listing = await _list_day(client, api_key, quota, budget, league_id, day)
             if listing is None:      # sin presupuesto o error: ese día se repite en la pasada siguiente
                 complete = False
                 break
+            ids = core_ids
+            if job == "cups":        # solo los cruces con ficha
+                listing = [m for m in listing if m.get("id") in targets[day][league_id]]
+                ids = {i for m in listing for i in ((m.get("homeTeam") or {}).get("id"),
+                                                    (m.get("awayTeam") or {}).get("id")) if i is not None}
             by_season: dict = {}
             for m in listing:
                 by_season.setdefault((m.get("league") or {}).get("season"), []).append(m)
@@ -493,7 +553,7 @@ async def _maint(dry_run, leagues, now, api_key, quota, store, client, budget, s
                 if season is None:
                     continue
                 row = {"job": job, "league_id": league_id, "season": int(season), "day": day}
-                docs = _ingest(job, ms, league_id, int(season), is_core, core_ids, store, dry_run, row)
+                docs = _ingest(job, ms, league_id, int(season), is_core, ids, store, dry_run, row)
                 row.pop("all_finished")
                 pend[job].update({str(d["match_id"]): d for d in _pending(docs)})
                 summary["comps"].append(row)
@@ -505,9 +565,10 @@ async def _maint(dry_run, leagues, now, api_key, quota, store, client, budget, s
     summary["pending_detail"] = sum(len(v) for v in pend.values())
     if dry_run:
         summary["would_fetch"] = min(summary["pending_detail"], budget.left)
+        summary["cup_grade"] = await _cup_grade(True, now, store, cup_prev)
         return
     fetched = {"done": 0, "empty": 0, "error": 0}
-    for job in ("nt", "women", "players"):
+    for job in ("cups", "nt", "women", "players"):
         picks = to_fetch(list(pend[job].values()), budget.left)
         if not picks:
             continue
@@ -524,6 +585,29 @@ async def _maint(dry_run, leagues, now, api_key, quota, store, client, budget, s
         f"maint_{now.date().isoformat()}": {"used": _maint_used(store, now) + budget.used}})
     if done_day and done_day != last:
         store.put(STATE, {"maint_last_day": {"day": done_day}})
+    summary["cup_grade"] = await _cup_grade(False, now, store, cup_prev)
+
+
+async def _cup_grade(dry_run: bool, now: datetime, store, previews: list[dict]) -> dict:
+    """Graduación de las fichas de copa con lo que ya hay en hl_team_stats (0 peticiones a
+    Highlightly). Un fallo aquí no tumba el mantenimiento: queda en el resumen (cup_grade)."""
+    if not previews:
+        return {"ok": True, "counts": {}, "skipped": "sin fichas de copa en la ventana"}
+    from analyzers import match_preview_cups_live as ml
+    try:
+        todo = ml.previews_to_grade(previews, now)
+        mids = [p["match_id"] for p in todo]
+        graded = store.existing(ml.GRADES_C, mids) if mids else {}
+        hl_ids = [str(p["hl_match_id"]) for p in todo if p["match_id"] not in graded and p.get("hl_match_id")]
+        res = await ml.run_cup_grade(
+            dry_run=dry_run, now=now, previews=todo, graded=graded,
+            results=store.existing(TEAM_STATS, hl_ids) if hl_ids else {},
+            all_grades=store.all_docs(ml.GRADES_C), backtest=store.get(ml.METRICS, ml.BACKTEST_DOC) or {},
+            write=store.replace)
+    except Exception as e:
+        logger.error("hl_load(maint): graduación de copas fallida", exc_info=True)
+        return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
+    return res
 
 
 async def _fetch_details(job, picks, api_key, quota, store, client, budget, summary):

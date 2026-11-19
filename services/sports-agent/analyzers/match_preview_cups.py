@@ -222,6 +222,55 @@ def labels_from_backtest(metrics: dict[str, dict]) -> dict[str, str]:
             for v in metrics.values() if v["div"] == "ALL"}
 
 
+# ── Directo: graduación y estrellas (19-nov-2026) ────────────────────────────────
+def cup_result(doc: Optional[dict]) -> Optional[dict]:
+    """Doc de hl_team_stats (grupo cups) con detalle → resultado para grade_preview, o None.
+    Mismas cuentas que el backtest (cup_stats): roja ausente con el resto presente = 0; amarilla
+    ausente = sin dato (las líneas de tarjetas de ese lado no se gradúan)."""
+    if not doc or doc.get("status") != "done" or not doc.get("finished", True):
+        return None
+    st = cup_stats(doc)
+    if st is None:
+        return None
+    return {"h": st["h"], "a": st["a"], "date": (doc.get("date") or "")[:10]}
+
+
+def rows_from_cup_grades(grades: Iterable[dict]) -> list[tuple]:
+    """Filas para mp.market_metrics con el país en el sitio de la liga (como el backtest de copas)."""
+    rows = []
+    for g in grades:
+        if g.get("status") != "graduada":
+            continue
+        for ln in g.get("lines") or []:
+            rows.append((g.get("season"), g.get("country"), ln["market"], ln["line"], ln["y"], ln["p_league"],
+                         ln["p_model"], g["match_id"]))
+    return rows
+
+
+def final_labels(backtest_labels: Optional[dict], live_metrics: Optional[dict],
+                 n_min: int = STARS_AFTER_LIVE) -> dict[str, str]:
+    """{mercado: etiqueta} de las fichas de copa. La estrella ("ventaja medida") se habilita con la
+    regla de liga (IC95 por partido de la diferencia de Brier modelo − liga entero bajo 0, todos
+    los países juntos) aplicada a los cruces graduados en directo, y solo cuando el mercado ya
+    estaba "medido en backtest" y lleva al menos n_min cruces graduados. Si no, se queda la
+    etiqueta del backtest (nunca baja de "medido en backtest" por el directo)."""
+    out = dict(backtest_labels or {})
+    for v in (live_metrics or {}).values():
+        if v.get("div") != "ALL":
+            continue
+        mk = v["market"]
+        if (out.get(mk) == LABEL_BACKTEST and (v.get("n_matches") or 0) >= n_min
+                and v.get("ci_label") == mp.LABEL_EDGE):
+            out[mk] = mp.LABEL_EDGE
+    return out
+
+
+def live_counts(live_metrics: Optional[dict]) -> dict[str, int]:
+    """{mercado: cruces graduados en directo} (todos los países)."""
+    return {v["market"]: int(v.get("n_matches") or 0) for v in (live_metrics or {}).values()
+            if v.get("div") == "ALL"}
+
+
 # ── Diagnóstico de amarillas ausentes (solo recuentos) ───────────────────────────
 def yellow_diag(docs: Iterable[dict]) -> dict:
     """Lados de partido de copa sin "Yellow cards": ¿traen faltas, rojas, córners y cuántos campos?

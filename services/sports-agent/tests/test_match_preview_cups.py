@@ -100,3 +100,49 @@ def test_roja_ausente_cuenta_como_cero():
     s = mc.cup_stats(doc)
     assert s["h"]["cards"] == 2            # roja ausente = 0
     assert s["a"]["cards"] is None         # sin amarillas no se inventa nada
+
+
+# ── Directo: resultado, filas y estrellas ───────────────────────────────────────
+
+def _hl_doc(**kw):
+    d = {"status": "done", "finished": True, "date": "2026-12-16T20:00:00Z", "goals_home": 2, "goals_away": 0,
+         "stats": {"home": {"corners": 6, "yellows": 2, "shots_on": 5, "shots_off": 4, "shots_blocked": 3,
+                            "fouls": 11},
+                   "away": {"corners": 3, "yellows": None, "reds": None, "shots_on": 2, "shots_off": 3,
+                            "shots_blocked": 1, "fouls": 9}}}
+    d.update(kw)
+    return d
+
+
+def test_resultado_de_copa_desde_hl_team_stats():
+    r = mc.cup_result(_hl_doc())
+    assert r["date"] == "2026-12-16" and r["h"]["goals"] == 2 and r["a"]["goals"] == 0
+    assert r["h"]["cards"] == 2                 # roja ausente con amarillas presentes = 0
+    assert r["a"]["cards"] is None              # amarilla ausente: sin dato, no se pone a 0
+    assert mc.cup_result(_hl_doc(status="pending")) is None
+    assert mc.cup_result(_hl_doc(goals_home=None)) is None
+    assert mc.cup_result(None) is None
+
+
+def test_filas_de_graduacion_por_pais():
+    g = {"status": "graduada", "season": "2627", "country": "ES", "match_id": "ES_x",
+         "lines": [{"market": "corners_team", "line": 4.5, "y": 1, "p_league": 0.5, "p_model": 0.6}]}
+    assert mc.rows_from_cup_grades([g, {**g, "status": "anulada"}]) == [
+        ("2627", "ES", "corners_team", 4.5, 1, 0.5, 0.6, "ES_x")]
+
+
+def _live(market, n, ci):
+    return {f"{market}|ALL": {"market": market, "div": "ALL", "n_matches": n, "ci_label": ci},
+            f"{market}|ES": {"market": market, "div": "ES", "n_matches": n, "ci_label": mp.LABEL_EDGE}}
+
+
+def test_estrella_solo_con_50_cruces_y_ic_en_directo():
+    bt = {"corners_team": mc.LABEL_BACKTEST, "goals_total": mp.LABEL_REF}
+    assert mc.final_labels(bt, None) == bt
+    assert mc.final_labels(bt, _live("corners_team", 49, mp.LABEL_EDGE))["corners_team"] == mc.LABEL_BACKTEST
+    assert mc.final_labels(bt, _live("corners_team", 50, mp.LABEL_EDGE))["corners_team"] == mp.LABEL_EDGE
+    # 80 cruces pero el IC en directo no queda bajo 0: se queda "medido en backtest"
+    assert mc.final_labels(bt, _live("corners_team", 80, mp.LABEL_REF))["corners_team"] == mc.LABEL_BACKTEST
+    # "solo referencia" en el backtest no sube a estrella por el directo
+    assert mc.final_labels(bt, _live("goals_total", 90, mp.LABEL_EDGE))["goals_total"] == mp.LABEL_REF
+    assert mc.live_counts(_live("corners_team", 12, mp.LABEL_REF)) == {"corners_team": 12}

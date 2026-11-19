@@ -16,8 +16,14 @@ liga de Highlightly, hl_matches), guardado en el estado y recalculado cada ID_MA
 id no está, por parecido con los equipos de esas divisiones (único y ≥ MIN_SIM).
 
 Etiquetas: las del documento match_preview_metrics/mp-v1-cups_backtest ("medido en backtest" en
-los cinco mercados por equipo; "solo referencia" en el resto). Nunca "ventaja medida" (estrella):
-espera a ~50 cruces graduados en directo (decisión del usuario).
+los cinco mercados por equipo; "solo referencia" en el resto). "Ventaja medida" (estrella) solo
+cuando el mercado lleva STARS_AFTER_LIVE (50) cruces graduados en directo y su IC95 en directo
+queda entero bajo 0 (regla de liga; mc.final_labels con match_preview_metrics/mp-v1-cups_live).
+Graduación (run_cup_grade): la lanza el mantenimiento diario de Highlightly (job maint), que lista
+los (copa, día) de las fichas de los días que mantiene y pide /statistics de esos cruces; se
+gradúa por mercado, equipo y línea como mp-v1 (sin la línea "extra") →
+match_preview_grades_cups/{match_id} y match_preview_metrics/mp-v1-cups_live (métricas, cruces
+graduados por mercado y etiquetas).
 Fichas → match_previews_cups/{país}_{fecha}_{id Highlightly}; grupo "cups". dry_run=True por
 defecto: no escribe fichas, pero sí guarda el listado nuevo (ya está pagado).
 Datos de Highlightly: SOLO la lista de partidos. Resúmenes del log: solo recuentos.
@@ -32,7 +38,8 @@ from typing import Optional
 from analyzers import match_preview as mp
 from analyzers import match_preview_cups as mc
 from analyzers.match_preview_store import (
-    METRICS, _get_doc, _get_many, _parse, _set_docs, content_hash, decide, freeze_at, load_matches,
+    GRADE_AFTER_H, GRADE_LOOKBACK_DAYS, METRICS, NO_RESULT_DAYS, _get_doc, _get_many, _parse, _set_docs,
+    content_hash, decide, freeze_at, grade_preview, load_matches, validity,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +47,8 @@ logger = logging.getLogger(__name__)
 PREVIEWS_C = "match_previews_cups"
 STATE_DOC = ("match_previews_state", "cups")
 BACKTEST_DOC = "mp-v1-cups_backtest"
+LIVE_DOC = "mp-v1-cups_live"
+GRADES_C = "match_preview_grades_cups"
 MODEL_VERSION = "mp-v1-cups"
 HL_CUP_FIXTURES_API = "highlightly_cup_fixtures"     # contador propio
 HL_CUP_FIXTURES_DAILY = 12
@@ -199,8 +208,10 @@ def cup_fixture(f: dict, tdiv: dict[tuple[str, str], str], season: str, similari
             "hl_match_id": f["hl_match_id"], "source": "highlightly"}, ""
 
 
-def labels_for(doc: Optional[dict], div: str) -> dict[tuple[str, str], str]:
-    return {(mk, div): lab for mk, lab in ((doc or {}).get("labels") or {}).items()}
+def labels_for(doc: Optional[dict], div: str, live: Optional[dict] = None) -> dict[tuple[str, str], str]:
+    """Etiquetas del backtest, con la estrella si el directo ya la habilita (mc.final_labels)."""
+    labels = mc.final_labels((doc or {}).get("labels"), (live or {}).get("metrics"))
+    return {(mk, div): lab for mk, lab in labels.items()}
 
 
 def cup_preview_content(fx: dict, pred: dict, labels_source: Optional[str]) -> dict:
@@ -211,8 +222,9 @@ def cup_preview_content(fx: dict, pred: dict, labels_source: Optional[str]) -> d
 async def run_cup_previews(dry_run: bool = True, now: Optional[datetime] = None, highlightly: bool = True,
                            state: Optional[dict] = None, matches: Optional[list[dict]] = None,
                            backtest: Optional[dict] = None, existing: Optional[dict] = None,
-                           client=None, read_hl_matches=None) -> dict:
-    """Fichas de copa de los próximos WINDOW_DAYS días. state/matches/backtest/existing/client: tests."""
+                           client=None, read_hl_matches=None, live: Optional[dict] = None) -> dict:
+    """Fichas de copa de los próximos WINDOW_DAYS días. state/matches/backtest/existing/client/live:
+    tests (live solo se lee de Firestore si tampoco se pasa backtest)."""
     from collectors.highlightly_players import team_similarity
 
     now = now or datetime.now(timezone.utc)
@@ -220,6 +232,11 @@ async def run_cup_previews(dry_run: bool = True, now: Optional[datetime] = None,
                      "errors": []}
     if backtest is None:
         backtest = _get_doc(METRICS, BACKTEST_DOC)
+        if live is None:
+            try:
+                live = _get_doc(METRICS, LIVE_DOC)
+            except Exception:
+                logger.error("cup_previews: no se pudo leer %s (sin estrellas)", LIVE_DOC, exc_info=True)
     if not backtest:
         summary.update(ok=False, errors=[f"sin {METRICS}/{BACKTEST_DOC}: no se escriben fichas"])
         return summary
@@ -268,7 +285,7 @@ async def run_cup_previews(dry_run: bool = True, now: Optional[datetime] = None,
     to_write: dict[str, dict] = {}
     for fx in fxs:
         pred = mp.predict_match(hist, fx["div"], season, fx["date"], fx["home_team"], fx["away_team"],
-                                labels=labels_for(backtest, fx["div"]))
+                                labels=labels_for(backtest, fx["div"], live))
         content = cup_preview_content(fx, pred, BACKTEST_DOC)
         action = decide(content, existing.get(fx["match_id"]), now)
         counts[action] += 1
@@ -300,4 +317,119 @@ async def run_cup_previews(dry_run: bool = True, now: Optional[datetime] = None,
     summary["state_saved"] = bool(save_state) and summary["ok"]
     summary["previews"] = [{"match_id": fx["match_id"], "cup": fx["cup"]} for fx in fxs]   # sin equipos
     logger.info("cup_previews: %s; escribe %d", dict(counts), len(to_write))
+    return summary
+
+
+# ── Graduación (la lanza el mantenimiento diario de Highlightly) ──────────────────
+
+def previews_to_grade(previews: list[dict], now: datetime) -> list[dict]:
+    """Fichas empezadas hace más de GRADE_AFTER_H horas y menos de GRADE_LOOKBACK_DAYS días."""
+    lo, hi = now - timedelta(days=GRADE_LOOKBACK_DAYS), now - timedelta(hours=GRADE_AFTER_H)
+    out = []
+    for p in previews:
+        try:
+            if lo <= _parse(p["kickoff_utc"]) <= hi:
+                out.append(p)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def _read_cup_previews_to_grade(now: datetime) -> list[dict]:
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from shared.firestore_client import col
+    lo = (now - timedelta(days=GRADE_LOOKBACK_DAYS)).isoformat()
+    hi = (now - timedelta(hours=GRADE_AFTER_H)).isoformat()
+    q = (col(PREVIEWS_C).where(filter=FieldFilter("kickoff_utc", ">=", lo))
+         .where(filter=FieldFilter("kickoff_utc", "<=", hi)))
+    return [s.to_dict() for s in q.stream()]
+
+
+def _read_all_cup_grades() -> list[dict]:
+    from shared.firestore_client import col
+    return [s.to_dict() for s in col(GRADES_C).stream()]
+
+
+def live_doc(rows: list[tuple], live: dict, backtest: Optional[dict], now: datetime) -> dict:
+    """match_preview_metrics/mp-v1-cups_live: métricas en directo, contador de cruces graduados
+    (total y por mercado) y las etiquetas que resultan (con estrella si ya toca)."""
+    labels = mc.final_labels((backtest or {}).get("labels"), live)
+    return {"model_version": MODEL_VERSION, "kind": "live", "group": "cups", "n_rows": len(rows),
+            "n_graduated": len({r[7] for r in rows}), "n_by_market": mc.live_counts(live),
+            "stars_after": mc.STARS_AFTER_LIVE, "labels": labels,
+            "star_markets": sorted(mk for mk, lab in labels.items() if lab == mp.LABEL_EDGE),
+            "rule": (f"estrella: medido en backtest + al menos {mc.STARS_AFTER_LIVE} cruces graduados "
+                     "+ IC95 en directo entero bajo 0 (todos los países)"),
+            "metrics": live, "computed_at": now.isoformat()}
+
+
+async def run_cup_grade(dry_run: bool = True, now: Optional[datetime] = None,
+                        previews: Optional[list[dict]] = None, results: Optional[dict] = None,
+                        graded: Optional[dict] = None, all_grades: Optional[list[dict]] = None,
+                        backtest: Optional[dict] = None, write=None) -> dict:
+    """Gradúa las fichas de copa congeladas con las estadísticas de hl_team_stats/{hl_match_id}
+    (las baja el mantenimiento diario). Mismas reglas que mp-v1: anulada si se escribió tras el
+    inicio o usó datos del día del partido; "sin resultado" a los NO_RESULT_DAYS días.
+    previews/results/graded/all_grades/backtest/write: el mantenimiento los pasa con su almacén
+    (None = leer/escribir en Firestore). Resumen: solo recuentos."""
+    now = now or datetime.now(timezone.utc)
+    write = write or _set_docs
+    summary: dict = {"ok": True, "dry_run": dry_run, "counts": {}, "by_cup": {}, "errors": []}
+    previews = _read_cup_previews_to_grade(now) if previews is None else previews_to_grade(previews, now)
+    if graded is None:
+        graded = _get_many(GRADES_C, [p["match_id"] for p in previews])
+    pending = [p for p in previews if p["match_id"] not in graded]
+    if results is None:
+        results = _get_many("hl_team_stats", [str(p["hl_match_id"]) for p in pending if p.get("hl_match_id")])
+    docs: dict[str, dict] = {}
+    counts: dict[str, int] = defaultdict(int)
+    by_cup: dict = defaultdict(lambda: defaultdict(int))
+    for p in pending:
+        base = {"match_id": p["match_id"], "div": p["div"], "country": p.get("country"), "cup": p.get("cup"),
+                "cup_id": p.get("cup_id"), "season": p.get("season"), "date": p["date"],
+                "kickoff_utc": p["kickoff_utc"], "home_team": p["home_team"], "away_team": p["away_team"],
+                "hl_match_id": p.get("hl_match_id"), "model_version": p.get("model_version"), "group": "cups",
+                "preview_hash": p.get("hash"), "preview_computed_at": p.get("computed_at"),
+                "graded_at": now.isoformat()}
+        why = validity(p)
+        res = mc.cup_result(results.get(str(p.get("hl_match_id"))))
+        if why:
+            doc = {**base, "status": "anulada", "reason": why}
+        elif res is not None:
+            doc = {**base, "status": "graduada", **grade_preview(p, res)}
+        elif now - _parse(p["kickoff_utc"]) >= timedelta(days=NO_RESULT_DAYS):
+            doc = {**base, "status": "sin resultado"}
+        else:
+            counts["esperando estadísticas"] += 1
+            by_cup[p.get("cup") or "?"]["esperando estadísticas"] += 1
+            continue
+        counts[doc["status"]] += 1
+        by_cup[p.get("cup") or "?"][doc["status"]] += 1
+        docs[p["match_id"]] = doc
+    summary["counts"] = dict(counts)
+    summary["by_cup"] = {k: dict(v) for k, v in sorted(by_cup.items())}
+
+    if all_grades is None:
+        all_grades = _read_all_cup_grades()
+    merged = {g["match_id"]: g for g in all_grades if g.get("match_id")}
+    merged.update(docs)
+    rows = mc.rows_from_cup_grades(merged.values())
+    live = mp.market_metrics(rows) if rows else {}
+    if backtest is None:
+        backtest = _get_doc(METRICS, BACKTEST_DOC)
+    ldoc = live_doc(rows, live, backtest, now)
+    summary.update(n_graduated=ldoc["n_graduated"], n_by_market=ldoc["n_by_market"],
+                   stars_after=mc.STARS_AFTER_LIVE, star_markets=ldoc["star_markets"])
+    summary["would_write" if dry_run else "written"] = len(docs)
+    if not dry_run:
+        try:
+            if docs:
+                write(GRADES_C, docs)
+            if rows:
+                write(METRICS, {LIVE_DOC: ldoc})
+        except Exception:
+            logger.error("cup_grade: error escribiendo", exc_info=True)
+            summary["errors"].append("escritura fallida (ver logs del servicio)")
+            summary["ok"] = False
+    logger.info("cup_grade: %s; cruces graduados en total %d", dict(counts), ldoc["n_graduated"])
     return summary
