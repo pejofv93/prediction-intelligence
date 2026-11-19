@@ -353,6 +353,16 @@ async def run_women_backtest_job(dry_run: bool = True) -> StreamingResponse:
     return _stream_with_summary("women-backtest", run_women_backtest, dry_run=dry_run)
 
 
+@app.post("/run-cup-previews", dependencies=[Depends(verify_token)])
+async def run_cup_previews_job(dry_run: bool = True, highlightly: bool = True) -> StreamingResponse:
+    """Copas (mp-v1-cups): fichas de los próximos 3 días en match_previews_cups. Lista de cruces:
+    cada (copa, día) se lista una vez en Highlightly al entrar en la ventana (tope propio: 30 al
+    día con el plan PRO, 12 después). dry_run=true por defecto: no escribe fichas, pero guarda el
+    listado nuevo para no repetirlo. Resumen solo con recuentos."""
+    from analyzers.match_preview_cups_live import run_cup_previews
+    return _stream_with_summary("cup-previews", run_cup_previews, dry_run=dry_run, highlightly=highlightly)
+
+
 @app.post("/run-women-previews", dependencies=[Depends(verify_token)])
 async def run_women_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = True) -> StreamingResponse:
     """Fútbol femenino (mp-w1): fichas "solo referencia" de los próximos `days` días en
