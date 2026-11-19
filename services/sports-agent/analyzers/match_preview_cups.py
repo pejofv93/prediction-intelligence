@@ -51,7 +51,11 @@ def cup_stats(doc: dict) -> Optional[dict]:
         return None
     out = {}
     for side, key, goals in (("h", "home", doc["goals_home"]), ("a", "away", doc["goals_away"])):
-        s = st[key]
+        s = dict(st[key])
+        # Highlightly no manda "Red cards" cuando son 0: con el resto de estadísticas presentes,
+        # una roja ausente es 0 (sin esto, tarjetas solo tenía 191 de ~530 partidos).
+        if s.get("reds") is None and s.get("yellows") is not None:
+            s["reds"] = 0
 
         def tot(*fs):
             vals = [s.get(f) for f in fs]
@@ -113,6 +117,13 @@ def cup_matches(docs: Iterable[dict], id_names: dict[int, str], tdiv: dict[tuple
             counts["descartado_sin_detalle"] += 1
             continue
         stats = cup_stats(d)
+        st = d.get("stats") or {}
+        for k in ("home", "away"):
+            sd = st.get(k) or {}
+            if sd.get("reds") is None and sd.get("yellows") is not None:
+                counts["rojas_ausentes_contadas_0"] += 1
+            if sd.get("yellows") is None:
+                counts["amarillas_ausentes"] += 1
         if stats is None:
             counts["descartado_sin_estadisticas"] += 1
             continue

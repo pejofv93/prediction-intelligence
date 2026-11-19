@@ -80,3 +80,12 @@ def test_filtros_y_filas_walk_forward():
     assert [r[6] for r in first] == [r[6] for r in same]
     assert c["factor_copa"]["corners_h"] > 1          # 7 córners en copa frente a ~6 esperados
     assert mp.market_metrics(rows["modelo_vs_liga"])
+
+
+def test_roja_ausente_cuenta_como_cero():
+    doc = {"goals_home": 0, "goals_away": 0,
+           "stats": {"home": {"corners": 4, "yellows": 2, "shots_on": 3, "shots_off": 2, "shots_blocked": 1, "fouls": 10},
+                     "away": {"corners": 5, "yellows": None, "shots_on": 1, "shots_off": 2, "shots_blocked": 0, "fouls": 12}}}
+    s = mc.cup_stats(doc)
+    assert s["h"]["cards"] == 2            # roja ausente = 0
+    assert s["a"]["cards"] is None         # sin amarillas no se inventa nada

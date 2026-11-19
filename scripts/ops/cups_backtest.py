@@ -40,7 +40,7 @@ async def _history(last_end: int) -> tuple[list[dict], list[str]]:
     return mp.matches_from_team_rows(rows), failed
 
 
-def _print_metrics(name: str, rows: list[tuple]) -> None:
+def _print_metrics(name: str, rows: list[tuple], detail: bool = False, only=None) -> None:
     if not rows:
         print(f"\n[{name}] sin filas")
         return
@@ -56,6 +56,13 @@ def _print_metrics(name: str, rows: list[tuple]) -> None:
         if v["div"] != "ALL" and v["ci_label"] == mp.LABEL_EDGE:
             per_c[v["div"]] += 1
     print(f"  celdas país×mercado con IC entero bajo 0: {dict(per_c) or 'ninguna'}")
+    if detail:
+        print(f"  [{name}] por país:  país · mercado · partidos · diferencia [IC95] · etiqueta del IC")
+        for v in sorted((v for v in met.values() if v["div"] != "ALL" and (not only or v["market"] in only)),
+                        key=lambda v: (v["div"], v["market"])):
+            lo = "—" if v["ci_lo"] is None else f"{v['ci_lo']:+.4f}"
+            hi = "—" if v["ci_hi"] is None else f"{v['ci_hi']:+.4f}"
+            print(f"    {v['div']} {v['market']:14} {v['n_matches']:4d} · {v['delta']:+.4f} [{lo}, {hi}] · {v['ci_label']}")
 
 
 def main() -> int:
@@ -78,8 +85,10 @@ def main() -> int:
     factor = counts.pop("factor_copa", {})
     print("Recuentos:", dict(counts))
     print("Factor de copa final (observado / esperado por mp-v1):", factor)
-    for name in ("modelo_vs_liga", "factor_vs_liga", "modelo_vs_copa", "factor_vs_copa"):
-        _print_metrics(name, rows[name])
+    _print_metrics("modelo_vs_liga", rows["modelo_vs_liga"], detail=True)
+    _print_metrics("factor_vs_liga", rows["factor_vs_liga"], detail=True, only={"cards_team", "cards_total"})
+    _print_metrics("modelo_vs_copa", rows["modelo_vs_copa"])
+    _print_metrics("factor_vs_copa", rows["factor_vs_copa"], detail=True, only={"cards_team", "cards_total"})
     return 0
 
 
