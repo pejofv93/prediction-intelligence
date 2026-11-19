@@ -27,6 +27,8 @@ from shared.config import (
     MATCHED_MAX_BACK_LAY_RATIO,
 )
 
+from shared.es_bookmakers import es_counterpart, reference_only_reason
+
 from .models import MatchedSignal
 
 logger = logging.getLogger(__name__)
@@ -60,8 +62,39 @@ def should_alert(sig: MatchedSignal) -> bool:
     return alert_cut_reason(sig) is None
 
 
+def _format_reference_only(sig: MatchedSignal, reason: str) -> str:
+    """Alerta de una señal con casa o exchange sin licencia en España: se enseña como
+    referencia de mercado, SIN stakes ni instrucciones de apuesta (decisión del usuario,
+    19-nov: solo casas .es y el exchange de betfair.es)."""
+    kind = (f"surebet {sig.qualifying_rating:+.2f}%" if sig.signal_type == "surebet"
+            else f"cobertura, peaje {sig.qualifying_rating:.2f}%")
+    kickoff = (sig.commence_time or "")[:16].replace("T", " ")
+    lines = [
+        f"ℹ️ SOLO REFERENCIA ({kind}) — no apostable desde España",
+        sig.sport_key,
+        f"{sig.home_team} vs {sig.away_team}",
+        f"Selección: {sig.selection}",
+        "",
+        f"Cuotas vistas: back {sig.back_bookmaker} @{sig.back_odds:.2f} · "
+        f"lay {sig.lay_bookmaker} @{sig.lay_odds:.2f}",
+        f"Saque: {kickoff}",
+        f"⚠️ {reason}.",
+    ]
+    counterpart = es_counterpart(sig.back_bookmaker)
+    if counterpart is not None:
+        lines.append(f"Existe {counterpart.name} ({counterpart.domain}): su cuota puede ser "
+                     "distinta, compruébala en la calculadora ES.")
+    lines.append("Sin instrucciones de apuesta: no son cuotas de casas con licencia en España "
+                 "ni del exchange de betfair.es.")
+    return "\n".join(lines)
+
+
 def format_alert(sig: MatchedSignal, back_stake: float = MATCHED_ALERT_BASE_STAKE) -> str:
-    """Mensaje de texto plano para el canal General."""
+    """Mensaje de texto plano para el canal General. Si la casa del back o el exchange del
+    lay no tienen licencia en España, solo referencia (sin stakes ni instrucciones)."""
+    reason = reference_only_reason(sig.back_bookmaker, sig.lay_bookmaker)
+    if reason:
+        return _format_reference_only(sig, reason)
     scale = back_stake / 100.0
     lay_stake = sig.lay_stake_per_100 * scale
     liability = sig.liability_per_100 * scale

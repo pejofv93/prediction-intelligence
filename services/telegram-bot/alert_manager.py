@@ -284,6 +284,25 @@ def _segment_history_line(prediction: dict, history: dict | None) -> str:
             f" · esperado por cuota {_pct(s['expected'])} · ROI {_pct(s['roi'])}{ci} · {verdict(s)}")
 
 
+def _bookmaker_line(bookmaker) -> tuple[str, bool]:
+    """(línea de la casa para la alerta, ¿solo referencia?). Sin casa en la señal → ('', False)
+    y la alerta sale como siempre. Casa fuera de la lista de casas con licencia en España
+    (shared/es_bookmakers.py) → aviso 'solo referencia' y, si la marca tiene versión .es,
+    se nombra (su cuota puede ser otra)."""
+    if not bookmaker or not str(bookmaker).strip():
+        return "", False
+    from shared.es_bookmakers import display_name, es_counterpart, is_es_sportsbook
+
+    book = str(bookmaker).strip()
+    if is_es_sportsbook(book):
+        return f"🏦 Casa: {_escape_md(display_name(book))}\n", False
+    line = f"🏦 Casa: {_escape_md(book)} — ⚠️ solo referencia: casa sin licencia en España\n"
+    counterpart = es_counterpart(book)
+    if counterpart is not None:
+        line += f"ℹ️ Existe {_escape_md(counterpart.name)}: su cuota puede ser distinta, compruébala\n"
+    return line, True
+
+
 def _format_alert_unified(prediction: dict) -> str:
     """Formato unificado para todos los deportes y mercados."""
     sport = prediction.get("sport", "football")
@@ -340,16 +359,24 @@ def _format_alert_unified(prediction: dict) -> str:
     _date_madrid = _format_match_date_madrid(prediction.get("match_date"))
     _date_line = f"{_date_madrid}\n" if _date_madrid else ""
 
+    # Casa de la cuota (si la señal la trae). Sin licencia en España → solo referencia:
+    # sin stake sugerido (Kelly) ni nada que se lea como instrucción de apuesta. Solo cambia
+    # la presentación; la señal se elige y se envía igual (decisión del usuario, 19-nov).
+    book_line, reference_only = _bookmaker_line(prediction.get("bookmaker"))
+    kelly_line = ("🧮 Sin stake sugerido: cuota de referencia, no apostable desde España"
+                  if reference_only else f"🧮 Kelly: {kelly:.1%} del bankroll")
+
     msg = (
         f"{intensity} | {sport_emoji} {league_label}\n"
         f"{home} vs {away}\n"
         f"{_date_line}"
         f"Mercado: {market_label} | Selección: *{selection}*\n"
         f"Cuota: *{odds:.2f}* | Confianza: *{conf:.0%}*\n"
+        f"{book_line}"
         f"EV: *{ev:+.1%}* (es el que filtra) | Edge: *{edge:+.1%}*\n"
         f"Factores: {factors_text}"
         f"{om_line}\n"
-        f"🧮 Kelly: {kelly:.1%} del bankroll"
+        f"{kelly_line}"
     )
     ext_ctx = prediction.get("external_context") or []
     if ext_ctx:

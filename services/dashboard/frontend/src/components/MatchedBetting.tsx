@@ -34,6 +34,7 @@ interface MatchedSignal {
   lay_stake_per_100: number
   liability_per_100: number
   profit_per_100: number
+  reference_only?: string | null
 }
 
 interface MatchedSignalsResp {
@@ -57,6 +58,7 @@ interface BonusPlay {
   lay_odds: number
   estimated_benefit: number
   benefit_label: string
+  reference_only?: string | null
 }
 
 interface Bonus {
@@ -334,17 +336,26 @@ function SignalCard({ s }: { s: MatchedSignal }) {
         </div>
       </div>
 
+      {s.reference_only && (
+        <div style={{ color: '#F44336', fontSize: 12, marginBottom: 8 }}>
+          ⚠️ SOLO REFERENCIA — no apostable desde España: {s.reference_only}
+        </div>
+      )}
+
       <div style={{ color: '#ccc', fontSize: 13, marginBottom: 10 }}>
-        Apostar a: <span style={{ color: '#fff', fontWeight: 'bold' }}>{s.selection}</span>
+        {s.reference_only ? 'Selección: ' : 'Apostar a: '}
+        <span style={{ color: '#fff', fontWeight: 'bold' }}>{s.selection}</span>
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <StatBox label={`BACK · ${s.back_bookmaker}`} value={s.back_odds.toFixed(2)} color="#00C853" />
         <StatBox label={`LAY · ${s.lay_bookmaker}`} value={s.lay_odds.toFixed(2)} color="#F7931A" />
         <StatBox label="RATING" value={`${s.qualifying_rating.toFixed(2)}%`} color={ratingColor} />
-        <StatBox label="BENEF./100€" value={`€${s.profit_per_100.toFixed(2)}`} color={ratingColor} />
-        <StatBox label="LAY STAKE/100€" value={`€${s.lay_stake_per_100.toFixed(2)}`} />
-        <StatBox label="RESPONSAB./100€" value={`€${s.liability_per_100.toFixed(2)}`} color="#FF5252" />
+        {!s.reference_only && <>
+          <StatBox label="BENEF./100€" value={`€${s.profit_per_100.toFixed(2)}`} color={ratingColor} />
+          <StatBox label="LAY STAKE/100€" value={`€${s.lay_stake_per_100.toFixed(2)}`} />
+          <StatBox label="RESPONSAB./100€" value={`€${s.liability_per_100.toFixed(2)}`} color="#FF5252" />
+        </>}
         <StatBox label="EV FREE BET SNR" value={`${s.freebet_snr_rating.toFixed(0)}%`} color="#9C27B0" />
       </div>
     </div>
@@ -493,7 +504,9 @@ function TabBonos() {
 
             {p ? (
               <div style={{ background: '#12121a', border: '1px solid #2a2a3a', borderRadius: 6, padding: '10px 12px' }}>
-                <div style={{ color: '#9C27B0', fontSize: 11, fontWeight: 'bold', marginBottom: 6 }}>JUGADA RECOMENDADA</div>
+                <div style={{ color: p.reference_only ? '#F44336' : '#9C27B0', fontSize: 11, fontWeight: 'bold', marginBottom: 6 }}>
+                  {p.reference_only ? `SOLO REFERENCIA — ${p.reference_only}` : 'JUGADA RECOMENDADA'}
+                </div>
                 <div style={{ fontSize: 13, color: '#ddd', marginBottom: 4 }}>
                   {p.event} — <span style={{ color: '#fff', fontWeight: 'bold' }}>{p.selection}</span>
                   <span style={{ color: '#555', fontSize: 11 }}> · {p.sport_key} · {fmtKickoff(p.commence_time)}</span>

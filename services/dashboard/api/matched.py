@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
+from shared.es_bookmakers import reference_only_reason
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -33,6 +35,10 @@ async def matched_signals(signal_type: str = "", limit: int = 100) -> dict:
                 continue
             if signal_type and doc.get("signal_type") != signal_type:
                 continue
+            # Casa del back o exchange del lay sin licencia en España → solo referencia
+            # (decisión del usuario, 19-nov). Solo presentación: la señal no cambia.
+            doc["reference_only"] = reference_only_reason(
+                doc.get("back_bookmaker") or "", doc.get("lay_bookmaker") or "")
             signals.append(doc)
     except Exception as e:
         logger.error("matched_signals: error leyendo Firestore — %s", e)
@@ -50,8 +56,9 @@ async def matched_signals(signal_type: str = "", limit: int = 100) -> dict:
         "count": len(signals),
         "surebets": n_sure,
         "coverage": len(signals) - n_sure,
-        "warning": "El lay de Betfair no incluye liquidez/size — verifica que el importe "
-                   "esté disponible antes de apostar. Ratings muy altos suelen ser lay fino.",
+        "warning": "Las señales con 'solo referencia' usan casas o el exchange .com (betfair_ex_eu) "
+                   "sin licencia en España: no son apostables desde España. El lay no incluye "
+                   "liquidez/size. Ratings muy altos suelen ser lay fino.",
         "fetched_at": now_iso,
     }
 
@@ -133,6 +140,8 @@ def _best_play(bonus: dict, signals: list[dict]) -> dict | None:
         "lay_odds": best.get("lay_odds"),
         "estimated_benefit": benefit,
         "benefit_label": benefit_label,
+        # El lay de referencia es del exchange .com (betfair_ex_eu): no usable desde España.
+        "reference_only": reference_only_reason(None, best.get("lay_bookmaker") or ""),
     }
 
 
