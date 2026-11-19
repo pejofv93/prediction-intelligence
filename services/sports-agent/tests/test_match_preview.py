@@ -156,3 +156,12 @@ def test_backtest_salta_equipos_con_menos_de_5_partidos():
     keys = {r[-1] for r in rows}
     assert rows and len(keys) < 48                                 # los primeros partidos no se predicen
     assert {r[2] for r in rows} == {mp.market_key(s, sc) for s in mp.STATS for sc in ("team", "total")}
+
+
+def test_linea_cercana_al_50_y_principal():
+    from analyzers import match_preview as mp
+    assert mp.line_near_half(16.6, mp.DISPERSION[("shots", "team")]) == 16.5
+    assert mp.line_near_half(0.4, None) == 0.5
+    lines = {"a": {"line": 12.5, "p_model": 0.79}, "b": {"line": 14.5, "p_model": 0.64},
+             "c": {"line": 16.5, "p_model": 0.49}}
+    assert mp.main_line(lines) == 16.5

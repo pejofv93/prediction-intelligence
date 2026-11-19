@@ -406,7 +406,9 @@ def grade_preview(preview: dict, result: dict) -> dict:
             if y_val is None:
                 continue
             for lk, ln in blk["lines"].items():
-                if ln.get("p_league") is None:
+                # Sin p_league o línea añadida para la ficha (la más cercana al 50 %): fuera de la
+                # graduación, que mide las líneas fijas igual que el backtest.
+                if ln.get("p_league") is None or ln.get("extra"):
                     continue
                 y = int(y_val > ln["line"])
                 lines.append({"stat": s, "side": side, "market": blk["market"], "line": ln["line"], "y": y,
@@ -550,6 +552,9 @@ def web_match(p: dict) -> dict:
             "exp": [b["exp_home"], b["exp_away"], b["exp_total"]],
             "league_mean": [b["league_mean_home"], b["league_mean_away"]],
             "blocks": {side: {"label": blk["label"], "highlight": bool(blk.get("highlight")),
+                              # línea principal: la de P(más) más cercana al 50 % (las fichas
+                              # antiguas no la traen guardada: se calcula con sus líneas)
+                              "main": blk.get("main_line") or mp.main_line(blk["lines"]),
                               "lines": [[ln["line"], ln["p_model"], ln["p_league"], ln.get("league_n")]
                                         for ln in sorted(blk["lines"].values(), key=lambda x: x["line"])]}
                        for side, blk in b["lines"].items()},
@@ -561,8 +566,8 @@ def web_match(p: dict) -> dict:
         "group": p.get("group") or "men", "model_version": p.get("model_version") or mp.MODEL_VERSION,
         "home": p["home_team"], "away": p["away_team"], "data_cutoff": p.get("data_cutoff"),
         "low_sample": bool(p.get("low_sample")),
-        "sample": {side: {"n_cur": t.get("n_cur"), "n_eff": t.get("n_eff"),
-                          "insufficient": bool(t.get("insufficient"))}
+        # Solo esta temporada en la web (la anterior la usa el modelo por dentro, no se enseña).
+        "sample": {side: {"n_cur": t.get("n_cur"), "insufficient": bool(t.get("insufficient"))}
                    for side, t in teams.items()},
         "computed_at": p.get("computed_at"), "stats": stats,
     }

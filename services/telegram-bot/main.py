@@ -393,6 +393,42 @@ async def dispatch(request: Request) -> JSONResponse:
     return JSONResponse(res, status_code=500 if res.get("error") else 200)
 
 
+@app.post("/send-trends-summary", dependencies=[Depends(verify_token)])
+async def send_trends_summary(force: bool = False) -> JSONResponse:
+    """
+    Resumen diario de fichas de Tendencias (trends_summary.py) en el hilo de Tendencias.
+    Una vez por día de Madrid (trends_summary_sent/{día}, create()); force=true lo repite.
+    La respuesta lleva solo recuentos.
+    """
+    import asyncio
+    from shared.firestore_client import col
+    from alert_manager import send_message
+    import trends_summary as ts
+
+    now = datetime.now(timezone.utc)
+    day, lo, hi = ts.day_window(now)
+    previews = await asyncio.get_event_loop().run_in_executor(None, lambda: ts.read_day_previews(lo, hi))
+    msgs = ts.build_messages(previews, day)
+    out = {"day": day.isoformat(), "matches": len(previews), "messages": len(msgs), "sent": 0}
+    if not msgs:
+        return JSONResponse({**out, "reason": "sin fichas hoy"})
+    ref = col("trends_summary_sent").document(day.isoformat())
+    if not force:
+        try:
+            ref.create({"day": day.isoformat(), "at": now, "matches": len(previews)})
+        except Exception as exc:
+            if type(exc).__name__ in ("AlreadyExists", "Conflict"):
+                return JSONResponse({**out, "reason": "ya enviado hoy"})
+            raise
+    for m in msgs:
+        if await send_message(m, parse_mode=None, message_thread_id=TELEGRAM_TRENDS_THREAD_ID):
+            out["sent"] += 1
+    if out["sent"] < len(msgs):
+        logger.error("send-trends-summary: Telegram no aceptó %d de %d mensajes", len(msgs) - out["sent"], len(msgs))
+        return JSONResponse(out, status_code=502)
+    return JSONResponse(out)
+
+
 @app.post("/send-weekly-report", dependencies=[Depends(verify_token)])
 async def send_weekly_report() -> JSONResponse:
     """

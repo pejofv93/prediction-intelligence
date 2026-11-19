@@ -191,6 +191,26 @@ def p_over(line: float, mean: float, r: Optional[float]) -> float:
     return float(1 - nbinom.cdf(k, r, r / (r + mean)))
 
 
+def line_near_half(mean: float, r: Optional[float], max_k: int = 80) -> float:
+    """Línea x,5 cuya P(más) queda más cerca del 50 % (para que la ficha siempre tenga una línea
+    principal equilibrada aunque la lista fija se quede corta; decisión del usuario, 19-nov-2026)."""
+    best, best_gap = 0.5, 2.0
+    for k in range(0, max_k):
+        ln = k + 0.5
+        gap = abs(p_over(ln, mean, r) - 0.5)
+        if gap < best_gap:
+            best, best_gap = ln, gap
+        elif ln > mean:            # P(más) baja al subir la línea: pasado el mínimo ya no mejora
+            break
+    return best
+
+
+def main_line(lines: dict) -> Optional[float]:
+    """Línea de la ficha con P(más) del modelo más cercana al 50 % (empate: la más baja)."""
+    vals = [(abs(v["p_model"] - 0.5), v["line"]) for v in lines.values()]
+    return min(vals)[1] if vals else None
+
+
 def market_prob_over25(odds: Optional[dict]) -> Optional[float]:
     """Probabilidad de más de 2,5 goles que da la cuota media, sin margen (dos vías)."""
     o, u = (odds or {}).get("over_2_5"), (odds or {}).get("under_2_5")
@@ -246,11 +266,13 @@ def predict_match(hist: History, div: str, season: str, match_date: str, home: s
             label = labels.get((mk, div), LABEL_REF)
             r = disp_all.get((s, scope))
             out = {}
-            for ln in lines:
+            # Las fijas + la más cercana al 50 % (solo en la ficha; el backtest usa las fijas).
+            for ln in sorted(set(lines) | {line_near_half(mean, r)}):
                 pm = p_over(ln, mean, r)
                 pl, nl = hist.league_line_rate(div, season, match_date, s, side, ln)
                 out[line_key(ln)] = {
                     "line": ln, "p_model": round(pm, 4),
+                    **({"extra": True} if ln not in lines else {}),   # añadida: no se gradúa
                     "p_league": None if pl is None else round(pl, 4),
                     "diff_vs_league": None if pl is None else round(pm - pl, 4),
                     "league_n": round(nl, 1),
@@ -259,6 +281,7 @@ def predict_match(hist: History, div: str, season: str, match_date: str, home: s
                 "market": mk, "label": LABEL_LOW_SAMPLE if low_sample else label,
                 "market_label": label, "highlight": (label == LABEL_EDGE and not low_sample),
                 "distribution": "binomial negativa" if r else "Poisson", "r": r, "lines": out,
+                "main_line": main_line(out),
             }
         stats[s] = block
 

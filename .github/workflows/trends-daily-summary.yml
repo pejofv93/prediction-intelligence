@@ -1,0 +1,32 @@
+# Resumen diario de Tendencias por Telegram (telegram-bot POST /send-trends-summary).
+# Lo lanza el repartidor a las 08:00 UTC (shared/dispatch_schedule.py). Una vez por día de Madrid;
+# force=true lo repite. El log lleva solo recuentos (partidos y mensajes), nunca el texto.
+name: trends-daily-summary
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "true = enviar aunque ya se haya enviado hoy"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  enviar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enviar resumen
+        env:
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$FORCE" =~ ^(true|false)$ ]] || { echo "force inválido"; exit 1; }
+          curl -sS -X POST "${{ secrets.TELEGRAM_BOT_URL }}/send-trends-summary?force=$FORCE" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 110 --retry 2 --retry-delay 10 --fail-with-body
+          echo

@@ -21,7 +21,6 @@
   <nav class="controls" aria-label="Filtros">
     <div class="group" id="leagues" role="tablist" aria-label="Liga"></div>
     <div class="group" id="splits" role="tablist" aria-label="Casa o fuera"></div>
-    <div class="group" id="samples" role="tablist" aria-label="Muestra"></div>
     <div class="group markets">
       <span class="label">Del equipo</span><span id="markets-team"></span>
     </div>
@@ -33,9 +32,6 @@
 
   <main>
     <section id="team" hidden></section>
-    <p id="sample-note" class="note" hidden>Solo esta temporada: porcentaje bruto con los partidos de este año,
-      sin la temporada anterior ni ajuste a la media de la liga. <b>Es descriptivo</b>: para predecir, el backtest
-      dice que la mezcla con la temporada anterior acierta más. En gris, menos de 5 partidos.</p>
     <p id="table-title" class="table-title"></p>
     <div class="table-wrap"><table id="grid"></table></div>
   </main>
@@ -45,16 +41,12 @@
     <ul>
       <li><b>Cada celda</b>: porcentaje de partidos del equipo por encima de la línea, ajustado hacia la media de la liga
         cuando la muestra es pequeña. Debajo, la media de la liga, la diferencia en puntos <b>frente a la media de la liga</b>
-        y la muestra: partidos de esta temporada + de la anterior (que cuenta la mitad; un cuarto si fue en otra división)
-        y el n efectivo.</li>
-      <li><b>Solo esta temporada</b>: aciertos / partidos de este año (por ejemplo 7/11 = 64 %), sin la temporada
-        anterior ni ajuste a la media de la liga; en gris si hay menos de 5 partidos. Es descriptivo: en el backtest,
-        mezclar con la temporada anterior predice mejor.</li>
+        y los partidos de esta temporada.</li>
       <li><b>Fiabilidad</b>: <span class="tag encima">por encima</span> o <span class="tag debajo">por debajo</span>
         de la liga si la diferencia es de al menos <span id="gap-pts">5</span> puntos y la muestra es suficiente;
         <span class="tag en_linea">en línea con la liga</span> si es menor;
         <span class="tag insuficiente">muestra insuficiente</span> si no llega al mínimo
-        (n efectivo ≥ 10 y ≥ 5 partidos de esta temporada; en casa o fuera, n efectivo ≥ 8).</li>
+        (pocos partidos para fiarse del porcentaje).</li>
       <li><b>Es descriptivo</b>: el porcentaje de un solo equipo apenas mejora a la media de la liga en el backtest.
         La probabilidad de un partido concreto (ataque de uno contra defensa del otro) irá en la previa de partido.</li>
       <li><b>Goles</b>: marcados y encajados por el equipo, total del partido, <b>ambos marcan</b> (% de partidos
@@ -75,6 +67,10 @@
     <footer>
       <h2>Cómo leer la ficha</h2>
       <ul>
+        <li><b>Cada mercado</b>: primero el total del partido y luego cada equipo, con lo esperado y la
+          <b>línea principal</b> (la más cercana al 50 %): % de que haya más y % de que haya menos. En
+          <b>Más líneas</b>, el resto de líneas, la media de la liga y las etiquetas. Una ★ junto al nombre del
+          mercado avisa de que alguna de sus líneas está destacada.</li>
         <li><b>Esperado</b>: lo que el modelo espera del local, del visitante y del total, cruzando el ataque
           de cada equipo con la defensa del otro (con todos sus partidos, en casa y fuera) sobre la media de la liga.</li>
         <li><b>Cada línea</b>: probabilidad del modelo de superarla y, al lado, con qué frecuencia la supera
@@ -87,8 +83,7 @@
         <li><b>★ Línea destacada</b>: en cada mercado con <span class="tag ventaja">ventaja medida</span> y cada lado
           (local, visitante, total), la línea en la que el modelo más se separa de la media de la liga, si llega a
           10 puntos; como mucho una por mercado y lado. La lista de partidos cuenta cuántas tiene cada ficha.</li>
-        <li><b>Muestra</b>: partidos de esta temporada de cada equipo y n efectivo (la anterior cuenta la mitad;
-          un cuarto si fue en otra división). La ficha se congela 2 horas antes del partido.</li>
+        <li><b>Muestra</b>: partidos de esta temporada de cada equipo. La ficha se congela 2 horas antes del partido.</li>
         <li><b>Femenino</b> (Liga F, WSL, Frauen-Bundesliga, Serie A y D1 Arkema): el mismo cálculo con la media
           de cada liga, la dispersión y las líneas recalculadas con sus datos (Highlightly, modelo mp-w1). Todas sus
           fichas salen como <span class="tag referencia">solo referencia</span> hasta medirlas en directo.</li>

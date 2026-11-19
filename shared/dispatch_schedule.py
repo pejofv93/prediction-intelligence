@@ -51,6 +51,7 @@ TASKS: dict[str, Task] = {
     "match-previews":       Task("sports-match-previews.yml", "0 2,16 * * *", 120, SCHEDULED),
     # ── Informes ───────────────────────────────────────────────────────────────────
     "daily-report":         Task("daily-report.yml",          "0 7 * * *", 180),
+    "trends-summary":       Task("trends-daily-summary.yml",  "0 8 * * *", 120),   # fichas del día por Telegram
     "weekly-report":        Task("weekly-report.yml",         "0 8 * * 1", 360),
     "tier-review":          Task("sports-tier-review.yml",    "0 8 1 * *", 360, SCHEDULED),
     "run-backtest-sports":  Task("run-backtest-sports.yml",   "0 2 1 * *", 360),
