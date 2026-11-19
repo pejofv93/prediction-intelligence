@@ -159,8 +159,8 @@ function openTeam(t) {
 function closeTeam() { $("team").hidden = true; }
 
 // ── Vista "Partidos": fichas de partido ─────────────────────────────────────
-const STAT_NAMES = { goals: "Goles", corners: "Córners", cards: "Tarjetas", shots: "Remates",
-                     sot: "Remates a puerta", fouls: "Faltas" };
+const STAT_NAMES = { corners: "Córners", cards: "Tarjetas", fouls: "Faltas", shots: "Remates",
+                     sot: "Remates a puerta", goals: "Goles" };
 const MP_TAGS = { "ventaja medida": "ventaja", "solo referencia": "referencia", "medido en backtest": "backtest",
                   "muestra insuficiente": "insuficiente" };
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -243,16 +243,6 @@ function mainLine(block) {
   return block.lines.reduce((b, l) => (!b || Math.abs(l[1] - 0.5) < Math.abs(b[1] - 0.5) ? l : b), null);
 }
 
-function mainRow(title, exp, block) {
-  const ml = mainLine(block);
-  return el("tr", {},
-    el("td", { text: title }),
-    el("td", { class: "pm", text: num(exp) }),
-    el("td", { text: ml ? `+${num(ml[0])}` : "—" }),
-    el("td", { class: "pm", text: ml ? pct(ml[1]) : "—" }),
-    el("td", { text: ml ? pct(1 - ml[1]) : "—" }));
-}
-
 function linesTable(title, block) {
   const best = standoutLine(block);
   return el("div", { class: "block" },
@@ -274,53 +264,130 @@ function linesTable(title, block) {
       }))));
 }
 
+// ── Ficha "Duelo" (propuesta C, 19-nov-2026) ─────────────────────────────────
+// Escudos: círculo de color con iniciales (nada de logos reales). El color sale del nombre.
+const BADGE_COLORS = ["#B42318", "#1D4ED8", "#7C3AED", "#B45309", "#0F766E", "#334155", "#BE185D", "#4D7C0F"];
+function badgeColor(name, avoid) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  let c = BADGE_COLORS[h % BADGE_COLORS.length];
+  if (c === avoid) c = BADGE_COLORS[(h + 3) % BADGE_COLORS.length];
+  return c;
+}
+function initials(name) {
+  const w = name.replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter(Boolean);
+  if (!w.length) return "?";
+  return (w.length === 1 ? w[0].slice(0, 3) : w.slice(0, 3).map((x) => x[0]).join("")).toUpperCase();
+}
+
+// Píldoras "Tendencias del partido": solo mercados por equipo; en cada mercado y equipo, la línea
+// MÁS ALTA con el modelo entre el 60 % y el 90 %; como mucho 5, de mayor a menor; ★ si el modelo se
+// separa 10 puntos o más de la media de la liga en esa línea. Lo mismo en el resumen de Telegram.
+const PILL_MIN = 0.60, PILL_MAX = 0.90, PILL_MAX_N = 5;
+const PILL_NOUN = { corners: "córners", cards: "tarjetas", fouls: "faltas", shots: "remates",
+                    sot: "remates a puerta", goals: "goles" };
+function pillText(team, stat, ln) {
+  return stat === "goals" && ln === 0.5 ? `${team} marca al menos 1 gol` : `${team} más de ${num(ln)} ${PILL_NOUN[stat]}`;
+}
+function matchPills(m) {
+  const out = [];
+  for (const stat of Object.keys(STAT_NAMES)) {
+    const s = m.stats[stat];
+    if (!s || !s.available) continue;
+    for (const side of ["home", "away"]) {
+      const ok = ((s.blocks[side] || {}).lines || []).filter(([, pm]) => pm >= PILL_MIN && pm <= PILL_MAX);
+      if (!ok.length) continue;
+      const [ln, pm, pl] = ok.reduce((x, y) => (y[0] > x[0] ? y : x));
+      const gap = pts(pm, pl);
+      out.push({ side, text: pillText(m[side], stat, ln), p: pm, star: gap != null && Math.abs(gap) >= STANDOUT_PTS });
+    }
+  }
+  return out.sort((a, b) => b.p - a.p).slice(0, PILL_MAX_N);
+}
+
+function sideLine(block) {
+  const ml = mainLine(block);
+  return ml ? [`+${num(ml[0])}`, pct(ml[1])] : ["—", "—"];
+}
+
+function marketCard(m, k, colors) {
+  const s = m.stats[k];
+  if (!s || !s.available) return el("section", { class: "mcard" },
+    el("h3", { text: STAT_NAMES[k] }), el("p", { class: "muted", text: "Sin datos de la liga." }));
+  const [eh, ea, et] = s.exp;
+  const [lh, la] = s.league_mean;
+  const star = ["total", "home", "away"].some((b) => s.blocks[b] && standoutLine(s.blocks[b]));
+  const [hl, hp] = sideLine(s.blocks.home), [al, ap] = sideLine(s.blocks.away), [tl, tp] = sideLine(s.blocks.total);
+  const share = eh + ea > 0 ? Math.round((eh / (eh + ea)) * 100) : 50;
+  return el("section", { class: "mcard" },
+    el("div", { class: "mrow" },
+      el("div", { class: "side" },
+        el("span", { class: "exp", text: num(Number(eh).toFixed(1)) }),
+        el("span", { class: "ln" }, `${hl} · `, el("strong", { text: hp }))),
+      el("div", { class: "mid" },
+        el("h3", { text: `${STAT_NAMES[k]}${star ? " ★" : ""}`,
+                   title: star ? "Alguna línea de este mercado está destacada (ver más líneas)" : "" }),
+        el("span", { class: "ln" }, `Total ${num(Number(et).toFixed(1))} · ${tl} `, el("strong", { text: tp }))),
+      el("div", { class: "side right" },
+        el("span", { class: "exp", text: num(Number(ea).toFixed(1)) }),
+        el("span", { class: "ln" }, `${al} · `, el("strong", { text: ap })))),
+    el("div", { class: "bar", role: "img", "aria-label": `Reparto del esperado: ${m.home} ${share} %, ${m.away} ${100 - share} %` },
+      el("span", { style: `width:${share}%;background:${colors[0]}` }),
+      el("span", { style: `width:${100 - share}%;background:${colors[1]}` })),
+    el("details", { class: "more" },
+      el("summary", { text: "Más líneas" }),
+      el("p", { class: "muted", text: `Media de la liga: ${m.home} ${num(lh)} · ${m.away} ${num(la)} · total ${num(lh + la)}` }),
+      el("div", { class: "blocks" },
+        linesTable("Total del partido", s.blocks.total),
+        linesTable(m.home, s.blocks.home), linesTable(m.away, s.blocks.away))));
+}
+
+function teamSide(name, n, color) {
+  return el("div", { class: "duel-team" },
+    el("div", { class: "badge", "aria-hidden": "true", style: `background:${color}`, text: initials(name) }),
+    el("div", { class: "duel-name", text: name }),
+    el("div", { class: "duel-sub", text: `${n ?? "—"} partidos esta temporada` }));
+}
+
 function renderMatch() {
   const sec = $("match");
   const m = PREV && PREV.matches.find((x) => x.id === state.match);
   if (!m) { sec.hidden = true; return; }
-  const kickoff = new Date(m.kickoff_utc).toLocaleString("es-ES",
-    { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
-  const stats = Object.keys(STAT_NAMES).map((k) => {
-    const s = m.stats[k];
-    if (!s || !s.available) return el("div", { class: "stat" },
-      el("h3", { text: STAT_NAMES[k] }), el("p", { class: "muted", text: "Sin datos de la liga." }));
-    const [eh, ea, et] = s.exp;
-    const [lh, la] = s.league_mean;
-    const star = ["total", "home", "away"].some((b) => s.blocks[b] && standoutLine(s.blocks[b]));
-    return el("div", { class: "stat" },
-      el("h3", { text: `${STAT_NAMES[k]}${star ? " ★" : ""}`,
-                 title: star ? "Alguna línea de este mercado está destacada (ver más líneas)" : "" }),
-      el("div", { class: "table-wrap" }, el("table", { class: "exp" },
-        el("thead", {}, el("tr", {}, ...["", "Esperado", "Línea", "Más", "Menos"].map((t) => el("th", { text: t })))),
-        el("tbody", {},
-          mainRow("Total del partido", et, s.blocks.total),
-          mainRow(m.home, eh, s.blocks.home),
-          mainRow(m.away, ea, s.blocks.away)))),
-      el("details", { class: "more" },
-        el("summary", { text: "Más líneas" }),
-        el("p", { class: "muted", text: `Media de la liga: ${m.home} ${num(lh)} · ${m.away} ${num(la)} · total ${num(lh + la)}` }),
-        el("div", { class: "blocks" },
-          linesTable("Total del partido", s.blocks.total),
-          linesTable(m.home, s.blocks.home), linesTable(m.away, s.blocks.away))));
-  });
-  const nStar = standoutCount(m);
+  const ko = new Date(m.kickoff_utc);
+  const c1 = badgeColor(m.home), c2 = badgeColor(m.away, c1);
+  const pills = m.low_sample ? [] : matchPills(m);
   sec.replaceChildren(...[    // replaceChildren pintaría un null como texto "null"
-    el("button", { class: "pill close", text: "Cerrar", onclick: () => { state.match = null; render(); } }),
-    el("h2", { text: `${m.home} – ${m.away}` }),
-    el("p", { class: "muted", text: `${groupTitle(m)} · ${kickoff} (${TZ}) · datos hasta ${m.data_cutoff || "—"}` }),
+    el("div", { class: "duel" },
+      el("button", { class: "pill close", text: "Cerrar", onclick: () => { state.match = null; render(); } }),
+      el("div", { class: "duel-grid" },
+        teamSide(m.home, (m.sample.home || {}).n_cur, c1),
+        el("div", { class: "duel-mid" },
+          el("div", { class: "duel-sub", text: groupTitle(m) }),
+          el("div", { class: "duel-time", text: hhmm(m.kickoff_utc) }),
+          el("div", { class: "duel-sub", text: ko.toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "short" }) })),
+        teamSide(m.away, (m.sample.away || {}).n_cur, c2))),
     isWomen(m) ? el("p", { class: "warn",
       text: `Fútbol femenino (modelo ${m.model_version}, datos de Highlightly): solo referencia hasta medirlo en directo.` }) : null,
     isCup(m) ? el("p", { class: "warn",
       text: `Copa (modelo de clubes, ${m.model_version}): cada equipo con su fuerza en ${leagueName(m.div)}. ` +
             "\"Medido en backtest\" en córners, faltas, goles, remates y a puerta por equipo; sin estrellas hasta medirlo en directo." }) : null,
-    el("p", { class: "muted", text: sampleText(m, "home") }),
-    el("p", { class: "muted", text: sampleText(m, "away") }),
     m.low_sample ? el("p", { class: "warn",
-      text: "Muestra insuficiente: algún equipo tiene pocos partidos esta temporada. Se calcula, pero no se resalta." })
-      : el("p", { class: nStar ? "standout" : "muted",
-          text: nStar ? `★ ${standoutText(nStar)}: en cada mercado y lado con ventaja medida, la línea que más se separa de la liga, si llega a ${STANDOUT_PTS} puntos.`
-                      : `Ninguna línea destacada (en mercados con ventaja medida, ninguna se separa ${STANDOUT_PTS} puntos o más de la liga).` }),
-    ...stats].filter(Boolean));
+      text: "Muestra insuficiente: algún equipo tiene pocos partidos esta temporada. Se calcula, pero no se resalta." }) : null,
+    el("section", { class: "trends", "aria-label": "Tendencias del partido" },
+      el("div", { class: "trends-head" },
+        el("h2", { text: "Tendencias del partido" }),
+        el("span", { class: "muted", text: "Lo más probable según el modelo, de más a menos" })),
+      pills.length
+        ? el("div", { class: "pills" }, ...pills.map((x) => el("span", { class: `tpill${x.star ? " star" : ""}`,
+            title: x.star ? `El modelo se separa ${STANDOUT_PTS} puntos o más de la media de la liga` : "" },
+            el("span", { class: "dot", "aria-hidden": "true", style: `background:${x.side === "home" ? c1 : c2}` }),
+            `${x.star ? "★ " : ""}${x.text}`, el("strong", { text: pct(x.p) }))))
+        : el("p", { class: "muted", text: m.low_sample ? "Sin tendencias: muestra insuficiente."
+            : "Ninguna línea por equipo entre el 60 % y el 90 % en este partido." })),
+    el("p", { class: "hint", text: "Número esperado de cada equipo, su línea y el % de que haya MÁS. En el centro, el total del partido." }),
+    ...Object.keys(STAT_NAMES).map((k) => marketCard(m, k, [c1, c2])),
+    el("p", { class: "hint", text: `Datos hasta ${m.data_cutoff || "—"}. Solo estadísticas del modelo. Sin cuotas ni recomendaciones.` }),
+  ].filter(Boolean));
   sec.hidden = false;
 }
 function scrollToMatch() { $("match").scrollIntoView({ behavior: "smooth", block: "start" }); }

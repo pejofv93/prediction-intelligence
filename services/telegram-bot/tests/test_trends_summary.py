@@ -73,3 +73,18 @@ def test_copa_en_su_propio_mensaje_entre_ligas_y_femenino():
     assert heads[0].endswith("· Primeira") and heads[1].endswith("· Copas · Taça de Portugal")
     assert heads[2].endswith("· Femenino · Liga F")
     assert "Guimaraes – Sp Braga" in msgs[1] and "Benfica" not in msgs[1]
+
+
+def test_pildoras_por_equipo_entre_60_y_90():
+    p = _preview()
+    p["stats"]["corners"]["lines"]["home"] = _block([(3.5, 0.85), (4.5, 0.73), (5.5, 0.60), (6.5, 0.47)])
+    p["stats"]["corners"]["lines"]["home"]["lines"]["over_5.5"]["p_league"] = 0.43   # +17 pts → ★
+    p["stats"]["goals"] = {"available": True, "lines": {
+        "home": _block([(0.5, 0.95)]), "away": _block([(0.5, 0.66), (1.5, 0.29)]), "total": _block([(2.5, 0.46)])}}
+    pills = ts.match_pills(p)
+    assert pills[0] == {"text": "Espanol marca al menos 1 gol", "p": 0.66, "star": False}
+    assert {"text": "Ath Bilbao más de 5,5 córners", "p": 0.60, "star": True} in pills
+    assert not any("3,5 córners" in x["text"] for x in pills)          # la línea MÁS ALTA que pasa
+    assert not any(x["p"] > 0.90 for x in pills) and len(pills) <= 5
+    txt = ts.match_block(p)
+    assert "  ▸ Espanol marca al menos 1 gol · 66 %" in txt and "  ★ Ath Bilbao más de 5,5 córners · 60 %" in txt

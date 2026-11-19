@@ -1,18 +1,23 @@
 :root {
-  --bg: #141414;
-  --panel: #1e1e1e;
-  --line: #2e2e2e;
-  --text: #f2f2f2;
-  --muted: #9a9a9a;
-  --accent: #F7931A;
-  --up: #00C853;
-  --down: #FF5252;
-  color-scheme: dark;
+  --bg: #FFFFFF;
+  --panel: #F6F8F7;
+  --line: #E4E8EC;
+  --text: #101418;
+  --muted: #4A5560;
+  --accent: #0B6B45;
+  --accent-dark: #0B3D2A;
+  --accent-soft: #F2F8F5;
+  --accent-line: #CFE5D9;
+  --on-dark: #D4E9DE;
+  --up: #0B6B45;
+  --down: #B42318;
+  color-scheme: light;
 }
 * { box-sizing: border-box; }
 body {
   margin: 0; padding: 16px; background: var(--bg); color: var(--text);
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 14px/1.45 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 h1 { margin: 0 0 4px; font-size: 20px; color: var(--accent); }
 h2 { font-size: 15px; margin: 0 0 8px; }
@@ -86,8 +91,7 @@ button.match-row:focus-visible { outline: 2px solid var(--accent); outline-offse
 .tag.referencia { color: var(--muted); }
 .tag.backtest { color: var(--text); border-color: var(--muted); }
 
-#match { margin-bottom: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
-#match h2 { color: var(--accent); }
+#match { margin-bottom: 16px; display: flex; flex-direction: column; gap: 14px; }
 #match .close { float: right; }
 #match p { margin: 2px 0; }
 #match .warn { color: var(--down); margin-top: 6px; }
@@ -101,7 +105,7 @@ table.exp td.pm, table.lines td.pm { font-weight: 600; }
 .block-title { font-weight: 600; margin: 0 0 4px; }
 table.lines th, table.lines td { padding: 3px 6px; font-size: 13px; }
 table.lines tr.hl td.pm { color: var(--accent); }
-table.lines tr.star td { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
+table.lines tr.star td { background: var(--accent-soft); font-weight: 600; }
 table.lines tr.star td:first-child { color: var(--accent); }
 #match p.standout { color: var(--accent); font-weight: 600; margin-top: 6px; }
 td.gap.up { color: var(--up); }
@@ -119,4 +123,61 @@ details.more > summary:focus-visible { outline: 2px solid var(--accent); outline
 @media (max-width: 600px) {
   body { padding: 12px 16px; }
   .group .label { min-width: 100%; }
+}
+
+/* Barra superior: marca y deportes */
+.topbar { background: var(--accent-dark); color: #FFFFFF; margin: -16px -16px 16px; padding: 12px 16px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.brand { font-weight: 800; font-size: 19px; letter-spacing: -0.02em; }
+.sports { display: flex; flex-wrap: wrap; gap: 6px; }
+button.sport { font: inherit; font-size: 14px; border: 0; border-radius: 8px; padding: 10px 14px; min-height: 44px;
+  background: transparent; color: var(--on-dark); }
+button.sport.on { background: #FFFFFF; color: var(--accent-dark); font-weight: 600; }
+button.sport:disabled { cursor: default; }
+h1 { color: var(--accent-dark); }
+
+/* Ficha "Duelo" */
+.duel { background: var(--accent-dark); color: #FFFFFF; border-radius: 14px; padding: 14px 16px 22px; }
+.duel .close { float: right; background: transparent; color: #FFFFFF; border-color: var(--on-dark); }
+.duel-grid { clear: both; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; gap: 12px; }
+.duel-team { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; min-width: 0; }
+.badge { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-weight: 800; color: #FFFFFF; font-size: 17px; }
+.duel-name { font-weight: 700; font-size: 20px; overflow-wrap: anywhere; }
+.duel-sub { font-size: 12px; color: var(--on-dark); }
+.duel-mid { text-align: center; display: flex; flex-direction: column; gap: 4px; }
+.duel-time { font-size: 28px; font-weight: 800; }
+#match .warn { color: var(--down); margin: 0; }
+.trends { background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 14px; padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 12px; }
+.trends-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.trends h2 { margin: 0; font-size: 17px; font-weight: 800; color: var(--accent-dark); }
+.trends .muted { font-size: 12px; }
+.pills { display: flex; flex-wrap: wrap; gap: 10px; }
+.tpill { display: inline-flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; border-radius: 999px;
+  background: #FFFFFF; border: 1px solid var(--accent-line); font-size: 14px; }
+.tpill.star { border: 2px solid var(--accent); font-weight: 600; }
+.tpill .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.tpill strong { background: var(--accent); color: #FFFFFF; border-radius: 999px; padding: 4px 10px; font-size: 13px; white-space: nowrap; flex: none; }
+.hint { margin: 0; font-size: 13px; color: var(--muted); text-align: center; }
+.mcard { border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.mrow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; gap: 12px; }
+.mcard .side { display: flex; flex-direction: column; gap: 2px; }
+.mcard .side.right { align-items: flex-end; text-align: right; }
+.mcard .exp { font-size: 26px; font-weight: 800; }
+.mcard .ln { font-size: 13px; color: var(--muted); }
+.mcard .ln strong { color: var(--accent); }
+.mcard .mid { text-align: center; display: flex; flex-direction: column; gap: 4px; }
+.mcard h3 { margin: 0; font-size: 15px; font-weight: 700; }
+.bar { display: flex; gap: 4px; height: 8px; }
+.bar span:first-child { border-radius: 4px 0 0 4px; }
+.bar span:last-child { border-radius: 0 4px 4px 0; }
+details.more > summary { font-weight: 600; padding: 6px 0; min-height: 32px; }
+@media (max-width: 600px) {
+  .topbar { margin: -12px -16px 12px; }
+  .badge { width: 48px; height: 48px; font-size: 14px; }
+  .duel-name { font-size: 16px; }
+  .duel-time { font-size: 22px; }
+  .mcard .exp { font-size: 22px; }
+  .mrow { gap: 6px; }
 }

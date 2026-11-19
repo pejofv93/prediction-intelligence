@@ -74,10 +74,41 @@ def _pct(p: float) -> str:
     return f"{round(p * 100)} %"
 
 
+# Píldoras "Tendencias del partido" (las mismas que la ficha de la web): solo mercados por equipo;
+# en cada mercado y equipo, la línea MÁS ALTA con el modelo entre el 60 % y el 90 %; como mucho 5,
+# de mayor a menor; ★ si el modelo se separa 10 puntos o más de la media de la liga en esa línea.
+PILL_MIN, PILL_MAX, PILL_MAX_N, STAR_PTS = 0.60, 0.90, 5, 10      # STAR_PTS en puntos, como la web
+PILL_NOUN = {"corners": "córners", "cards": "tarjetas", "fouls": "faltas", "shots": "remates",
+             "sot": "remates a puerta", "goals": "goles"}
+
+
+def match_pills(p: dict) -> list[dict]:
+    out = []
+    for key, _ in STATS:
+        b = (p.get("stats") or {}).get(key) or {}
+        if not b.get("available"):
+            continue
+        for side, team in (("home", p["home_team"]), ("away", p["away_team"])):
+            lines = [v for v in (((b.get("lines") or {}).get(side) or {}).get("lines") or {}).values()
+                     if PILL_MIN <= v["p_model"] <= PILL_MAX]
+            if not lines:
+                continue
+            v = max(lines, key=lambda x: x["line"])
+            text = (f"{team} marca al menos 1 gol" if key == "goals" and v["line"] == 0.5
+                    else f"{team} más de {_line(v['line'])} {PILL_NOUN[key]}")
+            star = (v.get("p_league") is not None
+                    and abs(round((v["p_model"] - v["p_league"]) * 100)) >= STAR_PTS)
+            out.append({"text": text, "p": v["p_model"], "star": star})
+    return sorted(out, key=lambda x: -x["p"])[:PILL_MAX_N]
+
+
 def match_block(p: dict) -> str:
     ko = madrid(_parse(p["kickoff_utc"]))
     out = [f"{ko:%H:%M} {p['home_team']} – {p['away_team']}"
            + ("  (muestra insuficiente)" if p.get("low_sample") else "")]
+    if not p.get("low_sample"):
+        for x in match_pills(p):
+            out.append(f"  {'★' if x['star'] else '▸'} {x['text']} · {_pct(x['p'])}")
     for key, name in STATS:
         b = (p.get("stats") or {}).get(key) or {}
         if not b.get("available"):

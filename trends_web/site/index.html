@@ -5,11 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <title>Tendencias por equipo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div class="topbar">
+    <div class="brand">Tendencias</div>
+    <nav class="sports" aria-label="Deportes">
+      <button class="sport on" aria-current="page">Fútbol</button>
+      <button class="sport" disabled>Baloncesto · pronto</button>
+      <button class="sport" disabled>Tenis · pronto</button>
+    </nav>
+  </div>
   <header>
-    <h1>Tendencias</h1>
     <div class="group views" role="tablist" aria-label="Vista">
       <button class="pill" role="tab" id="tab-teams" aria-selected="true">Equipos</button>
       <button class="pill" role="tab" id="tab-matches" aria-selected="false">Partidos</button>
