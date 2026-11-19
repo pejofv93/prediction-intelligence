@@ -84,6 +84,7 @@ button.match-row:focus-visible { outline: 2px solid var(--accent); outline-offse
 .match-row .teams { font-weight: 600; flex: 1 1 auto; }
 .tag.ventaja { color: var(--accent); border-color: var(--accent); }
 .tag.referencia { color: var(--muted); }
+.tag.backtest { color: var(--text); border-color: var(--muted); }
 
 #match { margin-bottom: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
 #match h2 { color: var(--accent); }

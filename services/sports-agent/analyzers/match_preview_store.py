@@ -564,6 +564,8 @@ def web_match(p: dict) -> dict:
         "id": p["match_id"], "div": p["div"], "kickoff_utc": p["kickoff_utc"],
         # Femenino (mp-w1, Highlightly): grupo propio y siempre "solo referencia".
         "group": p.get("group") or "men", "model_version": p.get("model_version") or mp.MODEL_VERSION,
+        # Copas (mp-v1-cups): nombre de la copa; div es la liga de los dos equipos.
+        **({"cup": p.get("cup")} if p.get("group") == "cups" else {}),
         "home": p["home_team"], "away": p["away_team"], "data_cutoff": p.get("data_cutoff"),
         "low_sample": bool(p.get("low_sample")),
         # Solo esta temporada en la web (la anterior la usa el modelo por dentro, no se enseña).
@@ -592,12 +594,13 @@ def _read_upcoming_previews(now: datetime, days: int = WEB_DAYS, collection: str
 
 
 def build_web_export(now: Optional[datetime] = None, days: int = WEB_DAYS) -> dict:
-    """Fichas de mp-v1 y, en el grupo "Femenino", las de mp-w1 (match_previews_women). Si las
-    femeninas no se pueden leer, la web sale solo con las de mp-v1."""
+    """Fichas de mp-v1 y, en sus grupos, las femeninas (mp-w1, match_previews_women) y las de copa
+    (mp-v1-cups, match_previews_cups). Si alguna no se puede leer, la web sale sin ese grupo."""
     now = now or _now()
     previews = _read_upcoming_previews(now, days)
-    try:
-        previews += _read_upcoming_previews(now, days, collection="match_previews_women")
-    except Exception:
-        logger.error("web_export: no se pudieron leer las fichas femeninas", exc_info=True)
+    for coll, name in (("match_previews_women", "femeninas"), ("match_previews_cups", "de copa")):
+        try:
+            previews += _read_upcoming_previews(now, days, collection=coll)
+        except Exception:
+            logger.error("web_export: no se pudieron leer las fichas %s", name, exc_info=True)
     return web_export(previews, now, days)

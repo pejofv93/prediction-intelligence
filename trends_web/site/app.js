@@ -161,7 +161,7 @@ function closeTeam() { $("team").hidden = true; }
 // ── Vista "Partidos": fichas de partido ─────────────────────────────────────
 const STAT_NAMES = { goals: "Goles", corners: "Córners", cards: "Tarjetas", shots: "Remates",
                      sot: "Remates a puerta", fouls: "Faltas" };
-const MP_TAGS = { "ventaja medida": "ventaja", "solo referencia": "referencia",
+const MP_TAGS = { "ventaja medida": "ventaja", "solo referencia": "referencia", "medido en backtest": "backtest",
                   "muestra insuficiente": "insuficiente" };
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const dayKey = (iso) => new Date(iso).toLocaleDateString("sv-SE");          // AAAA-MM-DD local
@@ -169,8 +169,11 @@ const dayLabel = (k) => new Date(`${k}T12:00:00`).toLocaleDateString("es-ES",
   { weekday: "short", day: "numeric", month: "short" });
 const hhmm = (iso) => new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
 const isWomen = (m) => m.group === "women";
+const isCup = (m) => m.group === "cups";
 const leagueName = (div) => DIV_NAMES[div] || div;
-const groupTitle = (m) => (isWomen(m) ? `Femenino · ${leagueName(m.div)}` : leagueName(m.div));
+const groupTitle = (m) => (isWomen(m) ? `Femenino · ${leagueName(m.div)}`
+  : isCup(m) ? `Copas · ${m.cup || "copa"}` : leagueName(m.div));
+const groupKey = (m) => (isCup(m) ? `cup:${m.cup}` : m.div);   // una copa no se mezcla con su liga
 // Línea destacada: como mucho UNA por mercado y lado (local, visitante, total), la que más se
 // separa de la liga, y solo si llega a STANDOUT_PTS puntos (los que se ven en la ficha) en un
 // mercado con ventaja medida (block.highlight, que ya es falso con muestra insuficiente).
@@ -209,9 +212,10 @@ function renderMatchList() {
   }
   const todays = PREV.matches.filter((m) => dayKey(m.kickoff_utc) === state.day);
   const byDiv = new Map();
-  // Primero las ligas masculinas y después el grupo "Femenino", cada una en orden de hora.
-  for (const m of [...todays.filter((x) => !isWomen(x)), ...todays.filter(isWomen)])
-    byDiv.set(m.div, [...(byDiv.get(m.div) || []), m]);
+  // Primero las ligas masculinas, después "Copas" y al final "Femenino", cada una en orden de hora.
+  const men = todays.filter((x) => !isWomen(x) && !isCup(x));
+  for (const m of [...men, ...todays.filter(isCup), ...todays.filter(isWomen)])
+    byDiv.set(groupKey(m), [...(byDiv.get(groupKey(m)) || []), m]);
   list.replaceChildren(...[...byDiv].map(([div, ms]) => el("div", { class: "match-group" },
     el("h3", { text: groupTitle(ms[0]) }),
     ...ms.map((m) => {
@@ -306,6 +310,9 @@ function renderMatch() {
     el("p", { class: "muted", text: `${groupTitle(m)} · ${kickoff} (${TZ}) · datos hasta ${m.data_cutoff || "—"}` }),
     isWomen(m) ? el("p", { class: "warn",
       text: `Fútbol femenino (modelo ${m.model_version}, datos de Highlightly): solo referencia hasta medirlo en directo.` }) : null,
+    isCup(m) ? el("p", { class: "warn",
+      text: `Copa (modelo de clubes, ${m.model_version}): cada equipo con su fuerza en ${leagueName(m.div)}. ` +
+            "\"Medido en backtest\" en córners, faltas, goles, remates y a puerta por equipo; sin estrellas hasta medirlo en directo." }) : null,
     el("p", { class: "muted", text: sampleText(m, "home") }),
     el("p", { class: "muted", text: sampleText(m, "away") }),
     m.low_sample ? el("p", { class: "warn",

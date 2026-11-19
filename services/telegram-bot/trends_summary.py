@@ -1,7 +1,7 @@
 """
 Resumen diario de Tendencias por Telegram (08:00 UTC, hilo de Tendencias; decisión del usuario,
-19-nov-2026). Fichas de partido del día (hora de Madrid): masculino (match_previews, mp-v1) y
-femenino (match_previews_women, mp-w1; el grupo es privado).
+19-nov-2026). Fichas de partido del día (hora de Madrid): masculino (match_previews, mp-v1), copas
+(match_previews_cups, mp-v1-cups) y femenino (match_previews_women, mp-w1; el grupo es privado).
 
 Por partido y mercado: la línea principal de cada equipo (la de P(más) más cercana al 50 %, que es
 donde el modelo mejora a la liga) y el total del partido como referencia. Solo estadísticas del
@@ -101,14 +101,22 @@ def build_messages(previews: list[dict], day: date) -> list[str]:
         return []
     by_div: dict[str, list[dict]] = defaultdict(list)
     for p in previews:
-        by_div[p.get("div") or "?"].append(p)
-    order = [d for d in DIV_ORDER if d in by_div] + sorted(d for d in by_div if d not in DIV_ORDER)
+        # una copa va en su propio mensaje, no con la liga de sus equipos
+        key = f"CUP:{p.get('cup') or 'copa'}" if p.get("group") == "cups" else (p.get("div") or "?")
+        by_div[key].append(p)
+    cups = sorted(d for d in by_div if d.startswith("CUP:"))
+    men = [d for d in DIV_ORDER if d in by_div and not d.startswith("W")]
+    women = [d for d in DIV_ORDER if d in by_div and d.startswith("W")]
+    order = men + cups + women + sorted(d for d in by_div if d not in DIV_ORDER and d not in cups)
     dlabel = f"{WEEKDAYS[day.weekday()]} {day.day} {MONTHS[day.month - 1]}"
     msgs: list[str] = []
     for div in order:
         ms = sorted(by_div[div], key=lambda p: (p["kickoff_utc"], p["home_team"]))
-        women = div.startswith("W")
-        head = f"📊 Tendencias · {dlabel} · {'Femenino · ' if women else ''}{DIV_NAMES.get(div, div)}"
+        if div.startswith("CUP:"):
+            title = f"Copas · {div[4:]}"
+        else:
+            title = f"{'Femenino · ' if div.startswith('W') else ''}{DIV_NAMES.get(div, div)}"
+        head = f"📊 Tendencias · {dlabel} · {title}"
         body, cur = [], head + "\n% de que haya MÁS de la línea (modelo; solo estadísticas)"
         for p in ms:
             blk = match_block(p)
@@ -126,7 +134,7 @@ def read_day_previews(lo: datetime, hi: datetime) -> list[dict]:
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     out = []
-    for coll in ("match_previews", "match_previews_women"):
+    for coll in ("match_previews", "match_previews_cups", "match_previews_women"):
         q = (col(coll).where(filter=FieldFilter("kickoff_utc", ">=", lo.isoformat()))
              .where(filter=FieldFilter("kickoff_utc", "<", hi.isoformat())))
         out.extend(s.to_dict() for s in q.stream())

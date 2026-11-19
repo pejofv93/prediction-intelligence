@@ -267,3 +267,12 @@ def test_csv_que_falta_de_la_misma_liga_deja_sin_ficha_y_falla(monkeypatch):
     out = _run_with_failed(monkeypatch, ["SP1_2627"])
     assert out["ok"] is False and out["counts"] == {"sin_ficha_historial": 1} and out["would_write"] == 0
     assert any("1 fichas sin escribir" in e for e in out["errors"])
+
+
+def test_exportacion_web_lleva_la_copa():
+    p = {**st.preview_content(_fixture(), mp.predict_match(mp.History(_league(rounds=4)), "SP1", "2627",
+                                                             NOW.date().isoformat(), "A", "B"), None),
+         "group": "cups", "cup": "Copa del Rey", "model_version": "mp-v1-cups", "computed_at": NOW.isoformat()}
+    w = st.web_match(p)
+    assert w["group"] == "cups" and w["cup"] == "Copa del Rey" and w["model_version"] == "mp-v1-cups"
+    assert "cup" not in st.web_match({**p, "group": "men"})

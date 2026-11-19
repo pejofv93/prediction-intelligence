@@ -62,3 +62,14 @@ def test_sin_fichas_no_hay_mensajes():
 def test_resumen_a_las_ocho_utc_en_el_repartidor():
     t = ds.TASKS["trends-summary"]
     assert t.workflow == "trends-daily-summary.yml" and t.cron == "0 8 * * *"
+
+
+def test_copa_en_su_propio_mensaje_entre_ligas_y_femenino():
+    cup = {**_preview(div="P1", home="Guimaraes", away="Sp Braga", ko="2026-11-21T20:45:00+00:00"),
+           "group": "cups", "cup": "Taça de Portugal"}
+    msgs = ts.build_messages([_preview(div="WLF", home="Barcelona", away="Levante"), cup,
+                              _preview(div="P1", home="Benfica", away="Porto")], date(2026, 11, 21))
+    heads = [m.splitlines()[0] for m in msgs]
+    assert heads[0].endswith("· Primeira") and heads[1].endswith("· Copas · Taça de Portugal")
+    assert heads[2].endswith("· Femenino · Liga F")
+    assert "Guimaraes – Sp Braga" in msgs[1] and "Benfica" not in msgs[1]
