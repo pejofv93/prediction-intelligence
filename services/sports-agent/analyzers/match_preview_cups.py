@@ -12,9 +12,8 @@ Datos:
 
 Qué se mide (walk-forward: cada partido solo con lo anterior a su fecha):
   - p_model: mp-v1 tal cual (ataque/defensa de cada equipo en su liga, media de la liga del local).
-  - p_model × factor de copa: factor por estadística y lado = observado / esperado en los partidos
-    de copa ANTERIORES, encogido hacia 1 con FACTOR_K partidos. Recoge el efecto copa y que
-    Highlightly no cuenta igual que football-data.
+  (Sin factor de copa: se probó observado/esperado en las copas anteriores y no mejoró ningún
+  mercado; decisión del usuario el 19-nov-2026.)
   - Referencias: (1) frecuencia de la línea en la liga del local (la de mp-v1); (2) frecuencia de
     la línea en las copas anteriores del mismo país (todas las copas si hay menos de CUP_REF_MIN).
 Solo cruces de la misma división (SP1-SP2 no es comparable: cada índice es relativo a su liga) y
@@ -32,7 +31,6 @@ CUP_COUNTRY = {122477: "ES", 39079: "EN", 41632: "EN", 117371: "IT", 69715: "DE"
 SUPERCUPS = {473940, 450112, 466281, 450963, 448410, 468834, 462877}
 COUNTRY_DIVS = {"ES": ("SP1", "SP2"), "EN": ("E0",), "IT": ("I1",), "DE": ("D1",), "FR": ("F1",),
                 "PT": ("P1",), "NL": ("N1",)}
-FACTOR_K = 20.0          # partidos ficticios con factor 1 para encoger el factor de copa
 CUP_REF_MIN = 30         # copas anteriores del país necesarias para su propia referencia
 
 
@@ -161,12 +159,9 @@ def _cup_ref(prior: list[dict], stat: str, side: Optional[str], line: float) -> 
 
 def backtest_cup_rows(hist: mp.History, cups: list[dict], counts: Counter,
                       k: float = mp.SHRINK_K) -> dict[str, list[tuple]]:
-    """Filas para mp.market_metrics, una lista por variante:
-      modelo_vs_liga, modelo_vs_copa, factor_vs_liga, factor_vs_copa.
+    """Filas para mp.market_metrics: modelo_vs_liga y modelo_vs_copa.
     Fila: (temporada, país, mercado, línea, y, p_referencia, p_modelo, clave del partido)."""
-    rows: dict[str, list[tuple]] = {v: [] for v in ("modelo_vs_liga", "modelo_vs_copa",
-                                                     "factor_vs_liga", "factor_vs_copa")}
-    obs_exp: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0])   # (stat, lado)
+    rows: dict[str, list[tuple]] = {"modelo_vs_liga": [], "modelo_vs_copa": []}
     done: list[dict] = []
     for m in cups:
         d, div, season = m["date"], m["div"], m["season"]
@@ -181,7 +176,6 @@ def backtest_cup_rows(hist: mp.History, cups: list[dict], counts: Counter,
         prior = prior_c if len(prior_c) >= CUP_REF_MIN else done
         key = f"{season}_{m['country']}_{d}_{m['home']}"
         means = hist.league_means(div, season, d)
-        exp_now = {}
         for s in mp.STATS:
             lh, la = means[s]
             if m["h"][s] is None or m["a"][s] is None or not lh or not la:
@@ -189,47 +183,64 @@ def backtest_cup_rows(hist: mp.History, cups: list[dict], counts: Counter,
             ah, dh, _ = hist.indices(hh, s, d, season, k)
             aa, da, _ = hist.indices(ha, s, d, season, k)
             lam, mu = lh * ah * da, la * aa * dh
-            exp_now[s] = (lam, mu)
-
-            def factor(side):
-                o, e, n = obs_exp[(s, side)]
-                avg = e / n if n else 1.0
-                return (o + FACTOR_K * avg) / (e + FACTOR_K * avg) if n else 1.0
-
-            fh, fa = factor("h"), factor("a")
             team_lines, total_lines = mp.LINES[s]
-            for side, mean, f in (("h", lam, fh), ("a", mu, fa)):
-                r = mp.DISPERSION.get((s, "team"))
+            r = mp.DISPERSION.get((s, "team"))
+            for side, mean in (("h", lam), ("a", mu)):
                 for ln in team_lines:
-                    y = int(m[side][s] > ln)
                     pl, _ = hist.league_line_rate(div, season, d, s, side, ln)
                     pc = _cup_ref(prior, s, side, ln) if prior else None
-                    pm, pf = mp.p_over(ln, mean, r), mp.p_over(ln, mean * f, r)
-                    mk = mp.market_key(s, "team")
-                    _add(rows, season, m["country"], mk, ln, y, pl, pc, pm, pf, key)
+                    _add(rows, season, m["country"], mp.market_key(s, "team"), ln, int(m[side][s] > ln),
+                         pl, pc, mp.p_over(ln, mean, r), key)
             r = mp.DISPERSION.get((s, "total"))
             yt = m["h"][s] + m["a"][s]
             for ln in total_lines:
                 pl, _ = hist.league_line_rate(div, season, d, s, None, ln)
                 pc = _cup_ref(prior, s, None, ln) if prior else None
-                pm, pf = mp.p_over(ln, lam + mu, r), mp.p_over(ln, lam * fh + mu * fa, r)
-                _add(rows, season, m["country"], mp.market_key(s, "total"), ln, int(yt > ln), pl, pc, pm, pf, key)
-        for s, (lam, mu) in exp_now.items():             # el factor se actualiza DESPUÉS de predecir
-            for side, e in (("h", lam), ("a", mu)):
-                acc = obs_exp[(s, side)]
-                acc[0] += m[side][s]
-                acc[1] += e
-                acc[2] += 1
+                _add(rows, season, m["country"], mp.market_key(s, "total"), ln, int(yt > ln),
+                     pl, pc, mp.p_over(ln, lam + mu, r), key)
         done.append(m)
-    counts["factor_copa"] = {f"{s}_{side}": round((o / e) if e else 1.0, 3)
-                             for (s, side), (o, e, n) in sorted(obs_exp.items())}
     return rows
 
 
-def _add(rows, season, country, mk, ln, y, pl, pc, pm, pf, key):
+def _add(rows, season, country, mk, ln, y, pl, pc, pm, key):
     if pl is not None:
         rows["modelo_vs_liga"].append((season, country, mk, ln, y, pl, pm, key))
-        rows["factor_vs_liga"].append((season, country, mk, ln, y, pl, pf, key))
     if pc is not None:
         rows["modelo_vs_copa"].append((season, country, mk, ln, y, pc, pm, key))
-        rows["factor_vs_copa"].append((season, country, mk, ln, y, pc, pf, key))
+
+
+# ── Etiquetas (decisión del usuario, 19-nov-2026) ─────────────────────────────────
+LABEL_BACKTEST = "medido en backtest"     # se muestra, sin estrella
+STARS_AFTER_LIVE = 50                      # cruces graduados en directo antes de pensar en estrellas
+
+
+def labels_from_backtest(metrics: dict[str, dict]) -> dict[str, str]:
+    """{mercado: etiqueta} con el backtest frente a la liga, todos los países juntos: "medido en
+    backtest" si el IC95 de la diferencia de Brier queda entero bajo 0; si no, "solo referencia".
+    Nunca "ventaja medida" (estrella): eso espera a ~STARS_AFTER_LIVE cruces graduados en directo."""
+    return {v["market"]: (LABEL_BACKTEST if v["ci_label"] == mp.LABEL_EDGE else mp.LABEL_REF)
+            for v in metrics.values() if v["div"] == "ALL"}
+
+
+# ── Diagnóstico de amarillas ausentes (solo recuentos) ───────────────────────────
+def yellow_diag(docs: Iterable[dict]) -> dict:
+    """Lados de partido de copa sin "Yellow cards": ¿traen faltas, rojas, córners y cuántos campos?
+    Y en los lados que sí traen amarillas, cuántos tienen 0."""
+    out = Counter()
+    for d in docs:
+        st = d.get("stats") or {}
+        for k in ("home", "away"):
+            sd = st.get(k)
+            if not sd:
+                continue
+            if sd.get("yellows") is None:
+                out["sin_amarillas"] += 1
+                out["sin_amarillas_con_faltas"] += sd.get("fouls") is not None
+                out["sin_amarillas_con_rojas"] += sd.get("reds") is not None
+                out["sin_amarillas_con_corners"] += sd.get("corners") is not None
+                n = sd.get("n_fields") or 0
+                out["sin_amarillas_campos_" + ("0" if n == 0 else "1-5" if n <= 5 else "6-10" if n <= 10 else "11+")] += 1
+            else:
+                out["con_amarillas"] += 1
+                out["con_amarillas_igual_0"] += sd["yellows"] == 0
+    return dict(out)

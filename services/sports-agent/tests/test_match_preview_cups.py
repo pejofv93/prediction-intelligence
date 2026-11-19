@@ -69,17 +69,28 @@ def test_filtros_y_filas_walk_forward():
     assert len(cups) == 2 and c["descartado_distinta_division"] == 1 and c["descartado_supercopa"] == 1
     assert c["descartado_equipo_sin_liga_esa_temporada"] == 1 and c["descartado_sin_detalle"] == 1
     rows = mc.backtest_cup_rows(hist, cups, c)
-    assert c["evaluados"] == 2
+    assert c["evaluados"] == 2 and set(rows) == {"modelo_vs_liga", "modelo_vs_copa"}
     assert rows["modelo_vs_liga"] and rows["modelo_vs_liga"][0][1] == "ES"
     # el primer partido no tiene copas anteriores: sin referencia de copa; el segundo sí
     keys_copa = {r[7] for r in rows["modelo_vs_copa"]}
     assert len(keys_copa) == 1 and next(iter(keys_copa)).startswith("2425_ES_2025-01-15")
-    # factor de copa: en el primer partido vale 1 (filas iguales), en el segundo ya no
-    first = [r for r in rows["factor_vs_liga"] if "2025-01-08" in r[7]]
-    same = [r for r in rows["modelo_vs_liga"] if "2025-01-08" in r[7]]
-    assert [r[6] for r in first] == [r[6] for r in same]
-    assert c["factor_copa"]["corners_h"] > 1          # 7 córners en copa frente a ~6 esperados
     assert mp.market_metrics(rows["modelo_vs_liga"])
+
+
+def test_etiquetas_del_backtest_sin_estrella():
+    met = {"corners_team|ALL": {"market": "corners_team", "div": "ALL", "ci_label": mp.LABEL_EDGE},
+           "corners_total|ALL": {"market": "corners_total", "div": "ALL", "ci_label": mp.LABEL_REF},
+           "corners_team|EN": {"market": "corners_team", "div": "EN", "ci_label": mp.LABEL_EDGE}}
+    assert mc.labels_from_backtest(met) == {"corners_team": "medido en backtest", "corners_total": mp.LABEL_REF}
+
+
+def test_diagnostico_de_amarillas():
+    docs = [{"stats": {"home": {"yellows": 0, "fouls": 9}, "away": {"yellows": None, "fouls": 12, "reds": None,
+                                                                    "corners": 4, "n_fields": 12}}},
+            {"stats": {"home": {"yellows": 3}, "away": {"yellows": None, "n_fields": 0}}}]
+    d = mc.yellow_diag(docs)
+    assert d["sin_amarillas"] == 2 and d["sin_amarillas_con_faltas"] == 1 and d["sin_amarillas_campos_11+"] == 1
+    assert d["con_amarillas"] == 2 and d["con_amarillas_igual_0"] == 1
 
 
 def test_roja_ausente_cuenta_como_cero():

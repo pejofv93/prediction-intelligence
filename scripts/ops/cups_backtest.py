@@ -1,9 +1,12 @@
-"""SOLO LECTURA. Backtest de copas con el modelo de clubes (mp-v1): analyzers/match_preview_cups.py.
+"""Backtest de copas con el modelo de clubes (mp-v1): analyzers/match_preview_cups.py.
+
+Por defecto SOLO LECTURA. Con CONFIRMAR=ESCRIBIR guarda UN documento: match_preview_metrics/
+mp-v1-cups_backtest (métricas por mercado de todos los países y etiquetas), nada más.
 
 Lee hl_team_stats (grupo cups) y hl_matches (partidos de liga de Highlightly, para emparejar ids
 con nombres de football-data) de Firestore, y baja los CSV de football-data.co.uk de todas las
 temporadas desde la anterior a la primera copa. No escribe nada ni pide nada a Highlightly.
-Log: solo agregados (recuentos, factores y métricas por mercado): nada de equipos ni partidos.
+Log: solo agregados (recuentos, diagnóstico de amarillas y métricas por mercado): nada de equipos ni partidos.
 """
 import asyncio
 import os
@@ -22,6 +25,7 @@ from collectors import fdco_team_matches as fd  # noqa: E402
 from collectors.highlightly_players import team_similarity  # noqa: E402
 from shared.firestore_client import iter_all  # noqa: E402
 
+DOC_ID = "mp-v1-cups_backtest"
 FIRST_SEASON_END = int(os.environ.get("FIRST_SEASON_END") or 2020)   # 2019/20: la anterior a la 1.ª copa
 
 
@@ -82,13 +86,24 @@ def main() -> int:
     cups = mc.cup_matches(docs, ids, mc.team_divs(hist), counts)
     print("Por país (utilizables):", dict(Counter(c["country"] for c in cups)))
     rows = mc.backtest_cup_rows(hist, cups, counts)
-    factor = counts.pop("factor_copa", {})
     print("Recuentos:", dict(counts))
-    print("Factor de copa final (observado / esperado por mp-v1):", factor)
+    print("Amarillas ausentes (lados de partido):", mc.yellow_diag(docs))
     _print_metrics("modelo_vs_liga", rows["modelo_vs_liga"], detail=True)
-    _print_metrics("factor_vs_liga", rows["factor_vs_liga"], detail=True, only={"cards_team", "cards_total"})
     _print_metrics("modelo_vs_copa", rows["modelo_vs_copa"])
-    _print_metrics("factor_vs_copa", rows["factor_vs_copa"], detail=True, only={"cards_team", "cards_total"})
+    met = mp.market_metrics(rows["modelo_vs_liga"])
+    labels = mc.labels_from_backtest(met)
+    print("\nEtiquetas (frente a la liga, todos los países):", labels)
+    if os.environ.get("CONFIRMAR") == "ESCRIBIR":
+        from datetime import datetime, timezone
+        from shared.firestore_client import col
+        col("match_preview_metrics").document(DOC_ID).set({
+            "model_version": "mp-v1-cups", "computed_at": datetime.now(timezone.utc).isoformat(),
+            "reference": "liga del local", "n_matches": counts["evaluados"], "labels": labels,
+            "metrics": {k: v for k, v in met.items() if v["div"] == "ALL"},
+            "stars_after_live": mc.STARS_AFTER_LIVE})
+        print(f"Escrito match_preview_metrics/{DOC_ID} (métricas agregadas y etiquetas).")
+    else:
+        print("Sin escribir (CONFIRMAR distinto de ESCRIBIR).")
     return 0
 
 

@@ -1,10 +1,15 @@
 # Backtest de copas con el modelo de clubes (scripts/ops/cups_backtest.py).
-# SOLO LECTURA: hl_team_stats (cups) y hl_matches de Firestore + CSV públicos de football-data.co.uk.
-# No escribe nada ni pide nada a Highlightly. Log: solo agregados. Manual, sin cron.
+# Lee hl_team_stats (cups) y hl_matches de Firestore + CSV públicos de football-data.co.uk.
+# No pide nada a Highlightly. Por defecto no escribe; con confirmar=ESCRIBIR guarda SOLO
+# match_preview_metrics/mp-v1-cups_backtest (agregados y etiquetas). Log: solo agregados. Manual.
 name: cups-backtest
 
 on:
   workflow_dispatch:
+    inputs:
+      confirmar:
+        description: "ESCRIBIR = guardar métricas y etiquetas (vacío = solo leer)"
+        default: ""
 
 permissions:
   contents: read
@@ -28,9 +33,10 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Backtest de copas (solo lectura)
+      - name: Backtest de copas (escribe solo con confirmar=ESCRIBIR)
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           PYTHONIOENCODING: utf-8
+          CONFIRMAR: ${{ inputs.confirmar }}
         run: python scripts/ops/cups_backtest.py
