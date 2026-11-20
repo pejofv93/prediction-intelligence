@@ -141,11 +141,23 @@ def test_emparejamiento_calendario_solo_agregados(monkeypatch):
 
         def stream(self):
             return [_Snap({"league": "ATP Finals", "home_team": "Carlos Alcaraz", "away_team": "Jannik Sinner"}),
-                    _Snap({"league": "WTA Finals", "home_team": "A / B", "away_team": "C & D"})]
+                    _Snap({"league": "WTA Finals", "home_team": "A / B", "away_team": "C & D"}),
+                    _Snap({"league": "ATP", "tournament": "ATP Challenger Montevideo",
+                           "home_team": "Carlos Alcaraz", "away_team": "Juan Nadie"}),
+                    _Snap({"league": "ATP", "tournament": "ITF M15 Monastir",
+                           "home_team": "Pepe Uno", "away_team": "Pepe Dos"})]
 
     fake = types.ModuleType("shared.firestore_client")
     fake.col = lambda name: _Q()
     monkeypatch.setitem(sys.modules, "shared.firestore_client", fake)
     out = td.calendar_name_match({td.td_player_key("Alcaraz C.")})
-    assert out["partidos"] == 2 and out["nombres"] == 2 and out["dobles_fuera"] == 2
+    assert out["partidos"] == 4 and out["nombres"] == 2 and out["dobles_fuera"] == 2
     assert out["emparejan"] == 1 and out["pct"] == 50.0 and out["por_circuito"] == {"ATP": "1/2"}
+    assert out["fuera_circuito_principal"] == "1/4"              # Challenger e ITF, aparte
+
+
+def test_circuito_principal():
+    assert td.is_main_tour({"league": "ATP_MADRID", "tournament": "Madrid Open"})
+    assert td.is_main_tour({"league": "WTA", "tournament": "WTA Finals"})
+    for t in ("Challenger Lima", "ITF W35 Sharm", "UTR Pro Tennis Series", "M25 Antalya", "Exhibition Mubadala"):
+        assert not td.is_main_tour({"league": "ATP", "tournament": t}), t

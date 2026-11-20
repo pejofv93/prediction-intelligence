@@ -374,19 +374,34 @@ def _write_changed(state_id: str, docs: dict[str, dict], folder: str, dry_run: b
     return len(changed)
 
 
+# Calendario (upcoming_matches de tenis): el fallback de odds-api.io etiqueta como «ATP» todo lo
+# que no reconoce (Challenger, ITF, UTR…). tennis-data solo trae ATP/WTA principal (decisión c).
+_NOT_MAIN_RE = re.compile(r"challenger|\bitf\b|\butr\b|futures|exhibition|junior|\b[mw]\s?(15|25|35|50|60|75|80|100)\b"
+                          r"|\b125\b|doubles|dobles", re.I)
+
+
+def is_main_tour(doc: dict) -> bool:
+    """True si el partido del calendario es del circuito principal ATP/WTA."""
+    text = f"{doc.get('tournament') or ''} {doc.get('league') or ''}"
+    return not _NOT_MAIN_RE.search(text)
+
+
 def calendar_name_match(index: set[str]) -> dict:
     """
     Cuántos nombres individuales de upcoming_matches (sport=tennis) emparejan con las claves
-    «Apellido I.» de tennis-data. Solo lectura y solo agregados (sin nombres).
+    «Apellido I.» de tennis-data, solo del circuito principal (el resto se cuenta aparte).
+    Solo lectura y solo agregados (sin nombres).
     """
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     snaps = list(col("upcoming_matches").where(filter=FieldFilter("sport", "==", "tennis")).stream())
     by_tour: dict[str, list[int]] = {}
+    otros = [0, 0]
     dobles = 0
     for snap in snaps:
         d = snap.to_dict() or {}
         tour = str(d.get("league") or "")[:3].upper() or "?"
+        principal = is_main_tour(d)
         for side in ("home_team", "away_team"):
             n = str(d.get(side) or "")
             if not n:
@@ -394,7 +409,7 @@ def calendar_name_match(index: set[str]) -> dict:
             if "/" in n or " & " in n:
                 dobles += 1
                 continue
-            hit = by_tour.setdefault(tour, [0, 0])
+            hit = by_tour.setdefault(tour, [0, 0]) if principal else otros
             hit[1] += 1
             hit[0] += 1 if match_player(n, index) else 0
     total = sum(t for _, t in by_tour.values())
@@ -402,6 +417,7 @@ def calendar_name_match(index: set[str]) -> dict:
     return {"partidos": len(snaps), "nombres": total, "dobles_fuera": dobles,
             "emparejan": ok, "pct": round(100 * ok / total, 1) if total else None,
             "por_circuito": {k: f"{m}/{t}" for k, (m, t) in sorted(by_tour.items())},
+            "fuera_circuito_principal": f"{otros[0]}/{otros[1]}",
             "claves_tennis_data": len(index)}
 
 
