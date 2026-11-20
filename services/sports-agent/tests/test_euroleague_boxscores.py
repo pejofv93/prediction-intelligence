@@ -74,11 +74,50 @@ def test_dry_run_sin_escribir_y_solo_lo_que_falta(monkeypatch):
     monkeypatch.setattr(eb, "_fetch_eur_season_games", lambda season: games)
     monkeypatch.setattr(eb, "_load_state", lambda season: {"E2025_1": "abc"})
     calls = []
-    monkeypatch.setattr(eb, "_http_get", lambda url: calls.append(url) or _box(94, 90))
+    monkeypatch.setattr(eb, "_http_get_box", lambda url: calls.append(url) or (_box(94, 90), None))
     monkeypatch.setattr(eb, "_SLEEP_S", 0)
     monkeypatch.setattr(eb, "_write", lambda *a: (_ for _ in ()).throw(AssertionError("escribió")))
     out = asyncio.run(eb.run_eur_boxscores(["E2025"], dry_run=True))
     s = out["seasons"]["E2025"]
     assert out["ok"] and s["finished"] == 2 and s["boxscores"] == 1 and s["docs"] == 1
     assert len(calls) == 1 and "gamecode=2" in calls[0]
-    assert s["written"] == 1 and out["requests"] == {"feed_seasons": 1, "boxscores": 1}
+    assert s["written"] == 1 and out["requests"]["boxscores"] == 1
+    assert out["pending"] == 0 and not out["out_of_time"]
+
+
+def _patch_run(monkeypatch, games, responses, calls):
+    monkeypatch.setattr(eb, "_fetch_eur_season_games", lambda season: games)
+    monkeypatch.setattr(eb, "_load_state", lambda season: {})
+    monkeypatch.setattr(eb, "_SLEEP_S", 0)
+    monkeypatch.setattr(eb, "_write", lambda *a: (_ for _ in ()).throw(AssertionError("escribió")))
+
+    def fake(url):
+        calls.append(url)
+        return responses.pop(0)
+    monkeypatch.setattr(eb, "_http_get_box", fake)
+
+    async def no_sleep(_s):
+        return None
+    monkeypatch.setattr(eb.asyncio, "sleep", no_sleep)
+
+
+def test_429_espera_retry_after_y_reintenta(monkeypatch):
+    calls = []
+    _patch_run(monkeypatch, [_game(code=1), _game(code=2)],
+               [(_box(94, 90), None), (None, 5), (_box(90, 94), None)], calls)
+    out = asyncio.run(eb.run_eur_boxscores(["E2025"], dry_run=True))
+    s = out["seasons"]["E2025"]
+    assert s["docs"] == 2 and s["pending"] == 0 and not out["out_of_time"]
+    assert len(calls) == 3 and calls[1] == calls[2]
+    assert out["requests"]["rate_limited"] == 1 and out["requests"]["waited_s"] == 5
+
+
+def test_429_sin_tiempo_deja_pendientes_sin_error(monkeypatch):
+    calls = []
+    _patch_run(monkeypatch, [_game(code=c) for c in (1, 2, 3)],
+               [(_box(94, 90), None), (None, 300)], calls)
+    out = asyncio.run(eb.run_eur_boxscores(["E2025", "E2024"], dry_run=True, time_budget_s=60))
+    assert out["ok"] and out["out_of_time"]
+    assert out["seasons"]["E2025"]["docs"] == 1 and out["seasons"]["E2025"]["pending"] == 2
+    assert out["seasons"]["E2024"]["pending"] == 3 and out["pending"] == 5
+    assert len(calls) == 2

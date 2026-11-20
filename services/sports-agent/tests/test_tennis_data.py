@@ -122,3 +122,30 @@ def test_nombres_apellido_inicial():
 def test_anos_por_defecto():
     from datetime import date
     assert td.default_years(date(2026, 11, 19)) == [2024, 2025, 2026]
+
+
+def test_emparejamiento_calendario_solo_agregados(monkeypatch):
+    import sys
+    import types
+
+    class _Snap:
+        def __init__(self, d):
+            self._d = d
+
+        def to_dict(self):
+            return self._d
+
+    class _Q:
+        def where(self, filter=None):
+            return self
+
+        def stream(self):
+            return [_Snap({"league": "ATP Finals", "home_team": "Carlos Alcaraz", "away_team": "Jannik Sinner"}),
+                    _Snap({"league": "WTA Finals", "home_team": "A / B", "away_team": "C & D"})]
+
+    fake = types.ModuleType("shared.firestore_client")
+    fake.col = lambda name: _Q()
+    monkeypatch.setitem(sys.modules, "shared.firestore_client", fake)
+    out = td.calendar_name_match({td.td_player_key("Alcaraz C.")})
+    assert out["partidos"] == 2 and out["nombres"] == 2 and out["dobles_fuera"] == 2
+    assert out["emparejan"] == 1 and out["pct"] == 50.0 and out["por_circuito"] == {"ATP": "1/2"}

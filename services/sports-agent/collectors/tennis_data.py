@@ -374,6 +374,37 @@ def _write_changed(state_id: str, docs: dict[str, dict], folder: str, dry_run: b
     return len(changed)
 
 
+def calendar_name_match(index: set[str]) -> dict:
+    """
+    Cuántos nombres individuales de upcoming_matches (sport=tennis) emparejan con las claves
+    «Apellido I.» de tennis-data. Solo lectura y solo agregados (sin nombres).
+    """
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from shared.firestore_client import col
+    snaps = list(col("upcoming_matches").where(filter=FieldFilter("sport", "==", "tennis")).stream())
+    by_tour: dict[str, list[int]] = {}
+    dobles = 0
+    for snap in snaps:
+        d = snap.to_dict() or {}
+        tour = str(d.get("league") or "")[:3].upper() or "?"
+        for side in ("home_team", "away_team"):
+            n = str(d.get(side) or "")
+            if not n:
+                continue
+            if "/" in n or " & " in n:
+                dobles += 1
+                continue
+            hit = by_tour.setdefault(tour, [0, 0])
+            hit[1] += 1
+            hit[0] += 1 if match_player(n, index) else 0
+    total = sum(t for _, t in by_tour.values())
+    ok = sum(m for m, _ in by_tour.values())
+    return {"partidos": len(snaps), "nombres": total, "dobles_fuera": dobles,
+            "emparejan": ok, "pct": round(100 * ok / total, 1) if total else None,
+            "por_circuito": {k: f"{m}/{t}" for k, (m, t) in sorted(by_tour.items())},
+            "claves_tennis_data": len(index)}
+
+
 def default_years(today: Optional[date] = None) -> list[int]:
     y = (today or datetime.now(timezone.utc).date()).year
     return [y - 2, y - 1, y]
@@ -385,6 +416,7 @@ async def run_tennis_data(years: Optional[list[int]] = None, tours: Iterable[str
     years = years or default_years()
     summary: dict = {"ok": True, "dry_run": dry_run, "years": years, "folder": None,
                      "files": {}, "written": {}, "errors": []}
+    index: set[str] = set()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
         try:
             links = await fetch_links(client)
@@ -401,6 +433,11 @@ async def run_tennis_data(years: Optional[list[int]] = None, tours: Iterable[str
                 try:
                     rows = await fetch_xlsx(client, url)
                     docs, stats = build_tournament_docs(rows, tour, year)
+                    for d in docs.values():
+                        for m in d["matches"]:
+                            for k in (td_player_key(m["winner"]), td_player_key(m["loser"])):
+                                if k:
+                                    index.add(k)
                     stats["tournaments"] = len(docs)
                     dates = [m["date"] for d in docs.values() for m in d["matches"]]
                     stats["first_date"], stats["last_date"] = (min(dates), max(dates)) if dates else (None, None)
@@ -409,6 +446,13 @@ async def run_tennis_data(years: Optional[list[int]] = None, tours: Iterable[str
                 except Exception as e:
                     logger.error("tennis_data: error en %s", key, exc_info=True)
                     summary["errors"].append(f"{key}: {e}")
+    if dry_run and index:
+        # Emparejamiento con el calendario (fase 2 lo necesita ≥90 %). No es fatal.
+        try:
+            summary["calendar_names"] = calendar_name_match(index)
+        except Exception as e:
+            logger.warning("tennis_data: emparejamiento con upcoming_matches falló: %s", e)
+            summary["calendar_names"] = {"error": str(e)[:200]}
     summary["ok"] = not summary["errors"]
     logger.info("tennis_data: %s", summary)
     return summary

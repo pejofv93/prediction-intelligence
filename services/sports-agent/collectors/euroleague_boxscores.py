@@ -21,19 +21,66 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
 from collectors.basketball_collector import (
     _eur_season_code,
     _fetch_eur_season_games,
-    _http_get,
 )
 
 logger = logging.getLogger(__name__)
 
 BOXSCORE_URL = "https://live.euroleague.net/api/Boxscore?gamecode={code}&seasoncode={season}"
 _SLEEP_S = 0.25
+# live.euroleague.net corta a ~75 peticiones seguidas con 429 y Retry-After ≈ 300 s
+# (medido 20-nov-2026). Se respeta el Retry-After y la llamada tiene un tope de tiempo
+# (Cloud Run corta a 1800 s): lo que no da tiempo queda 'pending' y la siguiente carga
+# lo pide (only_missing).
+_HTTP_TIMEOUT_S = 20
+_RETRY_AFTER_DEFAULT_S = 300
+_RETRY_AFTER_MAX_S = 330
+_MAX_429_PER_GAME = 2
+TIME_BUDGET_S = 1500
+
+
+def _http_get_box(url: str) -> tuple[Optional[dict], Optional[int]]:
+    """(json, None) si va bien; (None, segundos) si 429; (None, None) en otro error."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as r:
+            data = json.loads(r.read().decode())
+            return (data if isinstance(data, dict) else None), None
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            try:
+                wait = int(e.headers.get("Retry-After") or _RETRY_AFTER_DEFAULT_S)
+            except (TypeError, ValueError):
+                wait = _RETRY_AFTER_DEFAULT_S
+            return None, max(1, min(wait, _RETRY_AFTER_MAX_S))
+        logger.warning("eur_boxscores: HTTP %s en %s", e.code, url)
+    except Exception as e:
+        logger.warning("eur_boxscores: %s en %s", e, url)
+    return None, None
+
+
+async def _fetch_box(loop, url: str, deadline: float, counters: dict) -> tuple[Optional[dict], bool]:
+    """(boxscore|None, sin_tiempo). Espera el Retry-After si cabe antes del tope."""
+    for _ in range(_MAX_429_PER_GAME + 1):
+        box, wait = await loop.run_in_executor(None, _http_get_box, url)
+        counters["boxscores"] += 1
+        if wait is None:
+            return box, False
+        counters["rate_limited"] += 1
+        if time.monotonic() + wait > deadline:
+            return None, True
+        logger.info("eur_boxscores: 429, espero %d s", wait)
+        await asyncio.sleep(wait)
+        counters["waited_s"] += wait
+    return None, False
 _REGULATION_MINUTES = 200   # 5 jugadores × 40 min
 _OT_MINUTES = 25            # 5 jugadores × 5 min
 
@@ -164,20 +211,25 @@ def _write(season: str, docs: dict[str, dict], old: dict) -> int:
 
 
 async def run_eur_boxscores(seasons: Optional[list[str]] = None, dry_run: bool = True,
-                            max_games: int = 0, only_missing: bool = True) -> dict:
+                            max_games: int = 0, only_missing: bool = True,
+                            time_budget_s: float = TIME_BUDGET_S) -> dict:
     """
     seasons: códigos 'E2024'… (por defecto las 3 últimas).
     max_games: tope de boxscores por temporada (0 = sin tope; útil en dry-run).
     only_missing: con estado guardado, solo pide boxscores de partidos que no estén en el
                   estado (los terminados no cambian) → el mantenimiento diario pide 0-10.
+    time_budget_s: tope de la llamada; lo que no da tiempo queda en 'pending' (no es error).
     """
+    deadline = time.monotonic() + time_budget_s
     seasons = seasons or default_seasons()
     loop = asyncio.get_running_loop()
     summary: dict = {"ok": True, "dry_run": dry_run, "seasons": {}, "errors": [],
-                     "requests": {"feed_seasons": 0, "boxscores": 0}}
+                     "requests": {"feed_seasons": 0, "boxscores": 0, "rate_limited": 0,
+                                  "waited_s": 0},
+                     "pending": 0, "out_of_time": False}
     for season in seasons:
         s: dict = {"feed_games": 0, "finished": 0, "boxscores": 0, "docs": 0, "written": 0,
-                   "ot_games": 0, "skipped": {}, "phases": {}}
+                   "ot_games": 0, "skipped": {}, "phases": {}, "pending": 0}
         try:
             games = await loop.run_in_executor(None, _fetch_eur_season_games, season)
             summary["requests"]["feed_seasons"] += 1
@@ -193,10 +245,18 @@ async def run_eur_boxscores(seasons: Optional[list[str]] = None, dry_run: bool =
             if max_games:
                 todo = todo[:max_games]
             docs: dict[str, dict] = {}
-            for g in todo:
-                box = await loop.run_in_executor(
-                    None, _http_get, BOXSCORE_URL.format(code=_n(g.get("code")), season=season))
-                summary["requests"]["boxscores"] += 1
+            for i, g in enumerate(todo):
+                if summary["out_of_time"] or time.monotonic() > deadline:
+                    summary["out_of_time"] = True
+                    s["pending"] = len(todo) - i
+                    break
+                box, no_time = await _fetch_box(
+                    loop, BOXSCORE_URL.format(code=_n(g.get("code")), season=season),
+                    deadline, summary["requests"])
+                if no_time:
+                    summary["out_of_time"] = True
+                    s["pending"] = len(todo) - i
+                    break
                 s["boxscores"] += 1
                 doc, why = build_game_doc(g, box) if isinstance(box, dict) else (None, "boxscore_error")
                 if doc is None:
@@ -222,6 +282,7 @@ async def run_eur_boxscores(seasons: Optional[list[str]] = None, dry_run: bool =
             logger.error("eur_boxscores: error en %s", season, exc_info=True)
             summary["errors"].append(f"{season}: {e}")
         summary["seasons"][season] = s
+        summary["pending"] += s["pending"]
     summary["ok"] = not summary["errors"]
     logger.info("eur_boxscores: %s", summary)
     return summary

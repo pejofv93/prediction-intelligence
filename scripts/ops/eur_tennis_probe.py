@@ -58,7 +58,7 @@ def euroleague() -> bool:
         checks.append(("sin jugar " + cur, cur, pending[-1], False))
 
     for label, season, g, expect_doc in checks:
-        box = eb._http_get(eb.BOXSCORE_URL.format(code=eb._n(g.get("code")), season=season))
+        box, _ = eb._http_get_box(eb.BOXSCORE_URL.format(code=eb._n(g.get("code")), season=season))
         doc, why = eb.build_game_doc(g, box) if isinstance(box, dict) else (None, "boxscore_error")
         if expect_doc:
             good = doc is not None
@@ -79,7 +79,14 @@ async def tennis() -> bool:
     print(f"\n== Tenis: tennis-data.co.uk {year}")
     index: set[str] = set()
     async with httpx.AsyncClient(timeout=td._HTTP_TIMEOUT, follow_redirects=True) as client:
-        links = await td.fetch_links(client)
+        try:
+            links = await td.fetch_links(client)
+        except httpx.HTTPStatusError as e:
+            # tennis-data.co.uk da 403 a las IP de GitHub (20-nov-2026); desde Cloud Run va.
+            # El emparejamiento de nombres sale en el dry-run de sports-tennis-load.
+            print(f"  alldata.php: HTTP {e.response.status_code} desde GitHub — ver dry-run "
+                  "de sports-tennis-load (Cloud Run), que trae calendar_names")
+            return True
         years = sorted({y for _, y in links})
         print(f"  alldata.php: {len(links)} enlaces .xlsx ({years[0] if years else '-'}–"
               f"{years[-1] if years else '-'}), carpeta '{td.link_folder(next(iter(links.values()), ''))}'")
