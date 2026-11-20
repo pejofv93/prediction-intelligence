@@ -15,6 +15,7 @@ como el semanal: una sola vez por día aunque el grader corra dos veces).
 "Graduadas ayer" = graduadas después del corte del diario anterior (guardado en la
 marca), no "últimas 24h": el grader no corre a hora fija.
 """
+import html
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -22,7 +23,7 @@ import httpx
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from analyzers.trend_weekly import (
-    _MARKET_LABEL, _calibration_label, _ratio, _tally, counts_in_feed, fixture_scores,
+    _MARKET_LABEL, _ratio, _tally, counts_in_feed, fixture_scores,
     not_duplicate, score_band_line, shadow_market_lines,
 )
 from shared.config import (
@@ -35,36 +36,55 @@ from shared.config import (
 logger = logging.getLogger(__name__)
 
 
-def _sends_line(run: dict | None) -> str:
-    """Envíos del feed del día anterior desde trend_runs. Sin fila → "sin datos" (el
-    feed no corrió o falló al registrar), nunca un cero que no se ha medido."""
+_WEEKDAYS = ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
+_MONTHS_SHORT = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
+_SEP = "━━━━━━━━━━━━━━"
+
+
+def _esc(text) -> str:
+    return html.escape(str(text), quote=False)
+
+
+def _sent_yesterday(run: dict | None) -> str:
+    """Envíos del feed del día anterior desde trend_runs. Sin fila → "sin datos" (el feed no
+    corrió o falló al registrar), nunca un cero que no se ha medido."""
+    return "sin datos" if not run else str(int(run.get("sent") or 0))
+
+
+def _sends_detail(run: dict | None) -> str | None:
     if not run:
-        return "📨 Enviados ayer: sin datos"
-    sent = int(run.get("sent") or 0)
-    line = f"📨 Enviados ayer: {sent} partido{'s' if sent != 1 else ''}"
+        return None
     extra = [f"{int(run.get('skipped_already_sent') or 0)} descartados por ya enviados"]
     if int(run.get("new_market_repeats") or 0):
         extra.append(f"{int(run['new_market_repeats'])} por mercado nuevo")
-    return line + f" ({' · '.join(extra)})"
+    return "Enviados ayer: " + " · ".join(extra)
+
+
+def market_ok(cal: dict | None, hits: int, misses: int, target: float) -> tuple[bool, str]:
+    """(cumple, nota corta) a partir de la calibración; sin estado, el acierto frente al objetivo."""
+    status = (cal or {}).get("status")
+    if status == "at_fixed":
+        return True, ""
+    if status == "calibrated" and cal.get("threshold_effective") != cal.get("threshold_fixed"):
+        return True, f"umbral {cal.get('threshold_effective')}"
+    if status == "calibrated":
+        hr = cal.get("hit_rate_fixed")
+        return (hr is not None and hr >= target), ""
+    if status == "below_target":
+        return False, ""
+    n = hits + misses
+    return (n > 0 and hits / n >= target), ""
 
 
 def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: list[dict],
                         calibration: dict[str, dict], run: dict | None, day: datetime,
                         shadow_lines: list[str] | None = None,
                         scores: dict[str, float] | None = None) -> str:
-    """Texto plano del diario. Función pura: todo entra por parámetro, ya sin sombra."""
+    """HTML de Telegram del diario de señales. Función pura: todo entra por parámetro, ya sin
+    sombra. Visible: título, una línea de resumen y una línea por mercado con muestra suficiente
+    (✅ cumple su objetivo / ⚠️ por debajo). Plegado: muestras pequeñas, sombra y detalle."""
     d_hit, d_miss, d_void = _tally(day_rows)
     t_hit, t_miss, _ = _tally(log_rows)
-
-    lines = [f"📈 TENDENCIAS — RESUMEN DEL DÍA — {day.strftime('%d/%m/%Y')}", ""]
-    lines.append(_sends_line(run))
-    lines.append(f"✅ Graduadas ayer: {d_hit + d_miss + d_void} ({d_hit} aciertos · {d_miss} fallos"
-                 f" · {d_void} anuladas)")
-    lines.append(f"⏳ Pendientes: {len(pending)}")
-    lines.append(f"🎯 Acierto total: {_ratio(t_hit, t_miss)}")
-    if scores is not None:
-        lines.append(score_band_line("🔢 Por puntuación del partido (total, informativo)",
-                                     log_rows, scores))
 
     pending_by_market: dict[str, int] = {}
     for s in pending:
@@ -80,31 +100,50 @@ def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: lis
     full = [mk for mk in order if sum(_totals(mk)) >= TREND_CALIBRATION_MIN_SAMPLE]
     thin = [mk for mk in order if sum(_totals(mk)) < TREND_CALIBRATION_MIN_SAMPLE]
 
+    dlabel = f"{_WEEKDAYS[day.weekday()]} {day.day} {_MONTHS_SHORT[day.month - 1]}"
+    lines = [f"<b>📈 Señales de tendencia · {dlabel}</b>",
+             f"🎯 Acierto <b>{_ratio(t_hit, t_miss)}</b> · 📨 Enviados ayer: {_sent_yesterday(run)}"
+             f" · ⏳ Pendientes: {len(pending)}"]
+
     if full:
-        lines += ["", "Por mercado — ayer · total · pendientes · calibración"]
+        lines.append(_SEP)
         for mk in full:
             dh, dm, _ = _tally([r for r in day_rows if r.get("market") == mk])
             th, tm = _totals(mk)
             target = TREND_MARKET_TARGET.get(mk, 0.70)
-            lines.append(
-                f"{_MARKET_LABEL.get(mk, mk)} (obj. {target * 100:.0f}%): {_ratio(dh, dm, with_pct=False)}"
-                f" · {_ratio(th, tm)} · {pending_by_market.get(mk, 0)} pend."
-                f" · {_calibration_label(calibration.get(mk), th + tm, target)}"
-            )
+            ok, note = market_ok(calibration.get(mk), th, tm, target)
+            extra = [f"obj. {target * 100:.0f}%"]
+            if dh + dm:
+                extra.append(f"ayer {_ratio(dh, dm, with_pct=False)}")
+            if pending_by_market.get(mk):
+                extra.append(f"{pending_by_market[mk]} pend.")
+            if note:
+                extra.append(note)
+            lines.append(f"{'✅' if ok else '⚠️'} <b>{_esc(_MARKET_LABEL.get(mk, mk))}</b> "
+                         f"{_ratio(th, tm)} · " + " · ".join(extra))
+
+    fold = [f"Graduadas ayer: {d_hit + d_miss + d_void} ({d_hit} aciertos · {d_miss} fallos"
+            f" · {d_void} anuladas)"]
+    detail = _sends_detail(run)
+    if detail:
+        fold.append(detail)
     if thin:
-        parts = []
+        fold += ["", f"<b>Muestra pequeña</b> (&lt;{TREND_CALIBRATION_MIN_SAMPLE} graduadas)"]
         for mk in thin:
             th, tm = _totals(mk)
-            part = f"{_MARKET_LABEL.get(mk, mk)} {th}/{th + tm}"
+            part = f"{_esc(_MARKET_LABEL.get(mk, mk))} {th}/{th + tm}"
             if pending_by_market.get(mk):
                 part += f" ({pending_by_market[mk]} pend.)"
-            parts.append(part)
-        lines += ["", f"Sin muestra suficiente (<{TREND_CALIBRATION_MIN_SAMPLE} graduadas): "
-                      + ", ".join(parts)]
-
-    lines += shadow_lines or []
-    lines += ["", "Las variantes en sombra no cuentan en estas cifras.",
-              "📈 Tendencia estadística, no consejo de inversión."]
+            fold.append(part)
+    shadow = [x for x in (shadow_lines or []) if x]
+    if shadow:
+        fold += ["", f"<b>{_esc(shadow[0])}</b>"] + [_esc(x) for x in shadow[1:]]
+    if scores is not None:
+        fold += ["", _esc(score_band_line("Por puntuación del partido (total, informativo)",
+                                          log_rows, scores))]
+    fold += ["", "Las variantes en sombra no cuentan en estas cifras."]
+    lines.append("<blockquote expandable>" + "\n".join(fold) + "</blockquote>")
+    lines.append("<i>Tendencia estadística, no consejo de inversión.</i>")
     return "\n".join(lines)
 
 
@@ -163,7 +202,7 @@ async def run_trend_daily_summary(force: bool = False) -> dict:
                 resp = await client.post(
                     f"{TELEGRAM_BOT_URL}/send-alert",
                     headers={"x-cloud-token": CLOUD_RUN_TOKEN},
-                    json={"type": "trend", "data": {"text": text}},
+                    json={"type": "trend", "data": {"text": text, "format": "html"}},
                 )
             sent = resp.status_code in (200, 202) and bool(resp.json().get("sent"))
         except Exception:

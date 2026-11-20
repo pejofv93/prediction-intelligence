@@ -215,7 +215,9 @@ async def send_alert(request: Request) -> JSONResponse:
             # Aislado del resto: nunca toca predictions/shadow_trades/accuracy_log.
             # parse_mode=None: nombres de equipo pueden traer caracteres que rompen
             # entidades Markdown (mismo motivo que el tipo "matched").
-            outcome = await _plain(data.get("text", ""), parse_mode=None,
+            # data.format="html": el informe diario de señales (HTML de Telegram, texto escapado).
+            outcome = await _plain(data.get("text", ""),
+                                   parse_mode="HTML" if data.get("format") == "html" else None,
                                    message_thread_id=TELEGRAM_TRENDS_THREAD_ID)
         else:
             logger.warning("send-alert: tipo desconocido '%s'", alert_type)
@@ -421,7 +423,7 @@ async def send_trends_summary(force: bool = False) -> JSONResponse:
                 return JSONResponse({**out, "reason": "ya enviado hoy"})
             raise
     for m in msgs:
-        if await send_message(m, parse_mode=None, message_thread_id=TELEGRAM_TRENDS_THREAD_ID):
+        if await send_message(m, parse_mode="HTML", message_thread_id=TELEGRAM_TRENDS_THREAD_ID):
             out["sent"] += 1
     if out["sent"] < len(msgs):
         logger.error("send-trends-summary: Telegram no aceptó %d de %d mensajes", len(msgs) - out["sent"], len(msgs))

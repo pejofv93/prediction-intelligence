@@ -53,7 +53,7 @@ def test_diario_no_lo_cuenta():
     feed = [r for r in rows if counts_in_feed(r)]
     text = build_daily_summary(feed, [], [], {}, None, datetime(2026, 10, 26, tzinfo=timezone.utc),
                                shadow_market_lines(rows, []))
-    assert "Acierto total: 1/1 (100%)" in text
+    assert "🎯 Acierto <b>1/1 (100%)</b>" in text
     assert "Total exacto (obj. 28%): en sombra — · enviadas antes 0/1 (0%) · 0 pend." in text
 
 
@@ -67,4 +67,22 @@ def test_duplicadas_fuera_de_todo():
     assert kept == [rows[0]]
     text = build_daily_summary([r for r in kept if counts_in_feed(r)], [], [], {}, None,
                                datetime(2026, 10, 28, tzinfo=timezone.utc))
-    assert "Acierto total: 1/1 (100%)" in text
+    assert "🎯 Acierto <b>1/1 (100%)</b>" in text
+
+
+def test_diario_html_resumen_mercados_y_plegado():
+    from analyzers.trend_daily import build_daily_summary as b
+    hits = [{"market": "double_chance", "result": "hit"}] * 40 + [{"market": "double_chance", "result": "miss"}] * 10
+    low = [{"market": "btts", "result": "hit"}] * 30 + [{"market": "btts", "result": "miss"}] * 25
+    thin = [{"market": "corners", "result": "hit"}] * 3
+    cal = {"double_chance": {"status": "at_fixed"}, "btts": {"status": "below_target"}}
+    text = b(hits + low + thin, hits[:2], [{"market": "btts"}], cal, {"sent": 4},
+             datetime(2026, 11, 20, tzinfo=timezone.utc), ["", "En sombra (se gradúa)", "Total exacto 1/2"], {})
+    first, second, third = text.splitlines()[:3]
+    assert first == "<b>📈 Señales de tendencia · Viernes 20 nov</b>"
+    assert "Enviados ayer: 4" in second and "Pendientes: 1" in second
+    assert "✅ <b>Doble oportunidad</b> 40/50 (80%)" in text and "ayer 2/2" in text
+    assert "⚠️ <b>Ambos marcan</b> 30/55 (55%)" in text and "1 pend." in text
+    folded = text[text.index("<blockquote expandable>"):text.index("</blockquote>")]
+    assert "Muestra pequeña" in folded and "Córners 3/3" in folded and "En sombra" in folded
+    assert "&lt;" in folded and "RESUMEN DEL DÍA" not in text

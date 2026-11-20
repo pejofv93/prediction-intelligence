@@ -23,36 +23,48 @@ def _block(lines, main=None):
 
 
 def _preview(home="Ath Bilbao", away="Espanol", div="SP1", ko="2026-11-20T20:00:00+00:00"):
-    stat = {"available": True, "lines": {
+    stat = {"available": True, "exp_home": 6.42, "exp_away": 3.71, "exp_total": 10.13, "lines": {
         "home": _block([(5.5, 0.60), (6.5, 0.47)], main=6.5),
-        "away": _block([(3.5, 0.45), (4.5, 0.28)]),                   # sin main guardada: se calcula
+        "away": _block([(3.5, 0.45), (4.5, 0.28)]),
         "total": _block([(9.5, 0.54), (10.5, 0.42)], main=9.5)}}
     return {"home_team": home, "away_team": away, "div": div, "kickoff_utc": ko,
             "stats": {"corners": stat, "goals": {"available": False}}}
 
 
-def test_bloque_de_partido_por_equipo_y_total_de_referencia():
+def _edge(p, stat, side):
+    p["stats"][stat]["lines"][side]["market_label"] = "ventaja medida"
+
+
+def test_bloque_de_partido_html():
     txt = ts.match_block(_preview())
-    assert txt.startswith("21:00 Athletic – Espanyol")                  # hora de Madrid y nombres de pantalla
-    assert "  Córners: local +6,5: 47 % · visit. +3,5: 45 % (total +9,5: 54 %)" in txt
-    assert "Goles" not in txt and "cuota" not in txt.lower()
+    lines = txt.splitlines()
+    assert lines[:3] == [ts.SEP, "⚽ LaLiga · 21:00", "<b>Athletic – Espanyol</b>"]
+    assert ("<blockquote expandable><b>Todos los mercados</b> (esperado)\n"
+            "Córners: Athletic 6,4 · Espanyol 3,7 · total 10,1</blockquote>") in txt
+    assert "Goles" not in txt and "cuota" not in txt.lower() and "local +" not in txt
+    assert "⭐" not in txt                                     # sin ventaja medida no hay píldoras
 
 
-def test_un_mensaje_por_liga_femenino_aparte_y_enlace_al_final():
-    msgs = ts.build_messages([_preview(), _preview(div="E0", home="Chelsea", away="Leeds"),
-                              _preview(div="WLF", home="Barcelona", away="Levante")], date(2026, 11, 20))
-    assert len(msgs) == 3
-    assert msgs[0].startswith("📊 Tendencias · viernes 20 nov · LaLiga")
-    assert "Femenino · Liga F" in msgs[2]
-    assert msgs[-1].endswith("https://tendencias-pi.pages.dev/#partidos/2026-11-20")
-    assert all(len(m) <= 4096 for m in msgs)
+def test_un_solo_mensaje_para_el_dia_con_cabecera_y_enlace():
+    msgs = ts.build_messages([_preview(div="E0", home="Chelsea", away="Leeds", ko="2026-11-20T15:00:00+00:00"),
+                              _preview(),
+                              {**_preview(div="WLF", home="Barcelona", away="Levante"), "group": "women"}],
+                             date(2026, 11, 20))
+    assert len(msgs) == 1
+    m = msgs[0]
+    assert m.startswith("<b>📊 TENDENCIAS · Viernes 20 nov</b>\n3 partidos\n" + ts.STAR_LEGEND)
+    assert m.index("Chelsea") < m.index("Athletic") < m.index("Barcelona")      # por hora
+    assert "👩 Liga F · 21:00" in m and "⚽ Premier · 16:00" in m
+    assert m.endswith('<a href="https://tendencias-pi.pages.dev/#partidos/2026-11-20">Fichas completas en la web</a>')
 
 
-def test_liga_larga_se_parte():
-    many = [_preview(home=f"Equipo {i}") for i in range(40)]
+def test_dia_largo_se_parte_entre_partidos():
+    many = [_preview(home=f"Equipo {i}") for i in range(60)]
     msgs = ts.build_messages(many, date(2026, 11, 21))
-    assert len(msgs) > 1 and all(len(m) <= ts.MAX_LEN + 200 for m in msgs)
-    assert "(sigue)" in msgs[1]
+    assert len(msgs) > 1 and all(len(m) <= ts.MAX_LEN for m in msgs)
+    assert "(sigue)" in msgs[1] and "Fichas completas" in msgs[-1]
+    for m in msgs:                                           # ningún partido ni plegable cortado
+        assert m.count("<blockquote expandable>") == m.count("</blockquote>")
 
 
 def test_sin_fichas_no_hay_mensajes():
@@ -64,50 +76,46 @@ def test_resumen_a_las_ocho_utc_en_el_repartidor():
     assert t.workflow == "trends-daily-summary.yml" and t.cron == "0 8 * * *"
 
 
-def test_copa_en_su_propio_mensaje_entre_ligas_y_femenino():
+def test_copa_con_icono_y_nombre_de_copa():
     cup = {**_preview(div="P1", home="Guimaraes", away="Sp Braga", ko="2026-11-21T20:45:00+00:00"),
            "group": "cups", "cup": "Taça de Portugal"}
-    msgs = ts.build_messages([_preview(div="WLF", home="Barcelona", away="Levante"), cup,
-                              _preview(div="P1", home="Benfica", away="Porto")], date(2026, 11, 21))
-    heads = [m.splitlines()[0] for m in msgs]
-    assert heads[0].endswith("· Primeira") and heads[1].endswith("· Copas · Taça de Portugal")
-    assert heads[2].endswith("· Femenino · Liga F")
-    assert "Vitória Guimarães – Braga" in msgs[1] and "Benfica" not in msgs[1]
+    m = ts.build_messages([cup], date(2026, 11, 21))[0]
+    assert "🏆 Taça de Portugal · 21:45" in m and "<b>Vitória Guimarães – Braga</b>" in m
 
 
-def test_pildoras_por_equipo_entre_60_y_90():
+def test_pildoras_solo_ventaja_medida_sin_0_5_salvo_marca():
     p = _preview()
     p["stats"]["corners"]["lines"]["home"] = _block([(3.5, 0.85), (4.5, 0.73), (5.5, 0.60), (6.5, 0.47)])
-    p["stats"]["corners"]["lines"]["home"]["lines"]["over_5.5"]["p_league"] = 0.43   # +17 pts → ★
-    p["stats"]["goals"] = {"available": True, "lines": {
+    p["stats"]["corners"]["lines"]["away"] = _block([(3.5, 0.70)])            # sin ventaja: fuera
+    p["stats"]["cards"] = {"available": True, "exp_home": 0.9, "exp_away": 1.1, "exp_total": 2.0, "lines": {
+        "home": _block([(0.5, 0.75)]), "away": _block([(0.5, 0.70)]), "total": _block([(1.5, 0.6)])}}
+    p["stats"]["goals"] = {"available": True, "exp_home": 1.6, "exp_away": 0.9, "exp_total": 2.5, "lines": {
         "home": _block([(0.5, 0.95)]), "away": _block([(0.5, 0.66), (1.5, 0.29)]), "total": _block([(2.5, 0.46)])}}
+    for st, side in (("corners", "home"), ("cards", "home"), ("cards", "away"), ("goals", "home"), ("goals", "away")):
+        _edge(p, st, side)
     pills = ts.match_pills(p)
-    assert pills[0] == {"text": "Espanyol marca al menos 1 gol", "p": 0.66, "star": False, "edge": False}
-    assert {"text": "Athletic más de 5,5 córners", "p": 0.60, "star": True, "edge": False} in pills
-    assert not any("3,5 córners" in x["text"] for x in pills)          # la línea MÁS ALTA que pasa
-    assert not any(x["p"] > 0.90 for x in pills) and len(pills) <= 5
+    assert [(x["key"], x["line"], x["p"]) for x in pills] == [("goals", 0.5, 0.66), ("corners", 5.5, 0.60)]
     txt = ts.match_block(p)
-    assert "  ▸ Espanyol marca al menos 1 gol · 66 %" in txt and "  ★ Athletic más de 5,5 córners · 60 %" in txt
+    assert "⭐ Espanyol <b>marca</b> al menos 1 gol · <b>66 %</b>" in txt
+    assert "⭐ Athletic más de <b>5,5</b> córners · <b>60 %</b>" in txt
+    assert "tarjetas" not in txt.split("<blockquote")[0]       # tarjetas 0,5 fuera de las píldoras
 
 
-def test_pildoras_primero_mercados_con_ventaja_medida():
+def test_pildoras_maximo_5_de_mayor_a_menor_y_nada_con_muestra_insuficiente():
     p = _preview()
-    p["stats"]["corners"]["lines"]["home"] = _block([(4.5, 0.62)])
-    p["stats"]["corners"]["lines"]["home"]["market_label"] = "ventaja medida"
-    p["stats"]["corners"]["lines"]["away"] = _block([(3.5, 0.61)])          # sin ventaja: solo completa
-    p["stats"]["goals"] = {"available": True, "lines": {
-        "home": _block([(0.5, 0.80)]), "away": _block([(0.5, 0.75)]), "total": _block([(2.5, 0.46)])}}
-    p["stats"]["goals"]["lines"]["home"]["market_label"] = "solo referencia"
-    texts = [x["text"] for x in ts.match_pills(p)]
-    assert texts == ["Athletic más de 4,5 córners", "Athletic marca al menos 1 gol",
-                     "Espanyol marca al menos 1 gol", "Espanyol más de 3,5 córners"]
+    p["stats"] = {}
+    for key in ("corners", "fouls", "shots", "sot"):
+        p["stats"][key] = {"available": True, "exp_home": 5, "exp_away": 5, "exp_total": 10, "lines": {
+            "home": _block([(4.5, 0.61)]), "away": _block([(3.5, 0.82)]), "total": _block([(9.5, 0.5)])}}
+        _edge(p, key, "home"), _edge(p, key, "away")
+    pills = ts.match_pills(p)
+    assert len(pills) == 5 and [x["p"] for x in pills] == sorted((x["p"] for x in pills), reverse=True)
+    assert ts.match_pills({**p, "low_sample": True}) == []
 
 
-def test_nombres_de_pantalla_sin_tocar_la_ficha():
+def test_nombres_escapados_y_de_pantalla():
     p = _preview(home="Athletic Club", away="RCD Espanyol de Barcelona")
-    assert ts.match_block(p).startswith("21:00 Athletic – Espanyol")
+    assert "<b>Athletic – Espanyol</b>" in ts.match_block(p)
     assert p["home_team"] == "Athletic Club"                                    # solo presentación
-    w = {**_preview(div="WLF", home="Barcelona W", away="Madrid CFF"), "group": "women"}
-    assert ts.match_block(w).startswith("21:00 Barcelona – Madrid CFF")
-    c = {**_preview(div="D1", home="FC Koln", away="M'gladbach"), "group": "cups", "cup": "DFB-Pokal"}
-    assert "Colonia – Mönchengladbach" in ts.build_messages([c], date(2026, 11, 20))[0]
+    w = {**_preview(div="WLF", home="A<B", away="C&D"), "group": "women"}
+    assert "<b>A&lt;B – C&amp;D</b>" in ts.match_block(w)

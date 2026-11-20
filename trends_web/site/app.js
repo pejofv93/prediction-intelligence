@@ -291,31 +291,35 @@ function initials(name) {
   return (w.length === 1 ? w[0].slice(0, 3) : w.slice(0, 3).map((x) => x[0]).join("")).toUpperCase();
 }
 
-// Píldoras "Tendencias del partido": solo mercados por equipo; en cada mercado y equipo, la línea
-// MÁS ALTA con el modelo entre el 60 % y el 90 %; como mucho 5, de mayor a menor; ★ si el modelo se
-// separa 10 puntos o más de la media de la liga en esa línea. Primero los mercados con "ventaja
-// medida" en la liga (etiqueta del backtest); los demás solo completan. Lo mismo en Telegram.
+// Píldoras "Tendencias del partido" (lo mismo en Telegram): SOLO mercados por equipo con "ventaja
+// medida" (en copas y femenino, además 50 graduadas en directo con IC95 bajo 0). En cada mercado y
+// equipo, la línea MÁS ALTA con el modelo entre el 60 % y el 90 %, sin las de 0,5 salvo "marca al
+// menos 1 gol"; como mucho 5, de mayor a menor %. Todas con ⭐: el modelo acierta más que la liga.
 const PILL_MIN = 0.60, PILL_MAX = 0.90, PILL_MAX_N = 5;
 const PILL_NOUN = { corners: "córners", cards: "tarjetas", fouls: "faltas", shots: "remates",
                     sot: "remates a puerta", goals: "goles" };
-function pillText(team, stat, ln) {
-  return stat === "goals" && ln === 0.5 ? `${team} marca al menos 1 gol` : `${team} más de ${num(ln)} ${PILL_NOUN[stat]}`;
+const STAR_LEGEND = "⭐ = el modelo acierta más que la media de la liga";
+function pillBody(team, stat, ln) {
+  return stat === "goals" && ln === 0.5
+    ? [`${team} `, el("b", { text: "marca" }), " al menos 1 gol"]
+    : [`${team} más de `, el("b", { text: num(ln) }), ` ${PILL_NOUN[stat]}`];
 }
 function matchPills(m) {
+  if (m.low_sample) return [];
   const out = [];
   for (const stat of Object.keys(STAT_NAMES)) {
     const s = m.stats[stat];
     if (!s || !s.available) continue;
     for (const side of ["home", "away"]) {
-      const ok = ((s.blocks[side] || {}).lines || []).filter(([, pm]) => pm >= PILL_MIN && pm <= PILL_MAX);
+      const blk = s.blocks[side] || {};
+      if (blk.label !== "ventaja medida") continue;
+      const ok = (blk.lines || []).filter(([ln, pm]) => pm >= PILL_MIN && pm <= PILL_MAX && (ln !== 0.5 || stat === "goals"));
       if (!ok.length) continue;
-      const [ln, pm, pl] = ok.reduce((x, y) => (y[0] > x[0] ? y : x));
-      const gap = pts(pm, pl);
-      out.push({ side, text: pillText(m[side], stat, ln), p: pm, star: gap != null && Math.abs(gap) >= STANDOUT_PTS,
-                 edge: s.blocks[side].label === "ventaja medida" });
+      const [ln, pm] = ok.reduce((x, y) => (y[0] > x[0] ? y : x));
+      out.push({ side, body: pillBody(m[side], stat, ln), p: pm });
     }
   }
-  return out.sort((a, b) => (b.edge - a.edge) || (b.p - a.p)).slice(0, PILL_MAX_N);
+  return out.sort((a, b) => b.p - a.p).slice(0, PILL_MAX_N);
 }
 
 function sideLine(block) {
@@ -380,7 +384,7 @@ function renderMatch() {
           el("div", { class: "duel-sub", text: ko.toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "short" }) })),
         teamSide(m.away, (m.sample.away || {}).n_cur, c2, (m.badges || [])[1]))),
     isWomen(m) ? el("p", { class: "warn",
-      text: `Fútbol femenino (modelo ${m.model_version}, datos de Highlightly): solo referencia hasta medirlo en directo.` }) : null,
+      text: `Fútbol femenino (modelo ${m.model_version}, datos de Highlightly): sin ⭐ hasta 50 partidos graduados en directo con IC95 entero bajo 0, como en copas.` }) : null,
     isCup(m) ? el("p", { class: "warn",
       text: `Copa (modelo de clubes, ${m.model_version}): cada equipo con su fuerza en ${leagueName(m.div)}. ` +
             "\"Medido en backtest\" en córners, faltas, goles, remates y a puerta por equipo; sin estrellas hasta medirlo en directo." }) : null,
@@ -389,14 +393,14 @@ function renderMatch() {
     el("section", { class: "trends", "aria-label": "Tendencias del partido" },
       el("div", { class: "trends-head" },
         el("h2", { text: "Tendencias del partido" }),
-        el("span", { class: "muted", text: "Primero los mercados con ventaja medida en esta liga; dentro, de más a menos probable" })),
+        el("span", { class: "muted", text: `${STAR_LEGEND}. De más a menos probable` })),
       pills.length
-        ? el("div", { class: "pills" }, ...pills.map((x) => el("span", { class: `tpill${x.star ? " star" : ""}`,
-            title: x.star ? `El modelo se separa ${STANDOUT_PTS} puntos o más de la media de la liga` : "" },
+        ? el("div", { class: "pills" }, ...pills.map((x) => el("span", { class: "tpill star",
+            title: "Mercado con ventaja medida: el modelo acierta más que la media de la liga" },
             el("span", { class: "dot", "aria-hidden": "true", style: `background:${x.side === "home" ? c1 : c2}` }),
-            `${x.star ? "★ " : ""}${x.text}`, el("strong", { text: pct(x.p) }))))
+            el("span", {}, "⭐ ", ...x.body), el("strong", { text: pct(x.p) }))))
         : el("p", { class: "muted", text: m.low_sample ? "Sin tendencias: muestra insuficiente."
-            : "Ninguna línea por equipo entre el 60 % y el 90 % en este partido." })),
+            : "Ningún mercado con ventaja medida entre el 60 % y el 90 % en este partido." })),
     el("p", { class: "hint", text: "Número esperado de cada equipo, su línea y el % de que haya MÁS. En el centro, el total del partido." }),
     ...Object.keys(STAT_NAMES).map((k) => marketCard(m, k, [c1, c2])),
     el("p", { class: "hint", text: `Datos hasta ${m.data_cutoff || "—"}. Solo estadísticas del modelo. Sin cuotas ni recomendaciones.` }),

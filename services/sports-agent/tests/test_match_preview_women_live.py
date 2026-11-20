@@ -54,7 +54,7 @@ def test_dry_run_guarda_el_listado_pero_no_las_fichas(monkeypatch):
     writes = []
     monkeypatch.setattr(wl, "list_women_fixtures", fake_list)
     monkeypatch.setattr(wl, "_set_docs", lambda c, d: writes.append((c, d)))
-    s = asyncio.run(wl.run_women_previews(dry_run=True, now=NOW, docs=docs, backtest=bt, existing={}, state={}))
+    s = asyncio.run(wl.run_women_previews(dry_run=True, now=NOW, docs=docs, backtest=bt, existing={}, state={}, live={}))
     assert s["would_write"] == 1 and s["state_saved"]
     assert [c for c, _ in writes] == ["match_previews_state"]          # ninguna ficha
     assert writes[0][1]["women"]["by_div"]["WLF"]["fixtures"] == [fx]
@@ -65,7 +65,7 @@ def test_dry_run_guarda_el_listado_pero_no_las_fichas(monkeypatch):
 
     writes.clear()
     monkeypatch.setattr(wl, "list_women_fixtures", from_state)
-    s = asyncio.run(wl.run_women_previews(dry_run=True, now=NOW, docs=docs, backtest=bt, existing={}, state={}))
+    s = asyncio.run(wl.run_women_previews(dry_run=True, now=NOW, docs=docs, backtest=bt, existing={}, state={}, live={}))
     assert not s["state_saved"] and writes == []
 
 
@@ -106,7 +106,7 @@ def test_fichas_solo_referencia_y_resumen_sin_nombres(monkeypatch):
     writes = []
     monkeypatch.setattr(wl, "_set_docs", lambda c, d: writes.append((c, d)))
     s = asyncio.run(wl.run_women_previews(dry_run=False, now=NOW, fixtures=[_fixture(docs)], docs=docs,
-                                          backtest=bt, existing={}))
+                                          backtest=bt, existing={}, live={}))
     assert s["ok"] and s["counts"] == {"nueva": 1} and s["written"] == 1
     coll, written = writes[0]
     assert coll == "match_previews_women"
@@ -174,3 +174,15 @@ def test_web_marca_el_grupo():
     assert store.web_match(p)["group"] == "men"
     w = store.web_match({**p, "group": "women"})
     assert w["group"] == "women" and w["model_version"] == "mp-w1"
+
+
+def test_estrella_femenino_solo_con_50_graduadas_en_directo_e_ic95_bajo_0():
+    live = {
+        "corners_team|ALL": {"market": "corners_team", "div": "ALL", "n_matches": 50, "ci_label": mp.LABEL_EDGE},
+        "fouls_team|ALL": {"market": "fouls_team", "div": "ALL", "n_matches": 49, "ci_label": mp.LABEL_EDGE},
+        "shots_team|ALL": {"market": "shots_team", "div": "ALL", "n_matches": 80, "ci_label": mp.LABEL_REF},
+        "corners_team|WLF": {"market": "corners_team", "div": "WLF", "n_matches": 30, "ci_label": mp.LABEL_EDGE},
+    }
+    labels = wl.star_labels(live, {"WLF", "WSL"})
+    assert labels == {("corners_team", "WLF"): mp.LABEL_EDGE, ("corners_team", "WSL"): mp.LABEL_EDGE}
+    assert wl.star_labels({}, {"WLF"}) == {} and wl.star_labels(None, {"WLF"}) == {}

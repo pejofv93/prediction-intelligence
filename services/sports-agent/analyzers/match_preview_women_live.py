@@ -47,7 +47,25 @@ HL_WOMEN_FIXTURES_DAILY = 12      # tope al día con el plan gratuito: un listad
 HL_WOMEN_FIXTURES_DAILY_PRO = 30  # tope al día mientras dura el plan PRO
 RELIST_H = 20                     # una liga listada hace menos no se vuelve a listar
 LIST_AHEAD_DAYS = 7               # partidos que se guardan del listado
-LABEL_POLICY = "solo referencia hasta medirlo en directo"
+STARS_AFTER_LIVE = 50             # graduadas en directo antes de la estrella (como copas)
+LABEL_POLICY = (f"solo referencia hasta {STARS_AFTER_LIVE} graduadas en directo con IC95 entero bajo 0")
+
+
+def star_labels(live_metrics: Optional[dict], divs, n_min: int = STARS_AFTER_LIVE) -> dict:
+    """{(mercado, div): "ventaja medida"} para las fichas femeninas: solo los mercados que llevan
+    al menos n_min partidos graduados en directo (todas las ligas juntas) con el IC95 de la
+    diferencia de Brier (modelo − liga) entero bajo 0. Lo demás queda "solo referencia"."""
+    out = {}
+    for v in (live_metrics or {}).values():
+        if (v.get("div") == "ALL" and (v.get("n_matches") or 0) >= n_min
+                and v.get("ci_label") == mp.LABEL_EDGE):
+            for d in divs:
+                out[(v["market"], d)] = mp.LABEL_EDGE
+    return out
+
+
+def read_live_metrics() -> dict:
+    return (_get_doc(METRICS, live_doc_id()) or {}).get("metrics") or {}
 
 
 def live_doc_id() -> str:
@@ -181,8 +199,9 @@ def women_preview_content(f: dict, pred: dict) -> dict:
 async def run_women_previews(dry_run: bool = True, now: Optional[datetime] = None, days: int = 3,
                              highlightly: bool = True, fixtures: Optional[list[dict]] = None,
                              docs: Optional[list[dict]] = None, backtest: Optional[dict] = None,
-                             existing: Optional[dict] = None, state: Optional[dict] = None) -> dict:
-    """Fichas de los próximos `days` días. fixtures/docs/backtest/existing/state: para tests.
+                             existing: Optional[dict] = None, state: Optional[dict] = None,
+                             live: Optional[dict] = None) -> dict:
+    """Fichas de los próximos `days` días. fixtures/docs/backtest/existing/state/live: para tests.
     En dry-run no escribe fichas, pero sí guarda el listado nuevo de Highlightly (si lo hubo)."""
     now = now or datetime.now(timezone.utc)
     summary: dict = {"ok": True, "dry_run": dry_run, "now": now.isoformat(), "counts": {}, "by_div": {},
@@ -218,6 +237,14 @@ async def run_women_previews(dry_run: bool = True, now: Optional[datetime] = Non
     season = mw.season_code(current_hl_season(now))
 
     todo = [f for f in fixtures if now <= _parse(f["kickoff_utc"]) <= now + timedelta(days=days)]
+    if live is None:
+        try:
+            live = await asyncio.to_thread(read_live_metrics)
+        except Exception as e:      # sin métricas en directo: sin estrellas, nunca sin fichas
+            logger.warning("women previews: sin métricas en directo (%s)", e)
+            live = {}
+    labels = star_labels(live, {f["div"] for f in todo})
+    summary["star_markets"] = sorted({mk for mk, _ in labels})
     if existing is None:
         existing = _get_many(PREVIEWS_W, [f["match_id"] for f in todo])
     to_write: dict[str, dict] = {}
@@ -225,7 +252,7 @@ async def run_women_previews(dry_run: bool = True, now: Optional[datetime] = Non
     by_div: dict = defaultdict(lambda: defaultdict(int))
     for f in todo:
         pred = mp.predict_match(hist, f["div"], season, f["date"], f["home_id"], f["away_id"],
-                                labels={}, lines=lines, dispersion=disp)
+                                labels=labels, lines=lines, dispersion=disp)
         content = women_preview_content(f, pred)
         action = decide(content, existing.get(f["match_id"]), now)
         counts[action] += 1
