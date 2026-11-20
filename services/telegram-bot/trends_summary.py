@@ -17,6 +17,7 @@ from shared.team_display_names import display_name
 
 WEB_URL = "https://tendencias-pi.pages.dev"
 MAX_LEN = 3800                          # Telegram admite 4096
+TG_LIMIT = 4096                         # el enlace final puede usar el margen (no se parte solo por él)
 STATS = (("corners", "Córners"), ("cards", "Tarjetas"), ("fouls", "Faltas"),
          ("shots", "Remates"), ("sot", "A puerta"), ("goals", "Goles"))
 DIV_NAMES = {"SP1": "LaLiga", "SP2": "Segunda", "I1": "Serie A", "E0": "Premier", "F1": "Ligue 1",
@@ -195,7 +196,7 @@ def build_messages(previews: list[dict], day: date) -> list[str]:
             msgs.append(cur)
             cur = f"<b>📊 TENDENCIAS · {dlabel}</b> (sigue)"
         cur += "\n" + blk
-    if len(cur) + len(link) > MAX_LEN:
+    if len(cur) + len(link) > TG_LIMIT:
         msgs.append(cur)
         cur = f"<b>📊 TENDENCIAS · {dlabel}</b> (sigue)"
     msgs.append(cur + link)

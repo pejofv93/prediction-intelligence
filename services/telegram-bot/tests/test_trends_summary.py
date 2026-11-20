@@ -61,7 +61,7 @@ def test_un_solo_mensaje_para_el_dia_con_cabecera_y_enlace():
 def test_dia_largo_se_parte_entre_partidos():
     many = [_preview(home=f"Equipo {i}") for i in range(60)]
     msgs = ts.build_messages(many, date(2026, 11, 21))
-    assert len(msgs) > 1 and all(len(m) <= ts.MAX_LEN for m in msgs)
+    assert len(msgs) > 1 and all(len(m) <= ts.TG_LIMIT for m in msgs)
     assert "(sigue)" in msgs[1] and "Fichas completas" in msgs[-1]
     for m in msgs:                                           # ningún partido ni plegable cortado
         assert m.count("<blockquote expandable>") == m.count("</blockquote>")
@@ -119,3 +119,10 @@ def test_nombres_escapados_y_de_pantalla():
     assert p["home_team"] == "Athletic Club"                                    # solo presentación
     w = {**_preview(div="WLF", home="A<B", away="C&D"), "group": "women"}
     assert "<b>A&lt;B – C&amp;D</b>" in ts.match_block(w)
+
+
+def test_el_enlace_no_va_solo_en_otro_mensaje(monkeypatch):
+    one = ts.build_messages([_preview()], date(2026, 11, 20))[0]
+    monkeypatch.setattr(ts, "MAX_LEN", len(one) - 20)                # cabe el partido, no el enlace
+    msgs = ts.build_messages([_preview()], date(2026, 11, 20))
+    assert msgs == [one]
