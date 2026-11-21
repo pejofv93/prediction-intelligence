@@ -421,6 +421,13 @@ def calendar_name_match(index: set[str]) -> dict:
             "claves_tennis_data": len(index)}
 
 
+def daily_years(today: Optional[date] = None) -> list[int]:
+    """Fase 2 (mantenimiento diario): el año en curso; en enero también el anterior, porque
+    tennis-data va 4-5 días por detrás y cierra el año viejo ya entrado el nuevo."""
+    t = today or datetime.now(timezone.utc).date()
+    return [t.year - 1, t.year] if t.month == 1 else [t.year]
+
+
 def default_years(today: Optional[date] = None) -> list[int]:
     y = (today or datetime.now(timezone.utc).date()).year
     return [y - 2, y - 1, y]

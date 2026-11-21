@@ -1,0 +1,65 @@
+# Fase 2 de Euroliga y tenis en Tendencias: mantenimiento diario (06:30 UTC, lo lanza el
+# repartidor /dispatch de telegram-bot; sin schedule: propio).
+#   Euroliga: /run-eur-boxscores?daily=true → solo la temporada en curso, solo partidos que
+#             faltan (feed ~4 páginas + 0-10 boxscores al día) → eur_games / eur_games_state.
+#   Tenis:    /run-tennis-data?daily=true → alldata.php + 2 xlsx del año en curso (en enero
+#             también el anterior); solo se reescriben los torneos nuevos o cambiados (hash)
+#             → tennis_tournaments / tennis_data_state.
+# Aislado: no lo lee ningún analizador todavía. El log solo muestra recuentos.
+# Los dos pasos corren siempre; el job falla si falla cualquiera.
+name: sports-eur-tennis-daily
+
+on:
+  workflow_dispatch:        # lo usa el repartidor (/dispatch de telegram-bot)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eur-tennis-load
+  cancel-in-progress: false
+
+jobs:
+  mantener:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Euroliga (sports-agent, síncrono)
+        id: eur
+        run: |
+          set -euo pipefail
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-eur-boxscores?daily=true&dry_run=false" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1700 --no-buffer --fail --silent --show-error > out.txt
+          grep '^summary: ' out.txt | sed 's/^summary: //' > s.json
+          python3 - <<'PY'
+          import json
+          s = json.load(open("s.json"))
+          for code, x in (s.get("seasons") or {}).items():
+              print(f"{code}: terminados {x.get('finished')} · boxscores {x.get('boxscores')} · "
+                    f"escritos {x.get('written')} · prórroga {x.get('ot_games')} · pendientes {x.get('pending')}")
+          r = s.get("requests") or {}
+          print(f"peticiones: boxscores {r.get('boxscores')} · 429 {r.get('rate_limited')} "
+                f"({r.get('waited_s')} s) · sin tiempo {s.get('out_of_time')} · errores {s.get('errors')}")
+          PY
+          grep -q '^done ' out.txt
+          grep -q '^summary: {"ok": true' out.txt
+
+      - name: Tenis (sports-agent, síncrono)
+        if: always()
+        run: |
+          set -euo pipefail
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-tennis-data?daily=true&dry_run=false" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 900 --no-buffer --fail --silent --show-error > out_t.txt
+          grep '^summary: ' out_t.txt | sed 's/^summary: //' > t.json
+          python3 - <<'PY'
+          import json
+          s = json.load(open("t.json"))
+          for k, f in (s.get("files") or {}).items():
+              print(f"{k}: partidos {f.get('matches')} · torneos {f.get('tournaments')} · "
+                    f"última fecha {f.get('last_date')} · reescritos {(s.get('written') or {}).get(k)}")
+          print(f"carpeta '{s.get('folder')}' · errores {s.get('errors')}")
+          PY
+          grep -q '^done ' out_t.txt
+          grep -q '^summary: {"ok": true' out_t.txt

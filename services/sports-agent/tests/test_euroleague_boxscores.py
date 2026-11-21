@@ -121,3 +121,10 @@ def test_429_sin_tiempo_deja_pendientes_sin_error(monkeypatch):
     assert out["seasons"]["E2025"]["docs"] == 1 and out["seasons"]["E2025"]["pending"] == 2
     assert out["seasons"]["E2024"]["pending"] == 3 and out["pending"] == 5
     assert len(calls) == 2
+
+
+def test_diario_solo_temporada_en_curso_cambia_el_1_de_agosto():
+    from datetime import datetime, timezone
+    assert eb.daily_seasons(datetime(2026, 7, 31, 23, tzinfo=timezone.utc)) == ["E2025"]
+    assert eb.daily_seasons(datetime(2026, 8, 1, 0, tzinfo=timezone.utc)) == ["E2026"]
+    assert eb.daily_seasons(datetime(2026, 11, 21, tzinfo=timezone.utc)) == ["E2026"]

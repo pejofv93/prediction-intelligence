@@ -54,6 +54,8 @@ def test_frecuencias_acordadas():
     assert ds.matches(ds.TASKS["sports-collect"].cron, T(17, 5, 30))
     assert ds.matches(ds.TASKS["sports-enrich"].cron, T(17, 18, 20))
     assert "hl-load-auto" not in ds.TASKS                                      # apagada, conserva su cron
+    t = ds.TASKS["eur-tennis-daily"]                                          # fase 2 Euroliga + tenis
+    assert t.workflow == "sports-eur-tennis-daily.yml" and ds.matches(t.cron, T(21, 6, 30))
     assert per_day("match-previews") == 2 and per_day("hl-load-daily") == 2
     assert per_day("oracle-a1-retry") == 96
     assert per_day("polymarket-scan") == 4 and per_day("polymarket-analyze") == 3

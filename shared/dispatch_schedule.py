@@ -49,6 +49,7 @@ TASKS: dict[str, Task] = {
     "matched-scan":         Task("matched-scan.yml",          "30 6 * * *", 120),
     "learning-engine":      Task("learning-engine.yml",       "0 2 * * *", 180),
     "match-previews":       Task("sports-match-previews.yml", "0 2,16 * * *", 120, SCHEDULED),
+    "eur-tennis-daily":     Task("sports-eur-tennis-daily.yml", "30 6 * * *", 120),  # Euroliga + tenis (fase 2)
     # ── Informes ───────────────────────────────────────────────────────────────────
     "daily-report":         Task("daily-report.yml",          "0 7 * * *", 180),
     "trends-summary":       Task("trends-daily-summary.yml",  "0 8 * * *", 120),   # fichas del día por Telegram

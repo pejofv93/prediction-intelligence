@@ -296,7 +296,7 @@ async def run_fdco_team_matches_job(seasons: str = "current", dry_run: bool = Tr
 
 @app.post("/run-eur-boxscores", dependencies=[Depends(verify_token)])
 async def run_eur_boxscores_job(seasons: str = "", dry_run: bool = True, max_games: int = 0,
-                                only_missing: bool = True) -> StreamingResponse:
+                                only_missing: bool = True, daily: bool = False) -> StreamingResponse:
     """
     Baloncesto en Tendencias (Fase 1): estadísticas de equipo por partido de Euroliga
     (feed incrowdsports + live.euroleague.net/api/Boxscore) → eur_games / eur_games_state.
@@ -304,9 +304,13 @@ async def run_eur_boxscores_job(seasons: str = "", dry_run: bool = True, max_gam
 
     seasons: 'E2024,E2025,E2026' (vacío = las 3 últimas). dry_run=true por defecto (descarga,
     calcula y cuenta, no escribe). max_games: tope de boxscores por temporada (0 = todos).
+    daily=true (fase 2, sports-eur-tennis-daily): sin seasons, solo la temporada en curso.
     La última línea del stream es 'summary: {...}' (solo agregados).
     """
     season_list = [s.strip().upper() for s in seasons.split(",") if s.strip()] or None
+    if daily and not season_list:
+        from collectors.euroleague_boxscores import daily_seasons
+        season_list = daily_seasons()
     if season_list and not all(len(s) == 5 and s[0] == "E" and s[1:].isdigit() for s in season_list):
         raise HTTPException(status_code=400, detail="seasons: códigos tipo E2025 separados por comas")
     result: dict = {}
@@ -331,13 +335,14 @@ async def run_eur_boxscores_job(seasons: str = "", dry_run: bool = True, max_gam
 
 
 @app.post("/run-tennis-data", dependencies=[Depends(verify_token)])
-async def run_tennis_data_job(years: str = "", dry_run: bool = True) -> StreamingResponse:
+async def run_tennis_data_job(years: str = "", dry_run: bool = True, daily: bool = False) -> StreamingResponse:
     """
     Tenis en Tendencias (Fase 1): resultados ATP/WTA con juegos por set desde
     tennis-data.co.uk (enlaces leídos de alldata.php) → tennis_tournaments / tennis_data_state.
     Aislado: no lo lee ningún analizador todavía.
 
     years: '2024,2025,2026' (vacío = los 3 últimos). dry_run=true por defecto.
+    daily=true (fase 2): sin years, el año en curso (en enero también el anterior).
     La última línea del stream es 'summary: {...}' (solo agregados).
     """
     try:
@@ -346,6 +351,9 @@ async def run_tennis_data_job(years: str = "", dry_run: bool = True) -> Streamin
         raise HTTPException(status_code=400, detail="years: años separados por comas")
     if year_list and not all(2013 <= y <= 2100 for y in year_list):
         raise HTTPException(status_code=400, detail="years: solo hay .xlsx desde 2013")
+    if daily and not year_list:
+        from collectors.tennis_data import daily_years
+        year_list = daily_years()
     result: dict = {}
 
     async def _job() -> None:

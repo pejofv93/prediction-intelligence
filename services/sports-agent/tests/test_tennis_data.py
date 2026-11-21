@@ -161,3 +161,10 @@ def test_circuito_principal():
     assert td.is_main_tour({"league": "WTA", "tournament": "WTA Finals"})
     for t in ("Challenger Lima", "ITF W35 Sharm", "UTR Pro Tennis Series", "M25 Antalya", "Exhibition Mubadala"):
         assert not td.is_main_tour({"league": "ATP", "tournament": t}), t
+
+
+def test_diario_año_en_curso_y_en_enero_tambien_el_anterior():
+    from datetime import date
+    assert td.daily_years(date(2026, 11, 21)) == [2026]
+    assert td.daily_years(date(2027, 1, 10)) == [2026, 2027]
+    assert td.daily_years(date(2027, 2, 1)) == [2027]

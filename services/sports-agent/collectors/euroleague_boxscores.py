@@ -90,6 +90,12 @@ def default_seasons(now: Optional[datetime] = None) -> list[str]:
     return [_eur_season_code(now, offset=o) for o in (-2, -1, 0)]
 
 
+def daily_seasons(now: Optional[datetime] = None) -> list[str]:
+    """Fase 2 (mantenimiento diario): solo la temporada en curso. Cambia sola el 1-ago
+    (31-jul → la que acabó en mayo, sin partidos nuevos; 1-ago → la nueva, aún vacía)."""
+    return [_eur_season_code(now)]
+
+
 def parse_minutes(raw) -> Optional[int]:
     """'225:00' → 225."""
     try:
