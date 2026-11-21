@@ -376,7 +376,9 @@ def _write_changed(state_id: str, docs: dict[str, dict], folder: str, dry_run: b
 
 # Calendario (upcoming_matches de tenis): el fallback de odds-api.io etiqueta como «ATP» todo lo
 # que no reconoce (Challenger, ITF, UTR…). tennis-data solo trae ATP/WTA principal (decisión c).
-_NOT_MAIN_RE = re.compile(r"challenger|\bitf\b|\butr\b|futures|exhibition|junior|\b[mw]\s?(15|25|35|50|60|75|80|100)\b"
+# Las competiciones por países (Davis Cup, Billie Jean King Cup / Fed Cup) tampoco están en
+# tennis-data y en el calendario traen eliminatorias con el país como «jugador» (auditoría 21-nov).
+_NOT_MAIN_RE = re.compile(r"davis cup|billie jean king|\bbjk\b|fed cup|challenger|\bitf\b|\butr\b|futures|exhibition|junior|\b[mw]\s?(15|25|35|50|60|75|80|100)\b"
                           r"|\b125\b|doubles|dobles", re.I)
 
 

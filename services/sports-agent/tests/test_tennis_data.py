@@ -159,7 +159,9 @@ def test_emparejamiento_calendario_solo_agregados(monkeypatch):
 def test_circuito_principal():
     assert td.is_main_tour({"league": "ATP_MADRID", "tournament": "Madrid Open"})
     assert td.is_main_tour({"league": "WTA", "tournament": "WTA Finals"})
-    for t in ("Challenger Lima", "ITF W35 Sharm", "UTR Pro Tennis Series", "M25 Antalya", "Exhibition Mubadala"):
+    for t in ("Challenger Lima", "ITF W35 Sharm", "UTR Pro Tennis Series", "M25 Antalya", "Exhibition Mubadala",
+              "Billie Jean King Cup - Playoffs", "Billie Jean King Cup - Billie Jean King Cup, Singles Matches",
+              "Davis Cup - Finals", "Fed Cup"):
         assert not td.is_main_tour({"league": "ATP", "tournament": t}), t
 
 
