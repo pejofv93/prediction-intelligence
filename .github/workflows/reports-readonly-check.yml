@@ -58,3 +58,20 @@ jobs:
           grep -E "trend_grader(\(series\+model\)|\(rolling\))?: [0-9]+ graduadas|trend_grader: series\+model=|trend_finder: [0-9]+ enriched|trend_finder: un envío por partido|trend_daily: (diario|resumen)" logs.txt \
             | sed -E 's/^([0-9T:-]{16})[^\t]*\t.*(trend_[a-z_]+[:(])/\1 \2/' | sort | tail -60 || echo "sin líneas"
           rm -f logs.txt err.txt
+
+      - name: Resultados de fútbol (logs de Cloud Run, solo recuentos y códigos HTTP)
+        env:
+          DAYS: ${{ inputs.days }}
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND (textPayload:"get_finished_matches" OR textPayload:"RESULTS_UPDATE" OR textPayload:"football-data.org")' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 2000 \
+            --format 'value(timestamp,textPayload)' > logs.txt 2> err.txt \
+            || { grep -oE "PERMISSION_DENIED|permission[^.]*" err.txt | head -2; exit 1; }
+          # Solo recuentos; de los errores de football-data, la ruta sin parámetros y el código HTTP.
+          grep -oE "^[0-9T:-]{16}|get_finished_matches: [0-9]+ partidos terminados|RESULTS_UPDATE: [0-9]+ partidos [a-zA-Z ]+|Rate limit football-data.org|Timeout en football-data.org /[a-z]+|football-data.org /[a-z]+[^ ]* → HTTP [0-9]{3}" logs.txt \
+            | sed -E 's#(/[a-z]+)[?/][^ ]*#\1#' \
+            | awk '/^[0-9]{4}-/ {ts=$0; next} {print ts " " $0}' | sort | tail -60
+          [ -s logs.txt ] || echo "sin líneas"
+          rm -f logs.txt err.txt
