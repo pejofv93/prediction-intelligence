@@ -1022,8 +1022,16 @@ async def run_daily_learning() -> None:
 
     # 3a. Paralelizar todas las llamadas check_result (I/O bound → asyncio.gather)
     _match_ids = [str(p.get("match_id", "")) for p in pending]
+
+    async def _no_result() -> None:
+        return None
+
+    # Basket NO pasa por check_result: el id de la NBA es el numérico de ESPN y acababa en
+    # football-data /matches/{id} → HTTP 400 cada noche (21-nov-2026: 11-15 a las 02:00).
+    # Su resultado sale de la resolución extra de basket, más abajo (r is None).
     _raw_results = list(await asyncio.gather(
-        *[check_result(mid) for mid in _match_ids],
+        *[_no_result() if _is_basketball(pr) else check_result(mid)
+          for pr, mid in zip(pending, _match_ids)],
         return_exceptions=True,
     ))
     logger.info(
@@ -1732,6 +1740,8 @@ async def grade_filter_blocks(max_age_days: int = 30, max_docs: int = 3000) -> d
                 md = md.replace(tzinfo=timezone.utc)
             if md > now - _FILTER_BLOCK_GRADE_DELAY:
                 continue  # aún no ha terminado
+        if _is_basketball(data):
+            continue  # check_result es solo fútbol (el id NBA de ESPN iría a football-data)
         pending.append((doc.id, data))
 
     summary["pendientes"] = len(pending)
