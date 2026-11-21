@@ -332,10 +332,38 @@ def candidate_keys(full_name: str) -> list[str]:
     return keys
 
 
-def match_player(full_name: str, index: set[str]) -> Optional[str]:
+def surname_prefix_keys(full_name: str) -> list[str]:
+    """Apellido compuesto recortado a sus primeros apellidos, del más largo al más corto (sin el
+    completo): tennis-data a veces solo pone el primero ('Maristany Zuleta de Reales, Guiomar'
+    o 'Guiomar Maristany Zuleta de Reales' → 'Maristany G.')."""
+    s = str(full_name or "").strip()
+    if "," in s:
+        last, first = [p.strip() for p in s.split(",", 1)]
+        k_last, k_first = _norm(last).split(), _norm(first)
+        if not k_last or not k_first:
+            return []
+        return [f"{' '.join(k_last[:j])}|{k_first[0]}" for j in range(len(k_last) - 1, 0, -1)]
+    tokens = _norm(s).split()
+    return [f"{' '.join(tokens[1:j])}|{tokens[0][0]}" for j in range(len(tokens) - 1, 1, -1)]
+
+
+def match_player(full_name: str, index, players: Optional[dict[str, int]] = None) -> Optional[str]:
+    """Clave de tennis-data del jugador o None. Primero las claves exactas; si ninguna está, los
+    primeros apellidos, pero SOLO con un único candidato: una sola clave de tennis-data con ese
+    apellido (o que empiece por él) e inicial, y un solo jugador detrás (players: clave → nº de
+    jugadores distintos). Con dos o más candidatos no empareja."""
     for k in candidate_keys(full_name):
         if k in index:
             return k
+    for p in surname_prefix_keys(full_name):
+        sur, ini = p.split("|")
+        cands = [k for k in index
+                 if k.endswith("|" + ini) and (k[:-len(ini) - 1] == sur or k.startswith(sur + " "))]
+        if not cands:
+            continue
+        if len(cands) == 1 and (players or {}).get(cands[0], 1) == 1:
+            return cands[0]
+        return None                      # ambiguo: no se prueba un apellido aún más corto
     return None
 
 
@@ -388,7 +416,7 @@ def is_main_tour(doc: dict) -> bool:
     return not _NOT_MAIN_RE.search(text)
 
 
-def calendar_name_match(index: set[str]) -> dict:
+def calendar_name_match(index: set[str], players: Optional[dict[str, int]] = None) -> dict:
     """
     Cuántos nombres individuales de upcoming_matches (sport=tennis) emparejan con las claves
     «Apellido I.» de tennis-data, solo del circuito principal (el resto se cuenta aparte).
@@ -413,7 +441,7 @@ def calendar_name_match(index: set[str]) -> dict:
                 continue
             hit = by_tour.setdefault(tour, [0, 0]) if principal else otros
             hit[1] += 1
-            hit[0] += 1 if match_player(n, index) else 0
+            hit[0] += 1 if match_player(n, index, players) else 0
     total = sum(t for _, t in by_tour.values())
     ok = sum(m for m, _ in by_tour.values())
     return {"partidos": len(snaps), "nombres": total, "dobles_fuera": dobles,
@@ -442,6 +470,7 @@ async def run_tennis_data(years: Optional[list[int]] = None, tours: Iterable[str
     summary: dict = {"ok": True, "dry_run": dry_run, "years": years, "folder": None,
                      "files": {}, "written": {}, "errors": []}
     index: set[str] = set()
+    names: dict[str, set[str]] = {}          # clave → jugadores distintos (nombre + circuito)
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
         try:
             links = await fetch_links(client)
@@ -460,9 +489,11 @@ async def run_tennis_data(years: Optional[list[int]] = None, tours: Iterable[str
                     docs, stats = build_tournament_docs(rows, tour, year)
                     for d in docs.values():
                         for m in d["matches"]:
-                            for k in (td_player_key(m["winner"]), td_player_key(m["loser"])):
+                            for raw in (m["winner"], m["loser"]):
+                                k = td_player_key(raw)
                                 if k:
                                     index.add(k)
+                                    names.setdefault(k, set()).add(f"{raw}|{tour}")
                     stats["tournaments"] = len(docs)
                     dates = [m["date"] for d in docs.values() for m in d["matches"]]
                     stats["first_date"], stats["last_date"] = (min(dates), max(dates)) if dates else (None, None)
@@ -474,7 +505,7 @@ async def run_tennis_data(years: Optional[list[int]] = None, tours: Iterable[str
     if dry_run and index:
         # Emparejamiento con el calendario (fase 2 lo necesita ≥90 %). No es fatal.
         try:
-            summary["calendar_names"] = calendar_name_match(index)
+            summary["calendar_names"] = calendar_name_match(index, {k: len(v) for k, v in names.items()})
         except Exception as e:
             logger.warning("tennis_data: emparejamiento con upcoming_matches falló: %s", e)
             summary["calendar_names"] = {"error": str(e)[:200]}

@@ -170,3 +170,19 @@ def test_diario_año_en_curso_y_en_enero_tambien_el_anterior():
     assert td.daily_years(date(2026, 11, 21)) == [2026]
     assert td.daily_years(date(2027, 1, 10)) == [2026, 2027]
     assert td.daily_years(date(2027, 2, 1)) == [2027]
+
+
+def test_apellido_compuesto_solo_con_un_unico_candidato():
+    idx = {td.td_player_key("Maristany G."), td.td_player_key("Davidovich Fokina A.")}
+    assert td.match_player("Maristany Zuleta de Reales, Guiomar", idx) == "maristany|g"
+    assert td.match_player("Guiomar Maristany Zuleta de Reales", idx) == "maristany|g"
+    assert td.match_player("Davidovich Fokina, Alejandro", idx) == "davidovich fokina|a"   # exacto primero
+    assert td.match_player("Alejandro Davidovich Fokina", idx) == "davidovich fokina|a"
+    assert td.match_player("Zolotareva, Anastasia", {td.td_player_key("Zolotareva R.")}) is None
+    # dos claves que empiezan por el primer apellido con la misma inicial → no empareja
+    two = {td.td_player_key("Gonzalez J."), td.td_player_key("Gonzalez Perez J.")}
+    assert td.match_player("Gonzalez Daniele, Justina Maria", two) is None
+    # una sola clave pero dos jugadores detrás (ATP y WTA) → no empareja
+    one = {td.td_player_key("Gonzalez J.")}
+    assert td.match_player("Gonzalez Daniele, Justina Maria", one, {"gonzalez|j": 2}) is None
+    assert td.match_player("Gonzalez Daniele, Justina Maria", one, {"gonzalez|j": 1}) == "gonzalez|j"
