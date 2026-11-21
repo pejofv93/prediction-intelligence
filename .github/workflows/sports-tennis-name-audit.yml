@@ -1,0 +1,61 @@
+# Por qué no emparejan los nombres de tenis (scripts/ops/tennis_name_audit.py). SOLO LECTURA.
+# El repo es PÚBLICO: los artefactos los puede bajar cualquier usuario de GitHub, así que el
+# JSON con nombres se cifra (AES-256 con clave aleatoria, y esa clave con la clave pública RSA
+# que se pasa como input; la privada solo existe en el PC que lo pide). Artefacto de 1 día.
+# En el log, solo recuentos. Manual, sin cron.
+name: sports-tennis-name-audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      pubkey_b64:
+        description: "Clave pública RSA (PEM en base64, una línea)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Auditoría de nombres (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/tennis_name_audit.py "$RUNNER_TEMP/names.json"
+
+      - name: Cifrar
+        env:
+          PUBKEY_B64: ${{ inputs.pubkey_b64 }}
+        run: |
+          mkdir -p enc
+          echo "$PUBKEY_B64" | base64 -d > "$RUNNER_TEMP/pub.pem"
+          openssl rand -hex 32 > "$RUNNER_TEMP/k"
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in "$RUNNER_TEMP/names.json" \
+            -out enc/names.json.enc -pass file:"$RUNNER_TEMP/k"
+          openssl pkeyutl -encrypt -pubin -inkey "$RUNNER_TEMP/pub.pem" \
+            -pkeyopt rsa_padding_mode:oaep -in "$RUNNER_TEMP/k" -out enc/k.enc
+          shred -u "$RUNNER_TEMP/names.json" "$RUNNER_TEMP/k"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tennis-names-enc
+          path: enc/
+          retention-days: 1
