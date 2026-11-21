@@ -249,9 +249,14 @@ async def get_finished_matches(days_back: int = 30) -> list[dict]:
     all_matches: list[dict] = []
     seen_ids: set[str] = set()
 
-    # Iterar en chunks de 10 días (límite API football-data.org free plan)
-    chunk_size = 10
-    cursor = today - timedelta(days=1)  # ayer
+    # Tramos de 9 días [date_from, cursor] pedidos como dateFrom=date_from&dateTo=cursor+1:
+    # football-data trata dateTo como EXCLUSIVO (21-nov-2026: con dateTo=ayer el último día no
+    # llegaba nunca —el viernes 20-nov faltaba en match_results a las 17:30 del sábado— y en cada
+    # tramo se perdía su último día). La diferencia dateTo−dateFrom sigue en 9 días, como antes
+    # (límite de 10 del plan gratis); si algún día dateTo fuese inclusivo, el día extra solo se
+    # solapa con el tramo siguiente y seen_ids lo descarta.
+    chunk_size = 9
+    cursor = today - timedelta(days=1)  # ayer (último día que se pide entero)
     remaining = days_back
 
     while remaining > 0:
@@ -259,7 +264,7 @@ async def get_finished_matches(days_back: int = 30) -> list[dict]:
         date_from = cursor - timedelta(days=window - 1)
 
         data = await _request(
-            f"/matches?dateFrom={date_from}&dateTo={cursor}"
+            f"/matches?dateFrom={date_from}&dateTo={cursor + timedelta(days=1)}"
             f"&competitions={leagues}&status=FINISHED"
         )
         if data:
