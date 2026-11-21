@@ -1,0 +1,60 @@
+# SOLO LECTURA (21-nov-2026): por qué no se mueven cifras de los informes de Telegram.
+#   1) informe diario: predictions (ventana de 500) frente a shadow_trades de Sports;
+#   2) «📈 Señales de tendencia»: trend_signals, trend_accuracy_log, trend_runs,
+#      trend_daily_reports, match_results; y las líneas de resumen de trend_grader y
+#      trend_finder en los logs de Cloud Run (solo recuentos).
+# Log público: solo recuentos y fechas. Manual, sin cron.
+name: reports-readonly-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "días de logs de Cloud Run"
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  consultar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Firestore (recuentos)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/reports_check.py
+
+      - name: Resúmenes de trend_grader y trend_finder (logs de Cloud Run)
+        env:
+          DAYS: ${{ inputs.days }}
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND (textPayload:"trend_grader" OR textPayload:"trend_finder: " OR textPayload:"trend_daily")' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 2000 \
+            --format 'value(timestamp,textPayload)' > logs.txt 2> err.txt \
+            || { grep -oE "PERMISSION_DENIED|permission[^.]*" err.txt | head -2; exit 1; }
+          # Solo las líneas que llevan únicamente recuentos (formatos fijos del código).
+          grep -E "trend_grader(\(series\+model\)|\(rolling\))?: [0-9]+ graduadas|trend_grader: series\+model=|trend_finder: [0-9]+ enriched|trend_finder: un envío por partido|trend_daily: (diario|resumen)" logs.txt \
+            | sed -E 's/^([0-9T:-]{16})[^\t]*\t.*(trend_[a-z_]+[:(])/\1 \2/' | sort | tail -60 || echo "sin líneas"
+          rm -f logs.txt err.txt
