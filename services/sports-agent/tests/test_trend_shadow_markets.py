@@ -94,3 +94,10 @@ def test_linea_descartados_por_ya_enviados():
     assert _sends_detail({"skipped_already_sent": 3, "new_market_repeats": 2}) == \
         "Descartados por ya enviados: 3 · repetidos por mercado nuevo: 2"
     assert _sends_detail(None) is None
+
+
+def test_graduadas_ayer_cuenta_tambien_las_de_sombra_aparte():
+    from analyzers.trend_daily import build_daily_summary as b
+    text = b([], [], [], {}, {"sent": 0}, datetime(2026, 11, 21, tzinfo=timezone.utc), day_shadow=8)
+    assert "Graduadas ayer: 0 (0 aciertos · 0 fallos · 0 anuladas) · en sombra: 8" in text
+    assert "en sombra:" not in b([], [], [], {}, None, datetime(2026, 11, 21, tzinfo=timezone.utc))

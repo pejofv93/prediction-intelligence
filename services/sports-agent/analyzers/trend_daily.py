@@ -79,7 +79,7 @@ def market_ok(cal: dict | None, hits: int, misses: int, target: float) -> tuple[
 def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: list[dict],
                         calibration: dict[str, dict], run: dict | None, day: datetime,
                         shadow_lines: list[str] | None = None,
-                        scores: dict[str, float] | None = None) -> str:
+                        scores: dict[str, float] | None = None, day_shadow: int = 0) -> str:
     """HTML de Telegram del diario de señales. Función pura: todo entra por parámetro, ya sin
     sombra. Visible: título, una línea de resumen y una línea por mercado con muestra suficiente
     (✅ cumple su objetivo / ⚠️ por debajo). Plegado: muestras pequeñas, sombra y detalle."""
@@ -123,7 +123,7 @@ def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: lis
                          f"{_ratio(th, tm)} · " + " · ".join(extra))
 
     fold = [f"Graduadas ayer: {d_hit + d_miss + d_void} ({d_hit} aciertos · {d_miss} fallos"
-            f" · {d_void} anuladas)"]
+            f" · {d_void} anuladas)" + (f" · en sombra: {day_shadow}" if day_shadow else "")]
     detail = _sends_detail(run)
     if detail:
         fold.append(detail)
@@ -182,9 +182,13 @@ async def run_trend_daily_summary(force: bool = False) -> dict:
         return {"sent": False, "reason": "read_failed"}
 
     day_rows = [r for r in log_rows if str(r.get("graded_at") or "") > period_from_iso]
-    cutoff = max((str(r.get("graded_at") or "") for r in log_rows), default=now.isoformat())
+    day_shadow = sum(1 for r in all_rows
+                     if not counts_in_feed(r) and str(r.get("graded_at") or "") > period_from_iso)
+    # Corte con TODAS las graduadas (también en sombra): si un día solo se gradúa sombra, el
+    # periodo avanza igual y «ayer» no arrastra días anteriores (21-nov: corte clavado el 18).
+    cutoff = max((str(r.get("graded_at") or "") for r in all_rows), default=now.isoformat())
     text = build_daily_summary(log_rows, day_rows, pending, calibration, run, now,
-                               shadow_market_lines(all_rows, all_pending), scores)
+                               shadow_market_lines(all_rows, all_pending), scores, day_shadow)
 
     try:
         reports.document(day_key).create({
