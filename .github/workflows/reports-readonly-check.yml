@@ -75,3 +75,25 @@ jobs:
             | awk '/^[0-9]{4}-/ {ts=$0; next} {print ts " " $0}' | sort | tail -60
           [ -s logs.txt ] || echo "sin líneas"
           rm -f logs.txt err.txt
+
+      - name: Baloncesto — graduación por su vía propia (Firestore, solo recuentos)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/basket_grading_check.py
+
+      - name: Baloncesto — líneas del aprendizaje nocturno (logs de Cloud Run, solo recuentos)
+        env:
+          DAYS: ${{ inputs.days }}
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND textPayload:"run_daily_learning"' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 2000 \
+            --format 'value(timestamp,textPayload)' > logs.txt 2> err.txt \
+            || { grep -oE "PERMISSION_DENIED|permission[^.]*" err.txt | head -2; exit 1; }
+          grep -oE "^[0-9T:-]{16}|[0-9]+ predicciones basket h2h sin resultado|basket extra-resolution — [0-9]+/[0-9]+ resueltos|basket totales/hándicap — [0-9]+/[0-9]+ con marcador|check_result paralelo completado — [0-9]+/[0-9]+ con resultado" logs.txt \
+            | awk '/^[0-9]{4}-/ {ts=$0; next} {print ts " " $0}' | sort | tail -40
+          [ -s logs.txt ] || echo "sin líneas"
+          rm -f logs.txt err.txt
