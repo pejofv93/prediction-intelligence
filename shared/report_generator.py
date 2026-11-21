@@ -189,7 +189,7 @@ def generate_weekly_report(
             f"P&L: ⚽ Sports {pnl_sports_bk:+.2f}u | 🔮 Polymarket {pnl_poly_bk:+.2f}u"
             + (f" | 📉 Movimientos Polymarket {pnl_poly_movement:+.2f}u" if n_poly_movement else ""),
             f"📈 ROI acumulado total: {roi_total:+.1%}",
-            f"  ⚽ Sports (acumulado): {roi_sports:+.1%} (win rate {wr_sports_bk:.0%}, {n_sports_bk} señales)",
+            f"  ⚽ Sports (acumulado): {roi_sports:+.1%} (win rate {wr_sports_bk:.0%}, {n_sports_bk} operaciones virtuales cerradas)",
             f"  🔮 Polymarket — ledger crudo: {roi_poly_bk:+.1%} "
             f"(win rate {wr_poly_bk:.0%}, {n_poly_bk} operaciones virtuales cerradas)",
             f"  🔮 Polymarket — emitido real (1u por envío): {roi_poly_alerted_bk:+.1%} "

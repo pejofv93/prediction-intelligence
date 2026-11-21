@@ -33,3 +33,11 @@ def test_metricas_separan_los_movimientos():
         se.poly_alerted_metrics = orig
     assert m["pnl_poly_movement"] == -1.5 and m["n_poly_movement"] == 1
     assert m["current_bankroll"] == 50.5
+
+
+def test_nombres_que_no_se_confunden():
+    pred = {"total": 492, "pending": 10, "resolved": 482, "correct": 200, "incorrect": 282,
+            "synthetic": 0, "real_odds": 492}
+    txt = format_daily_report({}, _m(n_sports=966), pred_stats=pred)
+    assert "📋 Predicciones Sports recientes (últimas 500): 492" in txt
+    assert "966 operaciones virtuales cerradas" in txt and "Señales sports" not in txt

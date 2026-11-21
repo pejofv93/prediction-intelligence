@@ -339,7 +339,9 @@ def format_daily_report(
         synthetic = pred_stats.get("synthetic", 0)
         real_odds = pred_stats.get("real_odds", 0)
 
-        lines.append(f"📋 Señales sports: {total} total")
+        # Ventana fija: las 500 predicciones más recientes (sin las de cuotas viejas), no el
+        # total histórico; no es la misma cifra que las operaciones cerradas del ROI.
+        lines.append(f"📋 Predicciones Sports recientes (últimas 500): {total}")
         if synthetic > 0 or real_odds > 0:
             lines.append(f"  · Con cuotas reales: {real_odds} | Sintéticas Poisson: {synthetic}")
         if resolved > 0:
@@ -366,7 +368,7 @@ def format_daily_report(
     lines.append(f"  ⚽ Sports: {pnl_sports:+.2f}u | 🔮 Polymarket: {pnl_poly:+.2f}u"
                  + (f" | 📉 Movimientos Polymarket: {pnl_poly_movement:+.2f}u" if n_poly_movement else ""))
     lines.append(f"📈 ROI total: {roi_total:+.1%}")
-    lines.append(f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports:.0%}, {n_sports} señales)")
+    lines.append(f"  ⚽ Sports: {roi_sports:+.1%} (win rate {wr_sports:.0%}, {n_sports} operaciones virtuales cerradas)")
     lines.append(f"  🔮 Polymarket — ledger crudo: {roi_poly:+.1%} "
                  f"(win rate {wr_poly:.0%}, {n_poly} operaciones virtuales cerradas)")
     lines.append(

@@ -54,10 +54,10 @@ def _sent_yesterday(run: dict | None) -> str:
 def _sends_detail(run: dict | None) -> str | None:
     if not run:
         return None
-    extra = [f"{int(run.get('skipped_already_sent') or 0)} descartados por ya enviados"]
+    line = f"Descartados por ya enviados: {int(run.get('skipped_already_sent') or 0)}"
     if int(run.get("new_market_repeats") or 0):
-        extra.append(f"{int(run['new_market_repeats'])} por mercado nuevo")
-    return "Enviados ayer: " + " · ".join(extra)
+        line += f" · repetidos por mercado nuevo: {int(run['new_market_repeats'])}"
+    return line
 
 
 def market_ok(cal: dict | None, hits: int, misses: int, target: float) -> tuple[bool, str]:

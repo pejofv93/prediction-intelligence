@@ -86,3 +86,11 @@ def test_diario_html_resumen_mercados_y_plegado():
     folded = text[text.index("<blockquote expandable>"):text.index("</blockquote>")]
     assert "Muestra pequeña" in folded and "Córners 3/3" in folded and "En sombra" in folded
     assert "&lt;" in folded and "RESUMEN DEL DÍA" not in text
+
+
+def test_linea_descartados_por_ya_enviados():
+    from analyzers.trend_daily import _sends_detail
+    assert _sends_detail({"sent": 0, "skipped_already_sent": 0}) == "Descartados por ya enviados: 0"
+    assert _sends_detail({"skipped_already_sent": 3, "new_market_repeats": 2}) == \
+        "Descartados por ya enviados: 3 · repetidos por mercado nuevo: 2"
+    assert _sends_detail(None) is None
