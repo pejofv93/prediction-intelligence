@@ -6,10 +6,12 @@ Madrid): masculino (match_previews, mp-v1), copas (match_previews_cups) y femeni
 Formato (20-nov-2026, decisión del usuario): HTML de Telegram, UN mensaje para el día (se parte
 solo si no cabe; un partido nunca se corta). Por partido: icono + liga + hora, equipos en negrita,
 píldoras SOLO de mercados con ventaja medida (⭐ = el modelo acierta más que la media de la liga,
-medido) y, plegado en <blockquote expandable>, el esperado de cada equipo y del total en todos
-los mercados. Solo estadísticas del modelo: sin cuotas ni nada de apuestas.
+medido). 21-nov-2026: sin el plegable del esperado (está en la web), las 3 mejores ⭐ por partido
+y los partidos sin ninguna juntos en «Sin tendencias destacadas»; el largo se mide como Telegram
+(sin etiquetas, UTF-16). Solo estadísticas del modelo: sin cuotas ni nada de apuestas.
 """
 import html
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -18,6 +20,15 @@ from shared.team_display_names import display_name
 WEB_URL = "https://tendencias-pi.pages.dev"
 MAX_LEN = 3800                          # Telegram admite 4096
 TG_LIMIT = 4096                         # el enlace final puede usar el margen (no se parte solo por él)
+TG_PILLS_MAX = 3                        # en Telegram, las 3 mejores ⭐ por partido (la web enseña hasta 5)
+
+
+def tg_len(text: str) -> int:
+    """Largo como lo cuenta Telegram: texto ya sin etiquetas HTML, en unidades UTF-16."""
+    plain = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return len(plain.encode("utf-16-le")) // 2
+
+
 STATS = (("corners", "Córners"), ("cards", "Tarjetas"), ("fouls", "Faltas"),
          ("shots", "Remates"), ("sot", "A puerta"), ("goals", "Goles"))
 DIV_NAMES = {"SP1": "LaLiga", "SP2": "Segunda", "I1": "Serie A", "E0": "Premier", "F1": "Ligue 1",
@@ -138,10 +149,6 @@ def pill_html(x: dict) -> str:
     return f"⭐ {body} · <b>{_pct(x['p'])}</b>"
 
 
-def _exp(x) -> str:
-    return f"{float(x):.1f}".replace(".", ",")
-
-
 def group_icon_label(p: dict) -> str:
     if p.get("group") == "cups":
         return f"🏆 {p.get('cup') or 'Copa'}"
@@ -151,24 +158,21 @@ def group_icon_label(p: dict) -> str:
     return f"⚽ {DIV_NAMES.get(div, div)}"
 
 
-def match_block(p: dict) -> str:
+def match_block(p: dict, pills: list[dict] | None = None) -> str:
+    """Partido con sus píldoras ⭐ (sin el esperado de cada mercado: está en la web)."""
     ko = madrid(_parse(p["kickoff_utc"]))
     home, away = names(p)
+    pills = match_pills(p) if pills is None else pills
     out = [SEP, f"{group_icon_label(p)} · {ko:%H:%M}", f"<b>{esc(home)} – {esc(away)}</b>"]
-    if p.get("low_sample"):
-        out.append("<i>Muestra insuficiente: se calcula, pero no se resalta.</i>")
-    out += [pill_html(x) for x in match_pills(p)]
-    rows = []
-    for key, name in STATS:
-        b = (p.get("stats") or {}).get(key) or {}
-        if not b.get("available") or b.get("exp_home") is None:
-            continue
-        rows.append(f"{name}: {esc(home)} {_exp(b['exp_home'])} · {esc(away)} {_exp(b['exp_away'])}"
-                    f" · total {_exp(b.get('exp_total', b['exp_home'] + b['exp_away']))}")
-    if rows:
-        out.append("<blockquote expandable><b>Todos los mercados</b> (esperado)\n"
-                   + "\n".join(rows) + "</blockquote>")
+    out += [pill_html(x) for x in pills]
     return "\n".join(out)
+
+
+def pair_label(p: dict) -> str:
+    """'A–B' para la línea final; femenino y copas con su icono para no confundirlos."""
+    home, away = names(p)
+    icon = group_icon_label(p).split(" ", 1)[0]
+    return f"{'' if icon == '⚽' else icon + ' '}{esc(home)}–{esc(away)}"
 
 
 def _group_rank(p: dict) -> int:
@@ -179,26 +183,43 @@ def _group_rank(p: dict) -> int:
 
 
 def build_messages(previews: list[dict], day: date) -> list[str]:
-    """Un mensaje para el día, por hora de inicio; si no cabe se parte entre partidos.
-    El último lleva el enlace a la web."""
+    """Resumen del día por hora de inicio: cada partido con alguna ⭐ con sus píldoras; los
+    que no tienen ninguna, juntos al final en «Sin tendencias destacadas». Si no cabe en un
+    mensaje se parte entre partidos (o entre nombres de la línea final). El último lleva el
+    enlace a la web."""
     if not previews:
         return []
     ms = sorted(previews, key=lambda p: (p["kickoff_utc"], _group_rank(p), p["home_team"]))
     dlabel = f"{WEEKDAYS[day.weekday()]} {day.day} {MONTHS[day.month - 1]}"
+    pills = [(p, match_pills(p)[:TG_PILLS_MAX]) for p in ms]
+    with_pills = [(p, pl) for p, pl in pills if pl]
+    without = [p for p, pl in pills if not pl]
     n = len(ms)
-    head = (f"<b>📊 TENDENCIAS · {dlabel}</b>\n{n} partido{'s' if n != 1 else ''}\n{STAR_LEGEND}")
-    link = (f'\n\n<a href="{WEB_URL}/#partidos/{day.isoformat()}">Fichas completas en la web</a>')
+    head = (f"<b>📊 TENDENCIAS · {dlabel}</b>\n{n} partido{'s' if n != 1 else ''}"
+            f" · {len(with_pills)} con ⭐\n{STAR_LEGEND}")
+    cont = f"<b>📊 TENDENCIAS · {dlabel}</b> (sigue)"
+    link = f'\n\n<a href="{WEB_URL}/#partidos/{day.isoformat()}">Fichas completas en la web</a>'
     msgs: list[str] = []
     cur = head
-    for p in ms:
-        blk = match_block(p)
-        if len(cur) + len(blk) + 1 > MAX_LEN:
+
+    def add(piece: str, sep: str = "\n") -> None:
+        nonlocal cur
+        if tg_len(cur + sep + piece) > MAX_LEN:
             msgs.append(cur)
-            cur = f"<b>📊 TENDENCIAS · {dlabel}</b> (sigue)"
-        cur += "\n" + blk
-    if len(cur) + len(link) > TG_LIMIT:
+            cur = cont
+            sep = "\n"
+        cur += sep + piece
+
+    for p, pl in with_pills:
+        add(match_block(p, pl))
+    if without:
+        add(SEP)
+        add("<b>Sin tendencias destacadas:</b> " + pair_label(without[0]))
+        for p in without[1:]:
+            add(pair_label(p), ", ")
+    if tg_len(cur + link) > TG_LIMIT:
         msgs.append(cur)
-        cur = f"<b>📊 TENDENCIAS · {dlabel}</b> (sigue)"
+        cur = cont
     msgs.append(cur + link)
     return msgs
 

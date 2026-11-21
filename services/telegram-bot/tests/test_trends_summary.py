@@ -36,13 +36,13 @@ def _edge(p, stat, side):
 
 
 def test_bloque_de_partido_html():
-    txt = ts.match_block(_preview())
+    p = _preview()
+    _edge(p, "corners", "home")
+    txt = ts.match_block(p)
     lines = txt.splitlines()
     assert lines[:3] == [ts.SEP, "⚽ LaLiga · 21:00", "<b>Athletic – Espanyol</b>"]
-    assert ("<blockquote expandable><b>Todos los mercados</b> (esperado)\n"
-            "Córners: Athletic 6,4 · Espanyol 3,7 · total 10,1</blockquote>") in txt
-    assert "Goles" not in txt and "cuota" not in txt.lower() and "local +" not in txt
-    assert "⭐" not in txt                                     # sin ventaja medida no hay píldoras
+    assert lines[3] == "⭐ Athletic más de <b>5,5</b> córners · <b>60 %</b>"
+    assert "blockquote" not in txt and "Todos los mercados" not in txt and "cuota" not in txt.lower()
 
 
 def test_un_solo_mensaje_para_el_dia_con_cabecera_y_enlace():
@@ -52,19 +52,21 @@ def test_un_solo_mensaje_para_el_dia_con_cabecera_y_enlace():
                              date(2026, 11, 20))
     assert len(msgs) == 1
     m = msgs[0]
-    assert m.startswith("<b>📊 TENDENCIAS · Viernes 20 nov</b>\n3 partidos\n" + ts.STAR_LEGEND)
-    assert m.index("Chelsea") < m.index("Athletic") < m.index("Barcelona")      # por hora
-    assert "👩 Liga F · 21:00" in m and "⚽ Premier · 16:00" in m
+    assert m.startswith("<b>📊 TENDENCIAS · Viernes 20 nov</b>\n3 partidos · 0 con ⭐\n" + ts.STAR_LEGEND)
+    # sin ninguna ⭐: todos juntos en la línea final, por hora
+    assert "<b>Sin tendencias destacadas:</b> Chelsea–Leeds, Athletic–Espanyol, 👩 Barcelona–Levante" in m
     assert m.endswith('<a href="https://tendencias-pi.pages.dev/#partidos/2026-11-20">Fichas completas en la web</a>')
 
 
 def test_dia_largo_se_parte_entre_partidos():
     many = [_preview(home=f"Equipo {i}") for i in range(60)]
+    for p in many:
+        _edge(p, "corners", "home")
     msgs = ts.build_messages(many, date(2026, 11, 21))
-    assert len(msgs) > 1 and all(len(m) <= ts.TG_LIMIT for m in msgs)
+    assert len(msgs) > 1 and all(ts.tg_len(m) <= ts.TG_LIMIT for m in msgs)
     assert "(sigue)" in msgs[1] and "Fichas completas" in msgs[-1]
-    for m in msgs:                                           # ningún partido ni plegable cortado
-        assert m.count("<blockquote expandable>") == m.count("</blockquote>")
+    for m in msgs:                                           # ningún partido cortado
+        assert m.count("<b>Equipo") == m.count("córners · ")
 
 
 def test_sin_fichas_no_hay_mensajes():
@@ -79,6 +81,7 @@ def test_resumen_a_las_ocho_utc_en_el_repartidor():
 def test_copa_con_icono_y_nombre_de_copa():
     cup = {**_preview(div="P1", home="Guimaraes", away="Sp Braga", ko="2026-11-21T20:45:00+00:00"),
            "group": "cups", "cup": "Taça de Portugal"}
+    _edge(cup, "corners", "home")
     m = ts.build_messages([cup], date(2026, 11, 21))[0]
     assert "🏆 Taça de Portugal · 21:45" in m and "<b>Vitória Guimarães – Braga</b>" in m
 
@@ -126,3 +129,24 @@ def test_el_enlace_no_va_solo_en_otro_mensaje(monkeypatch):
     monkeypatch.setattr(ts, "MAX_LEN", len(one) - 20)                # cabe el partido, no el enlace
     msgs = ts.build_messages([_preview()], date(2026, 11, 20))
     assert msgs == [one]
+
+
+def test_telegram_maximo_3_estrellas_y_largo_como_telegram():
+    p = _preview()
+    p["stats"] = {}
+    for key in ("corners", "fouls", "shots", "sot"):
+        p["stats"][key] = {"available": True, "exp_home": 5, "exp_away": 5, "exp_total": 10, "lines": {
+            "home": _block([(4.5, 0.61)]), "away": _block([(3.5, 0.82)]), "total": _block([(9.5, 0.5)])}}
+        _edge(p, key, "home"), _edge(p, key, "away")
+    m = ts.build_messages([p], date(2026, 11, 21))[0]
+    assert m.count("⭐ ") == 1 + ts.TG_PILLS_MAX                  # leyenda + 3 píldoras
+    assert ts.tg_len("<b>📊 a &amp; b</b>") == len("📊 a & b") + 1    # sin etiquetas; 📊 vale 2 en UTF-16
+
+
+def test_partidos_sin_estrella_al_final_y_con_estrella_arriba():
+    a = _preview(home="Chelsea", away="Leeds", div="E0", ko="2026-11-21T12:30:00+00:00")
+    b = _preview(home="Ath Bilbao", away="Espanol", ko="2026-11-21T20:00:00+00:00")
+    _edge(b, "corners", "home")
+    m = ts.build_messages([a, b], date(2026, 11, 21))[0]
+    assert m.index("<b>Athletic – Espanyol</b>") < m.index("Sin tendencias destacadas") < m.index("Chelsea–Leeds")
+    assert "<b>Chelsea – Leeds</b>" not in m
