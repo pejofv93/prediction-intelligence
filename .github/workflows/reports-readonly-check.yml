@@ -65,13 +65,14 @@ jobs:
         run: |
           [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
           gcloud logging read \
-            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND (textPayload:"get_finished_matches" OR textPayload:"RESULTS_UPDATE" OR textPayload:"football-data.org")' \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND (textPayload:"get_finished_matches" OR textPayload:"RESULTS_UPDATE" OR textPayload:"football-data.org" OR textPayload:"collect.standings")' \
             --project prediction-intelligence --freshness "${DAYS}d" --limit 2000 \
             --format 'value(timestamp,textPayload)' > logs.txt 2> err.txt \
             || { grep -oE "PERMISSION_DENIED|permission[^.]*" err.txt | head -2; exit 1; }
-          # Solo recuentos; de los errores de football-data, la ruta sin parámetros y el código HTTP.
-          grep -oE "^[0-9T:-]{16}|get_finished_matches: [0-9]+ partidos terminados|RESULTS_UPDATE: [0-9]+ partidos [a-zA-Z ]+|Rate limit football-data.org|Timeout en football-data.org /[a-z]+|football-data.org /[a-z]+[^ ]* → HTTP [0-9]{3}" logs.txt \
-            | sed -E 's#(/[a-z]+)[?/][^ ]*#\1#' \
+          # Solo recuentos; de los errores de football-data, la ruta sin parámetros y el código HTTP
+          # (en /competitions se deja el id de la competición; en /matches nada más).
+          grep -oE "^[0-9T:-]{16}|get_finished_matches: [0-9]+ partidos terminados|RESULTS_UPDATE: [0-9]+ partidos [a-zA-Z ]+|Rate limit football-data.org|Timeout en football-data.org /[a-z]+|football-data.org /[a-z]+[^ ]* → HTTP [0-9]{3}|collect.standings: (sin datos para|error en) [A-Z0-9]+( \(id=[0-9]+\))?" logs.txt \
+            | sed -E 's#(/competitions/[0-9A-Z]+/[a-z]+)[^ ]*#\1#; s#(/matches)[?/][^ ]*#\1#' \
             | awk '/^[0-9]{4}-/ {ts=$0; next} {print ts " " $0}' | sort | tail -60
           [ -s logs.txt ] || echo "sin líneas"
           rm -f logs.txt err.txt
