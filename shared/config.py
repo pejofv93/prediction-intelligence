@@ -142,6 +142,22 @@ POLY_LEARNED_PARAMS_FROZEN = os.environ.get("POLY_LEARNED_PARAMS_FROZEN", "true"
 # valor por defecto aquí a "false" (deploy.yml reescribe las variables de entorno).
 POLY_BUY_NO_SHADOW = os.environ.get("POLY_BUY_NO_SHADOW", "true").lower() in ("1", "true", "yes")
 
+# Señales 1X2 de fútbol en SOMBRA (23-nov-2026, CLV W47 −2,7 % frente a la media sin margen, IC
+# entero bajo 0): se siguen generando, guardando en predictions, graduando y midiendo (CLV al
+# cierre por versión del Poisson), pero telegram-bot no las envía: las registra en alerts_sent
+# con type "sports_shadow" / status "shadow" y tampoco manda sus avisos de cambio de cuota.
+# Para reactivar el envío: cambiar el valor por defecto aquí a "false".
+SPORTS_FOOTBALL_1X2_SHADOW = os.environ.get("SPORTS_FOOTBALL_1X2_SHADOW", "true").lower() in ("1", "true", "yes")
+# Tipos de alerts_sent que se gradúan y se miden al cierre (enviadas y en sombra).
+SPORTS_GRADED_TYPES = ["sports_sent", "sports_shadow"]
+
+
+def is_football_1x2(prediction: dict) -> bool:
+    """Señal 1X2 de fútbol (sport football/soccer o sin sport; mercado h2h/1x2 o sin mercado)."""
+    sport = str(prediction.get("sport") or "football").lower()
+    market = str(prediction.get("market_type") or "h2h").lower()
+    return sport in ("football", "soccer") and market in ("h2h", "1x2")
+
 # Thresholds por liga — calibrados por backtest histórico (prodmatch_results)
 # Ligas con ROI positivo en backtest → umbral más bajo (más señales)
 # Ligas con ROI negativo → umbral más alto (sólo señales de alta convicción)

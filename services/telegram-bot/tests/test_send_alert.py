@@ -28,6 +28,8 @@ def bot(monkeypatch):
         return None
 
     monkeypatch.setattr(alert_manager, "send_message", _send)
+    # prueba la ruta de envío: sin la sombra del 1X2 de fútbol (test_football_1x2_shadow.py)
+    monkeypatch.setattr(alert_manager, "SPORTS_FOOTBALL_1X2_SHADOW", False)
     monkeypatch.setattr(alert_manager.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(alert_manager, "_format_poly_alert", lambda a: "poly")
     monkeypatch.setattr(alert_manager, "_format_alert_unified", lambda a: "sports")

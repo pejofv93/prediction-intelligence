@@ -14,7 +14,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from shared.config import (
     TELEGRAM_CHAT_ID, TELEGRAM_TOKEN,
     TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID,
-    SPORTS_MIN_EDGE,
+    SPORTS_MIN_EDGE, SPORTS_FOOTBALL_1X2_SHADOW, is_football_1x2,
 )
 
 logger = logging.getLogger(__name__)
@@ -868,6 +868,10 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
                 )
                 continue
 
+            # 1X2 de fútbol en sombra: tampoco sale su aviso de cambio de cuota.
+            if SPORTS_FOOTBALL_1X2_SHADOW and is_football_1x2(pred):
+                continue
+
             match_id = str(pred.get("match_id") or doc.id)
             # Extraer el match_id base (sin sufijos de mercado de baloncesto: _ml, _spread,
             # _tot, _h1_*, _q1_* — y los antiguos _ml_home/_ml_away/_tot_over/_tot_under)
@@ -973,7 +977,7 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
     return sent_count
 
 
-def _record_sports_sent(prediction: dict) -> None:
+def _record_sports_sent(prediction: dict, shadow: bool = False) -> None:
     """
     Registro de lo REALMENTE enviado (fútbol, tenis, baloncesto) en alerts_sent, type=sports_sent.
     Fuente de verdad de "qué se alertó", como en Polymarket: predictions.alerted se pierde
@@ -982,6 +986,10 @@ def _record_sports_sent(prediction: dict) -> None:
     odds/ev son los del primer envío. La graduación (result/correct) la escribe
     learning_engine.grade_sent_alerts con la selección enviada y el resultado del partido.
     Nunca lanza: un fallo aquí no debe afectar al envío ya hecho.
+    shadow=True (1X2 de fútbol en sombra, SPORTS_FOOTBALL_1X2_SHADOW): mismo doc, pero
+    type "sports_shadow" y status "shadow" — no se envió; se gradúa y se mide al cierre igual,
+    y queda fuera de todo lo que cuenta lo enviado (ROI por nivel, historial, salud).
+    Una re-evaluación del mismo partido y lado no toca el doc (no hubo reenvío).
     """
     from shared.firestore_client import col
 
@@ -998,6 +1006,8 @@ def _record_sports_sent(prediction: dict) -> None:
     try:
         snap = ref.get()
         if snap.exists:
+            if shadow:
+                return
             prev = snap.to_dict() or {}
             ref.update({
                 "resends": int(prev.get("resends") or 0) + 1,
@@ -1005,7 +1015,8 @@ def _record_sports_sent(prediction: dict) -> None:
             })
             return
         ref.set({
-            "type": "sports_sent", "status": "sent",
+            "type": "sports_shadow" if shadow else "sports_sent",
+            "status": "shadow" if shadow else "sent",
             "prediction_id": prediction_id,
             "match_id": str(prediction.get("base_match_id") or prediction.get("match_id") or ""),
             "sport": prediction.get("sport"), "league": prediction.get("league"),
@@ -1033,8 +1044,8 @@ async def send_sports_alert(prediction: dict) -> str:
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
     Baloncesto/fútbol/tenis: un envío por partido+fecha+mercado (_claim_match_slot).
     Resto, o sin fecha: dedup 24h via _claim_alert_slot.
-    Devuelve "sent", "duplicate" (dedup), "too_late" (TIMING_GUARD) o
-    "rejected" (Telegram no aceptó el mensaje).
+    Devuelve "sent", "duplicate" (dedup), "too_late" (TIMING_GUARD), "shadow" (1X2 de
+    fútbol en sombra: registrada, sin enviar) o "rejected" (Telegram no aceptó el mensaje).
     """
     edge = float(prediction.get("edge") or 0)
     key = _alert_key(prediction, edge)
@@ -1050,6 +1061,14 @@ async def send_sports_alert(prediction: dict) -> str:
             kickoff_label(prediction.get("match_date")),
         )
         return "too_late"
+
+    # 1X2 de fútbol en sombra: se registra (graduable y medible al cierre) y no se envía.
+    # No ocupa el slot del partido: si algún día se reactiva, el primer envío sale normal.
+    if SPORTS_FOOTBALL_1X2_SHADOW and is_football_1x2(prediction):
+        prediction, _ = _apply_tier_adjustment(prediction)
+        _record_sports_sent(prediction, shadow=True)
+        logger.info("send_sports_alert: SHADOW_1X2 — registrada sin enviar (%s)", key)
+        return "shadow"
 
     # Dedup atómico: pre-escribe antes de enviar
     _resend_from_odds = None

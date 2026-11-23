@@ -2081,9 +2081,12 @@ async def _send_telegram_alert(prediction: dict) -> bool:
             logger.warning("_send_telegram_alert: bot respondio %d", resp.status_code)
             return False
 
-        sent = resp.json().get("sent", False)
+        body = resp.json()
+        sent = body.get("sent", False)
         if sent:
             logger.info("_send_telegram_alert: alerta entregada al usuario")
+        elif body.get("reason") == "shadow":
+            logger.info("_send_telegram_alert: 1X2 de fútbol en sombra — registrada sin enviar")
         else:
             logger.info("_send_telegram_alert: deduplicada por el bot (sent=False)")
         return bool(sent)

@@ -1,5 +1,6 @@
 """
-CLV real de lo ENVIADO en fútbol 1X2 (alerts_sent, type=sports_sent) contra la cuota de
+CLV real de lo ENVIADO en fútbol 1X2 (alerts_sent, type=sports_sent) y del 1X2 en sombra
+(type=sports_shadow, desde el 23-nov-2026: registrado sin enviar) contra la cuota de
 cierre de football-data.co.uk, cuando el CSV de la liga publica el partido (suele tardar
 de 2 a 8 días).
 
@@ -28,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from collectors.fdco_collector import FDCO_LEAGUES
+from shared.config import SPORTS_GRADED_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +148,7 @@ async def run_closing_clv(dry_run: bool = False, now: datetime | None = None) ->
                "liga_sin_csv": 0, "seleccion_desconocida": 0, "dry_run": dry_run}
     todo: dict[tuple[str, str], list[tuple[str, dict]]] = defaultdict(list)
     try:
-        for doc in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
+        for doc in iter_all("alerts_sent", where=("type", "in", SPORTS_GRADED_TYPES)):
             d = doc.to_dict() or {}
             if str(d.get("sport") or "football").lower() not in ("football", "soccer"):
                 continue

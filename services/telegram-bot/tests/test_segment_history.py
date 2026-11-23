@@ -52,6 +52,8 @@ def test_linea_de_la_alerta():
 
 def _send(monkeypatch, pred, line, record):
     sent = {}
+    # prueba la ruta de envío: sin la sombra del 1X2 de fútbol (test_football_1x2_shadow.py)
+    monkeypatch.setattr(alert_manager, "SPORTS_FOOTBALL_1X2_SHADOW", False)
 
     async def fake_send(text, **kw):
         sent["text"] = text

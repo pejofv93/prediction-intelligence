@@ -1,5 +1,7 @@
 """CLV real al cierre de lo enviado (fútbol 1X2), por versión del Poisson, para el informe
-semanal. Lee los campos que escribe sports-agent learner/closing_clv.py en alerts_sent."""
+semanal. Lee los campos que escribe sports-agent learner/closing_clv.py en alerts_sent.
+Desde el 23-nov-2026 el 1X2 va en sombra (type=sports_shadow): se resume aparte, con su
+propio título, para no mezclarlo con lo enviado."""
 import math
 from datetime import datetime, timedelta, timezone
 
@@ -60,12 +62,23 @@ def summarize(docs: list[dict], now: datetime, window_days: int = WINDOW_DAYS) -
             "source": ", ".join(sorted(sources)) if sources else None}
 
 
-def report_lines(s: dict) -> list[str]:
+TITLE_SENT = "CLV real al cierre (enviadas 1X2, 4 semanas):"
+TITLE_SHADOW = "CLV real al cierre (1X2 en sombra, sin enviar, 4 semanas):"
+
+
+def split_by_type(docs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(enviadas, en sombra) según el type del doc de alerts_sent."""
+    sent = [d for d in docs if d.get("type", "sports_sent") == "sports_sent"]
+    shadow = [d for d in docs if d.get("type") == "sports_shadow"]
+    return sent, shadow
+
+
+def report_lines(s: dict, title: str = TITLE_SENT) -> list[str]:
     """Líneas del informe semanal (vacío si no hay nada en la ventana)."""
     if not s or (not s.get("groups") and not s.get("pending")):
         return []
     ref = "Pinnacle sin margen" if "pinnacle" in (s.get("source") or "") else "media sin margen"
-    lines = ["CLV real al cierre (enviadas 1X2, 4 semanas):"]
+    lines = [title]
     names = {FIT_OLD: "Poisson anterior", "lbfgs-l2-v1": "Poisson nuevo"}
 
     def _fmt(g: dict) -> str:

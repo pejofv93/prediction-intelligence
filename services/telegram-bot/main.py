@@ -186,7 +186,7 @@ async def send_alert(request: Request) -> JSONResponse:
 
     from alert_manager import send_sports_alert, send_poly_alert, send_message
 
-    # Resultado: "sent" | "duplicate" | "too_late" | "rejected" | "empty" | "unknown_type".
+    # Resultado: "sent" | "shadow" | "duplicate" | "too_late" | "rejected" | "empty" | "unknown_type".
     # Solo "sent" responde 200: los agentes que miran el código HTTP (polymarket-agent)
     # no deben marcar como enviada una alerta que no llegó a Telegram.
     async def _plain(text: str, **kw) -> str:
@@ -226,7 +226,8 @@ async def send_alert(request: Request) -> JSONResponse:
         logger.error("send-alert: error enviando alerta tipo=%s", alert_type, exc_info=True)
         outcome = "rejected"
 
-    status = {"sent": 200, "duplicate": 409, "too_late": 409,
+    # "shadow" (1X2 de fútbol en sombra): 202, registrada y no enviada (sent=False).
+    status = {"sent": 200, "shadow": 202, "duplicate": 409, "too_late": 409,
               "empty": 400, "unknown_type": 400}.get(outcome, 502)
     logger.info("send-alert: tipo=%s resultado=%s http=%d", alert_type, outcome, status)
     return JSONResponse(
@@ -635,16 +636,20 @@ async def send_weekly_report() -> JSONResponse:
             logger.warning("send-weekly-report: error calculando shadow_metrics", exc_info=True)
             shadow_metrics = {}
 
-        # CLV real al cierre de lo enviado (fútbol 1X2), separado por versión del Poisson
+        # CLV real al cierre (fútbol 1X2), separado por versión del Poisson: lo enviado y,
+        # aparte, el 1X2 en sombra (registrado sin enviar desde el 23-nov-2026)
         clv_close: dict = {}
+        clv_close_shadow: dict = {}
         try:
-            from shared.clv_summary import summarize
+            from shared.clv_summary import split_by_type, summarize
+            from shared.config import SPORTS_GRADED_TYPES
             from shared.firestore_client import iter_all
-            def _clv() -> dict:
-                docs = (d.to_dict() or {} for d in
-                        iter_all("alerts_sent", where=("type", "==", "sports_sent")))
-                return summarize(list(docs), now)
-            clv_close = await asyncio.get_event_loop().run_in_executor(None, _clv)
+            def _clv() -> tuple[dict, dict]:
+                docs = [d.to_dict() or {} for d in
+                        iter_all("alerts_sent", where=("type", "in", SPORTS_GRADED_TYPES))]
+                sent, shadow = split_by_type(docs)
+                return summarize(sent, now), summarize(shadow, now)
+            clv_close, clv_close_shadow = await asyncio.get_event_loop().run_in_executor(None, _clv)
         except Exception:
             logger.warning("send-weekly-report: error calculando el CLV al cierre", exc_info=True)
 
@@ -705,6 +710,7 @@ async def send_weekly_report() -> JSONResponse:
             "pnl_poly_movement": movement["pnl"],
             "n_poly_movement": movement["n"],
             "clv_close": clv_close,
+            "clv_close_shadow": clv_close_shadow,
             "roi_poly": shadow_metrics.get("roi_poly", 0.0),
             "win_rate": shadow_metrics.get("win_rate", 0.0),
             "win_rate_sports": shadow_metrics.get("win_rate_sports", 0.0),

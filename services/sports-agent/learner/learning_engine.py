@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from shared.config import DEFAULT_WEIGHTS, LEARNING_RATE, SUPPORTED_FOOTBALL_LEAGUES
+from shared.config import DEFAULT_WEIGHTS, LEARNING_RATE, SPORTS_GRADED_TYPES, SUPPORTED_FOOTBALL_LEAGUES
 from shared.firestore_client import col, get_client
 
 logger = logging.getLogger(__name__)
@@ -1842,7 +1842,8 @@ def _grade_sent_basket(prediction_id: str) -> "bool | str | None":
 
 async def grade_sent_alerts(max_age_days: int = 30) -> dict:
     """
-    Gradúa lo REALMENTE enviado en fútbol (alerts_sent, type=sports_sent): la selección
+    Gradúa lo REALMENTE enviado en fútbol (alerts_sent, type=sports_sent) y el 1X2 en sombra
+    (type=sports_shadow, registrado sin enviar; 23-nov-2026): la selección
     enviada contra el resultado del partido, sin pasar por el doc de predictions (que el
     análisis reescribe y puede haber cambiado de lado). Escribe en el doc:
       result  — "win" | "loss" | "push"
@@ -1862,7 +1863,7 @@ async def grade_sent_alerts(max_age_days: int = 30) -> dict:
 
     pending: list[tuple[str, dict]] = []
     try:
-        for doc in iter_all("alerts_sent", where=("type", "==", "sports_sent")):
+        for doc in iter_all("alerts_sent", where=("type", "in", SPORTS_GRADED_TYPES)):
             data = doc.to_dict() or {}
             if data.get("result") is not None:
                 continue
