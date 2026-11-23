@@ -31,6 +31,7 @@ from shared.config import (
     TELEGRAM_BOT_URL,
     TREND_CALIBRATION_MIN_SAMPLE,
     TREND_MARKET_TARGET,
+    TREND_SHADOW_MARKETS,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ def build_daily_summary(log_rows: list[dict], day_rows: list[dict], pending: lis
         pending_by_market[s.get("market")] = pending_by_market.get(s.get("market"), 0) + 1
     markets = {r.get("market") for r in log_rows} | set(pending_by_market)
     markets.discard(None)
+    markets -= TREND_SHADOW_MARKETS   # en sombra: van al plegable, aunque lo enviado cuente en el total
 
     def _totals(mk: str) -> tuple[int, int]:
         h, m, _ = _tally([r for r in log_rows if r.get("market") == mk])

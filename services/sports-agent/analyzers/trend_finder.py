@@ -636,11 +636,18 @@ async def _fixture_candidates(enriched: dict, shadow_out: list[dict] | None = No
             out.append({**vc, "score": _score(vc["rate"], vc["sample"])})
         elif shadow_out is not None:
             shadow_out.append(vc)
-    # Mercados en sombra (TREND_SHADOW_MARKETS, hoy Total exacto): se gradúan, no se envían.
+    # Mercados en sombra (TREND_SHADOW_MARKETS: Total exacto, Margen, Ambos marcan): se
+    # gradúan, no se envían. Si el mercado tiene variantes, su v1 ya va a la sombra por
+    # variant_candidates: no se duplica (otro doc con el mismo rule_id contaría dos veces).
     if TREND_SHADOW_MARKETS:
+        from analyzers.trend_variants import SHADOW_VARIANTS
         for c in out:
-            if c["market"] in TREND_SHADOW_MARKETS and shadow_out is not None:
-                shadow_out.append({**c, "rule_id": f"{c['market']}.{TREND_RULE_VERSION}"})
+            if c["market"] not in TREND_SHADOW_MARKETS or shadow_out is None:
+                continue
+            rule_id = c.get("rule_id") or f"{c['market']}.{TREND_RULE_VERSION}"
+            if c["market"] in SHADOW_VARIANTS and rule_id == f"{c['market']}.v1":
+                continue
+            shadow_out.append({**c, "rule_id": rule_id})
         out = [c for c in out if c["market"] not in TREND_SHADOW_MARKETS]
     out = _one_goals_signal_per_fixture(out, enriched)  # solo lo que se envía; la sombra no
 

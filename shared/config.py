@@ -304,10 +304,20 @@ TREND_EXACT_TOTAL_LIVE = os.environ.get("TREND_EXACT_TOTAL_LIVE", "false").lower
 # Margen de victoria EN SOMBRA (2026-10-27: 4/11 = 36% y el modelo elige siempre el empate,
 # margen 0, en 11 de 11). Mismo trato que Total exacto. TREND_WIN_MARGIN_LIVE=true lo reactiva.
 TREND_WIN_MARGIN_LIVE = os.environ.get("TREND_WIN_MARGIN_LIVE", "false").lower() in ("1", "true", "yes")
+# Ambos marcan EN SOMBRA (23-nov-2026: 99/166 = 60 % frente a su 70 %; subir el umbral de
+# racha no lo arregla con lo ya graduado: >=0,8 → 57,8 %, >=0,9 → 64,3 % con n=42; en sombra
+# el acierto del feed pasa de 71,2 % a 75,0 %). Su regla v1 ya corre en sombra como variante
+# (trend_variants, btts.v1) junto a B6: se sigue graduando. TREND_BTTS_LIVE=true lo reactiva.
+TREND_BTTS_LIVE = os.environ.get("TREND_BTTS_LIVE", "false").lower() in ("1", "true", "yes")
 TREND_SHADOW_MARKETS: frozenset[str] = frozenset(
     ({"exact_total"} if not TREND_EXACT_TOTAL_LIVE else set())
     | ({"win_margin"} if not TREND_WIN_MARGIN_LIVE else set())
+    | ({"btts"} if not TREND_BTTS_LIVE else set())
 )
+# Mercados en sombra cuyo historial ENVIADO sigue contando en el acierto total (decisión del
+# usuario, 23-nov-2026): las 166 graduadas de Ambos marcan se enviaron de verdad; solo lo
+# nuevo, que ya va en sombra, sale del acierto. Total exacto y Margen no (salen enteros).
+TREND_SHADOW_KEEP_SENT: frozenset[str] = frozenset({"btts"}) & TREND_SHADOW_MARKETS
 
 # ── Auto-calibración por mercado (analyzers/trend_calibration.py) ──────────────
 # Cada uno de los 14 mercados del feed acumula su propio hit-rate real en

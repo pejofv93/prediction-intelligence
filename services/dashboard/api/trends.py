@@ -56,7 +56,7 @@ async def trend_accuracy() -> dict:
     dos) y desglosado por mercado y por equipo, para poder comparar los tres
     sin que se mezclen.
     """
-    from shared.config import TREND_MARKET_TARGET, TREND_SHADOW_MARKETS
+    from shared.config import TREND_MARKET_TARGET, TREND_SHADOW_KEEP_SENT, TREND_SHADOW_MARKETS
     from shared.firestore_client import col
 
     rows: list[dict] = []
@@ -68,6 +68,9 @@ async def trend_accuracy() -> dict:
                 continue  # copia de la misma señal en otro id del mismo partido: no cuenta
             if row.get("market") in TREND_SHADOW_MARKETS:
                 shadow_market_rows.append(row)  # mercado en sombra: aparte, también lo enviado antes
+                # Ambos marcan: lo que se envió de verdad sigue en el acierto total
+                if row.get("market") in TREND_SHADOW_KEEP_SENT and not row.get("shadow"):
+                    rows.append(row)
             elif not row.get("shadow"):  # las variantes en sombra no cuentan en el acierto
                 rows.append(row)
     except Exception as e:
@@ -88,7 +91,7 @@ async def trend_accuracy() -> dict:
         by_pattern_type[pt] = _bucket([r for r in rows if r.get("pattern_type") == pt])
 
     by_market: dict[str, dict] = {}
-    markets = {r.get("market") for r in rows if r.get("market")}
+    markets = {r.get("market") for r in rows if r.get("market")} - TREND_SHADOW_MARKETS
     for m in markets:
         by_market[m] = _bucket([r for r in rows if r.get("market") == m])
 
@@ -121,7 +124,9 @@ async def trend_accuracy() -> dict:
 
     shadow_markets = {
         m: {"target": TREND_MARKET_TARGET.get(m),
-            "shadow": _bucket([r for r in shadow_market_rows if r.get("market") == m and r.get("shadow")]),
+            # su regla v1 en sombra; las variantes del mercado (Ambos marcan B6) no se mezclan
+            "shadow": _bucket([r for r in shadow_market_rows if r.get("market") == m and r.get("shadow")
+                               and (r.get("rule_id") or f"{m}.v1") == f"{m}.v1"]),
             "sent_before": _bucket([r for r in shadow_market_rows
                                     if r.get("market") == m and not r.get("shadow")])}
         for m in sorted(TREND_SHADOW_MARKETS)

@@ -27,6 +27,7 @@ from shared.config import (
     TELEGRAM_BOT_URL,
     TREND_CALIBRATION_MIN_SAMPLE,
     TREND_MARKET_TARGET,
+    TREND_SHADOW_KEEP_SENT,
     TREND_SHADOW_MARKETS,
 )
 
@@ -92,8 +93,12 @@ def not_duplicate(r: dict) -> bool:
 
 def counts_in_feed(r: dict) -> bool:
     """Fila/señal que cuenta en el acierto: ni variante en sombra ni de un mercado en sombra
-    (TREND_SHADOW_MARKETS — tampoco sus graduadas de cuando se enviaba)."""
-    return not r.get("shadow") and r.get("market") not in TREND_SHADOW_MARKETS
+    (TREND_SHADOW_MARKETS — tampoco sus graduadas de cuando se enviaba, salvo los mercados de
+    TREND_SHADOW_KEEP_SENT: Ambos marcan, cuyo historial enviado sigue en el total)."""
+    if r.get("shadow"):
+        return False
+    mk = r.get("market")
+    return mk not in TREND_SHADOW_MARKETS or mk in TREND_SHADOW_KEEP_SENT
 
 
 def shadow_market_lines(all_rows: list[dict], all_pending: list[dict]) -> list[str]:
@@ -104,7 +109,9 @@ def shadow_market_lines(all_rows: list[dict], all_pending: list[dict]) -> list[s
     lines = ["", "En sombra (se gradúa, no se envía ni cuenta en el acierto)"]
     for mk in sorted(TREND_SHADOW_MARKETS):
         rows = [r for r in all_rows if r.get("market") == mk]
-        sh_h, sh_m, _ = _tally([r for r in rows if r.get("shadow")])
+        # En sombra = su regla v1; las variantes (Ambos marcan B6) van aparte, en "Probando".
+        sh_h, sh_m, _ = _tally([r for r in rows if r.get("shadow")
+                                and (r.get("rule_id") or f"{mk}.v1") == f"{mk}.v1"])
         old_h, old_m, _ = _tally([r for r in rows if not r.get("shadow")])
         pend = sum(1 for p in all_pending if p.get("market") == mk)
         target = TREND_MARKET_TARGET.get(mk, 0.70)
@@ -176,8 +183,7 @@ def _variant_parts(variants: list[dict]) -> tuple[list[str], list[str]]:
         if v["status"] == "promoted":
             lines.append(f"{name}: ✅ en uso · sombra {mine} · v1 {base}")
             continue
-        lines.append(f"{name}: {mine} · v1 en sombra {base} · {min(v['n'], TREND_PROMOTION_MIN_SHADOW)}"
-                     f"/{TREND_PROMOTION_MIN_SHADOW} para decidir")
+        lines.append(f"{name}: {mine} · v1 en sombra {base} · {_decision_state(v, TREND_PROMOTION_MIN_SHADOW)}")
         if v["status"] == "ready":
             alerts.append(
                 f"🟢 <b>LISTA</b> para sustituir a la regla actual: {name} ({_esc(v['desc'])}) — "
@@ -185,6 +191,20 @@ def _variant_parts(variants: list[dict]) -> tuple[list[str], list[str]]:
                 f"No se aplica hasta que la confirmes."
             )
     return lines, alerts
+
+
+def _decision_state(v: dict, min_n: int) -> str:
+    """Por qué una variante sigue en prueba (antes «30/30 para decidir» aunque llevara 59 y no
+    cumpliera): muestra que le falta o la condición de la regla que no pasa."""
+    if v["n"] < min_n:
+        return f"{v['n']}/{min_n} para decidir"
+    if v["v1_n"] < min_n:
+        return f"{v['n']} graduadas · v1 en sombra {v['v1_n']}/{min_n}"
+    if v["status"] == "ready":
+        return f"{v['n']} graduadas · cumple"
+    if v["rate"] is None or v["rate"] < v["target"]:
+        return f"{v['n']} graduadas (mín. {min_n}) · por debajo del {v['target'] * 100:.0f}%"
+    return f"{v['n']} graduadas (mín. {min_n}) · no mejora a v1"
 
 
 def _zero_days_line(runs: dict[str, dict], period_from: datetime, period_to: datetime) -> str | None:
@@ -227,6 +247,7 @@ def build_weekly_summary(log_rows: list[dict], week_rows: list[dict],
         pending_by_market[s.get("market")] = pending_by_market.get(s.get("market"), 0) + 1
     markets = {r.get("market") for r in log_rows} | set(pending_by_market)
     markets.discard(None)
+    markets -= TREND_SHADOW_MARKETS   # en sombra: van al plegable, aunque lo enviado cuente en el total
 
     def _totals(mk: str) -> tuple[int, int]:
         h, m, _ = _tally([r for r in log_rows if r.get("market") == mk])
