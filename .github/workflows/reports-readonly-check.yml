@@ -144,3 +144,35 @@ jobs:
           fi
           n=$(gcloud billing accounts list --format='value(name)' 2>/dev/null | wc -l)
           echo "Cuentas de facturación visibles para la cuenta de servicio: $n"
+
+      - name: sports-agent — tiempo facturable frente a peticiones (por día y por ruta)
+        env:
+          DAYS: ${{ inputs.days }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          TOKEN=$(gcloud auth print-access-token)
+          END=$(date -u +%Y-%m-%dT00:00:00Z)
+          START=$(date -u -d "-${DAYS} days" +%Y-%m-%dT00:00:00Z)
+          curl -sS -G "https://monitoring.googleapis.com/v3/projects/prediction-intelligence/timeSeries" \
+            -H "Authorization: Bearer $TOKEN" \
+            --data-urlencode 'filter=metric.type="run.googleapis.com/container/billable_instance_time" AND resource.labels.service_name="sports-agent"' \
+            --data-urlencode "interval.startTime=$START" --data-urlencode "interval.endTime=$END" \
+            --data-urlencode "aggregation.alignmentPeriod=86400s" \
+            --data-urlencode "aggregation.perSeriesAligner=ALIGN_SUM" \
+            --data-urlencode "aggregation.crossSeriesReducer=REDUCE_SUM" > bill.json
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND logName="projects/prediction-intelligence/logs/run.googleapis.com%2Frequests"' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 20000 --format json > req.json 2> err.txt \
+            || { echo "peticiones: sin acceso ($(grep -oE 'PERMISSION_DENIED' err.txt | head -1))"; echo "[]" > req.json; }
+          gcloud run services describe sports-agent --project prediction-intelligence --region europe-west1 \
+            --format json > svc.json 2>/dev/null || echo "{}" > svc.json
+          BILL_FILE=bill.json REQ_FILE=req.json SVC_FILE=svc.json python scripts/ops/billable_breakdown.py
+          rm -f bill.json req.json svc.json err.txt
+
+      - name: Semanal de «Señales de tendencia» — Ambos marcan, G5 y días sin ejecución (Firestore)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/trend_weekly_review.py
