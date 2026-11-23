@@ -34,8 +34,10 @@ def test_franja_vigente_y_retraso_maximo():
 
 def test_que_toca_a_las_siete_de_un_lunes():
     names = {n for n, _ in ds.due(T(16, 7, 2))}
-    assert {"sports-analyze", "daily-report", "polymarket-scan", "oracle-a1-retry",
+    assert {"sports-analyze", "daily-report", "oracle-a1-retry",
             "sports-fdco-collect"} <= names
+    assert not any(n.startswith("poly") for n in names)       # Polymarket en pausa (23-nov)
+    assert "polymarket-resolve" in {n for n, _ in ds.due(T(16, 3, 2))}   # salvo la resolución
     assert "sports-collect" not in names                      # 05:30, ya fuera del margen de 60 min
     assert "weekly-report" not in names                       # es a las 08:00
     assert "weekly-report" in {n for n, _ in ds.due(T(16, 8, 3))}
@@ -58,8 +60,10 @@ def test_frecuencias_acordadas():
     assert t.workflow == "sports-eur-tennis-daily.yml" and ds.matches(t.cron, T(21, 6, 30))
     assert per_day("match-previews") == 2 and per_day("hl-load-daily") == 2
     assert per_day("oracle-a1-retry") == 96
-    assert per_day("polymarket-scan") == 4 and per_day("polymarket-analyze") == 3
-    assert per_day("poly-ws-keepalive") == 4
+    # Polymarket en pausa (23-nov-2026): fuera de TASKS, conservado en PAUSED_TASKS
+    assert {n for n, t in ds.TASKS.items() if t.workflow.startswith("poly")} == {"polymarket-resolve"}
+    assert per_day("polymarket-resolve") == 1
+    assert len(ds.PAUSED_TASKS) == 8 and "polymarket-analyze" in ds.PAUSED_TASKS
 
 
 def test_retraso_maximo_cubre_el_intervalo_del_reloj():

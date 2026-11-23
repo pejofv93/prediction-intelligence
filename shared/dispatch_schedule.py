@@ -15,7 +15,8 @@ Frecuencias (decididas por el usuario el 16-nov-2026):
   - Recogida y enriquecimiento de Sports, 2 al día (17-nov-2026): con las 4 pasadas a su hora
     sports-agent doblaría su tiempo de Cloud Run; así queda como con el cron de GitHub.
     Análisis, 4 al día.
-  - Polymarket: al ritmo real que tenía con el cron de GitHub (no al nominal).
+  - Polymarket: EN PAUSA desde el 23-nov-2026 (PAUSED_TASKS) salvo polymarket-resolve; antes, al ritmo real que tenía
+    con el cron de GitHub (no al nominal).
   - hl-load-auto no está: se apagó sola al terminar la carga (15-nov-2026) y conserva su cron.
   - oracle-a1-retry: cada 15 minutos.
 """
@@ -58,18 +59,26 @@ TASKS: dict[str, Task] = {
     "run-backtest-sports":  Task("run-backtest-sports.yml",   "0 2 1 * *", 360),
     # ── Highlightly (mantenimiento), a su hora ─────────────────────────────────────
     "hl-load-daily":        Task("hl-load-daily.yml",         "40 5,17 * * *", 120),
-    # ── Polymarket, al ritmo real medido (≈ 3-4 al día, no el nominal) ──────────────
+    # ── Oracle ─────────────────────────────────────────────────────────────────────
+    "oracle-a1-retry":      Task("oracle-a1-retry.yml",       "*/15 * * * *", 14),
+    # ── Polymarket: solo la resolución, para cerrar las alertas ya enviadas (resto en pausa) ──
+    "polymarket-resolve":   Task("polymarket-resolve.yml",    "0 3 * * *", 180),
+}
+
+# Polymarket EN PAUSA (23-nov-2026, decisión del usuario para bajar la factura de GCP): sus
+# tareas no se lanzan, salvo polymarket-resolve (sigue en TASKS para cerrar las alertas ya
+# enviadas). El servicio polymarket-agent, sus workflows y sus datos siguen ahí.
+# Para reactivar: volver a meter estas entradas en TASKS.
+PAUSED_TASKS: dict[str, Task] = {
+    # al ritmo real medido (≈ 3-4 al día, no el nominal)
     "polymarket-scan":      Task("polymarket-scan.yml",       "0 1,7,13,19 * * *"),
     "poly-news-trigger":    Task("poly-news-trigger.yml",     "10 1,7,13,19 * * *"),
     "poly-price-monitor":   Task("poly-price-monitor.yml",    "20 1,7,13,19 * * *"),
     "poly-ws-keepalive":    Task("poly-websocket-keepalive.yml", "5 1,7,13,19 * * *"),
     "polymarket-enrich":    Task("polymarket-enrich.yml",     "30 3,11,19 * * *"),
     "polymarket-analyze":   Task("polymarket-analyze.yml",    "0 4,12,20 * * *"),
-    "polymarket-resolve":   Task("polymarket-resolve.yml",    "0 3 * * *", 180),
     "polymarket-learn":     Task("polymarket-learn.yml",      "30 3 * * *", 180),
     "poly-backtest":        Task("poly-backtest.yml",         "0 3 1 * *", 360),
-    # ── Oracle ─────────────────────────────────────────────────────────────────────
-    "oracle-a1-retry":      Task("oracle-a1-retry.yml",       "*/15 * * * *", 14),
 }
 
 
