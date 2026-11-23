@@ -2,9 +2,10 @@
 Ejecuta un trabajo de sports-agent fuera de Cloud Run (GitHub Actions), con el mismo código
 que el endpoint: `python job_runner.py collect` = POST /run-collect.
 
-Fase 1 del recorte de la factura de GCP (23-nov-2026): el collect corre en el runner de
-GitHub (gratis en repo público) en vez de en Cloud Run; lo sigue lanzando el repartidor por
-workflow_dispatch, como antes.
+Recorte de la factura de GCP (23-nov-2026): el trabajo corre en el runner de GitHub (gratis
+en repo público) en vez de en Cloud Run; lo sigue lanzando el repartidor por workflow_dispatch.
+  - collect: probado el 23-nov y devuelto a Cloud Run (Sofascore bloquea las IP del runner).
+  - analyze: fase 2 (no usa Sofascore: cuotas por API con clave, Firestore y telegram-bot).
 
 Logs — el log de Actions es PÚBLICO:
   - Todo (equipos, partidos, trazas) va a un fichero temporal del runner, que el workflow
@@ -24,18 +25,30 @@ import logging
 import os
 import re
 import sys
+import time
 from collections import Counter
 
-JOBS = {"collect": "_bg_collect"}
+JOBS = {"collect": "_bg_collect", "analyze": "_bg_analyze"}
 
 # Líneas de resumen con recuentos/códigos (formatos fijos del código de main.py).
 PUBLIC_RE = re.compile(
     r"^(collect(\.[a-z_0-9]+)?: (iniciando pipeline|completado( en [0-9.]+s)?|[0-9]+ "
     r"[a-zA-Záéíóúñ ]+|equipos por motivo \{[a-z_0-9': ,]*\}|sin datos para [A-Z0-9]+ \(id=[0-9]+\)"
     r"|upcoming=[0-9]+ expirados, predictions=[0-9]+ expiradas, odds_cache=[0-9]+ eliminados)"
-    r"|get_finished_matches: [0-9]+ partidos terminados|RESULTS_UPDATE: [0-9]+ partidos [a-zA-Z ]+)$"
+    r"|get_finished_matches: [0-9]+ partidos terminados|RESULTS_UPDATE: [0-9]+ partidos [a-zA-Z ]+"
+    # analyze: solo las líneas de recuentos (sin ligas, equipos ni ids de partido)
+    r"|analyze: (iniciando pipeline|pre-fetch completado — todas las fuentes en cache"
+    r"|pre-fetching [0-9]+ coroutines en paralelo"
+    r"|[0-9]+ enriched \(7d\) de [0-9]+ upcoming SCHEDULED \(get_all [0-9]+ refs\)"
+    r"|dedup por partido físico — [0-9]+ fixtures con doc duplicado, [0-9]+ señales eliminadas"
+    r"|[0-9]+ partidos de (tenis|baloncesto) \(48h\) a analizar"
+    r"|tenis — [0-9]+ señales( generadas|, [0-9]+ sin stats \([^()]*\))"
+    r"|[0-9]+ bloqueos de filtro registrados"
+    r"|[0-9]+ senales generadas de [0-9]+ enriquecidos en [0-9.]+s \([0-9]+ partidos descartados[^()]*\)"
+    r"|arbitrage detector lanzado en background|odds-check lanzado en telegram-bot))$"
 )
-FAIL_MARK = "collect: error no controlado"
+FAIL_MARKS = tuple(f"{job}: error no controlado" for job in JOBS)
+PENDING_TASKS_TIMEOUT = 300   # lo que el trabajo deja en segundo plano (analyze → _bg_arb)
 
 
 class PublicFilter(logging.Filter):
@@ -73,7 +86,7 @@ class FailFlag(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            if record.getMessage().startswith(FAIL_MARK):
+            if record.getMessage().startswith(FAIL_MARKS):
                 self.failed = True
         except Exception:
             pass
@@ -94,6 +107,8 @@ class CloudLoggingHandler(logging.Handler):
         self._fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
         self._buf: list[tuple[str, str]] = []
         self.broken = False
+        self.lost = 0            # líneas que no se pudieron escribir tras los reintentos
+        self._fails_in_row = 0
 
     def emit(self, record: logging.LogRecord) -> None:
         if self.broken:
@@ -102,23 +117,43 @@ class CloudLoggingHandler(logging.Handler):
             self._buf.append((self._fmt.format(record), record.levelname))
         except Exception:
             return
-        if len(self._buf) >= 200:
+        if len(self._buf) >= self.BATCH:
             self.flush()
 
+    BATCH = 100
+    RETRY_WAITS = (2, 5, 15)     # segundos entre reintentos (ResourceExhausted = cuota por minuto)
+
     def flush(self) -> None:
-        """Escribe lo acumulado en una sola llamada (por lotes de 200 líneas)."""
+        """Escribe lo acumulado por lotes de BATCH líneas. Si un lote falla, reintenta con
+        espera; si sigue fallando, lo da por perdido (queda en el fichero) y sigue con el
+        siguiente. Solo se rinde del todo tras 3 lotes perdidos seguidos."""
         if self.broken or not self._buf:
             return
         buf, self._buf = self._buf, []
-        try:
-            batch = self._logger.batch()
-            for text, sev in buf:
-                batch.log_text(text, resource=self._resource, severity=sev)
-            batch.commit()
-        except Exception as exc:          # sin el mensaje: podría llevar datos
-            self.broken = True
-            print(f"Cloud Logging: no se puede escribir ({type(exc).__name__}); queda el fichero",
-                  file=sys.stdout, flush=True)
+        for i in range(0, len(buf), self.BATCH):
+            chunk, exc_name = buf[i:i + self.BATCH], None
+            for wait in (0, *self.RETRY_WAITS):
+                if wait:
+                    time.sleep(wait)
+                try:
+                    batch = self._logger.batch()
+                    for text, sev in chunk:
+                        batch.log_text(text, resource=self._resource, severity=sev)
+                    batch.commit()
+                    exc_name = None
+                    break
+                except Exception as exc:  # sin el mensaje: podría llevar datos
+                    exc_name = type(exc).__name__
+            if exc_name is None:
+                self._fails_in_row = 0
+                continue
+            self.lost += len(chunk)
+            self._fails_in_row += 1
+            if self._fails_in_row >= 3:
+                self.broken = True
+                print(f"Cloud Logging: no se puede escribir ({exc_name}); queda el fichero",
+                      file=sys.stdout, flush=True)
+                return
 
 
 def setup_logging(log_file: str, project: str | None) -> tuple[PublicFilter, FailFlag]:
@@ -159,9 +194,17 @@ def main(argv: list[str]) -> int:
     # Tras configurar los handlers: el basicConfig de main.py ya no añade el de consola.
     import main as svc
 
+    async def _run() -> None:
+        await getattr(svc, JOBS[job])()
+        # Lo que el trabajo deja en segundo plano (en Cloud Run seguía tras la respuesta):
+        # aquí se espera, porque asyncio.run() lo cancelaría al salir.
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.wait(pending, timeout=PENDING_TASKS_TIMEOUT)
+
     rc = 0
     try:
-        asyncio.run(getattr(svc, JOBS[job])())
+        asyncio.run(_run())
     except Exception as exc:
         logging.getLogger("job_runner").error("%s lanzó %s", job, type(exc).__name__, exc_info=True)
         rc = 1
@@ -169,6 +212,8 @@ def main(argv: list[str]) -> int:
         rc = 1
     for h in logging.getLogger().handlers:
         h.flush()
+        if getattr(h, "lost", 0):
+            print(f"Cloud Logging: {h.lost} líneas sin escribir (quedan en el fichero)", flush=True)
     print("avisos y errores por módulo: "
           + (", ".join(f"{lvl} {name}={n}" for (lvl, name), n in sorted(pub_filter.counts.items()))
              or "ninguno"), flush=True)

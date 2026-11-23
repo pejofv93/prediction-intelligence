@@ -1,17 +1,85 @@
 name: sports-analyze
+# Fase 2 del recorte de la factura de GCP (23-nov-2026): el analyze corre AQUÍ, en el runner de
+# GitHub (gratis en repo público), con el mismo código que POST /run-analyze de sports-agent
+# (services/sports-agent/job_runner.py analyze). Lo sigue lanzando el repartidor por workflow_dispatch.
+# No usa Sofascore (bloquea las IP del runner): cuotas por API con clave, Firestore y telegram-bot.
+# Log PÚBLICO: solo resúmenes con recuentos y, de avisos/errores, módulo + clase de excepción.
+# El log completo va a Cloud Logging (mismo recurso que el servicio, revisión "github-actions")
+# y a un fichero del runner que se borra al terminar.
+# Vuelta atrás: restaurar la versión anterior de este fichero (curl a /run-analyze).
 on:
   workflow_dispatch:
-
+concurrency:
+  group: sports-analyze
+  cancel-in-progress: false
+permissions:
+  contents: read
 jobs:
-  trigger:
+  analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
-      - name: Trigger Cloud Run (sync)
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/sports-agent/requirements.txt
+
+      - name: Install dependencies
         run: |
-          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-analyze" \
-            -H "Content-Type: application/json" \
-            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
-            --max-time 1700 \
-            --no-buffer \
-            --fail --silent --show-error
+          for i in 1 2 3; do
+            pip install -q -r services/sports-agent/requirements.txt google-cloud-logging==3.11.3 && break
+            echo "pip falló (intento $i)"; sleep 20
+          done
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Analyze
+        timeout-minutes: 35
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONIOENCODING: utf-8
+          JOB_LOG_FILE: ${{ runner.temp }}/analyze.log
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+          FOOTBALL_RAPID_API_KEY: ${{ secrets.FOOTBALL_RAPID_API_KEY }}
+          CLOUD_RUN_TOKEN: ${{ secrets.CLOUD_RUN_TOKEN }}
+          TELEGRAM_BOT_URL: ${{ secrets.TELEGRAM_BOT_URL }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
+          ODDSAPIIO_KEY: ${{ secrets.ODDSAPIIO_KEY }}
+          HIGHLIGHTLY_API_KEY: ${{ secrets.HIGHLIGHTLY_API_KEY }}
+        run: python services/sports-agent/job_runner.py analyze
+
+      - name: Borrar el log completo del runner
+        if: ${{ always() }}
+        run: rm -f "${{ runner.temp }}/analyze.log"
+
+      - name: Avisar por Telegram si el analyze falló o se cortó
+        if: ${{ failure() }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          text = ("⚠️ sports-analyze (GitHub Actions) falló o se cortó a los 35 min: puede que "
+                  "no se hayan generado las señales de esta pasada.\n" + os.environ["RUN_URL"])
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_TOKEN']}/sendMessage",
+              data=json.dumps({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text,
+                               "disable_web_page_preview": True}).encode(),
+              headers={"Content-Type": "application/json"})
+          try:
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  print("Telegram: HTTP", r.status)
+          except Exception as e:  # sin str(e): llevaría la URL con el token
+              print("Telegram: error", type(e).__name__)
+          PY
