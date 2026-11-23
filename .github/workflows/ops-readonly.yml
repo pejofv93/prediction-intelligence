@@ -59,3 +59,19 @@ jobs:
           echo "entradas leídas: $(python3 -c 'import json;print(len(json.load(open("logs.json"))))')"
           LOGS_FILE=logs.json python scripts/ops/collect_step_times.py
           rm -f logs.json err.txt
+
+      - name: Recuentos de cada pasada de sports-analyze (Cloud Run y GitHub Actions)
+        env:
+          DAYS: ${{ inputs.days }}
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND textPayload:"analyze: "' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 5000 \
+            --format 'value(timestamp,resource.labels.revision_name,textPayload)' > logs.txt 2> err.txt \
+            || { grep -oE "PERMISSION_DENIED|permission[^.]*" err.txt | head -2; exit 1; }
+          # Solo líneas de formato fijo con recuentos; origen = Actions o Cloud Run (sin nombre de revisión).
+          grep -E "analyze: ([0-9]+ enriched \(7d\) de [0-9]+ upcoming|[0-9]+ senales generadas de [0-9]+ enriquecidos|tenis — [0-9]+ señales|[0-9]+ partidos de (tenis|baloncesto) \(48h\))" logs.txt \
+            | awk -F'\t' '{o = ($2 == "github-actions") ? "actions  " : "cloud-run"; match($3, /analyze: .*/); print substr($1,1,16), o, substr($3, RSTART)}' \
+            | sed -E 's/ en [0-9.]+s / /' | sort | tail -80 || echo "sin líneas"
+          rm -f logs.txt err.txt
