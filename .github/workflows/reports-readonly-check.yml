@@ -98,3 +98,49 @@ jobs:
             | awk '/^[0-9]{4}-/ {ts=$0; next} {print ts " " $0}' | sort | tail -40
           [ -s logs.txt ] || echo "sin líneas"
           rm -f logs.txt err.txt
+
+      - name: Coste — tiempo de instancia facturable por servicio y prueba de lectura de facturación
+        env:
+          DAYS: ${{ inputs.days }}
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          # Cloud Monitoring (solo lectura): run.googleapis.com/container/billable_instance_time,
+          # suma por servicio y día. Solo nombres de servicio y segundos.
+          TOKEN=$(gcloud auth print-access-token)
+          END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          START=$(date -u -d "-${DAYS} days" +%Y-%m-%dT%H:%M:%SZ)
+          curl -sS -G "https://monitoring.googleapis.com/v3/projects/prediction-intelligence/timeSeries" \
+            -H "Authorization: Bearer $TOKEN" \
+            --data-urlencode 'filter=metric.type="run.googleapis.com/container/billable_instance_time"' \
+            --data-urlencode "interval.startTime=$START" --data-urlencode "interval.endTime=$END" \
+            --data-urlencode "aggregation.alignmentPeriod=86400s" \
+            --data-urlencode "aggregation.perSeriesAligner=ALIGN_SUM" \
+            --data-urlencode "aggregation.crossSeriesReducer=REDUCE_SUM" \
+            --data-urlencode "aggregation.groupByFields=resource.labels.service_name" > ts.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("ts.json"))
+          if "error" in d:
+              print("Monitoring: sin acceso —", d["error"].get("status"), d["error"].get("code"))
+              raise SystemExit(0)
+          print("== tiempo de instancia facturable (segundos de instancia; × vCPU y × GiB del servicio)")
+          rows = []
+          for s in d.get("timeSeries", []):
+              name = s["resource"]["labels"].get("service_name", "?")
+              pts = s.get("points", [])
+              tot = sum(float(p["value"].get("doubleValue", p["value"].get("int64Value", 0))) for p in pts)
+              rows.append((tot, name, len(pts)))
+          for tot, name, n in sorted(rows, reverse=True):
+              print(f"  {name}: {tot:,.0f} s en {n} días · media {tot / max(n, 1) / 60:,.0f} min/día")
+          if not rows:
+              print("  sin series")
+          PY
+          rm -f ts.json
+          # Facturación: solo si la cuenta puede leerla (sin ids de cuenta en el log público).
+          if out=$(gcloud billing projects describe prediction-intelligence --format='value(billingEnabled)' 2>&1); then
+            echo "Facturación del proyecto legible: billingEnabled=$out"
+          else
+            echo "Facturación del proyecto: sin acceso ($(echo "$out" | grep -oE 'PERMISSION_DENIED|403|SERVICE_DISABLED|has not been used' | head -1))"
+          fi
+          n=$(gcloud billing accounts list --format='value(name)' 2>/dev/null | wc -l)
+          echo "Cuentas de facturación visibles para la cuenta de servicio: $n"
