@@ -86,6 +86,21 @@ def test_copa_con_icono_y_nombre_de_copa():
     assert "🏆 Taça de Portugal · 21:45" in m and "<b>Vitória Guimarães – Braga</b>" in m
 
 
+def test_europa_con_icono_y_competicion_y_sin_pildora_hasta_la_estrella():
+    eu = {**_preview(div="CL", home="Zorrovia Norte", away="Quimeria Valle", ko="2026-11-25T20:00:00+00:00"),
+          "group": "uefa", "comp": "CL", "comp_name": "Champions League"}
+    eu["stats"]["corners"]["lines"]["home"]["market_label"] = "medido en backtest"
+    m = ts.build_messages([eu], date(2026, 11, 25))[0]
+    assert "0 con ⭐" in m and "🌍 Zorrovia Norte–Quimeria Valle" in m          # medido en backtest: sin píldora
+    _edge(eu, "corners", "home")
+    m = ts.build_messages([eu], date(2026, 11, 25))[0]
+    assert "🌍 Champions League · 21:00" in m and "⭐ Zorrovia Norte más de" in m
+    assert ts.group_icon_label({"group": "uefa", "div": "EL"}) == "🌍 Europa League"
+    cup = {**_preview(div="P1"), "group": "cups", "cup": "Taça"}
+    league = _preview(div="SP1")
+    assert ts._group_rank(league) < ts._group_rank(eu) < ts._group_rank(cup) < ts._group_rank(_preview(div="XX"))
+
+
 def test_pildoras_solo_ventaja_medida_sin_0_5_salvo_marca():
     p = _preview()
     p["stats"]["corners"]["lines"]["home"] = _block([(3.5, 0.85), (4.5, 0.73), (5.5, 0.60), (6.5, 0.47)])

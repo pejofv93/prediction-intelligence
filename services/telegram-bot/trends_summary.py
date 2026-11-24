@@ -1,7 +1,8 @@
 """
 Resumen diario de Tendencias por Telegram (hilo de Tendencias). Fichas de partido del día (hora de
-Madrid): masculino (match_previews, mp-v1), copas (match_previews_cups) y femenino
-(match_previews_women, mp-w1).
+Madrid): masculino (match_previews, mp-v1), copas (match_previews_cups), Europa
+(match_previews_uefa, mp-e1) y femenino (match_previews_women, mp-w1). En copas y Europa la ⭐ solo
+llega tras 50 graduados en directo con IC95 bajo 0 (antes, "medido en backtest": sin píldora).
 
 Formato (20-nov-2026, decisión del usuario): HTML de Telegram, UN mensaje para el día (se parte
 solo si no cabe; un partido nunca se corta). Por partido: icono + liga + hora, equipos en negrita,
@@ -35,6 +36,7 @@ DIV_NAMES = {"SP1": "LaLiga", "SP2": "Segunda", "I1": "Serie A", "E0": "Premier"
              "P1": "Primeira", "D1": "Bundesliga", "N1": "Eredivisie",
              "WLF": "Liga F", "WSL": "WSL", "WFBL": "Frauen-Bundesliga", "WSA": "Serie A fem.", "WD1": "D1 Arkema"}
 DIV_ORDER = ("SP1", "SP2", "E0", "I1", "D1", "F1", "P1", "N1", "WLF", "WSL", "WFBL", "WSA", "WD1")
+UEFA_NAMES = {"CL": "Champions League", "EL": "Europa League", "ECL": "Conference League"}
 SEP = "━━━━━━━━━━━━━━"
 STAR_LEGEND = "⭐ = el modelo acierta más que la media de la liga"
 WEEKDAYS = ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
@@ -152,6 +154,8 @@ def pill_html(x: dict) -> str:
 def group_icon_label(p: dict) -> str:
     if p.get("group") == "cups":
         return f"🏆 {p.get('cup') or 'Copa'}"
+    if p.get("group") == "uefa":
+        return f"🌍 {p.get('comp_name') or UEFA_NAMES.get(p.get('comp') or p.get('div'), 'Europa')}"
     div = p.get("div") or "?"
     if p.get("group") == "women" or div.startswith("W"):
         return f"👩 {DIV_NAMES.get(div, div)}"
@@ -176,10 +180,10 @@ def pair_label(p: dict) -> str:
 
 
 def _group_rank(p: dict) -> int:
-    if p.get("group") == "cups":
-        return len(DIV_ORDER)
+    if p.get("group") in ("uefa", "cups"):
+        return len(DIV_ORDER) + (0 if p.get("group") == "uefa" else 1)
     div = p.get("div") or ""
-    return DIV_ORDER.index(div) if div in DIV_ORDER else len(DIV_ORDER) + 1
+    return DIV_ORDER.index(div) if div in DIV_ORDER else len(DIV_ORDER) + 2
 
 
 def build_messages(previews: list[dict], day: date) -> list[str]:
@@ -228,7 +232,7 @@ def read_day_previews(lo: datetime, hi: datetime) -> list[dict]:
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     out = []
-    for coll in ("match_previews", "match_previews_cups", "match_previews_women"):
+    for coll in ("match_previews", "match_previews_cups", "match_previews_uefa", "match_previews_women"):
         q = (col(coll).where(filter=FieldFilter("kickoff_utc", ">=", lo.isoformat()))
              .where(filter=FieldFilter("kickoff_utc", "<", hi.isoformat())))
         out.extend(s.to_dict() for s in q.stream())
