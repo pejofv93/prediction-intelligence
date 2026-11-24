@@ -92,6 +92,35 @@ class FailFlag(logging.Handler):
             pass
 
 
+_REASON_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+# Errores que no se arreglan reintentando (falta permiso, petición inválida, no existe).
+_PERMANENT_CODES = {"PERMISSION_DENIED", "UNAUTHENTICATED", "INVALID_ARGUMENT", "NOT_FOUND",
+                    "FAILED_PRECONDITION"}
+
+
+def _error_code(exc: Exception) -> str | None:
+    """Código gRPC del error de la API de Google (PERMISSION_DENIED…) o, si no hay, el HTTP."""
+    grpc_code = getattr(exc, "grpc_status_code", None)
+    if grpc_code is not None:
+        return getattr(grpc_code, "name", None) or str(grpc_code)
+    http = getattr(exc, "code", None)
+    return f"HTTP {http}" if isinstance(http, int) else None
+
+
+def describe_api_error(exc: Exception) -> str:
+    """«clase, código X, motivo Y» SIN el texto del error (podría llevar datos). El motivo es
+    la constante de Google de ErrorInfo (p. ej. IAM_PERMISSION_DENIED); si no tiene forma de
+    constante, no se muestra."""
+    parts = [type(exc).__name__]
+    code = _error_code(exc)
+    if code:
+        parts.append(f"código {code}")
+    reason = getattr(exc, "reason", None)
+    parts.append(f"motivo {reason}" if isinstance(reason, str) and _REASON_RE.match(reason)
+                 else "sin motivo")
+    return ", ".join(parts)
+
+
 class CloudLoggingHandler(logging.Handler):
     """Manda cada línea a Cloud Logging como si la escribiera el servicio en Cloud Run."""
 
@@ -131,7 +160,7 @@ class CloudLoggingHandler(logging.Handler):
             return
         buf, self._buf = self._buf, []
         for i in range(0, len(buf), self.BATCH):
-            chunk, exc_name = buf[i:i + self.BATCH], None
+            chunk, err = buf[i:i + self.BATCH], None
             for wait in (0, *self.RETRY_WAITS):
                 if wait:
                     time.sleep(wait)
@@ -140,18 +169,25 @@ class CloudLoggingHandler(logging.Handler):
                     for text, sev in chunk:
                         batch.log_text(text, resource=self._resource, severity=sev)
                     batch.commit()
-                    exc_name = None
+                    err = None
                     break
                 except Exception as exc:  # sin el mensaje: podría llevar datos
-                    exc_name = type(exc).__name__
-            if exc_name is None:
+                    err = describe_api_error(exc)
+                    if _error_code(exc) in _PERMANENT_CODES:
+                        # reintentar no lo arregla (p. ej. falta el permiso de escribir logs)
+                        self.lost += len(buf) - i
+                        self.broken = True
+                        print(f"Cloud Logging: no se puede escribir ({err}); queda el fichero",
+                              file=sys.stdout, flush=True)
+                        return
+            if err is None:
                 self._fails_in_row = 0
                 continue
             self.lost += len(chunk)
             self._fails_in_row += 1
             if self._fails_in_row >= 3:
                 self.broken = True
-                print(f"Cloud Logging: no se puede escribir ({exc_name}); queda el fichero",
+                print(f"Cloud Logging: no se puede escribir ({err}); queda el fichero",
                       file=sys.stdout, flush=True)
                 return
 
@@ -178,7 +214,7 @@ def setup_logging(log_file: str, project: str | None) -> tuple[PublicFilter, Fai
         try:
             root.addHandler(CloudLoggingHandler(project, "sports-agent"))
         except Exception as exc:
-            print(f"Cloud Logging: no disponible ({type(exc).__name__}); queda el fichero", flush=True)
+            print(f"Cloud Logging: no disponible ({describe_api_error(exc)}); queda el fichero", flush=True)
     for noisy in ("httpx", "httpcore", "urllib3", "google"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     return pub_filter, fail

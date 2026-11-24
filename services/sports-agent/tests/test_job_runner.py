@@ -113,3 +113,39 @@ def test_cloud_logging_pierde_lote_y_sigue(monkeypatch):
     h._buf = [("x", "INFO")] * 150
     h.flush()
     assert not h.broken and h.lost == 100 and h._logger.calls == 5
+
+
+class _FakeCode:
+    def __init__(self, name):
+        self.name = name
+
+
+class _ApiError(Exception):
+    def __init__(self, code_name, reason, text="Arsenal sin permiso"):
+        super().__init__(text)
+        self.grpc_status_code, self.reason = _FakeCode(code_name), reason
+
+
+def test_aviso_con_codigo_y_motivo_sin_texto():
+    d = job_runner.describe_api_error(_ApiError("PERMISSION_DENIED", "IAM_PERMISSION_DENIED"))
+    assert d == "_ApiError, código PERMISSION_DENIED, motivo IAM_PERMISSION_DENIED"
+    d = job_runner.describe_api_error(_ApiError("PERMISSION_DENIED", "algo con Arsenal"))
+    assert "Arsenal" not in d and d.endswith("sin motivo")
+
+
+class _DeniedBatch(_FakeBatch):
+    def commit(self):
+        self.owner.calls += 1
+        raise _ApiError("PERMISSION_DENIED", "IAM_PERMISSION_DENIED")
+
+
+def test_permiso_denegado_no_reintenta(monkeypatch, capsys):
+    waits = []
+    monkeypatch.setattr(job_runner.time, "sleep", waits.append)
+    h = _handler(fail_first=0)
+    h._logger.batch = lambda: _DeniedBatch(h._logger)
+    h._buf = [("x", "INFO")] * 250
+    h.flush()
+    out = capsys.readouterr().out
+    assert h.broken and h.lost == 250 and h._logger.calls == 1 and not waits
+    assert "código PERMISSION_DENIED, motivo IAM_PERMISSION_DENIED" in out
