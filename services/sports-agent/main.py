@@ -443,6 +443,17 @@ async def run_cup_previews_job(dry_run: bool = True, highlightly: bool = True) -
     return _stream_with_summary("cup-previews", run_cup_previews, dry_run=dry_run, highlightly=highlightly)
 
 
+@app.post("/run-uefa-previews", dependencies=[Depends(verify_token)])
+async def run_uefa_previews_job(dry_run: bool = True, highlightly: bool = True) -> StreamingResponse:
+    """Europa (mp-e1): fichas de los próximos 3 días en match_previews_uefa (CL, EL y ECL con el plan
+    PRO; solo CL y EL después). Lista de partidos: cada (id, día) se lista una vez en Highlightly
+    (tope propio: 15 al día con PRO, 4 después). Sin match_preview_metrics/mp-e1_backtest no escribe
+    fichas. dry_run=true por defecto: no escribe fichas, pero guarda el listado nuevo. Resumen solo
+    con recuentos."""
+    from analyzers.match_preview_uefa_live import run_uefa_previews
+    return _stream_with_summary("uefa-previews", run_uefa_previews, dry_run=dry_run, highlightly=highlightly)
+
+
 @app.post("/run-women-previews", dependencies=[Depends(verify_token)])
 async def run_women_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = True) -> StreamingResponse:
     """Fútbol femenino (mp-w1): fichas "solo referencia" de los próximos `days` días en
