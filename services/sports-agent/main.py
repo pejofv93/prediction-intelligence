@@ -361,16 +361,15 @@ async def run_tennis_data_job(years: str = "", dry_run: bool = True, daily: bool
     tennis-data.co.uk (enlaces leídos de alldata.php) → tennis_tournaments / tennis_data_state.
     Aislado: no lo lee ningún analizador todavía.
 
-    years: '2024,2025,2026' (vacío = los 3 últimos). dry_run=true por defecto.
+    years: '2024,2025,2026' o rangos '2019-2023' (vacío = los 3 últimos). dry_run=true por defecto.
     daily=true (fase 2): sin years, el año en curso (en enero también el anterior).
     La última línea del stream es 'summary: {...}' (solo agregados).
     """
+    from collectors.tennis_data import parse_years
     try:
-        year_list = [int(y) for y in years.split(",") if y.strip()] or None
-    except ValueError:
-        raise HTTPException(status_code=400, detail="years: años separados por comas")
-    if year_list and not all(2013 <= y <= 2100 for y in year_list):
-        raise HTTPException(status_code=400, detail="years: solo hay .xlsx desde 2013")
+        year_list = parse_years(years)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"years: {e}")
     if daily and not year_list:
         from collectors.tennis_data import daily_years
         year_list = daily_years()

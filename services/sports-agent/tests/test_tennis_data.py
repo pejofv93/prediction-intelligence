@@ -186,3 +186,40 @@ def test_apellido_compuesto_solo_con_un_unico_candidato():
     one = {td.td_player_key("Gonzalez J.")}
     assert td.match_player("Gonzalez Daniele, Justina Maria", one, {"gonzalez|j": 2}) is None
     assert td.match_player("Gonzalez Daniele, Justina Maria", one, {"gonzalez|j": 1}) == "gonzalez|j"
+
+
+def test_hash_de_los_docs_no_cambia():
+    """Los docs ya cargados (2024-2026) no deben reescribirse: mismo hash que antes de 2019-2023."""
+    docs, st = td.build_tournament_docs(td.read_xlsx_rows(_xlsx(_rows())), "atp", 2026)
+    assert {k: td.doc_hash(v) for k, v in docs.items()} == {
+        "atp_2026_001_brisbane": "6d19c416f0f9", "atp_2026_002_australian-open": "1b2d2d911327"}
+    assert st["series"] == {"ATP250": 5}                    # solo en el resumen, no en el doc
+
+
+def test_wta_antiguo_tier_y_numero_de_torneo():
+    """xlsx WTA de 2019: la categoría va en 'Tier' (International, Premier…) y el nº en 'WTA'."""
+    header = ["WTA", "Location", "Tournament", "Date", "Tier", "Court", "Surface", "Round", "Best of",
+              "Winner", "Loser", "WRank", "LRank", "W1", "L1", "W2", "L2", "W3", "L3", "Wsets", "Lsets", "Comment"]
+    rows = [header,
+            [3, "Ciudad", "Abierto Inventado", 43472, "International", "Outdoor", "Hard", "1st Round", 3,
+             "Pereda X.", "Lunar Y.", 30, 40, 6, 3, 3, 6, 7, 5, 2, 1, "Completed"],
+            [3, "Ciudad", "Abierto Inventado", 43473, "International", "Outdoor", "Hard", "2nd Round", 3,
+             "Pereda X.", "Sauce Z.", 30, 50, 6, 2, 6, 1, None, None, 2, 0, "Completed"]]
+    docs, st = td.build_tournament_docs(td.read_xlsx_rows(_xlsx(rows)), "wta", 2019)
+    d = docs["wta_2019_003_abierto-inventado"]
+    assert d["series"] == "International" and d["best_of"] == 3 and d["start"] == "2019-01-07"
+    assert [m["valid"] for m in d["matches"]] == [True, True]
+    assert st["series"] == {"International": 2}
+
+
+def test_anos_y_rangos():
+    from datetime import date
+
+    import pytest
+    hoy = date(2026, 11, 24)
+    assert td.parse_years("2019-2023", hoy) == [2019, 2020, 2021, 2022, 2023]
+    assert td.parse_years("2026, 2019-2020,2019", hoy) == [2019, 2020, 2026]
+    assert td.parse_years("", hoy) is None and td.parse_years(" , ", hoy) is None
+    for bad in ("2023-2019", "2012", "2027", "19-23", "abc", "2019-2030"):
+        with pytest.raises(ValueError):
+            td.parse_years(bad, hoy)

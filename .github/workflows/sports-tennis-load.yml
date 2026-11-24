@@ -1,13 +1,15 @@
 # Tenis en Tendencias (Fase 1): carga del historial ATP/WTA (juegos por set) desde
 # tennis-data.co.uk (enlaces leídos de alldata.php) → tennis_tournaments.
 # SOLO manual. dry_run=true por defecto (descarga y cuenta, no escribe). Escribir exige
-# dry_run=false Y confirmar=ESCRIBIR. El log solo lleva agregados.
+# dry_run=false Y confirmar=ESCRIBIR. El log solo lleva agregados (también los partidos por
+# Series/Tier de cada fichero, que son categorías públicas). Histórico: years=2019-2023
+# (10 .xlsx, sin cuotas; los docs de 2024-2026 no cambian de hash).
 name: sports-tennis-load
 on:
   workflow_dispatch:
     inputs:
       years:
-        description: "Años (2024,2025,2026); vacío = los 3 últimos"
+        description: "Años (2024,2025,2026) o rangos (2019-2023); vacío = los 3 últimos"
         default: ""
       dry_run:
         description: "true = solo descarga y cuenta"

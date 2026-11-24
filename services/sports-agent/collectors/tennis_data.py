@@ -253,7 +253,7 @@ def build_tournament_docs(rows: Iterable[dict], tour: str, year: int) -> tuple[d
     """Agrupa las filas por torneo → {doc_id: doc}; devuelve también contadores de control."""
     groups: dict[tuple, dict] = {}
     stats = {"rows": 0, "matches": 0, "sin_fecha_o_jugador": 0, "sets_incoherentes": 0,
-             "status": {}, "surface": {}}
+             "status": {}, "surface": {}, "series": {}}
     for row in rows:
         stats["rows"] += 1
         m = normalize_match(row, tour)
@@ -279,6 +279,8 @@ def build_tournament_docs(rows: Iterable[dict], tour: str, year: int) -> tuple[d
             }
         g["matches"].append(m)
         stats["surface"][g["surface"]] = stats["surface"].get(g["surface"], 0) + 1
+        # Categoría pública (Series/Tier): solo para el resumen; no entra en el doc ni en su hash.
+        stats["series"][g["series"]] = stats["series"].get(g["series"], 0) + 1
     docs: dict[str, dict] = {}
     for g in groups.values():
         g["matches"].sort(key=lambda x: (x["date"], x["round"]))
@@ -456,6 +458,35 @@ def daily_years(today: Optional[date] = None) -> list[int]:
     tennis-data va 4-5 días por detrás y cierra el año viejo ya entrado el nuevo."""
     t = today or datetime.now(timezone.utc).date()
     return [t.year - 1, t.year] if t.month == 1 else [t.year]
+
+
+FIRST_XLSX_YEAR = 2013       # antes solo hay .xls, que el lector no lee
+
+
+def parse_years(text: str, today: Optional[date] = None) -> Optional[list[int]]:
+    """'2019-2023,2026' → [2019, 2020, 2021, 2022, 2023, 2026] (ordenados, sin repetir).
+    Vacío → None (= los 3 últimos). ValueError si hay algo que no es año o rango, si un rango
+    va al revés o si un año queda fuera de FIRST_XLSX_YEAR..año en curso."""
+    years: set[int] = set()
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d{4})\s*-\s*(\d{4})", part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                raise ValueError(f"rango al revés: {part}")
+            years.update(range(a, b + 1))
+        elif re.fullmatch(r"\d{4}", part):
+            years.add(int(part))
+        else:
+            raise ValueError(f"no es un año ni un rango: {part}")
+    last = (today or datetime.now(timezone.utc).date()).year
+    bad = sorted(y for y in years if not FIRST_XLSX_YEAR <= y <= last)
+    if bad:
+        raise ValueError(f"años sin .xlsx en tennis-data ({FIRST_XLSX_YEAR}-{last}): {bad}")
+    return sorted(years) or None
 
 
 def default_years(today: Optional[date] = None) -> list[int]:
