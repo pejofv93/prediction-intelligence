@@ -548,6 +548,23 @@ async def run_hl_load_job(job: str, dry_run: bool = True, max_requests: int = 20
                                 max_requests=max(0, min(max_requests, 3000)), leagues=ids)
 
 
+@app.post("/run-hlb-load", dependencies=[Depends(verify_token)])
+async def run_hlb_load_job(dry_run: bool = True, max_requests: int = 90, league_id: int = 0,
+                           seasons: str = "") -> StreamingResponse:
+    """ACB con Highlightly BALONCESTO (plan gratuito, cuota propia 'highlightly_basketball',
+    100/día con 10 de reserva; separada de la de fútbol). Solo estadísticas para Tendencias →
+    hlb_games / hlb_load_state. dry_run=true por defecto: lista y cuenta (≤ 4 peticiones por
+    temporada), no escribe ni pide detalle. league_id: id de la ACB (0 = ACB_LEAGUE_ID, que sale
+    de la sonda). seasons: años de inicio separados por comas (vacío = la actual y las 3 anteriores)."""
+    import re
+    from collectors.highlightly_basket import HLB_DAILY_LIMIT, run_hlb_load
+    if seasons and not re.fullmatch(r"\d{4}(,\d{4})*", seasons):
+        raise HTTPException(status_code=400, detail="seasons: años tipo 2025 separados por comas")
+    years = [int(x) for x in seasons.split(",")] if seasons else None
+    return _stream_with_summary("hlb-load", run_hlb_load, league_id=league_id or None, seasons=years,
+                                dry_run=dry_run, max_requests=max(0, min(max_requests, HLB_DAILY_LIMIT)))
+
+
 @app.post("/run-match-preview-grade", dependencies=[Depends(verify_token)])
 async def run_match_preview_grade_job(dry_run: bool = True) -> StreamingResponse:
     """Ficha de partido (mp-v1): gradúa las fichas congeladas contra el CSV de resultados →

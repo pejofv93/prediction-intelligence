@@ -1,0 +1,61 @@
+# ACB con Highlightly BALONCESTO (sports-agent POST /run-hlb-load). Solo estadísticas para la
+# web de Tendencias: no la usa el motor de apuestas.
+#
+# Cuota propia "highlightly_basketball" (plan gratuito de baloncesto: 100/día, 10 de reserva),
+# separada de la de fútbol. Cada pasada: lista las temporadas (la actual y las 3 anteriores) que
+# falten y pide el detalle de lo terminado, primero la temporada actual. Reanudable: lo hecho no
+# se repide. Histórico estimado ~1.150 peticiones → ~13 días a 90/día; después, mantenimiento.
+#
+# NO CORRE hasta que exista la variable de repositorio HLB_ACTIVO = si (cuando el usuario active
+# el plan de baloncesto, la sonda hlb-acb-probe confirme el id y ACB_LEAGUE_ID esté en el código o
+# en la variable HLB_ACB_LEAGUE_ID). Dos horas por si GitHub se salta un cron: la cuota del día la
+# controla el contador, así que la segunda solo gasta lo que sobre.
+# El log solo muestra recuentos.
+name: hlb-load-daily
+
+on:
+  schedule:
+    - cron: "20 6 * * *"
+    - cron: "20 18 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = solo listar y contar (gasta ≤ 4 por temporada)"
+        default: "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hlb-load
+  cancel-in-progress: false
+
+jobs:
+  cargar:
+    if: vars.HLB_ACTIVO == 'si'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Carga ACB (sports-agent, síncrono)
+        env:
+          LEAGUE_ID: ${{ vars.HLB_ACB_LEAGUE_ID }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "${LEAGUE_ID:-0}" =~ ^[0-9]*$ ]] || { echo "HLB_ACB_LEAGUE_ID inválido"; exit 1; }
+          [[ "$DRY_RUN" =~ ^(true|false)$ ]] || { echo "dry_run inválido"; exit 1; }
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-hlb-load?dry_run=${DRY_RUN}&max_requests=90&league_id=${LEAGUE_ID:-0}" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1500 --no-buffer --fail --silent --show-error > out.txt
+          grep '^summary: ' out.txt | sed 's/^summary: //' > s.json
+          python3 - <<'PY'
+          import json
+          s = json.load(open("s.json"))
+          rows = [{k: r.get(k) for k in ("season", "listed", "finished", "new", "pending_detail")}
+                  for r in s.get("seasons", [])]
+          print(f"peticiones {s.get('requests')} de {s.get('budget')} · temporadas {rows} · "
+                f"detalle {s.get('fetched')} · pendientes {s.get('pending_detail')} · "
+                f"{'pediría ' + str(s.get('would_fetch')) + ' · ' if s.get('dry_run') else ''}"
+                f"errores {s.get('errors')}")
+          PY
+          grep -q '"ok": true' out.txt
