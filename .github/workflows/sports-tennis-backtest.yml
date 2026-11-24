@@ -1,0 +1,47 @@
+# Tenis top tp-v1 (F1) — backtest walk-forward por torneo, SOLO LECTURA
+# (scripts/ops/tennis_backtest.py): cadena de Markov y regresión frente a la referencia
+# (frecuencia de la línea por circuito × superficie × best_of en 24 meses), por mercado y
+# circuito × best_of, con IC95 por partido. Lee tennis_tournaments; no escribe nada ni pide nada
+# fuera de Firestore. El log solo lleva agregados (ningún jugador ni partido). Manual, sin cron.
+name: sports-tennis-backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      eval_from:
+        description: "Torneos con inicio desde (AAAA-MM-DD); lo anterior solo entrena"
+        default: "2024-01-01"
+      eval_to:
+        description: "Hasta (AAAA-MM-DD; vacío = todo)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx scipy numpy
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Backtest tp-v1 (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          EVAL_FROM: ${{ inputs.eval_from }}
+          EVAL_TO: ${{ inputs.eval_to }}
+        run: python scripts/ops/tennis_backtest.py
