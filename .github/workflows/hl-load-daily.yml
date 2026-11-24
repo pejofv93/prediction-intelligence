@@ -8,6 +8,9 @@
 # Copas (fichas mp-v1-cups): lista solo los (copa, día) con alguna ficha de copa y pide el detalle
 # solo de esos cruces (dentro de los 50); después gradúa las fichas de copa con lo que haya en
 # hl_team_stats → match_preview_grades_cups y match_preview_metrics/mp-v1-cups_live.
+# Europa (fichas mp-e1, match_previews_uefa): igual, solo los partidos con ficha → match_preview_
+# grades_uefa y mp-e1_live. Tras el plan PRO, solo Champions y Europa League y con tope propio de
+# 20 al día dentro de los 50 (lo que no quepa, al día siguiente).
 #
 # Dos horas: 05:40 y 17:40 UTC (respaldo, porque GitHub se salta crons). No gasta de más: el
 # tope de 50 es por día UTC (hl_load_state/maint_<fecha>); si la de la mañana ya corrió, la de la

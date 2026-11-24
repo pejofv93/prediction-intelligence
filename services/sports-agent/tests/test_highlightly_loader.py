@@ -579,3 +579,73 @@ def test_uefa_probe_como_mucho_9_y_solo_nombres_de_campo():
     assert el["matches_2025"] == 150 and el["previas_mismo_id_probable"] is False
     assert el["stats"] is not None and "field_names" in el["stats"]
     assert ecl["main_id"] is None and "matches_2025" not in ecl
+
+
+# ── Mantenimiento: Europa (fichas mp-e1) ─────────────────────────────────────────
+
+class _UefaStore(_CupStore):
+    def __init__(self, uefa=()):
+        super().__init__()
+        self.uefa = list(uefa)
+
+    def uefa_previews(self, lo, hi):
+        return [p for p in self.uefa if lo <= p["kickoff_utc"] <= hi]
+
+
+def _uefa_preview(hl_id, comp, lid, day="2026-12-15"):
+    blk = {"market": "corners_team", "label": "medido en backtest", "highlight": False,
+           "lines": {"over_4_5": {"line": 4.5, "p_model": 0.55, "p_league": 0.5}}}
+    return {"match_id": f"{comp}_{day}_{hl_id}", "div": comp, "comp": comp, "league_id": lid, "season": "2627",
+            "date": day, "kickoff_utc": f"{day}T20:00:00+00:00", "home_team": "Aland FC", "away_team": "Qarabeta",
+            "hl_match_id": hl_id, "hash": "h", "computed_at": f"{day}T02:00:00+00:00", "data_cutoff": "2026-12-10",
+            "low_sample": False, "stats": {"corners": {"available": True, "lines": {"home": blk}}}}
+
+
+AFTER_PRO = datetime(2026, 12, 16, 12, 0, tzinfo=timezone.utc)
+
+
+def _uefa_maint(monkeypatch, cap=20):
+    monkeypatch.setattr(L, "UEFA_SEASONS", _UEFA_FAKE)
+    monkeypatch.setattr(L, "HL_UEFA_MAINT_DAILY", cap)
+    day = "2026-12-15"
+    days = {(9001, day): [_sm(60 + i, "Aland FC", "Qarabeta", 10, 99, day, 2026) for i in range(3)],
+            (9003, day): [_sm(70, "Bravia", "Zeta", 20, 98, day, 2026)]}
+    stats = {60 + i: _stats(10, "Aland FC", 99, "Qarabeta", corners=(6, 2)) for i in range(3)}
+    stats[70] = _stats(20, "Bravia", 98, "Zeta")
+    store = _UefaStore([_uefa_preview(60 + i, "CL", 9001) for i in range(3)] + [_uefa_preview(70, "ECL", 9003)])
+    store.put(L.STATE, {"nt_core_teams": {"ids": [10, 20]}, "maint_last_day": {"day": "2026-12-14"}})
+    return store, _Client(stats=stats, days=days)
+
+
+def test_maint_europa_tras_el_pro_solo_cl_y_el_con_ficha_y_gradua(monkeypatch):
+    store, client = _uefa_maint(monkeypatch)
+    out = _run("maint", client, store, max_requests=3000, now=AFTER_PRO)
+    assert out["ok"] and out["uefa_budget"] == 20
+    assert sum("leagueId=9001&date=2026-12-15" in u for u in client.calls) == 1
+    assert not any("leagueId=9003" in u for u in client.calls)                 # la Conference no
+    assert {u.rsplit("/", 1)[1] for u in client.calls if "/statistics/" in u} == {"60", "61", "62"}
+    assert store.c[L.TEAM_STATS]["60"]["group"] == "uefa" and store.c[L.TEAM_STATS]["60"]["comp"] == "CL"
+    assert store.c[L.STATE]["maint_2026-12-16"]["uefa_used"] == 4
+    g = out["uefa_grade"]
+    assert g["counts"] == {"graduada": 3, "esperando estadísticas": 1}           # la de la Conference
+    assert store.c["match_preview_grades_uefa"]["CL_2026-12-15_60"]["status"] == "graduada"
+
+
+def test_maint_europa_tope_propio_por_fecha_tras_el_pro(monkeypatch):
+    store, client = _uefa_maint(monkeypatch, cap=2)
+    out = _run("maint", client, store, max_requests=3000, now=AFTER_PRO)
+    assert out["ok"] and sum(1 for u in client.calls if "leagueId=9001" in u or "/statistics/6" in u) == 2
+    assert store.c[L.STATE]["maint_2026-12-16"]["uefa_used"] == 2
+    assert sum(1 for it in store.c[L.STATE]["maint_backlog"]["items"] if it["job"] == "uefa") == 2
+    # Otra pasada el mismo día: el tope de Europa ya está gastado; lo demás sigue.
+    client2 = _Client(stats=client.stats, days=client.days)
+    out2 = _run("maint", client2, store, max_requests=3000, now=AFTER_PRO)
+    assert out2["uefa_budget"] == 0 and not any("/statistics/6" in u for u in client2.calls)
+
+
+def test_maint_europa_con_pro_las_tres_y_sin_tope_propio(monkeypatch):
+    assert L.uefa_maint_cap(datetime(2026, 12, 12).date()) is None
+    assert L.uefa_maint_cap(datetime(2026, 12, 13).date()) == L.HL_UEFA_MAINT_DAILY
+    prev = [_uefa_preview(1, "CL", 9001, "2026-11-12"), _uefa_preview(2, "ECL", 9003, "2026-11-12")]
+    assert L.uefa_targets(prev, ["2026-11-12"], NOW.date()) == {"2026-11-12": {9001: {1}, 9003: {2}}}
+    assert L.uefa_targets(prev, ["2026-11-12"], AFTER_PRO.date()) == {"2026-11-12": {9001: {1}}}
