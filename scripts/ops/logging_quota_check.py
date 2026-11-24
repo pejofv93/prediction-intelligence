@@ -36,6 +36,21 @@ def _get(url: str, params: list[tuple[str, str]] | None = None) -> dict:
         return {"error": {"code": e.code, "status": err.get("status", "")}}
 
 
+def _post(url: str, body: dict) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Authorization": f"Bearer {TOKEN}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.load(e).get("error", {})
+        except Exception:
+            err = {}
+        return {"error": {"code": e.code, "status": err.get("status", "")}}
+
+
 def _series(metric_filter: str, aligner: str, group_by: list[str]) -> dict:
     end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(days=DAYS)
@@ -86,14 +101,39 @@ def main() -> None:
     except Exception as e:
         print(f"  no se pudo leer la credencial ({type(e).__name__})")
 
+    # 1b) ¿Tiene la cuenta permiso para escribir entradas de log? (testIamPermissions y roles
+    #     de la cuenta en el proyecto; solo nombres de permiso y de rol).
+    print("== Permisos de la cuenta de servicio en el proyecto")
+    perms = ["logging.logEntries.create", "logging.logEntries.list", "logging.logs.list"]
+    d = _post(f"https://cloudresourcemanager.googleapis.com/v1/projects/{PROJECT}:testIamPermissions",
+              {"permissions": perms})
+    if "error" in d:
+        print(f"  testIamPermissions sin acceso: {d['error'].get('code')} {d['error'].get('status')}")
+    else:
+        have = set(d.get("permissions", []))
+        for perm in perms:
+            print(f"  {perm}: {'sí' if perm in have else 'NO'}")
+    try:
+        email = json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])).get("client_email", "")
+    except Exception:
+        email = ""
+    d = _post(f"https://cloudresourcemanager.googleapis.com/v1/projects/{PROJECT}:getIamPolicy", {})
+    if "error" in d:
+        print(f"  roles: sin acceso ({d['error'].get('code')} {d['error'].get('status')})")
+    else:
+        roles = sorted(b["role"] for b in d.get("bindings", [])
+                       if f"serviceAccount:{email}" in b.get("members", []))
+        print("  roles de la cuenta: " + (", ".join(roles) if roles else "ninguno directo"))
+
     # 2) Peticiones a la API de Logging por hora, método y código (solo las que se cargan a
     #    este proyecto como consumidor).
     _print_hours(
         "Peticiones a logging.googleapis.com cargadas a este proyecto (por hora UTC, método, código)",
         _series(f'metric.type="serviceruntime.googleapis.com/api/request_count" AND '
                 f'resource.type="consumed_api" AND resource.labels.service="{LOGGING}"',
-                "ALIGN_SUM", ["resource.labels.method", "metric.labels.response_code"]),
-        [("resource", "method"), ("metric", "response_code")])
+                "ALIGN_SUM", ["resource.labels.method", "metric.labels.response_code",
+                              "metric.labels.grpc_status_code"]),
+        [("resource", "method"), ("metric", "response_code"), ("metric", "grpc_status_code")])
 
     # 3) Cuotas superadas y uso por cuota.
     _print_hours(
