@@ -12,14 +12,14 @@ Partidos de entrada (games_from_docs convierte eur_games y las colecciones con s
 Modelo (por 100 posesiones, ajustado por rival, ritmo, casa/fuera y prórroga):
   Liga (antes del corte; temporada actual peso 1, anterior 0,5):
     R_casa[s], R_fuera[s] = estadística s por 100 posesiones del local y del visitante
-    P = posesiones por equipo en 40 minutos (las de un partido con prórroga × 40/(40+5·prórrogas))
+    P = posesiones por equipo en 40 minutos (NBA 48; con prórroga × 40/(40+5·prórrogas))
     tasa_prórroga = prórrogas medias por partido
   Equipo (mismos pesos, encogido hacia 1 con K = 8 partidos ficticios de equipo medio):
     ataque[s]  = media de (lo suyo por 100 / R de su sede)
     defensa[s] = media de (lo del rival por 100 / R de la sede del rival)
     ritmo      = media de (posesiones en 40 min del partido / P)
   Partido:
-    posesiones = P × ritmo_local × ritmo_visitante × (1 + tasa_prórroga × 5/40)
+    posesiones = P × ritmo_local × ritmo_visitante × (1 + tasa_prórroga × 5/40)   (NBA 5/48)
     media_local[s]     = posesiones × R_casa[s]/100  × ataque_local[s]     × defensa_visitante[s]
     media_visitante[s] = posesiones × R_fuera[s]/100 × ataque_visitante[s] × defensa_local[s]
     total = las dos sumadas (los puntos con prórroga, como gradúan las casas)
@@ -53,6 +53,7 @@ MIN_CUR = 5                  # partidos de la temporada actual de cada equipo pa
 MIN_RESID = 60               # residuos de la liga para usar su desviación en vez de la bruta
 TEAM_REF_PRIOR = 2.0         # partidos ficticios a la frecuencia de la liga en la media del equipo
 REG_MIN, OT_MIN = 40.0, 5.0
+REG_MIN_BY_LEAGUE = {"NBA": 48.0}     # FIBA 40 min; NBA 48. La prórroga es de 5 en las dos
 QUANTILES = (0.25, 0.5, 0.75)
 
 STATS = ("pts", "reb", "ast", "fg3m")
@@ -120,14 +121,18 @@ def games_from_docs(docs: Iterable[dict], league: str) -> list[dict]:
     return [g for g in out if g["home"] and g["away"]]
 
 
-def reg_factor(ot: int) -> float:
-    """Fracción de 40 minutos sobre los minutos jugados: 1 sin prórroga, 40/45 con una."""
-    return REG_MIN / (REG_MIN + OT_MIN * ot)
+def reg_minutes(league: str) -> float:
+    return REG_MIN_BY_LEAGUE.get(league, REG_MIN)
+
+
+def reg_factor(ot: int, reg: float = REG_MIN) -> float:
+    """Fracción del tiempo reglamentario sobre los minutos jugados: 1 sin prórroga, 40/45 con una."""
+    return reg / (reg + OT_MIN * ot)
 
 
 def game_poss(g: dict) -> float:
-    """Posesiones por equipo del partido, llevadas a 40 minutos."""
-    return (g["h"]["poss"] + g["a"]["poss"]) / 2 * reg_factor(g["ot"])
+    """Posesiones por equipo del partido, llevadas al tiempo reglamentario (40 min; NBA 48)."""
+    return (g["h"]["poss"] + g["a"]["poss"]) / 2 * reg_factor(g["ot"], reg_minutes(g["league"]))
 
 
 def stat_value(g: dict, stat: str, side: Optional[str]) -> float:
@@ -282,7 +287,7 @@ def expected(hist: History, league: str, season: str, before: str, home: str, aw
     th = hist.team_games(league, home, season, before)
     ta = hist.team_games(league, away, season, before)
     ih, ia = hist.team_indices(th, lm, k), hist.team_indices(ta, lm, k)
-    poss = lm["pace"] * ih["pace"] * ia["pace"] * (1 + lm["ot_rate"] * OT_MIN / REG_MIN)
+    poss = lm["pace"] * ih["pace"] * ia["pace"] * (1 + lm["ot_rate"] * OT_MIN / reg_minutes(league))
     h = {s: poss * lm["rate"][s][0] / 100 * ih["att"][s] * ia["def"][s] for s in STATS}
     a = {s: poss * lm["rate"][s][1] / 100 * ia["att"][s] * ih["def"][s] for s in STATS}
     return {"poss": poss, "h": h, "a": a, "total": {s: h[s] + a[s] for s in STATS},

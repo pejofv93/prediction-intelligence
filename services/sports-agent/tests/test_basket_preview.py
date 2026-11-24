@@ -156,3 +156,9 @@ def test_sesgo_medio_pequeno():
     bias = bp.mean_bias(bp.History(games), "EUR", ["E2025"])
     assert set(bias) == set(bp.STATS)
     assert abs(bias["pts"]) < 6        # la prórroga entra en la media del total
+
+
+def test_prorroga_nba_sobre_48_minutos():
+    g = {"league": "NBA", "ot": 1, "h": _side(110, poss=106.0), "a": _side(108, poss=106.0)}
+    assert bp.game_poss(g) == pytest.approx(106 * 48 / 53)
+    assert bp.game_poss({**g, "league": "EUR"}) == pytest.approx(106 * 40 / 45)
