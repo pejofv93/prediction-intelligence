@@ -147,3 +147,66 @@ def test_informe_semanal_separa_enviadas_y_sombra():
     assert len(sent) == 1 and len(shadow) == 2
     lines = report_lines(summarize(shadow, now), TITLE_SHADOW)
     assert lines[0] == TITLE_SHADOW and "n=2" in lines[2]
+
+
+# ── Tenis odds-only en sombra (SPORTS_TENNIS_ODDS_ONLY_SHADOW, 24-nov-2026) ────────
+_TOO = {"sport": "tennis", "market_type": "h2h", "match_id": "t1", "selection": "Jugador A",
+        "home_team": "Jugador A", "away_team": "Jugador B", "odds": 1.9, "ev": 0.1, "edge": 0.09,
+        "match_date": "2099-01-01T20:00:00Z", "data_source": "odds_only",
+        "prediction_id": "t1_h2h_p1_oo"}
+
+
+def test_tenis_odds_only_se_registra_en_sombra_y_no_se_envia(bot, monkeypatch):
+    monkeypatch.setattr(alert_manager, "SPORTS_TENNIS_ODDS_ONLY_SHADOW", True)
+    r = bot["client"].post("/send-alert", json={"type": "sports", "data": dict(_TOO)}, headers=HEADERS)
+    assert r.status_code == 202 and r.json()["reason"] == "shadow"
+    assert bot["messages"] == [] and bot["claims"] == 0
+    assert bot["records"] == [("h2h", True)]
+
+
+def test_tenis_con_estadisticas_se_envia(bot, monkeypatch):
+    monkeypatch.setattr(alert_manager, "SPORTS_TENNIS_ODDS_ONLY_SHADOW", True)
+    data = {k: v for k, v in _TOO.items() if k != "data_source"}
+    data["prediction_id"] = "t1_h2h_p1"
+    r = bot["client"].post("/send-alert", json={"type": "sports", "data": data}, headers=HEADERS)
+    assert r.status_code == 200 and bot["messages"] == ["sports"]
+
+
+def test_con_la_sombra_de_tenis_apagada_sale(bot, monkeypatch):
+    monkeypatch.setattr(alert_manager, "SPORTS_TENNIS_ODDS_ONLY_SHADOW", False)
+    r = bot["client"].post("/send-alert", json={"type": "sports", "data": dict(_TOO)}, headers=HEADERS)
+    assert r.status_code == 200 and bot["messages"] == ["sports"]
+
+
+def test_is_tennis_odds_only():
+    from shared.config import is_tennis_odds_only
+    assert is_tennis_odds_only({"sport": "tennis", "data_source": "odds_only"})
+    assert is_tennis_odds_only({"sport": "tennis", "prediction_id": "x_h2h_p2_oo"})
+    assert not is_tennis_odds_only({"sport": "tennis", "prediction_id": "x_h2h_p2"})
+    assert not is_tennis_odds_only({"sport": "football", "data_source": "odds_only"})
+
+
+def test_aviso_de_cambio_de_cuota_no_sale_para_tenis_odds_only(monkeypatch):
+    sent = []
+
+    async def _send(text, *a, **k):
+        sent.append(text)
+        return True
+
+    # el doc de predictions no lleva prediction_id: se reconoce por el id del doc (_oo)
+    pred = {"match_id": "t1", "sport": "tennis", "market_type": "h2h", "odds": 2.0,
+            "calculated_prob": 0.6, "match_date": "2099-01-01T20:00:00Z", "home_team": "A",
+            "away_team": "B", "selection": "A"}
+    docs = [type("D", (), {"id": "t1_h2h_p1_oo", "to_dict": lambda s: dict(pred)})()]
+
+    class _Q:
+        def where(self, *a, **k): return self
+        def limit(self, *a): return self
+        def stream(self): return iter(docs)
+
+    monkeypatch.setattr(fc, "col", lambda name: _Q())
+    monkeypatch.setattr(alert_manager, "send_message", _send)
+    monkeypatch.setattr(shared.match_timing, "signal_is_too_late", lambda d: False)
+    monkeypatch.setattr(alert_manager, "SPORTS_TENNIS_ODDS_ONLY_SHADOW", True)
+    assert asyncio.run(alert_manager.check_pending_odds_changes({"t1": 1.7})) == 0
+    assert sent == []

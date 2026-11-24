@@ -2086,7 +2086,7 @@ async def _send_telegram_alert(prediction: dict) -> bool:
         if sent:
             logger.info("_send_telegram_alert: alerta entregada al usuario")
         elif body.get("reason") == "shadow":
-            logger.info("_send_telegram_alert: 1X2 de fútbol en sombra — registrada sin enviar")
+            logger.info("_send_telegram_alert: en sombra (1X2 de fútbol o tenis odds-only) — registrada sin enviar")
         else:
             logger.info("_send_telegram_alert: deduplicada por el bot (sent=False)")
         return bool(sent)

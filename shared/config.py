@@ -148,6 +148,13 @@ POLY_BUY_NO_SHADOW = os.environ.get("POLY_BUY_NO_SHADOW", "true").lower() in ("1
 # con type "sports_shadow" / status "shadow" y tampoco manda sus avisos de cambio de cuota.
 # Para reactivar el envío: cambiar el valor por defecto aquí a "false".
 SPORTS_FOOTBALL_1X2_SHADOW = os.environ.get("SPORTS_FOOTBALL_1X2_SHADOW", "true").lower() in ("1", "true", "yes")
+# Señales de TENIS del motor de valor sacadas solo de las cuotas («odds-only», 24-nov-2026): el
+# colector de tenis (RapidAPI) no trae estadísticas de jugadores desde mayo, y sin ellas
+# tennis_analyzer usa la probabilidad sin margen de la cuota media frente a la mejor cuota (la
+# «ventaja» es solo la diferencia entre casas). Van en sombra como el 1X2: se registran en
+# alerts_sent como sports_shadow y no se envían ni avisan de cambio de cuota. Las de tenis con
+# estadísticas siguen saliendo. Para reactivarlas: cambiar el valor por defecto a "false".
+SPORTS_TENNIS_ODDS_ONLY_SHADOW = os.environ.get("SPORTS_TENNIS_ODDS_ONLY_SHADOW", "true").lower() in ("1", "true", "yes")
 # Tipos de alerts_sent que se gradúan y se miden al cierre (enviadas y en sombra).
 SPORTS_GRADED_TYPES = ["sports_sent", "sports_shadow"]
 
@@ -157,6 +164,15 @@ def is_football_1x2(prediction: dict) -> bool:
     sport = str(prediction.get("sport") or "football").lower()
     market = str(prediction.get("market_type") or "h2h").lower()
     return sport in ("football", "soccer") and market in ("h2h", "1x2")
+
+
+def is_tennis_odds_only(prediction: dict) -> bool:
+    """Señal de tenis del camino odds-only de tennis_analyzer (data_source=odds_only; el id del
+    doc de predictions termina en _oo)."""
+    if str(prediction.get("sport") or "").lower() != "tennis":
+        return False
+    pid = str(prediction.get("prediction_id") or "")
+    return prediction.get("data_source") == "odds_only" or pid.endswith("_oo")
 
 # Thresholds por liga — calibrados por backtest histórico (prodmatch_results)
 # Ligas con ROI positivo en backtest → umbral más bajo (más señales)

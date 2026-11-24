@@ -15,6 +15,7 @@ from shared.config import (
     TELEGRAM_CHAT_ID, TELEGRAM_TOKEN,
     TELEGRAM_SPORTS_THREAD_ID, TELEGRAM_POLY_THREAD_ID,
     SPORTS_MIN_EDGE, SPORTS_FOOTBALL_1X2_SHADOW, is_football_1x2,
+    SPORTS_TENNIS_ODDS_ONLY_SHADOW, is_tennis_odds_only,
 )
 
 logger = logging.getLogger(__name__)
@@ -868,8 +869,8 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
                 )
                 continue
 
-            # 1X2 de fútbol en sombra: tampoco sale su aviso de cambio de cuota.
-            if SPORTS_FOOTBALL_1X2_SHADOW and is_football_1x2(pred):
+            # En sombra (1X2 de fútbol, tenis odds-only): tampoco sale su aviso de cambio de cuota.
+            if _shadow_kind({**pred, "prediction_id": pred.get("prediction_id") or doc.id}):
                 continue
 
             match_id = str(pred.get("match_id") or doc.id)
@@ -977,6 +978,16 @@ async def check_pending_odds_changes(current_odds_by_match: dict[str, float]) ->
     return sent_count
 
 
+def _shadow_kind(prediction: dict) -> str | None:
+    """Por qué va en sombra (registrada sin enviar), o None si se envía:
+    "1X2" (SPORTS_FOOTBALL_1X2_SHADOW) o "TENIS_ODDS_ONLY" (SPORTS_TENNIS_ODDS_ONLY_SHADOW)."""
+    if SPORTS_FOOTBALL_1X2_SHADOW and is_football_1x2(prediction):
+        return "1X2"
+    if SPORTS_TENNIS_ODDS_ONLY_SHADOW and is_tennis_odds_only(prediction):
+        return "TENIS_ODDS_ONLY"
+    return None
+
+
 def _record_sports_sent(prediction: dict, shadow: bool = False) -> None:
     """
     Registro de lo REALMENTE enviado (fútbol, tenis, baloncesto) en alerts_sent, type=sports_sent.
@@ -1044,8 +1055,8 @@ async def send_sports_alert(prediction: dict) -> str:
     Formatea prediccion deportiva y envia a TELEGRAM_CHAT_ID.
     Baloncesto/fútbol/tenis: un envío por partido+fecha+mercado (_claim_match_slot).
     Resto, o sin fecha: dedup 24h via _claim_alert_slot.
-    Devuelve "sent", "duplicate" (dedup), "too_late" (TIMING_GUARD), "shadow" (1X2 de
-    fútbol en sombra: registrada, sin enviar) o "rejected" (Telegram no aceptó el mensaje).
+    Devuelve "sent", "duplicate" (dedup), "too_late" (TIMING_GUARD), "shadow" (en sombra:
+    1X2 de fútbol o tenis odds-only, registrada sin enviar) o "rejected" (Telegram no aceptó el mensaje).
     """
     edge = float(prediction.get("edge") or 0)
     key = _alert_key(prediction, edge)
@@ -1062,12 +1073,13 @@ async def send_sports_alert(prediction: dict) -> str:
         )
         return "too_late"
 
-    # 1X2 de fútbol en sombra: se registra (graduable y medible al cierre) y no se envía.
-    # No ocupa el slot del partido: si algún día se reactiva, el primer envío sale normal.
-    if SPORTS_FOOTBALL_1X2_SHADOW and is_football_1x2(prediction):
+    # En sombra (1X2 de fútbol, tenis odds-only): se registra (graduable y medible al cierre)
+    # y no se envía. No ocupa el slot del partido: si se reactiva, el primer envío sale normal.
+    _kind = _shadow_kind(prediction)
+    if _kind:
         prediction, _ = _apply_tier_adjustment(prediction)
         _record_sports_sent(prediction, shadow=True)
-        logger.info("send_sports_alert: SHADOW_1X2 — registrada sin enviar (%s)", key)
+        logger.info("send_sports_alert: SHADOW_%s — registrada sin enviar (%s)", _kind, key)
         return "shadow"
 
     # Dedup atómico: pre-escribe antes de enviar
