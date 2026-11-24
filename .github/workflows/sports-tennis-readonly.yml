@@ -1,0 +1,38 @@
+# Tenis top (tp-v1) F0 — SOLO LECTURA sobre tennis_tournaments (scripts/ops/tennis_readonly.py):
+# series por circuito (y qué torneos quedan fuera de la lista cerrada), partidos por circuito,
+# superficie y best_of con valid/status, e histograma de partidos por jugador y superficie en 24
+# meses. No escribe nada. El log solo lleva agregados (series y torneos son categorías públicas;
+# ningún nombre de jugador). Manual, sin cron.
+name: sports-tennis-readonly
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  consultar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Series, forma de los datos y muestra por jugador (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/tennis_readonly.py
