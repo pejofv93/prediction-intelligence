@@ -1,5 +1,6 @@
 # Dos consultas de SOLO LECTURA (manual, sin cron). No escribe nada.
 #  - fichas: aciertos de las fichas graduadas por liga y mercado (scripts/ops/previews_grade_summary.py).
+#  - logging: qué cuota de Cloud Logging agota job_runner desde Actions (scripts/ops/logging_quota_check.py).
 #  - collect: tiempo de cada paso de sports-collect desde los logs de Cloud Run de sports-agent
 #    (scripts/ops/collect_step_times.py). El log solo lleva pasos, minutos y recuentos.
 name: ops-readonly
@@ -75,3 +76,18 @@ jobs:
             | awk -F'\t' '{o = ($2 == "github-actions") ? "actions  " : "cloud-run"; match($3, /analyze: .*/); print substr($1,1,16), o, substr($3, RSTART)}' \
             | sed -E 's/ en [0-9.]+s / /' | sort | tail -80 || echo "sin líneas"
           rm -f logs.txt err.txt
+
+      - name: Cloud Logging desde GitHub Actions — qué cuota se agota (Monitoring y Service Usage)
+        env:
+          DAYS: ${{ inputs.days }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          echo "== Líneas escritas por job_runner (revisión github-actions) por hora UTC"
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND resource.labels.revision_name="github-actions"' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 20000 \
+            --format 'value(timestamp)' 2> err.txt | cut -c1-13 | sort | uniq -c || true
+          grep -oE "PERMISSION_DENIED" err.txt | head -1; rm -f err.txt
+          TOKEN=$(gcloud auth print-access-token) PROJECT=prediction-intelligence \
+            python scripts/ops/logging_quota_check.py
