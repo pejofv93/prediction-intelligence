@@ -55,9 +55,17 @@ MAIN_DIVS: dict[str, str] = {
 # Segundas divisiones: solo temporada anterior y solo filas de equipos que hoy están
 # en una división principal (historial de ascendidos).
 LOWER_DIVS: dict[str, str] = {"E1": "ELC", "I2": "SB", "F2": "FL2", "D2": "BL2"}
+# Ligas de fuera de las 8 que SOLO lee Europa (mp-e1, fuerza en su liga de los equipos de CL/EL/ECL):
+# no entran en MAIN_DIVS ni en LOWER_DIVS, así que mp-v1, el colector y la web no cambian.
+# Verificado el 24-nov-2026 en mmz4281 (2020/21 a 2026/27): las cuatro traen FTHG/FTAG, HS/AS,
+# HST/AST, HF/AF, HC/AC, HY/AY y HR/AR (huecos sueltos: T1 2022/23 29 partidos sin estadísticas;
+# B1/G1/T1 1-3 partidos alguna temporada). HxG/AxG solo desde 2026/27.
+EUROPE_DIVS: dict[str, str] = {"B1": "JPL", "T1": "SL", "G1": "GSL", "SC0": "SPL"}
 
-_FREE_KICKS_NOT_FOULS = {"F2"}
-_SECOND_YELLOW_EXCLUDED = {"E0", "E1"}
+# notes.txt: en Francia 2ª, Bélgica 1ª y Grecia 1ª HF/AF son "Free Kicks Conceded" (faltas + fueras
+# de juego + otras), no faltas; Escocia, como Inglaterra, no cuenta la 1ª amarilla de una doble.
+_FREE_KICKS_NOT_FOULS = {"F2", "B1", "G1"}
+_SECOND_YELLOW_EXCLUDED = {"E0", "E1", "SC0"}
 
 WEIGHT_CURRENT = 1.0
 WEIGHT_PREV_SAME_DIV = 0.5

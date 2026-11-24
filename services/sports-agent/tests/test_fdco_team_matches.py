@@ -61,6 +61,19 @@ def test_convencion_tarjetas_inglaterra():
     assert esp["cards_convention"] == "second_yellow_counts_yellow_plus_red"
 
 
+def test_ligas_de_europa_fuera_de_las_8_y_con_sus_notas():
+    assert set(m.EUROPE_DIVS) == {"B1", "T1", "G1", "SC0"}
+    assert not set(m.EUROPE_DIVS) & (set(m.MAIN_DIVS) | set(m.LOWER_DIVS))
+    for div in ("B1", "G1"):                       # HF/AF = tiros libres concedidos (notes.txt)
+        home, _ = m.team_rows_from_csv_row(_csv_row(), div, "2526")
+        assert home["fouls_for"] is None and home["fouls_note"] == "free_kicks_conceded_not_fouls"
+    tur, _ = m.team_rows_from_csv_row(_csv_row(), "T1", "2526")
+    sco, _ = m.team_rows_from_csv_row(_csv_row(), "SC0", "2526")
+    assert tur["fouls_for"] is not None and tur["corners_for"] is not None
+    assert sco["cards_convention"] == "second_yellow_excluded_from_yellows"
+    assert tur["cards_convention"] == "second_yellow_counts_yellow_plus_red"
+
+
 def test_temporadas():
     assert m.season_code(2027) == "2627"
     assert m.current_season_end_year(date(2026, 11, 7)) == 2027
