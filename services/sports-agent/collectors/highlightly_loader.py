@@ -112,13 +112,17 @@ CUP_SEASONS = (2026, 2025, 2024, 2023, 2022, 2021, 2020)   # la más reciente pr
 CUP_CURRENT_SEASON = 2026
 CUP_TEAMS_MAX_DAYS = 7          # la lista de equipos de liga se recalcula como mucho cada 7 días
 CUP_TEAMS_MIN = 100             # menos equipos = players sin cargar: no se lista nada
-# Europa (CL, EL, ECL). Los ids de Highlightly salen del sondeo uefa_probe (aún SIN lanzar): hasta
-# rellenarlos, el trabajo uefa falla con un error claro. Por competición, lista de (id, temporada):
-# el id puede cambiar con el formato (la Champions femenina cambió en 2025) y las previas pueden ir
-# en otro id (entonces se añaden aquí también, con la misma competición). La ECL empieza en 2021.
+# Europa (CL, EL, ECL). Ids de Highlightly del sondeo uefa_probe del 24-nov-2026: un solo id por
+# competición en todas las temporadas, con las previas dentro (2025/26: CL 281 partidos, EL 271,
+# ECL 409, frente a 189/189/153 de fase principal y eliminatorias). Por competición, lista de
+# (id, temporada); temporada = año de inicio (2025 = 2025/26). De 2020/21 a la actual; la ECL
+# empieza en 2021/22. Si un id cambiara con el formato, se añade aquí con la misma competición.
 UEFA_COMPS = ("CL", "EL", "ECL")
-UEFA_SEASONS: dict[str, list[tuple[int, int]]] = {"CL": [], "EL": [], "ECL": []}
+_UEFA_IDS = {"CL": 2486, "EL": 3337, "ECL": 722432}
+_UEFA_FIRST = {"CL": 2020, "EL": 2020, "ECL": 2021}
 UEFA_CURRENT_SEASON = 2026
+UEFA_SEASONS: dict[str, list[tuple[int, int]]] = {
+    c: [(_UEFA_IDS[c], y) for y in range(_UEFA_FIRST[c], UEFA_CURRENT_SEASON + 1)] for c in UEFA_COMPS}
 UEFA_PROBE = {"CL": "Champions League", "EL": "Europa League", "ECL": "Conference League"}
 # /leagues?leagueName= busca por el nombre EXACTO (sondeo del 24-nov: "Champions League" → 0 ligas).
 # Se prueban en orden y se para en el primero que devuelve algo.

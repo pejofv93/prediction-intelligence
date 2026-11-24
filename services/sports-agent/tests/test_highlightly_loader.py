@@ -493,6 +493,17 @@ def test_cups_dry_run_no_escribe():
 _UEFA_FAKE = {"CL": [(9001, 2026), (9001, 2025)], "EL": [(9002, 2026)], "ECL": [(9003, 2026)]}
 
 
+def test_uefa_seasons_ids_del_sondeo():
+    # Sondeo del 24-nov-2026: un id por competición; 2020/21 → actual, la ECL desde 2021/22
+    assert L.uefa_missing() == []
+    assert {c: {i for i, _ in v} for c, v in L.UEFA_SEASONS.items()} ==         {"CL": {2486}, "EL": {3337}, "ECL": {722432}}
+    assert [y for _, y in L.UEFA_SEASONS["CL"]] == list(range(2020, 2027))
+    assert [y for _, y in L.UEFA_SEASONS["ECL"]] == list(range(2021, 2027))
+    comps = L._comps("uefa", None)
+    assert comps[:3] == [(2486, 2026, True), (3337, 2026, True), (722432, 2026, True)]
+    assert len(comps) == 7 + 7 + 6
+
+
 def test_uefa_sin_ids_falla_claro_y_no_pide_nada(monkeypatch):
     monkeypatch.setattr(L, "UEFA_SEASONS", {"CL": [], "EL": [], "ECL": []})
     client = _Client()
