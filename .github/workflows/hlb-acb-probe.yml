@@ -1,0 +1,45 @@
+# Sonda de Highlightly BALONCESTO para la ACB (scripts/ops/hlb_acb_probe.py).
+# EXACTAMENTE 3 peticiones (leagues?leagueName=ACB, matches de una temporada, statistics de un
+# partido), con la clave HIGHLIGHTLY_API_KEY (la misma que fútbol; necesita el plan de baloncesto
+# activado). No pasa por el contador de cuota (no hay GCP): entra en la reserva de 10 al día.
+# No escribe nada. Log público: ids, recuentos, nombres de campos y cabeceras x-ratelimit; sin
+# equipos, marcadores ni valores. Manual, sin cron.
+name: hlb-acb-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "temporada para /matches (vacío = la anterior a la más reciente)"
+        default: ""
+      league_id:
+        description: "id de la liga si la búsqueda por nombre devuelve varias (vacío = la de España)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sonda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Sonda ACB (3 peticiones, solo lectura)
+        env:
+          HIGHLIGHTLY_API_KEY: ${{ secrets.HIGHLIGHTLY_API_KEY }}
+          SEASON: ${{ inputs.season }}
+          LEAGUE_ID: ${{ inputs.league_id }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          [[ "${SEASON:-}" =~ ^[0-9-]*$ ]] || { echo "season inválida"; exit 1; }
+          [[ "${LEAGUE_ID:-}" =~ ^[0-9]*$ ]] || { echo "league_id inválido"; exit 1; }
+          python scripts/ops/hlb_acb_probe.py
