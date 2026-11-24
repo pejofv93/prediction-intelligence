@@ -17,6 +17,12 @@ Trabajos (job):
   players      box score (jugadores) de los clubes de las 8 ligas → /box-score por partido
   cups         copas y supercopas de esos países (CUPS, 2020-2026): solo cruces entre dos equipos
                de las 8 ligas (sacados de players) → /statistics. Va después de players.
+  uefa_probe   sondeo de Europa (Champions, Europa League, Conference League), ≤ 9 peticiones: por
+               competición 1 /leagues (ids, temporadas), 1 listado de la temporada 2025 (recuentos y
+               meses, para saber si las previas van en el mismo id) y 1 /statistics (nombres de campo)
+  uefa         Europa (UEFA_SEASONS, ids del sondeo): TODOS los partidos (previas, fase principal,
+               playoff y eliminatorias), sin filtrar a los equipos de las 8 ligas → /statistics.
+               Sin ids en UEFA_SEASONS falla con un error claro (no pide nada).
 
 Cada pasada: 1) lista los partidos de cada (competición, temporada) pendiente, 2) pide el
 detalle de los partidos terminados que falten, del más reciente al más antiguo, hasta el tope
@@ -36,8 +42,8 @@ Selecciones — qué equipos entran:
     menos una de ellas. La lista sale de los datos, sin mantenerla a mano.
 
 Colecciones (por shared.firestore_client.col, migran con el resto):
-  hl_team_stats/{match_id}        nt, women y cups (group = "cups"): partido + estadísticas de
-                                  equipo de los dos lados
+  hl_team_stats/{match_id}        nt, women, cups y uefa (group = "cups" / "uefa"): partido +
+                                  estadísticas de equipo de los dos lados (uefa además comp y round)
   hl_matches/{match_id}           players: partido + estado del box score (como highlightly_players)
   hl_match_players/{match_id}     players: un doc por partido con los jugadores de los dos equipos
   hl_load_state/{clave}           avance del listado por (trabajo, competición, temporada) y la
@@ -47,8 +53,10 @@ import asyncio
 import logging
 import os
 import re
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -101,6 +109,18 @@ CUP_SEASONS = (2026, 2025, 2024, 2023, 2022, 2021, 2020)   # la más reciente pr
 CUP_CURRENT_SEASON = 2026
 CUP_TEAMS_MAX_DAYS = 7          # la lista de equipos de liga se recalcula como mucho cada 7 días
 CUP_TEAMS_MIN = 100             # menos equipos = players sin cargar: no se lista nada
+# Europa (CL, EL, ECL). Los ids de Highlightly salen del sondeo uefa_probe (aún SIN lanzar): hasta
+# rellenarlos, el trabajo uefa falla con un error claro. Por competición, lista de (id, temporada):
+# el id puede cambiar con el formato (la Champions femenina cambió en 2025) y las previas pueden ir
+# en otro id (entonces se añaden aquí también, con la misma competición). La ECL empieza en 2021.
+UEFA_COMPS = ("CL", "EL", "ECL")
+UEFA_SEASONS: dict[str, list[tuple[int, int]]] = {"CL": [], "EL": [], "ECL": []}
+UEFA_CURRENT_SEASON = 2026
+UEFA_PROBE = {"CL": "Champions League", "EL": "Europa League", "ECL": "Conference League"}
+UEFA_PROBE_SEASON = 2025
+# Partidos de fase principal + playoff + eliminatorias en 2025/26 (sin previas): si el listado trae
+# muchos más, las previas van en el mismo id.
+UEFA_MAIN_PHASE_2025 = {"CL": 189, "EL": 189, "ECL": 153}
 
 _YOUTH_WOMEN = re.compile(r"\bU\s?-?\d{2}\b|\bunder[- ]?\d{2}\b|olympic|women|femenin|f[ée]minin|frauen|\bW$",
                           re.IGNORECASE)
@@ -176,6 +196,27 @@ def _num(v) -> Optional[int]:
     if isinstance(v, str) and v.strip().isdigit():
         return int(v.strip())
     return None
+
+
+def uefa_missing(seasons: Optional[dict] = None) -> list[str]:
+    """Competiciones de Europa sin ids de Highlightly en UEFA_SEASONS."""
+    seasons = UEFA_SEASONS if seasons is None else seasons
+    return [c for c in UEFA_COMPS if not seasons.get(c)]
+
+
+def uefa_comp_of(league_id, seasons: Optional[dict] = None) -> Optional[str]:
+    """Id de Highlightly → "CL" | "EL" | "ECL" (None si no es de Europa)."""
+    seasons = UEFA_SEASONS if seasons is None else seasons
+    for comp, pairs in seasons.items():
+        if any(lid == league_id for lid, _ in pairs):
+            return comp
+    return None
+
+
+def uefa_round(m: dict) -> Optional[str]:
+    """Ronda del listado si Highlightly la manda (campo round o league.round); si no, None."""
+    r = m.get("round") or (m.get("league") or {}).get("round")
+    return str(r)[:60] if r else None
 
 
 def next_status(parsed_ok: bool, attempts: int) -> tuple[str, int]:
@@ -310,6 +351,9 @@ def _comps(job: str, leagues: Optional[list]) -> list[tuple[int, int, bool]]:
         return [(lid, hp.hl_season(s), True) for lid in hp.HL_LEAGUES.values() for s in PLAYER_SEASONS]
     if job == "cups":
         return [(lid, y, True) for y in CUP_SEASONS for lid in CUPS]
+    if job == "uefa":     # la temporada más reciente primero; dentro, CL → EL → ECL
+        pairs = [(lid, y, UEFA_COMPS.index(c)) for c in UEFA_COMPS for lid, y in UEFA_SEASONS.get(c, [])]
+        return [(lid, y, True) for lid, y, _ in sorted(pairs, key=lambda t: (-t[1], t[2], t[0]))]
     raise ValueError(f"job desconocido: {job}")
 
 
@@ -332,6 +376,11 @@ async def run_hl_load(job: str, dry_run: bool = True, max_requests: int = HL_LOA
                                       reserve=hp.HL_MANUAL_RESERVE if job == "maint" else HL_LOAD_RESERVE)
     else:
         avail = max_requests
+    if job == "uefa" and uefa_missing():
+        summary["errors"].append(f"faltan ids de Highlightly de {'/'.join(uefa_missing())} en UEFA_SEASONS "
+                                 "(highlightly_loader.py): lanza uefa_probe y rellénalos; no se pide nada")
+        summary["ok"] = False
+        return summary
     store = store or FirestoreStore()
     if job == "maint":     # tope propio del día, aunque se lance varias veces
         avail = min(avail, max(0, HL_MAINT_DAILY - _maint_used(store, now)))
@@ -342,6 +391,8 @@ async def run_hl_load(job: str, dry_run: bool = True, max_requests: int = HL_LOA
     try:
         if job == "women_probe":
             summary["probe"] = await _probe(client, api_key, quota, budget)
+        elif job == "uefa_probe":
+            summary["probe"] = await _uefa_probe(client, api_key, quota, budget)
         elif job == "maint":
             await _maint(dry_run, leagues, now, api_key, quota, store, client, budget, summary)
         else:
@@ -427,6 +478,10 @@ def _ingest(job, listing, league_id, season, is_core, core_ids: set, store, dry_
             metas = [x for x in metas if keep_nt(x, core_ids, is_core)]
         elif job == "cups":
             metas = [x for x in metas if x["home_team_id"] in core_ids and x["away_team_id"] in core_ids]
+        elif job == "uefa":   # sin filtro de equipos: también los de ligas sin datos (fuerza de liga)
+            comp = uefa_comp_of(league_id)
+            for x, m in zip(metas, listing):
+                x["comp"], x["round"] = comp, uefa_round(m)
     known = store.existing(coll, [x["match_id"] for x in metas if x["match_id"] is not None])
     new = {str(x["match_id"]): x for x in metas
            if x["match_id"] is not None and str(x["match_id"]) not in known}
@@ -439,9 +494,10 @@ def _ingest(job, listing, league_id, season, is_core, core_ids: set, store, dry_
     row.update({"listed_total": len(listing), "kept": len(metas),
                 "finished": sum(1 for x in metas if x["finished"]), "new": len(new),
                 "all_finished": bool(metas) and all(x["finished"] for x in metas)})
-    if job == "cups":     # se mira el listado entero: una edición pasada sin cruces nuestros no se relista
+    if job in ("cups", "uefa"):   # el listado entero: una edición pasada sin cruces nuestros no se relista
         fin = [((m.get("state") or {}).get("description") or "").startswith("Finished") for m in listing]
-        row["all_finished"] = all(fin) if fin else season < CUP_CURRENT_SEASON
+        current = CUP_CURRENT_SEASON if job == "cups" else UEFA_CURRENT_SEASON
+        row["all_finished"] = all(fin) if fin else season < current
     if not dry_run:
         store.put(coll, new)
     docs = []
@@ -662,6 +718,87 @@ async def _probe(client, api_key, quota, budget: _Budget) -> list[dict]:
             p = parse_team_stats(raw, meta) if raw is not None else None
             row["stats"] = None if p is None else {"complete": p["complete"], "n_fields": p["n_fields"],
                                                    "missing": [f for f in _STAT_FIELDS.values()
+                                                               if p["home"][f] is None]}
+        out.append(row)
+    return out
+
+
+# ── Sondeo de Europa ───────────────────────────────────────────────────────────
+
+def _pick_uefa_league(cands: list[dict], name: str) -> Optional[dict]:
+    """Candidato principal del /leagues: "UEFA <nombre>" o "<nombre>" exacto; si no, el primero que
+    lo contenga sin "qualif" en el nombre."""
+    exact = {f"uefa {name}".lower(), name.lower()}
+    for c in cands:
+        if (c.get("name") or "").strip().lower() in exact:
+            return c
+    for c in cands:
+        n = (c.get("name") or "").lower()
+        if name.lower() in n and "qualif" not in n:
+            return c
+    return None
+
+
+def _league_row(x: dict) -> dict:
+    """Elemento de /leagues → solo id, nombre, país y temporadas (datos de la competición)."""
+    seasons = []
+    for s in x.get("seasons") or []:
+        v = s.get("season") if isinstance(s, dict) else s
+        if isinstance(v, (int, str)) and str(v).isdigit():
+            seasons.append(int(v))
+    country = x.get("country") or {}
+    return {"id": x.get("id"), "name": x.get("name"),
+            "country": country.get("name") if isinstance(country, dict) else country,
+            "seasons": sorted(set(seasons))}
+
+
+async def _uefa_probe(client, api_key, quota, budget: _Budget) -> list[dict]:
+    """Sondeo de Europa (≤ 9 peticiones). Por competición: 1 /leagues?leagueName=…, 1 listado de la
+    temporada UEFA_PROBE_SEASON (primera página: total, meses de la página, terminados y si trae la
+    ronda) y 1 /statistics de un partido terminado (SOLO los nombres de los campos: sin valores ni
+    equipos)."""
+    out = []
+    for comp, name in UEFA_PROBE.items():
+        row: dict = {"comp": comp, "search": name}
+        cands: list[dict] = []
+        if budget.take():
+            raw = await hp.hl_get(client, api_key, f"/leagues?leagueName={quote(name)}", quota=quota)
+            data = raw.get("data", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+            cands = [_league_row(x) for x in data if isinstance(x, dict) and is_senior_men(x.get("name") or "")]
+        row["candidates"] = cands[:10]
+        row["qualifying_ids"] = [c["id"] for c in cands if "qualif" in (c.get("name") or "").lower()]
+        main = _pick_uefa_league(cands, name)
+        row["main_id"] = main["id"] if main else None
+        listing = None
+        if main and budget.take():
+            raw = await hp.hl_get(client, api_key, f"/matches?leagueId={main['id']}&season={UEFA_PROBE_SEASON}"
+                                  f"&limit={hp.HL_PAGE_LIMIT}&offset=0", quota=quota)
+            if isinstance(raw, dict):
+                listing = raw.get("data", [])
+                total = (raw.get("pagination") or {}).get("totalCount")
+                exp = UEFA_MAIN_PHASE_2025.get(comp)
+                row[f"matches_{UEFA_PROBE_SEASON}"] = total
+                row["main_phase_expected"] = exp
+                # Bastantes más partidos que la fase principal → las previas van en el mismo id.
+                row["previas_mismo_id_probable"] = (total - exp > 40) if isinstance(total, int) and exp else None
+        if listing is not None:
+            months = Counter((m.get("date") or "")[:7] for m in listing)
+            row["months_in_page"] = dict(sorted(months.items()))
+            row["jul_ago_in_page"] = sum(v for k, v in months.items() if k[5:7] in ("07", "08"))
+            row["with_round_field"] = sum(1 for m in listing if uefa_round(m))
+        fin = [m for m in (listing or []) if ((m.get("state") or {}).get("description") or "").startswith("Finished")]
+        if listing is not None:
+            row["finished_in_page"] = len(fin)
+        if fin and budget.take():
+            meta = listing_meta(fin[0], "uefa", main["id"], UEFA_PROBE_SEASON)
+            raw = await hp.hl_get(client, api_key, f"/statistics/{meta['match_id']}", quota=quota)
+            data = raw.get("data", []) if isinstance(raw, dict) else (raw or [])
+            names = sorted({x.get("displayName") for t in data if isinstance(t, dict)
+                            for x in t.get("statistics") or [] if x.get("displayName")})
+            p = parse_team_stats(raw, meta) if raw is not None else None
+            row["stats"] = {"field_names": names, "n_fields": len(names), "parsed": p is not None,
+                            "complete": None if p is None else p["complete"],
+                            "missing": None if p is None else [f for f in _STAT_FIELDS.values()
                                                                if p["home"][f] is None]}
         out.append(row)
     return out

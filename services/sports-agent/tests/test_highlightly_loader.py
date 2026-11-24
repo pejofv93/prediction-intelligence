@@ -486,3 +486,96 @@ def test_cups_dry_run_no_escribe():
     writes = store.writes
     out = _run("cups", _Client(routes=routes, stats=stats), store, dry_run=True)
     assert out["ok"] and store.writes == writes and out["would_fetch"] == 1
+
+
+# ── Europa (CL, EL, ECL): sondeo y carga ───────────────────────────────────────
+
+_UEFA_FAKE = {"CL": [(9001, 2026), (9001, 2025)], "EL": [(9002, 2026)], "ECL": [(9003, 2026)]}
+
+
+def test_uefa_sin_ids_falla_claro_y_no_pide_nada(monkeypatch):
+    monkeypatch.setattr(L, "UEFA_SEASONS", {"CL": [], "EL": [], "ECL": []})
+    client = _Client()
+    out = _run("uefa", client, _Store())
+    assert not out["ok"] and client.calls == [] and out["requests"] == 0
+    assert "UEFA_SEASONS" in out["errors"][0] and "CL/EL/ECL" in out["errors"][0]
+    monkeypatch.setattr(L, "UEFA_SEASONS", {"CL": [(1, 2026)], "EL": [], "ECL": [(3, 2026)]})
+    assert L.uefa_missing() == ["EL"]
+
+
+def test_uefa_comps_orden_reciente_primero(monkeypatch):
+    monkeypatch.setattr(L, "UEFA_SEASONS", _UEFA_FAKE)
+    assert [(l, y) for l, y, _ in L._comps("uefa", None)] == [(9001, 2026), (9002, 2026), (9003, 2026), (9001, 2025)]
+    assert L.uefa_comp_of(9002) == "EL" and L.uefa_comp_of(122477) is None
+
+
+def _uefa_world():
+    m1 = _m(1, "Aland FC", "Qarabeta", 10, 99, date="2025-10-01")            # equipo de liga sin datos: dentro
+    m1["round"] = "League phase - 2"
+    routes = {(9001, 2025): [m1, _m(2, "Bravia", "Zeta", 20, 98, date="2025-07-22")],   # previa: dentro
+              (9002, 2026): [_m(3, "Cetia", "Dosia", 30, 31, date="2026-11-27", desc="Not started", score=None)]}
+    stats = {1: _stats(10, "Aland FC", 99, "Qarabeta"), 2: _stats(20, "Bravia", 98, "Zeta")}
+    return routes, stats
+
+
+def test_uefa_guarda_todo_sin_filtrar_equipos_y_estado_por_clave_uefa(monkeypatch):
+    monkeypatch.setattr(L, "UEFA_SEASONS", _UEFA_FAKE)
+    routes, stats = _uefa_world()
+    store = _Store()
+    out = _run("uefa", _Client(routes, stats), store)
+    assert out["ok"] and out["fetched"] == {"done": 2, "empty": 0, "error": 0}
+    ts = store.c[L.TEAM_STATS]
+    assert set(ts) == {"1", "2", "3"} and {d["group"] for d in ts.values()} == {"uefa"}
+    assert ts["1"]["comp"] == "CL" and ts["1"]["round"] == "League phase - 2" and ts["2"]["round"] is None
+    assert ts["3"]["comp"] == "EL" and ts["3"]["status"] == "pending"
+    st = store.c[L.STATE]
+    assert st["uefa_9001_2025"]["all_finished"] is True
+    assert st["uefa_9003_2026"]["all_finished"] is False          # temporada en curso vacía: se relista
+    assert st["uefa_9002_2026"]["all_finished"] is False
+
+
+def test_uefa_dry_run_no_escribe_ni_pide_detalle(monkeypatch):
+    monkeypatch.setattr(L, "UEFA_SEASONS", _UEFA_FAKE)
+    routes, stats = _uefa_world()
+    store, client = _Store(), _Client(routes, stats)
+    out = _run("uefa", client, store, dry_run=True)
+    assert out["ok"] and store.writes == 0 and out["would_fetch"] == 2
+    assert not any("/statistics/" in u for u in client.calls)
+
+
+class _ProbeClient(_Client):
+    """Como _Client, más /leagues?leagueName=… (ligas inventadas)."""
+
+    LEAGUES = {"Champions League": [{"id": 9001, "name": "UEFA Champions League", "country": {"name": "World"},
+                                     "seasons": [{"season": 2024}, {"season": 2025}]},
+                                    {"id": 9101, "name": "UEFA Champions League Qualification"},
+                                    {"id": 9201, "name": "UEFA Champions League Women"}],
+               "Europa League": [{"id": 9002, "name": "UEFA Europa League", "seasons": [2025]}],
+               "Conference League": []}
+
+    async def get(self, url, headers=None):
+        m = re.search(r"/leagues\?leagueName=([^&]+)", url)
+        if m:
+            from urllib.parse import unquote
+            self.calls.append(url)
+            return _Resp(200, {"data": self.LEAGUES.get(unquote(m.group(1)), [])})
+        return await super().get(url, headers)
+
+
+def test_uefa_probe_como_mucho_9_y_solo_nombres_de_campo():
+    lst = [_m(100 + i, "Aland", "Bravia", 10, 20, date="2025-07-15" if i < 150 else "2025-10-01") for i in range(300)]
+    client = _ProbeClient({(9001, 2025): lst, (9002, 2025): lst[150:]},
+                          stats={100: _stats(10, "Aland", 20, "Bravia")})
+    out = _run("uefa_probe", client, _Store())
+    assert out["ok"] and len(client.calls) <= 9 and out["requests"] == len(client.calls)
+    cl, el, ecl = out["probe"]
+    assert cl["main_id"] == 9001 and cl["qualifying_ids"] == [9101]
+    assert [c["id"] for c in cl["candidates"]] == [9001, 9101]                 # sin la femenina
+    assert cl["candidates"][0]["seasons"] == [2024, 2025] and cl["candidates"][0]["country"] == "World"
+    assert cl["matches_2025"] == 300 and cl["previas_mismo_id_probable"] is True
+    assert cl["jul_ago_in_page"] == 100 and cl["finished_in_page"] == 100
+    assert "Corners" in cl["stats"]["field_names"] and cl["stats"]["complete"]
+    assert all(isinstance(v, str) for v in cl["stats"]["field_names"])        # nombres, no valores
+    assert el["matches_2025"] == 150 and el["previas_mismo_id_probable"] is False
+    assert el["stats"] is not None and "field_names" in el["stats"]
+    assert ecl["main_id"] is None and "matches_2025" not in ecl

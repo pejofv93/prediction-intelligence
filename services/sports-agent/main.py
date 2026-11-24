@@ -502,12 +502,14 @@ async def run_hl_load_job(job: str, dry_run: bool = True, max_requests: int = 20
                           leagues: str = "") -> StreamingResponse:
     """Carga de Highlightly del mes PRO (solo estadísticas para la web de Tendencias; no la usa
     el motor de apuestas). job = nt | women | women_probe | players | maint (mantenimiento diario,
-    tope propio de 50 al día) | cups (copas: cruces entre equipos de las 8 ligas). dry_run=true por defecto:
-    solo lista y cuenta. leagues: ids de ligas femeninas extra, separados por comas."""
+    tope propio de 50 al día) | cups (copas: cruces entre equipos de las 8 ligas) | uefa_probe (sondeo
+    de ids de CL/EL/ECL, ≤ 9 peticiones) | uefa (Europa: todos los partidos de UEFA_SEASONS). dry_run=true
+    por defecto: solo lista y cuenta. leagues: ids de ligas femeninas extra, separados por comas."""
     import re
     from collectors.highlightly_loader import run_hl_load
-    if job not in ("nt", "women", "women_probe", "players", "maint", "cups"):
-        raise HTTPException(status_code=400, detail="job = nt | women | women_probe | players | maint | cups")
+    jobs = ("nt", "women", "women_probe", "players", "maint", "cups", "uefa_probe", "uefa")
+    if job not in jobs:
+        raise HTTPException(status_code=400, detail="job = " + " | ".join(jobs))
     if leagues and not re.fullmatch(r"\d+(,\d+)*", leagues):
         raise HTTPException(status_code=400, detail="leagues: ids separados por comas")
     ids = [int(x) for x in leagues.split(",")] if leagues else None
