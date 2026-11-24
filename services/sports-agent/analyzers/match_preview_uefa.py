@@ -176,8 +176,9 @@ class Engine:
     estadística. add() solo con partidos de fechas ya cerradas; refit() antes de predecir."""
 
     def __init__(self, hist: mp.History, tdiv: dict, k: float = mp.SHRINK_K, ridge: float = RIDGE,
-                 min_fit: int = MIN_FIT):
-        self.hist, self.tdiv, self.k, self.ridge, self.min_fit = hist, tdiv, k, ridge, min_fit
+                 min_fit: Optional[int] = None):
+        self.hist, self.tdiv, self.k, self.ridge = hist, tdiv, k, ridge
+        self.min_fit = MIN_FIT if min_fit is None else min_fit
         self.by_cs: dict[tuple[str, str], list[dict]] = defaultdict(list)
         self.by_season: dict[str, list[dict]] = defaultdict(list)
         self.obs: dict[str, list[tuple]] = defaultdict(list)
@@ -293,11 +294,11 @@ def coverage(exp: dict) -> Optional[str]:
 # ── Backtest ────────────────────────────────────────────────────────────────────
 
 def backtest_rows(engine: Engine, matches: list[dict], counts: Counter,
-                  seasons: Iterable[str] = EVAL_SEASONS) -> dict[str, list[tuple]]:
+                  seasons: Optional[Iterable[str]] = None) -> dict[str, list[tuple]]:
     """Walk-forward por fecha. Filas {"{variante}|{cobertura}": [(temporada, competición, mercado,
     línea, y, p_referencia, p_modelo, clave del partido)]}, variantes: e1_vs_comp (mp-e1 frente a la
     frecuencia de la competición), v1_vs_comp (mp-v1 sin factor frente a la competición), e1_vs_v1."""
-    seasons = set(seasons)
+    seasons = set(EVAL_SEASONS if seasons is None else seasons)
     rows: dict[str, list[tuple]] = {f"{v}|{c}": [] for v in VARIANTS for c in COVERAGES}
     by_date: dict[str, list[dict]] = defaultdict(list)
     for m in matches:
