@@ -1,0 +1,42 @@
+# Backtest walk-forward por jornada del modelo de baloncesto bp-v1 (scripts/ops/basket_backtest.py).
+# SOLO LECTURA: lee eur_games (o nba_games / hlb_games de ACB cuando existan) de Firestore.
+# 0 peticiones a APIs. No escribe nada. Log: solo agregados (líneas de la liga, Brier, IC95 y n
+# por mercado), sin equipos ni partidos. Manual.
+name: basket-backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      liga:
+        description: "EUR (eur_games) · NBA (nba_games) · ACB (hlb_games)"
+        default: "EUR"
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx scipy
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Backtest de baloncesto (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          LIGA: ${{ inputs.liga }}
+        run: python scripts/ops/basket_backtest.py
