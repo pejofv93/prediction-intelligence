@@ -1,6 +1,8 @@
 # ¿Cuántas señales de tenis del motor de valor salieron solo de las cuotas (odds-only)?
 # (scripts/ops/tennis_vbe_count.py). SOLO LECTURA: predictions y alerts_sent. No escribe nada.
 # Solo agregados por mes y origen (odds-only / con estadísticas); ningún nombre. Manual, sin cron.
+# 2º paso: por qué emparejan tan pocos nombres del calendario con tennis-data
+# (scripts/ops/tennis_calendar_audit.py): por torneo del calendario, emparejan/nombres.
 name: sports-tennis-vbe-count
 
 on:
@@ -25,7 +27,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install google-cloud-firestore
+        run: pip install google-cloud-firestore httpx
 
       - name: Auth GCP
         uses: google-github-actions/auth@v2
@@ -39,3 +41,10 @@ jobs:
           PYTHONIOENCODING: utf-8
           SINCE: ${{ inputs.since }}
         run: python scripts/ops/tennis_vbe_count.py
+
+      - name: Nombres del calendario frente a tennis-data, por torneo (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/tennis_calendar_audit.py
