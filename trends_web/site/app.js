@@ -68,7 +68,25 @@ function writeHash() {
   const h = state.view === "matches"
     ? `#partidos${state.match ? "/" + state.match : ""}`
     : `#${state.div}/${SPLITS[state.split][0]}/${state.market}`;
-  if (location.hash !== h) history.replaceState(null, "", h);
+  // history.state se conserva: marca la entrada que añadió openMatch (para cerrar con "atrás").
+  if (location.hash !== h) history.replaceState(history.state, "", h);
+}
+
+// Ficha abierta desde la lista = una entrada nueva en el historial, para que el botón atrás del
+// móvil la cierre. Cambiar de ficha con otra abierta no añade entradas.
+function openMatch(id) {
+  if (!state.match) history.pushState({ ficha: true }, "", `#partidos/${encodeURIComponent(id)}`);
+  state.match = id;
+  render();
+  scrollToMatch();
+}
+// Cerrar (botón, Escape o pulsar fuera): si la entrada es de openMatch, se vuelve atrás (lo mismo
+// que el botón atrás); si se entró con un enlace directo a la ficha, se cierra sin salir de la web.
+function closeMatch() {
+  if (!state.match) return;
+  if (history.state && history.state.ficha) { history.back(); return; }
+  state.match = null;
+  render();
 }
 
 function pills(container, items, isOn, onPick) {
@@ -225,7 +243,7 @@ function renderMatchList() {
     ...ms.map((m) => {
       const n = standoutCount(m);
       return el("button", { class: `match-row${m.id === state.match ? " on" : ""}`,
-                            onclick: () => { state.match = m.id; render(); scrollToMatch(); } },
+                            onclick: () => openMatch(m.id) },
         el("span", { class: "ko", text: hhmm(m.kickoff_utc) }),
         el("span", { class: "teams", text: `${m.home} – ${m.away}` }),
         m.low_sample ? mpTag("muestra insuficiente")
@@ -375,7 +393,7 @@ function renderMatch() {
   const pills = m.low_sample ? [] : matchPills(m);
   sec.replaceChildren(...[    // replaceChildren pintaría un null como texto "null"
     el("div", { class: "duel" },
-      el("button", { class: "pill close", text: "Cerrar", onclick: () => { state.match = null; render(); } }),
+      el("button", { class: "pill close", text: "Cerrar", "aria-label": "Cerrar la ficha", onclick: closeMatch }),
       el("div", { class: "duel-grid" },
         teamSide(m.home, (m.sample.home || {}).n_cur, c1, (m.badges || [])[0]),
         el("div", { class: "duel-mid" },
@@ -468,6 +486,16 @@ async function main() {
   $("tab-teams").addEventListener("click", () => { state.view = "teams"; render(); });
   $("tab-matches").addEventListener("click", () => { state.view = "matches"; render(); });
   window.addEventListener("hashchange", () => { readHash(); render(); });
+  window.addEventListener("popstate", () => { readHash(); render(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.view === "matches" && state.match) closeMatch();
+  });
+  // Pulsar fuera de la ficha la cierra; otra fila de la lista cambia de ficha en vez de cerrar.
+  document.addEventListener("click", (e) => {
+    if (state.view !== "matches" || !state.match || !e.target.isConnected) return;
+    if ($("match").contains(e.target) || e.target.closest(".match-row")) return;
+    closeMatch();
+  });
   render();
 }
 
