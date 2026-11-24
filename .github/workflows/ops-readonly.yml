@@ -1,6 +1,7 @@
 # Dos consultas de SOLO LECTURA (manual, sin cron). No escribe nada.
 #  - fichas: aciertos de las fichas graduadas por liga y mercado (scripts/ops/previews_grade_summary.py).
 #  - logging: qué cuota de Cloud Logging agota job_runner desde Actions (scripts/ops/logging_quota_check.py).
+#  - avisos: avisos de la última pasada de analyze en Actions por tipo (scripts/ops/warning_types.py).
 #  - collect: tiempo de cada paso de sports-collect desde los logs de Cloud Run de sports-agent
 #    (scripts/ops/collect_step_times.py). El log solo lleva pasos, minutos y recuentos.
 name: ops-readonly
@@ -91,3 +92,20 @@ jobs:
           grep -oE "PERMISSION_DENIED" err.txt | head -1; rm -f err.txt
           TOKEN=$(gcloud auth print-access-token) PROJECT=prediction-intelligence \
             python scripts/ops/logging_quota_check.py
+
+      - name: Avisos de la última pasada de sports-analyze en Actions, por tipo (sin nombres ni cifras)
+        env:
+          DAYS: ${{ inputs.days }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND resource.labels.revision_name="github-actions" AND severity=WARNING AND (textPayload:"analyzers.value_bet_engine WARNING" OR textPayload:"analyzers.player_props WARNING")' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 5000 \
+            --format 'json(timestamp,textPayload)' > warn.json 2> err.txt \
+            || { grep -oE "PERMISSION_DENIED" err.txt | head -1; exit 1; }
+          # Al log solo va la plantilla del código (texto del repo) con {…} y cuántas veces salió.
+          LOGS_FILE=warn.json python scripts/ops/warning_types.py \
+            analyzers.value_bet_engine=services/sports-agent/analyzers/value_bet_engine.py \
+            analyzers.player_props=services/sports-agent/analyzers/player_props.py
+          rm -f warn.json err.txt
