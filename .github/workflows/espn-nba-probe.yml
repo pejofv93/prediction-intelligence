@@ -1,0 +1,27 @@
+# Sonda de ESPN para la NBA en Tendencias (scripts/ops/espn_nba_probe.py).
+# SOLO LECTURA: ≤10 scoreboards + 3 summaries de partidos ya jugados, a ESPN (sin clave).
+# Sin GCP ni Firestore. Log público: nombres de campos de estadística de equipo, si vienen
+# rellenos, código HTTP y tiempos; sin equipos ni cifras. Manual, sin cron.
+name: espn-nba-probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sonda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sonda ESPN NBA (solo lectura)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/espn_nba_probe.py
