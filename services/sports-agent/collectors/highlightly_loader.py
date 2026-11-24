@@ -20,7 +20,7 @@ Trabajos (job):
   players      box score (jugadores) de los clubes de las 8 ligas → /box-score por partido
   cups         copas y supercopas de esos países (CUPS, 2020-2026): solo cruces entre dos equipos
                de las 8 ligas (sacados de players) → /statistics. Va después de players.
-  uefa_probe   sondeo de Europa (Champions, Europa League, Conference League), ≤ 9 peticiones: por
+  uefa_probe   sondeo de Europa (Champions, Europa League, Conference League), ≤ 10 peticiones (tope: max_requests): por
                competición 1 /leagues (ids, temporadas), 1 listado de la temporada 2025 (recuentos y
                meses, para saber si las previas van en el mismo id) y 1 /statistics (nombres de campo)
   uefa         Europa (UEFA_SEASONS, ids del sondeo): TODOS los partidos (previas, fase principal,
@@ -120,6 +120,11 @@ UEFA_COMPS = ("CL", "EL", "ECL")
 UEFA_SEASONS: dict[str, list[tuple[int, int]]] = {"CL": [], "EL": [], "ECL": []}
 UEFA_CURRENT_SEASON = 2026
 UEFA_PROBE = {"CL": "Champions League", "EL": "Europa League", "ECL": "Conference League"}
+# /leagues?leagueName= busca por el nombre EXACTO (sondeo del 24-nov: "Champions League" → 0 ligas).
+# Se prueban en orden y se para en el primero que devuelve algo.
+UEFA_PROBE_NAMES = {"CL": ["UEFA Champions League"],
+                    "EL": ["UEFA Europa League"],
+                    "ECL": ["UEFA Europa Conference League", "UEFA Conference League"]}
 UEFA_PROBE_SEASON = 2025
 # Partidos de fase principal + playoff + eliminatorias en 2025/26 (sin previas): si el listado trae
 # muchos más, las previas van en el mismo id.
@@ -862,14 +867,23 @@ async def _uefa_probe(client, api_key, quota, budget: _Budget) -> list[dict]:
     temporada UEFA_PROBE_SEASON (primera página: total, meses de la página, terminados y si trae la
     ronda) y 1 /statistics de un partido terminado (SOLO los nombres de los campos: sin valores ni
     equipos)."""
-    out = []
-    for comp, name in UEFA_PROBE.items():
-        row: dict = {"comp": comp, "search": name}
-        cands: list[dict] = []
-        if budget.take():
-            raw = await hp.hl_get(client, api_key, f"/leagues?leagueName={quote(name)}", quota=quota)
+    # Primero los ids de las tres (lo que más importa si el presupuesto no da para todo).
+    found: dict[str, tuple[Optional[str], list[dict]]] = {}
+    for comp in UEFA_PROBE:
+        found[comp] = (None, [])
+        for search in UEFA_PROBE_NAMES[comp]:
+            if not budget.take():
+                break
+            raw = await hp.hl_get(client, api_key, f"/leagues?leagueName={quote(search)}", quota=quota)
             data = raw.get("data", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
             cands = [_league_row(x) for x in data if isinstance(x, dict) and is_senior_men(x.get("name") or "")]
+            found[comp] = (search, cands)
+            if cands:
+                break
+    out = []
+    for comp, name in UEFA_PROBE.items():
+        search, cands = found[comp]
+        row: dict = {"comp": comp, "search": search}
         row["candidates"] = cands[:10]
         row["qualifying_ids"] = [c["id"] for c in cands if "qualif" in (c.get("name") or "").lower()]
         main = _pick_uefa_league(cands, name)

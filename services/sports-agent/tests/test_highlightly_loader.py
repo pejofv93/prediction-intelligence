@@ -546,12 +546,12 @@ def test_uefa_dry_run_no_escribe_ni_pide_detalle(monkeypatch):
 class _ProbeClient(_Client):
     """Como _Client, más /leagues?leagueName=… (ligas inventadas)."""
 
-    LEAGUES = {"Champions League": [{"id": 9001, "name": "UEFA Champions League", "country": {"name": "World"},
+    LEAGUES = {"UEFA Champions League": [{"id": 9001, "name": "UEFA Champions League", "country": {"name": "World"},
                                      "seasons": [{"season": 2024}, {"season": 2025}]},
                                     {"id": 9101, "name": "UEFA Champions League Qualification"},
                                     {"id": 9201, "name": "UEFA Champions League Women"}],
-               "Europa League": [{"id": 9002, "name": "UEFA Europa League", "seasons": [2025]}],
-               "Conference League": []}
+               "UEFA Europa League": [{"id": 9002, "name": "UEFA Europa League", "seasons": [2025]}],
+               "Champions League": [], "Europa League": [], "Conference League": []}
 
     async def get(self, url, headers=None):
         m = re.search(r"/leagues\?leagueName=([^&]+)", url)
@@ -579,6 +579,16 @@ def test_uefa_probe_como_mucho_9_y_solo_nombres_de_campo():
     assert el["matches_2025"] == 150 and el["previas_mismo_id_probable"] is False
     assert el["stats"] is not None and "field_names" in el["stats"]
     assert ecl["main_id"] is None and "matches_2025" not in ecl
+    # ECL: prueba los dos nombres exactos y no encuentra nada
+    assert sum("leagueName=UEFA%20Europa%20Conference" in u or "leagueName=UEFA%20Conference" in u
+               for u in client.calls) == 2
+
+
+def test_uefa_probe_ids_primero_si_el_presupuesto_es_corto():
+    client = _ProbeClient({(9001, 2025): [], (9002, 2025): []})
+    out = _run("uefa_probe", client, _Store(), max_requests=4)
+    assert out["requests"] == 4 and all("/leagues?" in u for u in client.calls)
+    assert out["probe"][0]["main_id"] == 9001 and out["probe"][1]["main_id"] == 9002
 
 
 # ── Mantenimiento: Europa (fichas mp-e1) ─────────────────────────────────────────
