@@ -1,0 +1,41 @@
+# ¿Cuántas señales de tenis del motor de valor salieron solo de las cuotas (odds-only)?
+# (scripts/ops/tennis_vbe_count.py). SOLO LECTURA: predictions y alerts_sent. No escribe nada.
+# Solo agregados por mes y origen (odds-only / con estadísticas); ningún nombre. Manual, sin cron.
+name: sports-tennis-vbe-count
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Desde (AAAA-MM-DD)"
+        default: "2026-05-01"
+
+permissions:
+  contents: read
+
+jobs:
+  recuento:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Señales de tenis odds-only (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          SINCE: ${{ inputs.since }}
+        run: python scripts/ops/tennis_vbe_count.py
