@@ -473,6 +473,18 @@ async def run_uefa_previews_job(dry_run: bool = True, highlightly: bool = True) 
     return _stream_with_summary("uefa-previews", run_uefa_previews, dry_run=dry_run, highlightly=highlightly)
 
 
+@app.post("/run-basket-previews", dependencies=[Depends(verify_token)])
+async def run_basket_previews_job(dry_run: bool = True, days: int = 3) -> StreamingResponse:
+    """Baloncesto (bp-v1, Euroliga): fichas de los próximos `days` días en match_previews_basket.
+    Calendario: feed de la Euroliga (sin clave); historial: eur_games. Líneas y etiquetas de
+    match_preview_metrics/bp-v1-EUR_backtest: sin ese documento no escribe fichas (aviso, no fallo).
+    dry_run=true por defecto. Resumen solo con recuentos e ids."""
+    if not 1 <= days <= 3:
+        raise HTTPException(status_code=400, detail="days 1-3")
+    from analyzers.basket_preview_live import run_basket_previews
+    return _stream_with_summary("basket-previews", run_basket_previews, dry_run=dry_run, days=days)
+
+
 @app.post("/run-women-previews", dependencies=[Depends(verify_token)])
 async def run_women_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = True) -> StreamingResponse:
     """Fútbol femenino (mp-w1): fichas "solo referencia" de los próximos `days` días en

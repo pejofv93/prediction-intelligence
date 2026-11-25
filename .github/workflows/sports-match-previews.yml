@@ -16,7 +16,7 @@ on:
       job:
         description: "Qué ejecutar"
         type: choice
-        options: [previews, backtest, grade, women_backtest, women_previews, women_grade, cup_previews, uefa_previews]
+        options: [previews, backtest, grade, women_backtest, women_previews, women_grade, cup_previews, uefa_previews, basket_previews]
         default: previews
       dry_run:
         description: "true = solo calcula y cuenta"
@@ -74,6 +74,7 @@ jobs:
             women_grade)    path="run-women-grade?dry_run=$DRY_RUN" ;;
             cup_previews)   path="run-cup-previews?dry_run=$DRY_RUN&highlightly=$HL" ;;   # solo recuentos en el log
             uefa_previews)  path="run-uefa-previews?dry_run=$DRY_RUN&highlightly=$HL" ;;  # solo recuentos en el log
+            basket_previews) path="run-basket-previews?dry_run=$DRY_RUN" ;;                 # Euroliga; solo recuentos e ids
           esac
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
@@ -144,3 +145,24 @@ jobs:
           grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
           grep -q '^done ' out.txt
           grep -q '^summary: {"ok": true' out.txt
+
+      - name: Programado — baloncesto (Euroliga), fichas (escriben; no bloquea)
+        # Independiente de los otros pasos. Calendario del feed de la Euroliga (sin clave) e historial
+        # eur_games (tarea diaria 06:30 UTC). Sin match_preview_metrics/bp-v1-EUR_backtest no escribe
+        # fichas (aviso en verde). El resumen solo lleva recuentos e ids.
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.programado == 'true') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for path in "run-basket-previews?dry_run=false"; do
+            echo "== $path"
+            curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
+              -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+              --max-time 1100 \
+              --no-buffer \
+              --fail --silent --show-error > out.txt
+            grep -v '^summary: ' out.txt
+            grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
+            grep -q '^done ' out.txt
+            grep -q '^summary: {"ok": true' out.txt
+          done
