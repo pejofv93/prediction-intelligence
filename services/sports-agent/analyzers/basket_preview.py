@@ -400,3 +400,109 @@ def mean_bias(hist: History, league: str, seasons: Iterable[str], k: float = SHR
                 for s in STATS:
                     acc[s].append(stat_value(g, s, None) - e["total"][s])
     return {s: round(sum(v) / len(v), 3) for s, v in acc.items() if v}
+
+
+# ── Etiquetas del backtest y ficha de un partido (fichas bp-v1) ─────────────────
+# Las mismas palabras que mp-v1 (analyzers.match_preview), sin importarlo: este módulo sigue sin scipy.
+LABEL_EDGE, LABEL_REF, LABEL_LOW_SAMPLE = "ventaja medida", "solo referencia", "muestra insuficiente"
+
+
+def metrics_doc_id(league: str, kind: str) -> str:
+    """match_preview_metrics/{bp-v1-EUR_backtest | bp-v1-EUR_live}: uno por liga (NBA/ACB después)."""
+    return f"{MODEL_VERSION}-{league}_{kind}"
+
+
+def labels_from_backtest(met_league: dict, met_team: dict) -> dict[str, str]:
+    """{mercado: etiqueta} del backtest (salidas de match_preview.market_metrics frente a la media
+    de la liga y frente a la del equipo). «ventaja medida» solo si el IC95 por partido de
+    (Brier modelo − Brier referencia) queda entero bajo 0 frente a LAS DOS medias; si no, «solo
+    referencia». Con una sola liga, la celda de la liga y la de todas («ALL») son la misma."""
+    out = {}
+    for mk in {v["market"] for v in met_league.values()} | {v["market"] for v in met_team.values()}:
+        a, b = met_league.get(f"{mk}|ALL") or {}, met_team.get(f"{mk}|ALL") or {}
+        out[mk] = LABEL_EDGE if a.get("ci_label") == LABEL_EDGE and b.get("ci_label") == LABEL_EDGE else LABEL_REF
+    return dict(sorted(out.items()))
+
+
+def residuals_until(hist: History, league: str, season: str, k: float = SHRINK_K) -> Residuals:
+    """Residuos de todas las jornadas ya jugadas de `season` y de la anterior, en el mismo orden
+    walk-forward que el backtest (sin filas: solo las desviaciones para las fichas)."""
+    resid = Residuals()
+    backtest_rows(hist, league, [season], {}, k=k, resid=resid)
+    return resid
+
+
+def line_key(line: float) -> str:
+    return "over_" + str(line).replace(".", "_")
+
+
+def main_line(lines: dict) -> Optional[float]:
+    """Línea con P(más) del modelo más cercana al 50 % (empate: la más baja), como mp-v1."""
+    vals = [(abs(v["p_model"] - 0.5), v["line"]) for v in lines.values()]
+    return min(vals)[1] if vals else None
+
+
+def predict_game(hist: History, resid: Residuals, league: str, season: str, match_date: str,
+                 home: str, away: str, lines: dict, labels: Optional[dict[str, str]] = None,
+                 k: float = SHRINK_K) -> Optional[dict]:
+    """
+    Ficha del partido con lo jugado ANTES de match_date, con la forma de la de mp-v1
+    (match_preview.predict_match): stats[s] = {available, exp_*, league_mean_*, lines: {home, away,
+    total}} y en cada lado {market, label, market_label, highlight, lines: {over_x: {line, p_model,
+    p_league, p_team, …}}, main_line}. Así la exportación a la web, la graduación
+    (match_preview_store.grade_preview) y el resumen de Telegram valen tal cual.
+    lines: {mercado: líneas fijas} (las del backtest); se añade la x,5 más cercana a la media del
+    modelo (marcada extra: no se gradúa, como en mp-v1). labels: {mercado: etiqueta}; lo que no
+    esté = «solo referencia». None si la liga no tiene partidos antes de la fecha.
+    """
+    labels = labels or {}
+    e = expected(hist, league, season, match_date, home, away, k)
+    if e is None:
+        return None
+    lm = hist.league_means(league, season, match_date)
+    teams = {side: {"team": t, "n_cur": n, "n_eff": round(sum(w for w, *_ in tg), 2), "insufficient": n < MIN_CUR}
+             for side, t, n, tg in (("home", home, e["n_cur"][0], e["tg"][0]),
+                                    ("away", away, e["n_cur"][1], e["tg"][1]))}
+    low_sample = teams["home"]["insufficient"] or teams["away"]["insufficient"]
+    poss_league = lm["pace"] * (1 + lm["ot_rate"] * OT_MIN / reg_minutes(league))
+    used = [g for tg in e["tg"] for w, g, _ in tg if w == W_CUR]
+    stats: dict = {}
+    for s in STATS:
+        block = {"available": True,
+                 "league_mean_home": round(poss_league * lm["rate"][s][0] / 100, 2),
+                 "league_mean_away": round(poss_league * lm["rate"][s][1] / 100, 2),
+                 "exp_home": round(e["h"][s], 2), "exp_away": round(e["a"][s], 2),
+                 "exp_total": round(e["total"][s], 2), "lines": {}}
+        for scope in SCOPES:
+            mk = market_key(s, scope)
+            sd = resid.sd(league, season, s, scope) or hist.league_sd(league, season, match_date, s, scope)
+            fixed = tuple(lines.get(mk) or ())
+            label = labels.get(mk, LABEL_REF)
+            for side in (("h", "a") if scope == "team" else (None,)):
+                mean = e[side][s] if side else e["total"][s]
+                tgs = [e["tg"][0 if side == "h" else 1]] if side else list(e["tg"])
+                out = {}
+                for ln in sorted(set(fixed) | {_round_half(mean)}):
+                    pm = p_over(ln, mean, sd or 0.0)
+                    pl = hist.league_rate(league, season, match_date, s, side, ln)
+                    pt = None if pl is None else History.team_rate(tgs, s, side is None, ln, pl)
+                    out[line_key(ln)] = {
+                        "line": ln, "p_model": round(pm, 4),
+                        **({"extra": True} if ln not in fixed else {}),     # añadida: no se gradúa
+                        "p_league": None if pl is None else round(pl, 4),
+                        "p_team": None if pt is None else round(pt, 4),
+                        "diff_vs_league": None if pl is None else round(pm - pl, 4),
+                        "league_n": round(lm["n"], 1),
+                    }
+                block["lines"][{"h": "home", "a": "away", None: "total"}[side]] = {
+                    "market": mk, "label": LABEL_LOW_SAMPLE if low_sample else label,
+                    "market_label": label, "highlight": label == LABEL_EDGE and not low_sample,
+                    "distribution": "normal", "sd": round(sd, 3) if sd else None, "lines": out,
+                    "main_line": main_line(out),
+                }
+        stats[s] = block
+    return {"model_version": MODEL_VERSION, "league": league, "season": season, "match_date": match_date,
+            "params": {"k": k, "weights": [W_CUR, W_PREV], "min_cur": MIN_CUR, "min_resid": MIN_RESID},
+            "exp_poss": round(e["poss"], 2),
+            "data_cutoff": max((g["date"] for g in used), default=None),
+            "low_sample": low_sample, "teams": teams, "stats": stats}

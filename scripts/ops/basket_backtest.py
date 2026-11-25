@@ -1,5 +1,5 @@
-"""SOLO LECTURA. Backtest walk-forward por jornada del modelo de baloncesto bp-v1
-(analyzers/basket_preview.py) con los partidos ya guardados en Firestore. 0 peticiones a APIs.
+"""Backtest walk-forward por jornada del modelo de baloncesto bp-v1 (analyzers/basket_preview.py)
+con los partidos ya guardados en Firestore. 0 peticiones a APIs.
 
 Liga (env LIGA, por defecto EUR):
   EUR → eur_games (Euroliga, live.euroleague.net)
@@ -11,8 +11,14 @@ La temporada más antigua es de calentamiento: de ella salen las líneas fijas (
 demás. Mercados: puntos, rebotes, asistencias y triples, por equipo y total. Referencias: media
 de la liga y media del equipo hasta la fecha.
 
-No escribe nada. Log: solo agregados (recuentos, líneas de la liga, Brier, IC95, n por mercado):
-nada de equipos ni partidos.
+SOLO LECTURA por defecto. Con CONFIRMAR=ESCRIBIR (a mano, con OK) guarda UN documento:
+match_preview_metrics/bp-v1-{LIGA}_backtest (líneas fijas usadas, métricas agregadas por mercado
+frente a las dos medias y etiquetas), nada más. De él salen las fichas de baloncesto
+(match_previews_basket): sus líneas y qué mercados llevan «ventaja medida» (IC95 entero bajo 0
+frente a la media de la liga Y frente a la del equipo). Solo esos dan píldoras ⭐ en la web y en
+Telegram, como en las ligas de fútbol (mp-v1_backtest). Sin el documento no se escriben fichas.
+Log: solo agregados (recuentos, líneas de la liga, Brier, IC95, n por mercado): nada de equipos ni
+partidos.
 """
 import os
 import sys
@@ -26,6 +32,8 @@ from analyzers import basket_preview as bp  # noqa: E402
 
 SOURCES = {"EUR": ("eur_games", None), "NBA": ("nba_games", None),
            "ACB": ("hlb_games", ("league", "==", "ACB"))}
+METRIC_FIELDS = ("market", "n_matches", "n_lines", "brier_league", "brier_model", "delta", "ci_lo", "ci_hi",
+                 "ci_label")
 
 
 def load_docs(league: str) -> list[dict]:
@@ -54,6 +62,12 @@ def fmt_metrics(name: str, met: dict) -> list[str]:
 
 def run(games: list[dict], league: str) -> list[str]:
     """Todo el cálculo sobre partidos ya convertidos; devuelve las líneas del informe."""
+    return compute(games, league)["report"]
+
+
+def compute(games: list[dict], league: str) -> dict:
+    """Informe (report) y lo que guardaría el documento del backtest: líneas, métricas por mercado
+    frente a la media de la liga y a la del equipo, etiquetas y recuentos."""
     from analyzers.match_preview import market_metrics
     warm, evals = split_seasons(games)
     lines_out = [f"Liga {league}: {len(games)} partidos · calentamiento {warm} · evaluadas {evals}",
@@ -69,15 +83,32 @@ def run(games: list[dict], league: str) -> list[str]:
     rows = bp.backtest_rows(hist, league, evals, lines, counts=counts)
     lines_out.append(f"\nRecuentos: {dict(counts)}")
     lines_out.append(f"Sesgo medio del total (real − modelo): {bp.mean_bias(hist, league, evals)}")
+    met: dict = {}
     for ref, key in (("modelo frente a la media de la liga", "vs_liga"),
                      ("modelo frente a la media del equipo", "vs_equipo")):
+        met[key] = market_metrics(rows[key]) if rows[key] else {}
         if not rows[key]:
             lines_out.append(f"\n[{ref}] sin filas")
             continue
-        lines_out += fmt_metrics(ref, market_metrics(rows[key]))
+        lines_out += fmt_metrics(ref, met[key])
     by_season = Counter(r[0] for r in rows["vs_liga"])
     lines_out.append(f"\nLíneas evaluadas por temporada: {dict(sorted(by_season.items()))}")
-    return lines_out
+    labels = bp.labels_from_backtest(met["vs_liga"], met["vs_equipo"])
+    lines_out.append(f"\nEtiquetas (IC95 entero bajo 0 frente a las dos medias): {labels}")
+    return {"report": lines_out, "warmup": warm, "seasons": evals, "lines": lines, "labels": labels,
+            "counts": dict(counts), "n_matches": counts.get("evaluados", 0),
+            "metrics": {k: {v["market"]: {f: v[f] for f in METRIC_FIELDS} for v in m.values() if v["div"] == "ALL"}
+                        for k, m in met.items()}}
+
+
+def backtest_doc(out: dict, league: str, now_iso: str) -> dict:
+    """match_preview_metrics/bp-v1-{liga}_backtest: solo agregados (nada de equipos ni partidos)."""
+    return {"model_version": bp.MODEL_VERSION, "kind": "backtest", "league": league, "computed_at": now_iso,
+            "warmup": out["warmup"], "seasons": out["seasons"], "counts": out["counts"],
+            "n_matches": out["n_matches"], "lines": {mk: list(v) for mk, v in out["lines"].items()},
+            "labels": out["labels"], "metrics": out["metrics"],
+            "rule": ("ventaja medida: IC95 por partido de (Brier modelo − Brier referencia) entero bajo 0 "
+                     "frente a la media de la liga y frente a la del equipo")}
 
 
 def main() -> int:
@@ -89,12 +120,21 @@ def main() -> int:
     games = bp.games_from_docs(docs, league)
     print(f"Docs leídos: {len(docs)} · utilizables: {len(games)}")
     try:
-        for line in run(games, league):
-            print(line)
+        out = compute(games, league)
     except ValueError as e:
         print(f"No se puede evaluar: {e}")
         return 1
-    print("\nSin escribir nada (solo lectura).")
+    for line in out["report"]:
+        print(line)
+    if os.environ.get("CONFIRMAR") == "ESCRIBIR":
+        from datetime import datetime, timezone
+        from shared.firestore_client import col
+        doc_id = bp.metrics_doc_id(league, "backtest")
+        col("match_preview_metrics").document(doc_id).set(
+            backtest_doc(out, league, datetime.now(timezone.utc).isoformat()))
+        print(f"\nEscrito match_preview_metrics/{doc_id} (líneas, métricas agregadas y etiquetas).")
+    else:
+        print("\nSin escribir nada (solo lectura).")
     return 0
 
 

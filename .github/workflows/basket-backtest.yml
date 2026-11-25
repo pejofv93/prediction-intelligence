@@ -1,7 +1,9 @@
 # Backtest walk-forward por jornada del modelo de baloncesto bp-v1 (scripts/ops/basket_backtest.py).
-# SOLO LECTURA: lee eur_games (o nba_games / hlb_games de ACB cuando existan) de Firestore.
-# 0 peticiones a APIs. No escribe nada. Log: solo agregados (líneas de la liga, Brier, IC95 y n
-# por mercado), sin equipos ni partidos. Manual.
+# Lee eur_games (o nba_games / hlb_games de ACB cuando existan) de Firestore. 0 peticiones a APIs.
+# Por defecto no escribe; con confirmar=ESCRIBIR guarda SOLO match_preview_metrics/bp-v1-{LIGA}_backtest
+# (líneas fijas, métricas agregadas y etiquetas: de ahí salen las fichas de baloncesto y qué mercados
+# dan píldoras ⭐). Log: solo agregados (líneas de la liga, Brier, IC95 y n por mercado), sin equipos
+# ni partidos. Manual.
 name: basket-backtest
 
 on:
@@ -10,6 +12,9 @@ on:
       liga:
         description: "EUR (eur_games) · NBA (nba_games) · ACB (hlb_games)"
         default: "EUR"
+      confirmar:
+        description: "ESCRIBIR = guardar líneas, métricas y etiquetas (vacío = solo leer)"
+        default: ""
 
 permissions:
   contents: read
@@ -33,10 +38,11 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Backtest de baloncesto (solo lectura)
+      - name: Backtest de baloncesto (escribe solo con confirmar=ESCRIBIR)
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           PYTHONIOENCODING: utf-8
           LIGA: ${{ inputs.liga }}
+          CONFIRMAR: ${{ inputs.confirmar }}
         run: python scripts/ops/basket_backtest.py

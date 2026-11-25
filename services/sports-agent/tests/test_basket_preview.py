@@ -158,6 +158,63 @@ def test_sesgo_medio_pequeno():
     assert abs(bias["pts"]) < 6        # la prórroga entra en la media del total
 
 
+# ── Etiquetas del backtest y ficha (fichas bp-v1) ───────────────────────────────
+
+def _cell(mk, label):
+    return {f"{mk}|ALL": {"market": mk, "div": "ALL", "ci_label": label},
+            f"{mk}|EUR": {"market": mk, "div": "EUR", "ci_label": label}}
+
+
+def test_etiquetas_ventaja_solo_si_gana_a_las_dos_medias():
+    edge, ref = bp.LABEL_EDGE, bp.LABEL_REF
+    liga = {**_cell("pts_team", edge), **_cell("reb_team", edge), **_cell("ast_total", ref)}
+    equipo = {**_cell("pts_team", edge), **_cell("reb_team", ref), **_cell("ast_total", edge)}
+    assert bp.labels_from_backtest(liga, equipo) == {"ast_total": ref, "pts_team": edge, "reb_team": ref}
+    assert bp.metrics_doc_id("EUR", "backtest") == "bp-v1-EUR_backtest"
+
+
+def test_ficha_con_forma_de_mp_v1():
+    games = _league(seasons=("E2024", "E2025"))
+    hist = bp.History(games)
+    lines = bp.fixed_lines([g for g in games if g["season"] == "E2024"])
+    resid = bp.residuals_until(hist, "EUR", "E2025")
+    assert resid.sd("EUR", "E2025", "pts", "team") is not None
+    labels = {"pts_team": bp.LABEL_EDGE, "pts_total": bp.LABEL_REF}
+    p = bp.predict_game(hist, resid, "EUR", "E2025", "2026-01-01", "T0", "T7", lines, labels)
+    assert not p["low_sample"] and p["data_cutoff"] < "2026-01-01"
+    assert set(p["stats"]) == set(bp.STATS)
+    pts = p["stats"]["pts"]
+    assert pts["exp_home"] > pts["exp_away"]                     # T0 ataca más que T7
+    assert pts["exp_total"] == pytest.approx(pts["exp_home"] + pts["exp_away"], abs=0.02)
+    home = pts["lines"]["home"]
+    assert home["market"] == "pts_team" and home["label"] == bp.LABEL_EDGE and home["highlight"]
+    assert pts["lines"]["total"]["label"] == bp.LABEL_REF and not pts["lines"]["total"]["highlight"]
+    assert p["stats"]["reb"]["lines"]["away"]["label"] == bp.LABEL_REF     # sin etiqueta = referencia
+    fixed = [v for v in home["lines"].values() if not v.get("extra")]
+    assert sorted(v["line"] for v in fixed) == list(lines["pts_team"])
+    extra = [v for v in home["lines"].values() if v.get("extra")]
+    assert len(extra) <= 1 and all(abs(v["p_model"] - 0.5) < 0.1 for v in extra)
+    for v in home["lines"].values():
+        assert 0 <= v["p_model"] <= 1 and 0 <= v["p_league"] <= 1 and 0 < v["p_team"] < 1
+    # P(más) baja al subir la línea
+    ps = [v["p_model"] for v in sorted(home["lines"].values(), key=lambda v: v["line"])]
+    assert ps == sorted(ps, reverse=True)
+    assert home["main_line"] in [v["line"] for v in home["lines"].values()]
+
+
+def test_ficha_muestra_insuficiente_no_resalta():
+    games = _league(seasons=("E2024", "E2025"))
+    hist = bp.History(games)
+    # al principio de E2025 nadie lleva 5 partidos de la temporada
+    first = min(g["date"] for g in games if g["season"] == "E2025")
+    p = bp.predict_game(hist, bp.Residuals(), "EUR", "E2025", first, "T0", "T1", {"pts_team": (80.5,)},
+                        {"pts_team": bp.LABEL_EDGE})
+    assert p["low_sample"]
+    blk = p["stats"]["pts"]["lines"]["home"]
+    assert blk["label"] == bp.LABEL_LOW_SAMPLE and blk["market_label"] == bp.LABEL_EDGE and not blk["highlight"]
+    assert bp.predict_game(bp.History([]), bp.Residuals(), "EUR", "E2025", first, "T0", "T1", {}) is None
+
+
 def test_prorroga_nba_sobre_48_minutos():
     g = {"league": "NBA", "ot": 1, "h": _side(110, poss=106.0), "a": _side(108, poss=106.0)}
     assert bp.game_poss(g) == pytest.approx(106 * 48 / 53)

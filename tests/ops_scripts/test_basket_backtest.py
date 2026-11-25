@@ -55,3 +55,16 @@ def test_una_temporada_no_basta():
 def test_orden_de_temporadas_numerico():
     games = [{"season": s} for s in ("A2025", "A2023", "A2024")]
     assert bb.split_seasons(games) == ("A2023", ["A2024", "A2025"])
+
+
+def test_documento_del_backtest_solo_agregados():
+    games = bb.bp.games_from_docs(_games(), "EUR")
+    out = bb.compute(games, "EUR")
+    doc = bb.backtest_doc(out, "EUR", "2026-11-25T00:00:00+00:00")
+    assert doc["warmup"] == "E2024" and doc["seasons"] == ["E2025"]
+    markets = {f"{s}_{sc}" for s in bb.bp.STATS for sc in ("team", "total")}
+    assert set(doc["labels"]) == set(doc["lines"]) == markets
+    assert set(doc["labels"].values()) <= {"ventaja medida", "solo referencia"}
+    assert set(doc["metrics"]) == {"vs_liga", "vs_equipo"} and set(doc["metrics"]["vs_liga"]) == markets
+    assert all(isinstance(v, list) for v in doc["lines"].values())
+    assert "EQUIPO" not in repr(doc)          # ni un equipo en el documento
