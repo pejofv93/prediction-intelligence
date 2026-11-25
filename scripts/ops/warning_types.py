@@ -9,6 +9,10 @@ Uso: LOGS_FILE=logs.json python scripts/ops/warning_types.py \
          analyzers.value_bet_engine=services/sports-agent/analyzers/value_bet_engine.py ...
 logs.json: salida de gcloud logging read --format json (timestamp, textPayload); textPayload =
 «fecha hora módulo WARNING mensaje», con el traceback en las líneas siguientes si lo hay.
+
+25-nov-2026: LOGS_TEXT=fichero lee en su lugar el log completo del runner (el de JOB_LOG_FILE,
+mismo formato, una entrada por línea que empieza por fecha); así sports-analyze cuenta los
+avisos de su pasada sin depender de Cloud Logging (la cuenta del workflow no puede escribir).
 """
 from __future__ import annotations
 
@@ -107,11 +111,29 @@ def last_pass(rows: list[tuple[datetime, str]]) -> list[tuple[datetime, str]]:
     return rows[start:]
 
 
+_ENTRY = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def read_text(path: str) -> list[tuple[datetime, str]]:
+    """Entradas del log del runner: cada una empieza por «AAAA-MM-DD HH:MM:SS»; las líneas que
+    no empiezan así (trazas) se pegan a la entrada anterior."""
+    rows: list[tuple[datetime, str]] = []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            m = _ENTRY.match(line)
+            if m:
+                rows.append((datetime.fromisoformat(m.group(1)), line))
+            elif rows:
+                rows[-1] = (rows[-1][0], rows[-1][1] + "\n" + line)
+    return rows
+
+
 def main(argv: list[str]) -> int:
     modules = dict(a.split("=", 1) for a in argv[1:])
     tpls = {mod: templates(path) for mod, path in modules.items()}
-    rows = []
-    for e in json.load(open(os.environ["LOGS_FILE"], encoding="utf-8")):
+    rows = read_text(os.environ["LOGS_TEXT"]) if os.environ.get("LOGS_TEXT") else []
+    for e in ([] if os.environ.get("LOGS_TEXT") else json.load(open(os.environ["LOGS_FILE"], encoding="utf-8"))):
         ts, text = e.get("timestamp", ""), e.get("textPayload", "")
         try:
             when = datetime.fromisoformat(ts[:19])

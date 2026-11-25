@@ -57,6 +57,18 @@ jobs:
           HIGHLIGHTLY_API_KEY: ${{ secrets.HIGHLIGHTLY_API_KEY }}
         run: python services/sports-agent/job_runner.py analyze
 
+      # Solo plantillas del código y recuentos (sin nombres ni cifras): Cloud Logging no se puede
+      # escribir desde aquí (PERMISSION_DENIED en la pasada del 25-nov 13:00).
+      - name: Avisos por tipo de esta pasada
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          PYTHONIOENCODING: utf-8
+          LOGS_TEXT: ${{ runner.temp }}/analyze.log
+        run: |
+          [ -f "$LOGS_TEXT" ] || { echo "sin log"; exit 0; }
+          python scripts/ops/warning_types.py             analyzers.value_bet_engine=services/sports-agent/analyzers/value_bet_engine.py             analyzers.player_props=services/sports-agent/analyzers/player_props.py
+
       - name: Borrar el log completo del runner
         if: ${{ always() }}
         run: rm -f "${{ runner.temp }}/analyze.log"

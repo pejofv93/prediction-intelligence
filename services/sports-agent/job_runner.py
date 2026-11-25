@@ -163,6 +163,7 @@ class CloudLoggingHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         if self.broken:
+            self.lost += 1       # también cuentan las que ya no se intentan
             return
         try:
             text = self._fmt.format(record)
