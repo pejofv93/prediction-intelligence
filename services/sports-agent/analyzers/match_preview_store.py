@@ -543,7 +543,13 @@ WEB_PAST = FREEZE_BEFORE            # un partido sigue en la web hasta 2 h despu
 
 def web_match(p: dict) -> dict:
     stats = {}
-    for s in mp.STATS:
+    basket = p.get("group") == "basket"
+    if basket:
+        # Baloncesto (bp-v1): puntos, rebotes, asistencias y triples (módulo puro, sin red).
+        from analyzers.basket_preview import STATS as stat_keys
+    else:
+        stat_keys = mp.STATS
+    for s in stat_keys:
         b = (p.get("stats") or {}).get(s) or {}
         if not b.get("available"):
             stats[s] = {"available": False}
@@ -563,14 +569,17 @@ def web_match(p: dict) -> dict:
     teams = p.get("teams") or {}
     # Nombres de pantalla en español ("Ath Bilbao" → "Athletic") e iniciales del escudo: solo
     # presentación; match_id, home_team/away_team guardados y la graduación no cambian.
-    home = display_name(p["home_team"], p.get("group"))
-    away = display_name(p["away_team"], p.get("group"))
+    # Baloncesto: el nombre del feed de la Euroliga tal cual (la tabla es de clubes de fútbol).
+    home = p["home_team"] if basket else display_name(p["home_team"], p.get("group"))
+    away = p["away_team"] if basket else display_name(p["away_team"], p.get("group"))
     return {
         "id": p["match_id"], "div": p["div"], "kickoff_utc": p["kickoff_utc"],
         # Femenino (mp-w1, Highlightly): grupo propio y siempre "solo referencia".
         "group": p.get("group") or "men", "model_version": p.get("model_version") or mp.MODEL_VERSION,
         # Copas (mp-v1-cups): nombre de la copa; div es la liga de los dos equipos.
         **({"cup": p.get("cup")} if p.get("group") == "cups" else {}),
+        # Baloncesto (bp-v1): nombre de la liga ("Euroliga"); div es su código ("EUR").
+        **({"league_name": p.get("league_name") or p["div"]} if basket else {}),
         "home": home, "away": away, "badges": [badge_initials(home), badge_initials(away)],
         "data_cutoff": p.get("data_cutoff"),
         "low_sample": bool(p.get("low_sample")),
@@ -600,11 +609,13 @@ def _read_upcoming_previews(now: datetime, days: int = WEB_DAYS, collection: str
 
 
 def build_web_export(now: Optional[datetime] = None, days: int = WEB_DAYS) -> dict:
-    """Fichas de mp-v1 y, en sus grupos, las femeninas (mp-w1, match_previews_women) y las de copa
-    (mp-v1-cups, match_previews_cups). Si alguna no se puede leer, la web sale sin ese grupo."""
+    """Fichas de mp-v1 y, en sus grupos, las femeninas (mp-w1, match_previews_women), las de copa
+    (mp-v1-cups, match_previews_cups) y las de baloncesto (bp-v1, match_previews_basket). Si alguna
+    no se puede leer, la web sale sin ese grupo."""
     now = now or _now()
     previews = _read_upcoming_previews(now, days)
-    for coll, name in (("match_previews_women", "femeninas"), ("match_previews_cups", "de copa")):
+    for coll, name in (("match_previews_women", "femeninas"), ("match_previews_cups", "de copa"),
+                       ("match_previews_basket", "de baloncesto")):
         try:
             previews += _read_upcoming_previews(now, days, collection=coll)
         except Exception:

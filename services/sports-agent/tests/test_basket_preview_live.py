@@ -169,3 +169,28 @@ def test_graduacion_espera_y_sin_resultado(monkeypatch):
     s = asyncio.run(bl.run_basket_grade(now=late, previews=previews, results={},
                                         graded={"EUR_E2026_801": {}, "EUR_E2026_802": {}}, all_grades=[]))
     assert s["counts"] == {}
+
+
+# ── Web de Tendencias ──────────────────────────────────────────────────────────
+
+def test_exportacion_web_de_baloncesto(monkeypatch):
+    from analyzers import match_preview_store as st
+    previews = _written_previews(monkeypatch)
+    w = st.web_match(previews["EUR_E2026_801"])
+    assert w["group"] == "basket" and w["div"] == "EUR" and w["league_name"] == "Euroliga"
+    assert w["model_version"] == "bp-v1" and w["home"] == "Zorrovia Norte"      # nombre del feed tal cual
+    assert list(w["stats"]) == ["pts", "reb", "ast", "fg3m"]
+    pts = w["stats"]["pts"]
+    assert pts["blocks"]["home"]["label"] == "ventaja medida" and pts["blocks"]["home"]["highlight"]
+    assert len(pts["exp"]) == 3 and pts["blocks"]["total"]["main"] is not None
+    assert "gamecode" not in w and "home_code" not in w            # nada de ids de origen
+
+    seen = []
+
+    def fake_read(now, days, collection="match_previews"):
+        seen.append(collection)
+        return list(previews.values()) if collection == bl.PREVIEWS_B else []
+
+    monkeypatch.setattr(st, "_read_upcoming_previews", fake_read)
+    out = st.build_web_export(NOW)
+    assert bl.PREVIEWS_B in seen and [m["id"] for m in out["matches"]] == ["EUR_E2026_801", "EUR_E2026_802"]

@@ -12,7 +12,9 @@ const DIV_NAMES = { SP1: "LaLiga", SP2: "Segunda", I1: "Serie A", E0: "Premier",
                     I2: "Serie B", F2: "Ligue 2", D2: "2. Bundesliga",
                     // Femenino (mp-w1, Highlightly)
                     WLF: "Liga F", WSL: "WSL", WFBL: "Frauen-Bundesliga", WSA: "Serie A fem.",
-                    WD1: "D1 Arkema" };
+                    WD1: "D1 Arkema",
+                    // Baloncesto (bp-v1)
+                    EUR: "Euroliga" };
 
 const state = { view: "teams", div: null, split: 0, market: null, sort: -1, desc: false, byGap: false,
                 day: null, match: null };
@@ -183,6 +185,10 @@ function closeTeam() { $("team").hidden = true; }
 // ── Vista "Partidos": fichas de partido ─────────────────────────────────────
 const STAT_NAMES = { corners: "Córners", cards: "Tarjetas", fouls: "Faltas", shots: "Remates",
                      sot: "Remates a puerta", goals: "Goles" };
+// Baloncesto (bp-v1, match_previews_basket): sus propias estadísticas, en este orden.
+const BASKET_STAT_NAMES = { pts: "Puntos", reb: "Rebotes", ast: "Asistencias", fg3m: "Triples" };
+const isBasket = (m) => m.group === "basket";
+const statNames = (m) => (isBasket(m) ? BASKET_STAT_NAMES : STAT_NAMES);
 const MP_TAGS = { "ventaja medida": "ventaja", "solo referencia": "referencia", "medido en backtest": "backtest",
                   "muestra insuficiente": "insuficiente" };
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -194,8 +200,10 @@ const isWomen = (m) => m.group === "women";
 const isCup = (m) => m.group === "cups";
 const leagueName = (div) => DIV_NAMES[div] || div;
 const groupTitle = (m) => (isWomen(m) ? `Femenino · ${leagueName(m.div)}`
-  : isCup(m) ? `Copas · ${m.cup || "copa"}` : leagueName(m.div));
-const groupKey = (m) => (isCup(m) ? `cup:${m.cup}` : m.div);   // una copa no se mezcla con su liga
+  : isCup(m) ? `Copas · ${m.cup || "copa"}`
+  : isBasket(m) ? `Baloncesto · ${m.league_name || leagueName(m.div)}` : leagueName(m.div));
+// Una copa no se mezcla con su liga; el baloncesto, en su propio grupo.
+const groupKey = (m) => (isCup(m) ? `cup:${m.cup}` : isBasket(m) ? `basket:${m.div}` : m.div);
 // Línea destacada: como mucho UNA por mercado y lado (local, visitante, total), la que más se
 // separa de la liga, y solo si llega a STANDOUT_PTS puntos (los que se ven en la ficha) en un
 // mercado con ventaja medida (block.highlight, que ya es falso con muestra insuficiente).
@@ -234,9 +242,10 @@ function renderMatchList() {
   }
   const todays = PREV.matches.filter((m) => dayKey(m.kickoff_utc) === state.day);
   const byDiv = new Map();
-  // Primero las ligas masculinas, después "Copas" y al final "Femenino", cada una en orden de hora.
-  const men = todays.filter((x) => !isWomen(x) && !isCup(x));
-  for (const m of [...men, ...todays.filter(isCup), ...todays.filter(isWomen)])
+  // Primero las ligas masculinas, después "Copas", "Femenino" y al final "Baloncesto", cada una en
+  // orden de hora.
+  const men = todays.filter((x) => !isWomen(x) && !isCup(x) && !isBasket(x));
+  for (const m of [...men, ...todays.filter(isCup), ...todays.filter(isWomen), ...todays.filter(isBasket)])
     byDiv.set(groupKey(m), [...(byDiv.get(groupKey(m)) || []), m]);
   list.replaceChildren(...[...byDiv].map(([div, ms]) => el("div", { class: "match-group" },
     el("h3", { text: groupTitle(ms[0]) }),
@@ -313,9 +322,11 @@ function initials(name) {
 // medida" (en copas y femenino, además 50 graduadas en directo con IC95 bajo 0). En cada mercado y
 // equipo, la línea MÁS ALTA con el modelo entre el 60 % y el 90 %, sin las de 0,5 salvo "marca al
 // menos 1 gol"; como mucho 5, de mayor a menor %. Todas con ⭐: el modelo acierta más que la liga.
+// Baloncesto: las mismas reglas que las ligas de fútbol (ventaja medida en el backtest de bp-v1).
 const PILL_MIN = 0.60, PILL_MAX = 0.90, PILL_MAX_N = 5;
 const PILL_NOUN = { corners: "córners", cards: "tarjetas", fouls: "faltas", shots: "remates",
-                    sot: "remates a puerta", goals: "goles" };
+                    sot: "remates a puerta", goals: "goles",
+                    pts: "puntos", reb: "rebotes", ast: "asistencias", fg3m: "triples" };
 const STAR_LEGEND = "⭐ = el modelo acierta más que la media de la liga";
 function pillBody(team, stat, ln) {
   return stat === "goals" && ln === 0.5
@@ -325,7 +336,7 @@ function pillBody(team, stat, ln) {
 function matchPills(m) {
   if (m.low_sample) return [];
   const out = [];
-  for (const stat of Object.keys(STAT_NAMES)) {
+  for (const stat of Object.keys(statNames(m))) {
     const s = m.stats[stat];
     if (!s || !s.available) continue;
     for (const side of ["home", "away"]) {
@@ -348,7 +359,7 @@ function sideLine(block) {
 function marketCard(m, k, colors) {
   const s = m.stats[k];
   if (!s || !s.available) return el("section", { class: "mcard" },
-    el("h3", { text: STAT_NAMES[k] }), el("p", { class: "muted", text: "Sin datos de la liga." }));
+    el("h3", { text: statNames(m)[k] }), el("p", { class: "muted", text: "Sin datos de la liga." }));
   const [eh, ea, et] = s.exp;
   const [lh, la] = s.league_mean;
   const star = ["total", "home", "away"].some((b) => s.blocks[b] && standoutLine(s.blocks[b]));
@@ -360,7 +371,7 @@ function marketCard(m, k, colors) {
         el("span", { class: "exp", text: num(Number(eh).toFixed(1)) }),
         el("span", { class: "ln" }, `${hl} · `, el("strong", { text: hp }))),
       el("div", { class: "mid" },
-        el("h3", { text: `${STAT_NAMES[k]}${star ? " ★" : ""}`,
+        el("h3", { text: `${statNames(m)[k]}${star ? " ★" : ""}`,
                    title: star ? "Alguna línea de este mercado está destacada (ver más líneas)" : "" }),
         el("span", { class: "ln" }, `Total ${num(Number(et).toFixed(1))} · ${tl} `, el("strong", { text: tp }))),
       el("div", { class: "side right" },
@@ -406,6 +417,10 @@ function renderMatch() {
     isCup(m) ? el("p", { class: "warn",
       text: `Copa (modelo de clubes, ${m.model_version}): cada equipo con su fuerza en ${leagueName(m.div)}. ` +
             "\"Medido en backtest\" en córners, faltas, goles, remates y a puerta por equipo; sin estrellas hasta medirlo en directo." }) : null,
+    isBasket(m) ? el("p", { class: "warn",
+      text: `Baloncesto (modelo ${m.model_version}, ${m.league_name || leagueName(m.div)}): por 100 posesiones, con ritmo, ` +
+            "casa/fuera y prórroga (los puntos la cuentan). ⭐ solo en los mercados con ventaja medida en el backtest " +
+            "frente a la media de la liga y a la del equipo." }) : null,
     m.low_sample ? el("p", { class: "warn",
       text: "Muestra insuficiente: algún equipo tiene pocos partidos esta temporada. Se calcula, pero no se resalta." }) : null,
     el("section", { class: "trends", "aria-label": "Tendencias del partido" },
@@ -420,7 +435,7 @@ function renderMatch() {
         : el("p", { class: "muted", text: m.low_sample ? "Sin tendencias: muestra insuficiente."
             : "Ningún mercado con ventaja medida entre el 60 % y el 90 % en este partido." })),
     el("p", { class: "hint", text: "Número esperado de cada equipo, su línea y el % de que haya MÁS. En el centro, el total del partido." }),
-    ...Object.keys(STAT_NAMES).map((k) => marketCard(m, k, [c1, c2])),
+    ...Object.keys(statNames(m)).map((k) => marketCard(m, k, [c1, c2])),
     el("p", { class: "hint", text: `Datos hasta ${m.data_cutoff || "—"}. Solo estadísticas del modelo. Sin cuotas ni recomendaciones.` }),
   ].filter(Boolean));
   sec.hidden = false;
