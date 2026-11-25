@@ -223,3 +223,22 @@ def test_anos_y_rangos():
     for bad in ("2023-2019", "2012", "2027", "19-23", "abc", "2019-2030"):
         with pytest.raises(ValueError):
             td.parse_years(bad, hoy)
+
+
+def test_competicion_de_odds_api_io_no_se_disfraza_de_torneo_principal():
+    # 25-nov-2026: torneos menores con «barcelona»/«madrid» quedaban como Barcelona/Madrid Open
+    from collectors.tennis_collector import _oddsapiio_comp_to_league as m
+    assert m("ATP Challenger Barcelona") == ("ATP", "hard", "ATP Challenger Barcelona")
+    assert m("ITF Women Madrid") == ("WTA", "hard", "ITF Women Madrid")
+    assert m("Barcelona Exhibition")[2] == "Barcelona Exhibition"
+    assert m("Spain - Barcelona")[0:2] == ("ATP", "hard") and m("Spain - Barcelona")[2] == "Spain - Barcelona"
+    assert m("ATP Barcelona") == ("ATP_BARCELONA", "clay", "Barcelona Open")
+    assert m("WTA Madrid") == ("WTA_MADRID", "clay", "Madrid Open")
+    assert m("Wimbledon Men") == ("ATP_WIMBLEDON", "grass", "Wimbledon")
+    assert m("WTA Finals") == ("WTA", "hard", "WTA")
+    for comp in ("ATP Challenger Barcelona", "ITF Women Madrid", "Barcelona Exhibition"):
+        lg, _, t = m(comp)
+        assert not td.is_main_tour({"league": lg, "tournament": t, "competition": comp}), comp
+    # docs viejos con el nombre traducido pero con la competición original guardada
+    assert not td.is_main_tour({"league": "ATP_BARCELONA", "tournament": "Barcelona Open",
+                                "competition": "Challenger Barcelona"})

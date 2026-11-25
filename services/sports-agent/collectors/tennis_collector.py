@@ -337,13 +337,35 @@ async def _fetch_oddsapiio_h2h_odds() -> dict[str, dict]:
     return result
 
 
+# Torneos del mapa que también tienen Challenger/ITF/exhibiciones con el mismo nombre de ciudad:
+# solo se traducen si la competición dice que es del circuito (ATP/WTA).
+_ODDSAPIIO_CITY_KW = ("madrid", "rome", "internazionali", "barcelona")
+_TOUR_WORD_RE = re.compile(r"\b(atp|wta)\b", re.I)
+
+
 def _oddsapiio_comp_to_league(comp: str) -> tuple[str, str, str]:
-    """Mapea nombre de competición de odds-api.io al código interno."""
+    """Mapea nombre de competición de odds-api.io al código interno.
+
+    25-nov-2026: antes se buscaba la palabra clave dentro del nombre sin más, y cualquier torneo
+    menor con «barcelona» o «madrid» quedaba como «Barcelona Open»/«Madrid Open» de la ATP; al
+    perder su nombre, is_main_tour lo contaba como circuito principal (calendario del 25-nov:
+    168 + 28 nombres, 9 emparejados con tennis-data). Ahora lo que no es del circuito principal
+    (Challenger, ITF, UTR, exhibiciones, Davis/BJK, juveniles, dobles…) conserva su nombre tal
+    cual, y las ciudades solo se traducen si la competición lleva ATP o WTA."""
+    from collectors.tennis_data import _NOT_MAIN_RE
+    comp = comp or ""
     comp_lower = comp.lower()
+    tour = "WTA" if re.search(r"\bwta\b|women", comp_lower) else "ATP"
+    if _NOT_MAIN_RE.search(comp):
+        return tour, "hard", comp or "Tennis"
     for kw, (code, surface, name) in _ODDSAPIIO_COMP_MAP.items():
         if kw in comp_lower:
+            if kw in _ODDSAPIIO_CITY_KW and not _TOUR_WORD_RE.search(comp):
+                continue
+            if code.startswith("ATP_") and tour == "WTA":
+                code = "WTA_" + code[4:]
             return code, surface, name
-    return "ATP", "hard", comp or "Tennis"
+    return tour, "hard", comp or "Tennis"
 
 
 async def _fetch_tennis_from_oddsapiio(days: int) -> list[dict]:
@@ -434,6 +456,7 @@ async def _fetch_tennis_from_oddsapiio(days: int) -> list[dict]:
             "h2h_advantage": 0.0,
             "surface": surface,
             "tournament": tournament_name,
+            "competition": comp,          # nombre original de odds-api.io (is_main_tour lo mira)
             "source": "oddsapiio_fallback",
         }
         if odds_pair:

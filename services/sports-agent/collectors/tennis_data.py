@@ -414,7 +414,7 @@ _NOT_MAIN_RE = re.compile(r"davis cup|billie jean king|\bbjk\b|fed cup|challenge
 
 def is_main_tour(doc: dict) -> bool:
     """True si el partido del calendario es del circuito principal ATP/WTA."""
-    text = f"{doc.get('tournament') or ''} {doc.get('league') or ''}"
+    text = f"{doc.get('tournament') or ''} {doc.get('league') or ''} {doc.get('competition') or ''}"
     return not _NOT_MAIN_RE.search(text)
 
 
