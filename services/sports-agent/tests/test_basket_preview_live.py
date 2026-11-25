@@ -118,3 +118,54 @@ def test_historial_solo_de_dias_anteriores():
     hoy = {**docs[-1], "date": NOW.date().isoformat(), "gamecode": 9999}
     s1, s2 = _run(docs=docs), _run(docs=docs + [hoy])
     assert s1["history_games"] == s2["history_games"]
+
+
+# ── Graduación ─────────────────────────────────────────────────────────────────
+
+def _written_previews(monkeypatch):
+    escritos = {}
+    monkeypatch.setattr(bl, "_set_docs", lambda c, d: escritos.setdefault(c, {}).update(d))
+    _run(dry_run=False)
+    return escritos[bl.PREVIEWS_B]
+
+
+def _game(code, home, away, pts=(90, 70)):
+    return {"season": "E2026", "gamecode": code, "date": "2026-11-26", "home_code": home, "away_code": away,
+            "home": {"pts": pts[0], "reb": 40, "ast": 20, "fg3m": 12, "poss_est": 75.0},
+            "away": {"pts": pts[1], "reb": 30, "ast": 14, "fg3m": 6, "poss_est": 75.0}}
+
+
+def test_graduacion_lineas_fijas_y_metricas(monkeypatch):
+    previews = list(_written_previews(monkeypatch).values())
+    later = datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc)
+    results = {"E2026_801": _game(801, "ZRV", "QMR"),
+               "E2026_802": _game(802, "QMR", "CLN")}        # equipos que no cuadran con la ficha
+    out = {}
+    s = asyncio.run(bl.run_basket_grade(dry_run=False, now=later, previews=previews, results=results, graded={},
+                                        all_grades=[], write=lambda c, d: out.setdefault(c, {}).update(d)))
+    assert s["ok"] and s["counts"] == {"graduada": 1, "anulada": 1} and s["n_graduated"] == 1
+    g = out[bl.GRADES_B]["EUR_E2026_801"]
+    assert g["status"] == "graduada" and g["group"] == "basket"
+    assert out[bl.GRADES_B]["EUR_E2026_802"]["reason"] == "el partido guardado no cuadra con la ficha"
+    pts_home = [ln for ln in g["lines"] if ln["market"] == "pts_team" and ln["side"] == "home"]
+    assert sorted(ln["line"] for ln in pts_home) == BACKTEST["lines"]["pts_team"]   # sin la línea extra
+    assert all(ln["y"] == int(90 > ln["line"]) and ln["p_team"] is not None for ln in pts_home)
+    total = [ln for ln in g["lines"] if ln["market"] == "pts_total"]
+    assert all(ln["value"] == 160 for ln in total)
+    live = out["match_preview_metrics"][bl.LIVE_DOC]
+    assert live["n_graduated"] == 1 and set(live["metrics"]) == {"vs_liga", "vs_equipo"}
+    assert "Zorrovia" not in repr(live) and "Zorrovia" not in repr(s)
+
+
+def test_graduacion_espera_y_sin_resultado(monkeypatch):
+    previews = list(_written_previews(monkeypatch).values())
+    soon = datetime(2026, 11, 27, 6, 0, tzinfo=timezone.utc)      # 801 empezó hace 11 h, 802 aún no
+    s = asyncio.run(bl.run_basket_grade(now=soon, previews=previews, results={}, graded={}, all_grades=[]))
+    assert s["counts"] == {"esperando eur_games": 1} and s["would_write"] == 0
+    late = datetime(2026, 12, 5, 12, 0, tzinfo=timezone.utc)      # más de 7 días tras los dos
+    s = asyncio.run(bl.run_basket_grade(now=late, previews=previews, results={}, graded={}, all_grades=[]))
+    assert s["counts"] == {"sin resultado": 2}
+    # ya graduada: no se repite
+    s = asyncio.run(bl.run_basket_grade(now=late, previews=previews, results={},
+                                        graded={"EUR_E2026_801": {}, "EUR_E2026_802": {}}, all_grades=[]))
+    assert s["counts"] == {}

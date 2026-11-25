@@ -485,6 +485,15 @@ async def run_basket_previews_job(dry_run: bool = True, days: int = 3) -> Stream
     return _stream_with_summary("basket-previews", run_basket_previews, dry_run=dry_run, days=days)
 
 
+@app.post("/run-basket-grade", dependencies=[Depends(verify_token)])
+async def run_basket_grade_job(dry_run: bool = True) -> StreamingResponse:
+    """Baloncesto (bp-v1, Euroliga): gradúa las fichas congeladas con eur_games (lo baja la tarea
+    diaria de las 06:30 UTC) → match_preview_grades_basket y match_preview_metrics/bp-v1-EUR_live.
+    dry_run=true por defecto. Resumen solo con recuentos."""
+    from analyzers.basket_preview_live import run_basket_grade
+    return _stream_with_summary("basket-grade", run_basket_grade, dry_run=dry_run)
+
+
 @app.post("/run-women-previews", dependencies=[Depends(verify_token)])
 async def run_women_previews_job(dry_run: bool = True, days: int = 3, highlightly: bool = True) -> StreamingResponse:
     """Fútbol femenino (mp-w1): fichas "solo referencia" de los próximos `days` días en
