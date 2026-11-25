@@ -247,7 +247,7 @@ function renderMatchList() {
   const men = todays.filter((x) => !isWomen(x) && !isCup(x) && !isBasket(x));
   for (const m of [...men, ...todays.filter(isCup), ...todays.filter(isWomen), ...todays.filter(isBasket)])
     byDiv.set(groupKey(m), [...(byDiv.get(groupKey(m)) || []), m]);
-  list.replaceChildren(...[...byDiv].map(([div, ms]) => el("div", { class: "match-group" },
+  list.replaceChildren(...safeGroups([...byDiv], (div, ms) => el("div", { class: "match-group" },
     el("h3", { text: groupTitle(ms[0]) }),
     ...ms.map((m) => {
       const n = standoutCount(m);
@@ -349,6 +349,21 @@ function matchPills(m) {
     }
   }
   return out.sort((a, b) => b.p - a.p).slice(0, PILL_MAX_N);
+}
+// Un fallo al montar el baloncesto no puede tumbar la lista: ese grupo se cambia por un aviso y el
+// resto (fútbol, copas, femenino) se pinta igual. Los grupos de fútbol, como siempre.
+const BASKET_FAIL = "No se pudieron mostrar las fichas de baloncesto.";
+function safeGroups(groups, build) {
+  const out = [];
+  for (const [key, ms] of groups) {
+    if (!isBasket(ms[0])) { out.push(build(key, ms)); continue; }
+    try { out.push(build(key, ms)); }
+    catch (e) {
+      console.warn("fichas de baloncesto:", e);
+      out.push(el("p", { class: "warn", text: BASKET_FAIL }));
+    }
+  }
+  return out;
 }
 
 function sideLine(block) {

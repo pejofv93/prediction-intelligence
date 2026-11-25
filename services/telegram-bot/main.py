@@ -410,8 +410,9 @@ async def send_trends_summary(force: bool = False) -> JSONResponse:
 
     now = datetime.now(timezone.utc)
     day, lo, hi = ts.day_window(now)
-    previews = await asyncio.get_event_loop().run_in_executor(None, lambda: ts.read_day_previews(lo, hi))
-    msgs = ts.build_messages(previews, day)
+    avisos: list[str] = []
+    previews = await asyncio.get_event_loop().run_in_executor(None, lambda: ts.read_day_previews(lo, hi, avisos))
+    msgs = ts.build_messages(previews, day, avisos)
     out = {"day": day.isoformat(), "matches": len(previews), "messages": len(msgs), "sent": 0}
     if not msgs:
         return JSONResponse({**out, "reason": "sin fichas hoy"})

@@ -14,11 +14,14 @@ y los partidos sin ninguna juntos en «Sin tendencias destacadas»; el largo se 
 (sin etiquetas, UTF-16). Solo estadísticas del modelo: sin cuotas ni nada de apuestas.
 """
 import html
+import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from shared.team_display_names import display_name
+
+logger = logging.getLogger(__name__)
 
 WEB_URL = "https://tendencias-pi.pages.dev"
 MAX_LEN = 3800                          # Telegram admite 4096
@@ -203,11 +206,35 @@ def _group_rank(p: dict) -> int:
     return DIV_ORDER.index(div) if div in DIV_ORDER else len(DIV_ORDER) + 3
 
 
-def build_messages(previews: list[dict], day: date) -> list[str]:
+BASKET_FAIL = "⚠️ Baloncesto: no se pudieron montar sus fichas de hoy."
+
+
+def _basket_ok(p: dict) -> bool:
+    """¿Se puede montar esta ficha de baloncesto? (todo lo que build_messages le va a pedir)."""
+    try:
+        str(p["kickoff_utc"]), str(p["home_team"])
+        match_block(p, match_pills(p)[:TG_PILLS_MAX])
+        pair_label(p)
+        _group_rank(p)
+        return True
+    except Exception:
+        logger.warning("trends_summary: ficha de baloncesto sin montar (se omite)", exc_info=True)
+        return False
+
+
+def build_messages(previews: list[dict], day: date, avisos: Optional[list[str]] = None) -> list[str]:
     """Resumen del día por hora de inicio: cada partido con alguna ⭐ con sus píldoras; los
     que no tienen ninguna, juntos al final en «Sin tendencias destacadas». Si no cabe en un
     mensaje se parte entre partidos (o entre nombres de la línea final). El último lleva el
-    enlace a la web."""
+    enlace a la web.
+
+    Un fallo al leer (avisos, de read_day_previews) o al montar el baloncesto no afecta al resto:
+    esas fichas se quitan y el último mensaje lleva un aviso."""
+    avisos = list(avisos or [])
+    ok = [p for p in previews if not is_basket(p) or _basket_ok(p)]
+    if len(ok) < len(previews) and BASKET_FAIL not in avisos:
+        avisos.append(BASKET_FAIL)
+    previews = ok
     if not previews:
         return []
     ms = sorted(previews, key=lambda p: (p["kickoff_utc"], _group_rank(p), p["home_team"]))
@@ -238,6 +265,8 @@ def build_messages(previews: list[dict], day: date) -> list[str]:
         add("<b>Sin tendencias destacadas:</b> " + pair_label(without[0]))
         for p in without[1:]:
             add(pair_label(p), ", ")
+    if avisos:
+        add("\n".join(esc(a) for a in avisos), "\n\n")
     if tg_len(cur + link) > TG_LIMIT:
         msgs.append(cur)
         cur = cont
@@ -245,7 +274,9 @@ def build_messages(previews: list[dict], day: date) -> list[str]:
     return msgs
 
 
-def read_day_previews(lo: datetime, hi: datetime) -> list[dict]:
+def read_day_previews(lo: datetime, hi: datetime, avisos: Optional[list[str]] = None) -> list[dict]:
+    """Fichas del día de todas las colecciones. Si el baloncesto no se puede leer, se sigue sin él
+    y se deja el aviso en `avisos` (el fútbol, como siempre)."""
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     out = []
@@ -253,5 +284,13 @@ def read_day_previews(lo: datetime, hi: datetime) -> list[dict]:
                  "match_previews_basket"):
         q = (col(coll).where(filter=FieldFilter("kickoff_utc", ">=", lo.isoformat()))
              .where(filter=FieldFilter("kickoff_utc", "<", hi.isoformat())))
-        out.extend(s.to_dict() for s in q.stream())
+        if coll != "match_previews_basket":
+            out.extend(s.to_dict() for s in q.stream())
+            continue
+        try:
+            out.extend([s.to_dict() for s in q.stream()])
+        except Exception:
+            logger.warning("trends_summary: no se pudieron leer las fichas de baloncesto", exc_info=True)
+            if avisos is not None:
+                avisos.append(BASKET_FAIL)
     return out

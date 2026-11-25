@@ -17,7 +17,7 @@ const code = [
 const el = (tag, props = {}, ...kids) => ({ tag, text: props.text, kids });
 const num = (x) => String(x).replace(".", ",");
 const api = new Function("el", "num",
-  `${code}; return { statNames, groupTitle, groupKey, matchPills, isBasket };`)(el, num);
+  `${code}; return { statNames, groupTitle, groupKey, matchPills, isBasket, safeGroups, BASKET_FAIL };`)(el, num);
 
 const blk = (label, lines) => ({ label, highlight: label === "ventaja medida", lines });
 function basketMatch(over = {}) {
@@ -63,4 +63,26 @@ test("como mucho 5 píldoras", () => {
     m.stats[s].blocks.away = blk("ventaja medida", [[10.5, 0.65]]);
   }
   assert.equal(api.matchPills(m).length, 5);
+});
+
+// Condición del usuario (25-nov): un fallo al montar el baloncesto no tumba la lista de partidos.
+test("un grupo de baloncesto que falla se cambia por un aviso y el fútbol se pinta igual", () => {
+  const futbol = { group: "men", div: "SP1", home: "Ciudad A", away: "Ciudad B" };
+  const groups = [["SP1", [futbol]], ["basket:EUR", [basketMatch()]]];
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const out = api.safeGroups(groups, (key, ms) => {
+      if (key.startsWith("basket")) throw new TypeError("ficha mal formada");
+      return el("div", { text: key });
+    });
+    assert.equal(out.length, 2);
+    assert.equal(out[0].text, "SP1");                       // el fútbol, como siempre
+    assert.equal(out[1].tag, "p");
+    assert.equal(out[1].text, api.BASKET_FAIL);             // el aviso en lugar del baloncesto
+    // un fallo en un grupo de fútbol sigue saliendo como antes (no se tapa)
+    assert.throws(() => api.safeGroups([["SP1", [futbol]]], () => { throw new Error("x"); }));
+  } finally {
+    console.warn = warn;
+  }
 });

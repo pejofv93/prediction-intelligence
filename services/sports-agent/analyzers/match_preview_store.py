@@ -594,8 +594,22 @@ def web_export(previews: list[dict], now: datetime, days: int = WEB_DAYS) -> dic
     lo, hi = now - WEB_PAST, now + timedelta(days=days)
     keep = sorted((p for p in previews if lo <= _parse(p["kickoff_utc"]) <= hi),
                   key=lambda p: (p["kickoff_utc"], p["div"], p["home_team"]))
-    return {"model_version": mp.MODEL_VERSION, "generated_at": now.isoformat(), "days": days,
-            "min_cur": mp.MIN_CUR, "matches": [web_match(p) for p in keep]}
+    matches, bad_basket = [], 0
+    for p in keep:
+        if p.get("group") != "basket":
+            matches.append(web_match(p))      # fútbol: como siempre
+            continue
+        # Una ficha de baloncesto que no se puede montar no tumba la web: se quita y se avisa.
+        try:
+            matches.append(web_match(p))
+        except Exception:
+            bad_basket += 1
+            logger.warning("web_export: ficha de baloncesto sin montar (se omite)", exc_info=True)
+    out = {"model_version": mp.MODEL_VERSION, "generated_at": now.isoformat(), "days": days,
+           "min_cur": mp.MIN_CUR, "matches": matches}
+    if bad_basket:
+        out["avisos"] = [f"{bad_basket} ficha(s) de baloncesto no se pudieron montar"]
+    return out
 
 
 def _read_upcoming_previews(now: datetime, days: int = WEB_DAYS, collection: str = PREVIEWS) -> list[dict]:
@@ -614,10 +628,15 @@ def build_web_export(now: Optional[datetime] = None, days: int = WEB_DAYS) -> di
     no se puede leer, la web sale sin ese grupo."""
     now = now or _now()
     previews = _read_upcoming_previews(now, days)
+    avisos = []
     for coll, name in (("match_previews_women", "femeninas"), ("match_previews_cups", "de copa"),
                        ("match_previews_basket", "de baloncesto")):
         try:
             previews += _read_upcoming_previews(now, days, collection=coll)
         except Exception:
             logger.error("web_export: no se pudieron leer las fichas %s", name, exc_info=True)
-    return web_export(previews, now, days)
+            avisos.append(f"no se pudieron leer las fichas {name}")
+    out = web_export(previews, now, days)
+    if avisos:
+        out["avisos"] = avisos + out.get("avisos", [])
+    return out

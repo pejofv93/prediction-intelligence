@@ -276,3 +276,33 @@ def test_exportacion_web_lleva_la_copa():
     w = st.web_match(p)
     assert w["group"] == "cups" and w["cup"] == "Copa del Rey" and w["model_version"] == "mp-v1-cups"
     assert "cup" not in st.web_match({**p, "group": "men"})
+
+
+# ── Un fallo del baloncesto no afecta al fútbol en la web (condición del usuario, 25-nov) ─────────
+
+def _basket_roto():
+    # ficha de baloncesto mal formada (sin match_id ni estadísticas): web_match revienta con ella
+    return {"group": "basket", "div": "EUR", "kickoff_utc": (NOW + timedelta(days=1)).isoformat(),
+            "home_team": "Zorrovia Norte", "away_team": "Quimeria Valle"}
+
+
+def test_web_ficha_de_baloncesto_rota_no_tumba_el_futbol():
+    futbol = _frozen_preview()
+    out = st.web_export([futbol, _basket_roto()], NOW)
+    assert [m["id"] for m in out["matches"]] == [futbol["match_id"]]      # el fútbol sale entero
+    assert out["avisos"] == ["1 ficha(s) de baloncesto no se pudieron montar"]
+    assert st.web_export([futbol], NOW).get("avisos") is None             # sin baloncesto, sin aviso
+
+
+def test_web_lectura_de_baloncesto_caida_no_tumba_el_futbol(monkeypatch):
+    futbol = _frozen_preview()
+
+    def fake_read(now, days, collection=st.PREVIEWS):
+        if collection == "match_previews_basket":
+            raise RuntimeError("Firestore caído")
+        return [futbol] if collection == st.PREVIEWS else []
+
+    monkeypatch.setattr(st, "_read_upcoming_previews", fake_read)
+    out = st.build_web_export(NOW)
+    assert [m["id"] for m in out["matches"]] == [futbol["match_id"]]
+    assert out["avisos"] == ["no se pudieron leer las fichas de baloncesto"]

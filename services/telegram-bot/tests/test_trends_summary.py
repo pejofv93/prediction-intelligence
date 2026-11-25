@@ -193,3 +193,45 @@ def test_partidos_sin_estrella_al_final_y_con_estrella_arriba():
     m = ts.build_messages([a, b], date(2026, 11, 21))[0]
     assert m.index("<b>Athletic – Espanyol</b>") < m.index("Sin tendencias destacadas") < m.index("Chelsea–Leeds")
     assert "<b>Chelsea – Leeds</b>" not in m
+
+
+# ── Un fallo del baloncesto no afecta al fútbol en Telegram (condición del usuario, 25-nov) ──────
+
+def test_ficha_de_baloncesto_rota_no_tumba_el_resumen():
+    futbol = _preview()
+    sin_nombre = {k: v for k, v in _basket().items() if k != "home_team"}           # antes rompía el orden
+    lineas_rotas = {**_basket(away="Otra Ciudad"), "stats": {"pts": {"available": True, "lines": {"home": 7}}}}
+    for roto in (sin_nombre, lineas_rotas):
+        msgs = ts.build_messages([futbol, roto], date(2026, 11, 20))
+        text = "\n".join(msgs)
+        assert "Athletic" in text and "Quimeria" not in text and "Otra Ciudad" not in text   # el fútbol, entero
+        assert text.count(ts.BASKET_FAIL) == 1 and "1 partido " in text   # aviso; la cabecera solo cuenta el fútbol
+    assert ts.BASKET_FAIL not in "\n".join(ts.build_messages([futbol], date(2026, 11, 20)))
+
+
+def test_lectura_de_baloncesto_caida_no_tumba_el_resumen(monkeypatch):
+    import sys
+    import types
+    futbol = _preview()
+
+    class Q:
+        def __init__(self, coll):
+            self.coll = coll
+
+        def where(self, filter=None):
+            return self
+
+        def stream(self):
+            if self.coll == "match_previews_basket":
+                raise RuntimeError("Firestore caído")
+            return [types.SimpleNamespace(to_dict=lambda: futbol)] if self.coll == "match_previews" else []
+
+    fake = types.ModuleType("shared.firestore_client")
+    fake.col = Q
+    monkeypatch.setitem(sys.modules, "shared.firestore_client", fake)
+    avisos = []
+    lo = datetime(2026, 11, 20, tzinfo=timezone.utc)
+    previews = ts.read_day_previews(lo, lo, avisos)
+    assert previews == [futbol] and avisos == [ts.BASKET_FAIL]
+    text = "\n".join(ts.build_messages(previews, date(2026, 11, 20), avisos))
+    assert "Athletic" in text and text.count(ts.BASKET_FAIL) == 1
