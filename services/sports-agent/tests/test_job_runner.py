@@ -95,24 +95,68 @@ def _handler(fail_first):
     logging.Handler.__init__(h)
     h._logger, h._resource = _FakeLogger(fail_first), None
     h._fmt = logging.Formatter("%(message)s")
-    h._buf, h.broken, h.lost, h._fails_in_row = [], False, 0, 0
+    h._reset()
     return h
 
 
 def test_cloud_logging_reintenta_con_espera(monkeypatch):
     monkeypatch.setattr(job_runner.time, "sleep", lambda s: None)
     h = _handler(fail_first=2)                       # falla 2 veces y luego escribe
-    h._buf = [("x", "INFO")] * 150                   # dos lotes de 100 + 50
+    h._buf = [("x", "INFO")] * 150                   # 8 lotes de 20 (el último de 10)
     h.flush()
-    assert not h.broken and h.lost == 0 and h._logger.calls == 4
+    assert not h.broken and h.lost == 0 and h.written == 150 and h._logger.calls == 2 + 8
+    assert h.codes == {"RuntimeError": 2}
 
 
-def test_cloud_logging_pierde_lote_y_sigue(monkeypatch):
+def test_cloud_logging_lote_fallido_se_reintenta_linea_a_linea(monkeypatch):
     monkeypatch.setattr(job_runner.time, "sleep", lambda s: None)
     h = _handler(fail_first=4)                       # el primer lote agota los reintentos
     h._buf = [("x", "INFO")] * 150
     h.flush()
-    assert not h.broken and h.lost == 100 and h._logger.calls == 5
+    # 4 intentos del lote + 20 líneas sueltas + 7 lotes restantes; no se pierde nada
+    assert not h.broken and h.lost == 0 and h.written == 150 and h._logger.calls == 4 + 20 + 7
+
+
+def test_cloud_logging_pausa_entre_lotes_y_lotes_por_tamano(monkeypatch):
+    waits = []
+    monkeypatch.setattr(job_runner.time, "sleep", waits.append)
+    h = _handler(fail_first=0)
+    big = "y" * 120_000
+    h._buf = [(big, "INFO"), (big, "INFO"), ("x", "INFO")]   # 200 KB por lote: 2 lotes
+    h.flush()
+    assert h._logger.calls == 2 and waits == [h.PAUSE_S]
+
+
+def test_cloud_logging_recorta_lineas_enormes():
+    h = _handler(fail_first=0)
+    h.emit(logging.LogRecord("m", logging.INFO, __file__, 1, "z" * 80_000, None, None))
+    assert h.truncated == 1 and len(h._buf[0][0]) < 50_100
+    assert "recortada" in h._buf[0][0]
+    assert "1 recortadas" in h.report()
+
+
+class _BadLineBatch(_FakeBatch):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.items = []
+
+    def log_text(self, text, **k):
+        self.items.append(text)
+
+    def commit(self):
+        self.owner.calls += 1
+        if "MALA" in self.items:
+            raise RuntimeError("ResourceExhausted")
+
+
+def test_cloud_logging_solo_pierde_la_linea_que_falla(monkeypatch):
+    monkeypatch.setattr(job_runner.time, "sleep", lambda s: None)
+    h = _handler(fail_first=0)
+    h._logger.batch = lambda: _BadLineBatch(h._logger)
+    h._buf = [("x", "INFO")] * 10 + [("MALA", "INFO")] + [("x", "INFO")] * 9
+    h.flush()
+    assert h.lost == 1 and h.written == 19 and not h.broken and h.max_lost_chars == 4
+    assert "1 sin escribir" in h.report()
 
 
 class _FakeCode:

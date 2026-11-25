@@ -122,7 +122,21 @@ def describe_api_error(exc: Exception) -> str:
 
 
 class CloudLoggingHandler(logging.Handler):
-    """Manda cada línea a Cloud Logging como si la escribiera el servicio en Cloud Run."""
+    """Manda cada línea a Cloud Logging como si la escribiera el servicio en Cloud Run.
+
+    25-nov-2026: en la pasada de las 19:00 del 24-nov tres lotes de 100 líneas fallaron con
+    ResourceExhausted SIN que Monitoring registrara ninguna cuota superada (probable petición
+    demasiado grande, no cuota). Ahora: lotes de BATCH líneas y como mucho MAX_BATCH_BYTES,
+    cada línea recortada a MAX_ENTRY_CHARS, PAUSE_S entre lotes, y un lote que agota los
+    reintentos se reintenta línea a línea (solo se pierde la que falle). Corre en un hilo
+    aparte (QueueListener, ver setup_logging): las esperas no frenan el trabajo."""
+
+    BATCH = 20
+    MAX_BATCH_BYTES = 200_000
+    MAX_ENTRY_CHARS = 50_000      # Cloud Logging admite 256 KB por entrada
+    PAUSE_S = 0.5
+    LINE_PAUSE_S = 0.2
+    RETRY_WAITS = (2, 5, 15)     # segundos entre reintentos (ResourceExhausted = cuota por minuto)
 
     def __init__(self, project: str, service: str) -> None:
         super().__init__(level=logging.INFO)
@@ -134,62 +148,117 @@ class CloudLoggingHandler(logging.Handler):
             "project_id": project, "service_name": service, "location": "europe-west1",
             "configuration_name": service, "revision_name": "github-actions"})
         self._fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+        self._reset()
+
+    def _reset(self) -> None:
         self._buf: list[tuple[str, str]] = []
         self.broken = False
         self.lost = 0            # líneas que no se pudieron escribir tras los reintentos
+        self.written = 0
+        self.truncated = 0       # líneas recortadas a MAX_ENTRY_CHARS
+        self.codes: Counter = Counter()   # código de error de cada intento fallido
+        self.max_lost_chars = 0
         self._fails_in_row = 0
+        self._sent_batches = 0
 
     def emit(self, record: logging.LogRecord) -> None:
         if self.broken:
             return
         try:
-            self._buf.append((self._fmt.format(record), record.levelname))
+            text = self._fmt.format(record)
         except Exception:
             return
+        if len(text) > self.MAX_ENTRY_CHARS:
+            text = text[:self.MAX_ENTRY_CHARS] + f" [recortada: {len(text)} caracteres]"
+            self.truncated += 1
+        self._buf.append((text, record.levelname))
         if len(self._buf) >= self.BATCH:
             self.flush()
 
-    BATCH = 100
-    RETRY_WAITS = (2, 5, 15)     # segundos entre reintentos (ResourceExhausted = cuota por minuto)
+    def _chunks(self, buf: list[tuple[str, str]]):
+        chunk, size = [], 0
+        for item in buf:
+            n = len(item[0].encode("utf-8", "replace"))
+            if chunk and (len(chunk) >= self.BATCH or size + n > self.MAX_BATCH_BYTES):
+                yield chunk
+                chunk, size = [], 0
+            chunk.append(item)
+            size += n
+        if chunk:
+            yield chunk
+
+    def _commit(self, chunk: list[tuple[str, str]]) -> None:
+        batch = self._logger.batch()
+        for text, sev in chunk:
+            batch.log_text(text, resource=self._resource, severity=sev)
+        batch.commit()
+
+    def _give_up(self, err: str, pending: int) -> None:
+        self.lost += pending
+        self.broken = True
+        print(f"Cloud Logging: no se puede escribir ({err}); queda el fichero", file=sys.stdout, flush=True)
 
     def flush(self) -> None:
-        """Escribe lo acumulado por lotes de BATCH líneas. Si un lote falla, reintenta con
-        espera; si sigue fallando, lo da por perdido (queda en el fichero) y sigue con el
-        siguiente. Solo se rinde del todo tras 3 lotes perdidos seguidos."""
+        """Escribe lo acumulado. Un lote que falla se reintenta con espera; si sigue fallando,
+        se prueba línea a línea y solo se pierde lo que falle (queda en el fichero). Se rinde
+        del todo con un error permanente (permiso) o tras 3 lotes seguidos sin escribir nada."""
         if self.broken or not self._buf:
             return
         buf, self._buf = self._buf, []
-        for i in range(0, len(buf), self.BATCH):
-            chunk, err = buf[i:i + self.BATCH], None
+        chunks = list(self._chunks(buf))
+        for ci, chunk in enumerate(chunks):
+            if self._sent_batches:
+                time.sleep(self.PAUSE_S)
+            self._sent_batches += 1
+            err = None
             for wait in (0, *self.RETRY_WAITS):
                 if wait:
                     time.sleep(wait)
                 try:
-                    batch = self._logger.batch()
-                    for text, sev in chunk:
-                        batch.log_text(text, resource=self._resource, severity=sev)
-                    batch.commit()
+                    self._commit(chunk)
                     err = None
                     break
                 except Exception as exc:  # sin el mensaje: podría llevar datos
                     err = describe_api_error(exc)
-                    if _error_code(exc) in _PERMANENT_CODES:
+                    code = _error_code(exc) or type(exc).__name__
+                    self.codes[code] += 1
+                    if code in _PERMANENT_CODES:
+                        if code == "INVALID_ARGUMENT" and len(chunk) > 1:
+                            break        # probablemente una línea: se prueba línea a línea
                         # reintentar no lo arregla (p. ej. falta el permiso de escribir logs)
-                        self.lost += len(buf) - i
-                        self.broken = True
-                        print(f"Cloud Logging: no se puede escribir ({err}); queda el fichero",
-                              file=sys.stdout, flush=True)
+                        self._give_up(err, sum(len(c) for c in chunks[ci:]))
                         return
             if err is None:
+                self.written += len(chunk)
                 self._fails_in_row = 0
                 continue
-            self.lost += len(chunk)
-            self._fails_in_row += 1
+            ok_lines = 0
+            for item in chunk:                         # línea a línea: aísla la que no entra
+                time.sleep(self.LINE_PAUSE_S)
+                try:
+                    self._commit([item])
+                    ok_lines += 1
+                except Exception as exc:
+                    self.codes[_error_code(exc) or type(exc).__name__] += 1
+                    self.lost += 1
+                    self.max_lost_chars = max(self.max_lost_chars, len(item[0]))
+            self.written += ok_lines
+            self._fails_in_row = 0 if ok_lines else self._fails_in_row + 1
             if self._fails_in_row >= 3:
-                self.broken = True
-                print(f"Cloud Logging: no se puede escribir ({err}); queda el fichero",
-                      file=sys.stdout, flush=True)
+                self._give_up(err, sum(len(c) for c in chunks[ci + 1:]))
                 return
+
+    def report(self) -> str | None:
+        """Resumen sin contenido para el log público (None si todo fue bien)."""
+        if not (self.lost or self.truncated or self.codes):
+            return None
+        codes = ", ".join(f"{k}={v}" for k, v in sorted(self.codes.items())) or "ninguno"
+        return (f"Cloud Logging: {self.written} líneas escritas, {self.lost} sin escribir (quedan en "
+                f"el fichero), {self.truncated} recortadas; errores por código: {codes}"
+                + (f"; la mayor perdida: {self.max_lost_chars} caracteres" if self.lost else ""))
+
+
+_CLOUD: list = []        # [(QueueListener, CloudLoggingHandler)] si Cloud Logging está activo
 
 
 def setup_logging(log_file: str, project: str | None) -> tuple[PublicFilter, FailFlag]:
@@ -212,7 +281,16 @@ def setup_logging(log_file: str, project: str | None) -> tuple[PublicFilter, Fai
 
     if project:
         try:
-            root.addHandler(CloudLoggingHandler(project, "sports-agent"))
+            import queue
+            from logging.handlers import QueueHandler, QueueListener
+            clh = CloudLoggingHandler(project, "sports-agent")
+            q: queue.Queue = queue.Queue()
+            qh = QueueHandler(q)
+            qh.setLevel(logging.INFO)
+            listener = QueueListener(q, clh, respect_handler_level=True)
+            listener.start()
+            root.addHandler(qh)
+            _CLOUD.append((listener, clh))
         except Exception as exc:
             print(f"Cloud Logging: no disponible ({describe_api_error(exc)}); queda el fichero", flush=True)
     for noisy in ("httpx", "httpcore", "urllib3", "google"):
@@ -248,8 +326,12 @@ def main(argv: list[str]) -> int:
         rc = 1
     for h in logging.getLogger().handlers:
         h.flush()
-        if getattr(h, "lost", 0):
-            print(f"Cloud Logging: {h.lost} líneas sin escribir (quedan en el fichero)", flush=True)
+    for listener, clh in _CLOUD:
+        listener.stop()          # procesa lo que quede en la cola
+        clh.flush()
+        line = clh.report()
+        if line:
+            print(line, flush=True)
     print("avisos y errores por módulo: "
           + (", ".join(f"{lvl} {name}={n}" for (lvl, name), n in sorted(pub_filter.counts.items()))
              or "ninguno"), flush=True)
