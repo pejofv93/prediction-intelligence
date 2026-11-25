@@ -1,0 +1,89 @@
+# Baloncesto en Tendencias: carga del historial de la NBA desde ESPN (scoreboard + summary, sin
+# clave; sports-agent POST /run-nba-espn) → nba_games / nba_games_state. Solo lo lee el backtest
+# bp-v1 (basket-backtest con liga=NBA).
+# SOLO manual. dry_run=true por defecto (descarga 5 días y cuenta, no escribe). Escribir exige
+# dry_run=false Y confirmar=ESCRIBIR. Temporadas válidas: de N2022 (2022-23) a la actual.
+# Reanudable: cada llamada corta a los ~25 min y lo hecho no se repide; «pasadas» encadena
+# llamadas mientras queden días (estimado: ~1.600 peticiones por temporada completa, 1-2
+# llamadas por temporada). El log solo lleva agregados (recuentos), sin equipos ni partidos.
+name: sports-nba-load
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Temporadas (N2022,…,N2026; N2025 = 2025-26); vacío = de N2022 a la actual"
+        default: ""
+      max_days:
+        description: "Tope de días por llamada (0 = sin tope; en dry_run, 5)"
+        default: "0"
+      pasadas:
+        description: "Llamadas seguidas mientras queden días (1-8; en dry_run siempre 1)"
+        default: "1"
+      dry_run:
+        description: "true = solo descarga y cuenta"
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      confirmar:
+        description: "Para dry_run=false escribe ESCRIBIR"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nba-load
+  cancel-in-progress: false
+
+jobs:
+  cargar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Comprobar confirmación
+        if: ${{ inputs.dry_run == 'false' && inputs.confirmar != 'ESCRIBIR' }}
+        run: |
+          echo "dry_run=false exige confirmar=ESCRIBIR — no se llama al servicio"
+          exit 1
+
+      - name: Carga NBA (sports-agent, síncrono)
+        env:
+          SEASONS: ${{ inputs.seasons }}
+          MAX_DAYS: ${{ inputs.max_days }}
+          PASADAS: ${{ inputs.pasadas }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          [[ "$SEASONS" =~ ^(N20[0-9]{2})?(,N20[0-9]{2})*$ ]] || { echo "seasons inválido"; exit 1; }
+          [[ "$MAX_DAYS" =~ ^[0-9]+$ ]] || { echo "max_days inválido"; exit 1; }
+          [[ "$PASADAS" =~ ^[1-8]$ ]] || { echo "pasadas: de 1 a 8"; exit 1; }
+          [[ "$DRY_RUN" == "true" ]] && PASADAS=1
+          for i in $(seq 1 "$PASADAS"); do
+            echo "── pasada $i de $PASADAS"
+            curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-nba-espn" -G \
+              --data-urlencode "seasons=${SEASONS}" \
+              --data-urlencode "max_days=${MAX_DAYS}" \
+              --data-urlencode "dry_run=${DRY_RUN}" \
+              -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+              --max-time 1700 --no-buffer --fail --silent --show-error > out.txt
+            grep '^summary: ' out.txt | sed 's/^summary: //' > s.json
+            python3 - <<'PY'
+          import json
+          s = json.load(open("s.json"))
+          for code, x in (s.get("seasons") or {}).items():
+              print(f"{code}: días pedidos {x.get('days')} · ya hechos {x.get('days_skipped')} · "
+                    f"sin partidos {x.get('empty_days')} · partidos {x.get('events')} · docs {x.get('docs')} "
+                    f"(por tipo {x.get('by_type')}) · escritos {x.get('written')} · prórroga {x.get('ot_games')} · "
+                    f"saltados {x.get('skipped')} · días pendientes {x.get('days_left')}"
+                    + (f" · media puntos {x.get('avg_total_pts')} · posesiones {x.get('avg_poss')}"
+                       if x.get("docs") else ""))
+          print(f"peticiones {s.get('requests')} · sin tiempo {s.get('out_of_time')} · "
+                f"días pendientes {s.get('days_left')} · errores {s.get('errors')}")
+          open("left.txt", "w").write(str(s.get("days_left") or 0))
+          PY
+            grep -q '^done ' out.txt
+            grep -q '^summary: {"ok": true' out.txt
+            if [[ "$(cat left.txt)" == "0" ]]; then echo "sin días pendientes"; break; fi
+          done
+          echo "días pendientes al terminar: $(cat left.txt)"

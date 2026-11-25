@@ -5,8 +5,12 @@
 #   Tenis:    /run-tennis-data?daily=true → alldata.php + 2 xlsx del año en curso (en enero
 #             también el anterior); solo se reescriben los torneos nuevos o cambiados (hash)
 #             → tennis_tournaments / tennis_data_state.
+#   NBA:      /run-nba-espn?daily=true → solo la temporada en curso, de ayer hacia atrás, días
+#             que falten (como mucho 30; en temporada ~1 scoreboard + 0-15 summary al día;
+#             jul-sep 0 peticiones) → nba_games / nba_games_state. APAGADO hasta que exista la
+#             variable de repositorio NBA_ACTIVO = si.
 # Aislado: no lo lee ningún analizador todavía. El log solo muestra recuentos.
-# Los dos pasos corren siempre; el job falla si falla cualquiera.
+# Los pasos corren siempre (NBA solo si está activo); el job falla si falla cualquiera.
 name: sports-eur-tennis-daily
 
 on:
@@ -22,7 +26,7 @@ concurrency:
 jobs:
   mantener:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Euroliga (sports-agent, síncrono)
         id: eur
@@ -63,3 +67,24 @@ jobs:
           PY
           grep -q '^done ' out_t.txt
           grep -q '^summary: {"ok": true' out_t.txt
+
+      - name: NBA (sports-agent, síncrono; solo con NBA_ACTIVO=si)
+        if: always() && vars.NBA_ACTIVO == 'si'
+        run: |
+          set -euo pipefail
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/run-nba-espn?daily=true&dry_run=false" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1700 --no-buffer --fail --silent --show-error > out_n.txt
+          grep '^summary: ' out_n.txt | sed 's/^summary: //' > n.json
+          python3 - <<'PY'
+          import json
+          s = json.load(open("n.json"))
+          for code, x in (s.get("seasons") or {}).items():
+              print(f"{code}: días pedidos {x.get('days')} · sin partidos {x.get('empty_days')} · "
+                    f"partidos {x.get('events')} · docs {x.get('docs')} (por tipo {x.get('by_type')}) · "
+                    f"escritos {x.get('written')} · prórroga {x.get('ot_games')} · saltados {x.get('skipped')} · "
+                    f"días pendientes {x.get('days_left')}")
+          print(f"peticiones {s.get('requests')} · sin tiempo {s.get('out_of_time')} · errores {s.get('errors')}")
+          PY
+          grep -q '^done ' out_n.txt
+          grep -q '^summary: {"ok": true' out_n.txt
