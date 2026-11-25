@@ -60,7 +60,10 @@ def test_el_doc_sirve_al_modelo():
 def test_temporadas_y_dias():
     assert ne.season_code(date(2025, 11, 1)) == "N2025"
     assert ne.season_code(date(2026, 3, 1)) == "N2025"
-    assert ne.default_seasons(date(2026, 11, 24)) == ["N2023", "N2024", "N2025", "N2026"]
+    assert ne.default_seasons(date(2026, 11, 24)) == ["N2022", "N2023", "N2024", "N2025", "N2026"]
+    assert ne.eligible_season("N2022", date(2026, 11, 24)) and ne.eligible_season("N2026", date(2026, 11, 24))
+    assert not ne.eligible_season("N2021", date(2026, 11, 24))
+    assert not ne.eligible_season("N2027", date(2026, 11, 24)) and not ne.eligible_season("E2025")
     days = ne.season_days("N2026", date(2026, 10, 3))
     assert days == ["20261001", "20261002", "20261003"]
     assert len(ne.season_days("N2024", date(2030, 1, 1))) == 273   # 1-oct-2024 … 30-jun-2025
@@ -122,3 +125,76 @@ def test_carga_dry_run_y_reanudable(monkeypatch):
     s = run(dry_run=False, state_loader=lambda season: dict(saved))
     assert [c for c in calls if "scoreboard" in c] == [ne.SCOREBOARD_URL.format(day="20261003")]
     assert s["seasons"]["N2026"]["docs"] == 1
+
+
+def _ev(eid, completed=True, stype=2, status="STATUS_FINAL"):
+    return {"id": eid, "status": {"type": {"completed": completed, "name": status}},
+            "season": {"type": stype}, "name": "x"}
+
+
+def test_aplazado_no_bloquea_el_dia():
+    evs = ne.events_from_scoreboard({"events": [_ev("1"), _ev("2", completed=False, status="STATUS_POSTPONED")]})
+    assert ne.day_complete(evs, {"1"}, set())
+    evs = ne.events_from_scoreboard({"events": [_ev("1"), _ev("2", completed=False, status="STATUS_SCHEDULED")]})
+    assert not ne.day_complete(evs, {"1"}, set())
+
+
+def _fetcher(monkeypatch, scoreboards):
+    monkeypatch.setattr(ne, "_SLEEP_S", 0)
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if "scoreboard" in url:
+            sb = scoreboards(url.split("dates=")[1])
+            return sb, (200 if sb is not None else 503), 0.01
+        return _summary(), 200, 0.01
+    return fetch, calls
+
+
+def test_scoreboard_sin_lista_no_da_el_dia_por_hecho(monkeypatch):
+    # 1-oct sin clave events (respuesta rara), 2-oct sin partidos (vacío legítimo), 3-oct caído
+    fetch, _ = _fetcher(monkeypatch, lambda d: {"20261001": {"leagues": []}, "20261002": {"events": []}}.get(d))
+    written = {}
+
+    def writer(season, docs, state):
+        written[season] = state
+        return 0
+    s = asyncio.run(ne.run_nba_espn(seasons=["N2026"], today=date(2026, 10, 4), dry_run=False, fetch=fetch,
+                                    state_loader=lambda season: {}, writer=writer))
+    assert written["N2026"]["days_done"] == {"20261002"}
+    assert s["requests"]["http_errors"] == 2 and s["seasons"]["N2026"]["empty_days"] == 1
+
+
+def test_pasada_diaria_temporada_actual_de_ayer_hacia_atras(monkeypatch):
+    fetch, calls = _fetcher(monkeypatch, lambda d: {"events": [_ev(d + "1")]})
+    s = asyncio.run(ne.run_nba_espn(daily=True, dry_run=True, max_days=2, today=date(2026, 11, 25),
+                                    fetch=fetch, state_loader=lambda season: {}))
+    assert list(s["seasons"]) == ["N2026"] and s["daily"]
+    assert [c.split("dates=")[1] for c in calls if "scoreboard" in c] == ["20261124", "20261123"]
+    assert s["seasons"]["N2026"]["by_type"] == {"2": 2}
+
+
+def test_pasada_diaria_fuera_de_temporada_no_pide_nada(monkeypatch):
+    fetch, calls = _fetcher(monkeypatch, lambda d: {"events": []})
+    for today in (date(2026, 8, 15), date(2026, 9, 30)):
+        s = asyncio.run(ne.run_nba_espn(daily=True, dry_run=False, today=today, fetch=fetch,
+                                        state_loader=lambda season: {}, writer=lambda *a: 0))
+        assert s["ok"] and list(s["seasons"]) == ["N2026"]
+    # julio: la temporada que acaba (N2025) ya cargada entera → 0 peticiones
+    done = {"days_done": ne.season_days("N2025", date(2026, 7, 31))}
+    s = asyncio.run(ne.run_nba_espn(daily=True, dry_run=False, today=date(2026, 7, 10), fetch=fetch,
+                                    state_loader=lambda season: dict(done), writer=lambda *a: 0))
+    assert list(s["seasons"]) == ["N2025"]
+    assert calls == []
+
+
+def test_endpoint_rechaza_temporadas_fuera_de_rango():
+    from fastapi.testclient import TestClient
+    import main
+    main.app.dependency_overrides[main.verify_token] = lambda: None
+    try:
+        r = TestClient(main.app).post("/run-nba-espn?seasons=N2021")
+        assert r.status_code == 400
+    finally:
+        main.app.dependency_overrides.clear()

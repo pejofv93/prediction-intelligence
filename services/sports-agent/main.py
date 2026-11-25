@@ -336,22 +336,26 @@ async def run_eur_boxscores_job(seasons: str = "", dry_run: bool = True, max_gam
 
 @app.post("/run-nba-espn", dependencies=[Depends(verify_token)])
 async def run_nba_espn_job(seasons: str = "", dry_run: bool = True, max_days: int = 0,
-                           only_missing: bool = True) -> StreamingResponse:
+                           only_missing: bool = True, daily: bool = False) -> StreamingResponse:
     """
     Baloncesto en Tendencias: estadísticas de equipo por partido de la NBA desde ESPN (scoreboard
     + summary, sin clave) → nba_games / nba_games_state. Aislado: solo lo lee el backtest bp-v1.
 
-    seasons: 'N2023,N2024,N2025,N2026' (vacío = la actual y las tres anteriores; N2025 = 2025-26).
+    seasons: 'N2022,…,N2026' (vacío = de N2022 a la actual; N2025 = 2025-26). Solo de N2022 a la
+    temporada actual (400 si no).
     dry_run=true por defecto (descarga, calcula y cuenta, no escribe; sin max_days, solo 5 días).
     max_days: tope de días por llamada (0 = sin tope). Lo que no da tiempo queda para la siguiente.
+    daily=true (sports-eur-tennis-daily con NBA_ACTIVO=si): solo la temporada en curso, de ayer
+    hacia atrás, como mucho 30 días.
     La última línea del stream es 'summary: {...}' (solo agregados).
     """
+    from collectors.nba_espn import eligible_season, run_nba_espn
     season_list = [s.strip().upper() for s in seasons.split(",") if s.strip()] or None
-    if season_list and not all(len(s) == 5 and s[0] == "N" and s[1:].isdigit() for s in season_list):
-        raise HTTPException(status_code=400, detail="seasons: códigos tipo N2025 separados por comas")
-    from collectors.nba_espn import run_nba_espn
+    if season_list and not all(eligible_season(s) for s in season_list):
+        raise HTTPException(status_code=400,
+                            detail="seasons: códigos tipo N2025 separados por comas, de N2022 a la actual")
     return _stream_with_summary("nba-espn", run_nba_espn, seasons=season_list, dry_run=dry_run,
-                                max_days=max(0, max_days), only_missing=only_missing)
+                                max_days=max(0, max_days), only_missing=only_missing, daily=daily)
 
 
 @app.post("/run-tennis-data", dependencies=[Depends(verify_token)])

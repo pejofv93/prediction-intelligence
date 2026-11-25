@@ -44,9 +44,14 @@ _HTTP_TIMEOUT_S = 20
 _SLEEP_S = 0.3
 TIME_BUDGET_S = 1500          # Cloud Run corta a 1800 s: lo que no da tiempo queda para la siguiente
 DRY_RUN_MAX_DAYS = 5          # en dry-run, sin max_days, solo unos días: es una prueba, no la carga
+DAILY_MAX_DAYS = 30           # pasada diaria: tope de días (de más reciente a más antiguo)
+FIRST_SEASON = 2022           # la carga empieza en 2022-23 (N2022): antes, ni se pide
 SEASON_TYPES = {2, 3, 5}      # regular, playoffs, play-in (1 = pretemporada, 4 = All-Star)
 SEASON_START = (10, 1)        # la temporada se recorre del 1-oct al 30-jun
 SEASON_END = (6, 30)
+# Partidos que no se juegan ese día: no impiden dar el día por completo (si no, se repediría
+# siempre). Si se juegan otro día, salen en el scoreboard de ese otro día.
+_NOT_PLAYED = {"STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_CANCELLED", "STATUS_FORFEIT"}
 
 STAT_NAMES = {
     "fg": "fieldGoalsMade-fieldGoalsAttempted",
@@ -67,10 +72,18 @@ def season_code(d: date) -> str:
 
 
 def default_seasons(today: Optional[date] = None) -> list[str]:
-    """La actual y las tres anteriores (N2022…N2025 en nov-2025)."""
+    """De N2022 (2022-23) a la actual: N2022…N2026 en nov-2026."""
     today = today or datetime.now(timezone.utc).date()
     start = int(season_code(today)[1:])
-    return [f"N{y}" for y in range(start - 3, start + 1)]
+    return [f"N{y}" for y in range(FIRST_SEASON, start + 1)]
+
+
+def eligible_season(season: str, today: Optional[date] = None) -> bool:
+    """'N2022'… hasta la temporada actual."""
+    if len(season) != 5 or season[0] != "N" or not season[1:].isdigit():
+        return False
+    today = today or datetime.now(timezone.utc).date()
+    return FIRST_SEASON <= int(season[1:]) <= int(season_code(today)[1:])
 
 
 def season_days(season: str, until: date) -> list[str]:
@@ -92,6 +105,7 @@ def events_from_scoreboard(sb: dict) -> list[dict]:
     for ev in (sb or {}).get("events") or []:
         st = ((ev.get("status") or {}).get("type") or {})
         out.append({"id": str(ev.get("id") or ""), "completed": bool(st.get("completed")),
+                    "status": st.get("name") or "",
                     "season_type": (ev.get("season") or {}).get("type"),
                     "name": ev.get("name") or ""})
     return [e for e in out if e["id"]]
@@ -204,7 +218,7 @@ def doc_hash(doc: dict) -> str:
 def day_complete(events: list[dict], stored: set[str], skipped_final: set[str]) -> bool:
     """Un día está hecho si todos sus partidos que interesan están terminados y guardados (o
     descartados por un motivo que no cambia al repetir)."""
-    evs = [e for e in events if wanted(e)]
+    evs = [e for e in events if wanted(e) and e.get("status") not in _NOT_PLAYED]
     return all(e["completed"] and (e["id"] in stored or e["id"] in skipped_final) for e in evs)
 
 
@@ -257,11 +271,15 @@ _FINAL_SKIPS = {"sin_local_visitante", "sin_codigo_equipo"}
 
 async def run_nba_espn(seasons: Optional[list[str]] = None, dry_run: bool = True, max_days: int = 0,
                        only_missing: bool = True, time_budget_s: float = TIME_BUDGET_S,
-                       today: Optional[date] = None, fetch=None, state_loader=None, writer=None) -> dict:
+                       today: Optional[date] = None, fetch=None, state_loader=None, writer=None,
+                       daily: bool = False) -> dict:
     """
-    seasons: 'N2025'… (por defecto la actual y las tres anteriores).
+    seasons: 'N2025'… (por defecto de N2022 a la actual).
     max_days: tope de días por llamada (0 = sin tope; en dry-run, DRY_RUN_MAX_DAYS).
     only_missing: con estado, se saltan los días ya completos y los partidos ya guardados.
+    daily: pasada diaria — solo la temporada de ayer, siempre only_missing, días de más reciente
+           a más antiguo (ayer primero aunque quede historial por cargar) y tope DAILY_MAX_DAYS.
+           Fuera de temporada (jul-sep) no pide nada.
     dry_run: descarga, calcula y cuenta; no escribe nada.
     fetch/state_loader/writer: inyectables para los tests (por defecto red y Firestore).
     """
@@ -270,18 +288,22 @@ async def run_nba_espn(seasons: Optional[list[str]] = None, dry_run: bool = True
     writer = writer or _write
     today = today or datetime.now(timezone.utc).date()
     yesterday = today - timedelta(days=1)
+    if daily:
+        seasons = seasons or [season_code(yesterday)]
+        only_missing = True
+        max_days = max_days or DAILY_MAX_DAYS
     seasons = seasons or default_seasons(today)
     if dry_run and not max_days:
         max_days = DRY_RUN_MAX_DAYS
     deadline = time.monotonic() + time_budget_s
     loop = asyncio.get_running_loop()
-    summary: dict = {"ok": True, "dry_run": dry_run, "seasons": {}, "errors": [],
+    summary: dict = {"ok": True, "dry_run": dry_run, "daily": daily, "seasons": {}, "errors": [],
                      "requests": {"scoreboard": 0, "summary": 0, "http_errors": 0},
                      "out_of_time": False, "days_left": 0}
     days_used = 0
     for season in seasons:
-        s = {"days": 0, "days_skipped": 0, "events": 0, "docs": 0, "written": 0, "ot_games": 0,
-             "skipped": {}, "days_left": 0}
+        s = {"days": 0, "days_skipped": 0, "empty_days": 0, "events": 0, "docs": 0, "written": 0,
+             "ot_games": 0, "by_type": {}, "skipped": {}, "days_left": 0}
         try:
             state = {}
             try:
@@ -293,6 +315,8 @@ async def run_nba_espn(seasons: Optional[list[str]] = None, dry_run: bool = True
             skipped_final = set(state.get("skipped_final", []))
             stored = {k.split("_", 1)[1] for k in state["hashes"]} if only_missing else set()
             todo = [d for d in season_days(season, yesterday) if d not in done_days]
+            if daily:
+                todo.reverse()
             s["days_skipped"] = len(season_days(season, yesterday)) - len(todo)
             docs: dict[str, dict] = {}
             for i, day in enumerate(todo):
@@ -303,11 +327,14 @@ async def run_nba_espn(seasons: Optional[list[str]] = None, dry_run: bool = True
                 days_used += 1
                 sb, code, _ = await loop.run_in_executor(None, fetch, SCOREBOARD_URL.format(day=day))
                 summary["requests"]["scoreboard"] += 1
-                if sb is None:
+                if sb is None or not isinstance(sb.get("events"), list):
+                    # sin respuesta o sin la lista de partidos: el día NO se da por hecho (que un
+                    # «0 partidos» raro de ESPN no deje huecos permanentes)
                     summary["requests"]["http_errors"] += 1
                     continue
                 events = events_from_scoreboard(sb)
                 s["days"] += 1
+                s["empty_days"] += 0 if any(wanted(e) for e in events) else 1
                 for ev in events:
                     if not wanted(ev) or not ev["completed"] or ev["id"] in stored or ev["id"] in skipped_final:
                         continue
@@ -326,6 +353,8 @@ async def run_nba_espn(seasons: Optional[list[str]] = None, dry_run: bool = True
                         continue
                     docs[f"{season}_{ev['id']}"] = doc
                     stored.add(ev["id"])
+                    st_key = str(doc.get("season_type"))
+                    s["by_type"][st_key] = s["by_type"].get(st_key, 0) + 1
                     s["ot_games"] += 1 if doc["ot_periods"] else 0
                     await asyncio.sleep(_SLEEP_S)
                 if day_complete(events, stored, skipped_final):
