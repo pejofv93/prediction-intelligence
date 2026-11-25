@@ -112,6 +112,22 @@ def _side(d: dict) -> Optional[dict]:
     return out
 
 
+# Tipo de temporada de ESPN (nba_games.season_type) → fase. 1 pretemporada y 4 All-Star no los
+# guarda el colector; si llegaran, salen como «PRE»/«ASG» y el backtest los descarta.
+NBA_PHASES = {2: "RS", 3: "PO", 5: "PI", 1: "PRE", 4: "ASG"}
+
+
+def game_phase(d: dict) -> Optional[str]:
+    """Fase del partido: la de eur_games (phase) o, en nba_games, la del tipo de temporada."""
+    st = d.get("season_type")
+    if st is not None:
+        try:
+            return NBA_PHASES.get(int(st), f"T{st}")
+        except (TypeError, ValueError):
+            return f"T{st}"
+    return d.get("phase")
+
+
 def games_from_docs(docs: Iterable[dict], league: str) -> list[dict]:
     """Docs con la forma de eur_games (season, date, home_code, away_code, ot_periods, phase,
     round, home/away con pts, reb, ast, fg3m y poss_est) → partidos del modelo. Fuera los que
@@ -125,7 +141,8 @@ def games_from_docs(docs: Iterable[dict], league: str) -> list[dict]:
         group = (f"{d['season']}_{d.get('phase') or ''}_{rnd}" if rnd is not None
                  else f"{d['season']}_{d['date']}")
         out.append({"league": league, "season": d["season"], "date": str(d["date"])[:10],
-                    "group": group, "home": d.get("home_code"), "away": d.get("away_code"),
+                    "group": group, "phase": game_phase(d),
+                    "home": d.get("home_code"), "away": d.get("away_code"),
                     "ot": int(d.get("ot_periods") or 0), "h": h, "a": a})
     return [g for g in out if g["home"] and g["away"]]
 
@@ -194,11 +211,20 @@ class History:
                 self.by_team[(g["league"], g["home"], g["season"])].append(g)
                 self.by_team[(g["league"], g["away"], g["season"])].append(g)
         self._lm: dict = {}
+        # Cachés por corte: todos los partidos de una jornada comparten corte (en la NBA, ~8 por
+        # día), así que la frecuencia de la liga por línea se calcula una vez por jornada.
+        self._w: dict = {}
+        self._rate: dict = {}
 
     def _weighted(self, league: str, season: str, before: str) -> list[tuple[float, dict]]:
-        cur = [(W_CUR, g) for g in self.by_ls.get((league, season), []) if g["date"] < before]
-        prev = [(W_PREV, g) for g in self.by_ls.get((league, prev_season(season)), [])]
-        return cur + prev
+        key = (league, season, before)
+        if key not in self._w:
+            if len(self._w) > 64:
+                self._w.clear()
+            cur = [(W_CUR, g) for g in self.by_ls.get((league, season), []) if g["date"] < before]
+            prev = [(W_PREV, g) for g in self.by_ls.get((league, prev_season(season)), [])]
+            self._w[key] = cur + prev
+        return self._w[key]
 
     def league_means(self, league: str, season: str, before: str) -> Optional[dict]:
         """{'pace', 'ot_rate', 'rate': {s: (por 100 en casa, por 100 fuera)}} o None sin partidos."""
@@ -267,11 +293,16 @@ class History:
 
     def league_rate(self, league: str, season: str, before: str, stat: str, side: Optional[str],
                     line: float) -> Optional[float]:
+        key = (league, season, before, stat, side, line)
+        if key in self._rate:
+            return self._rate[key]
         ws = self._weighted(league, season, before)
         sw = sum(w for w, _ in ws)
-        if not sw:
-            return None
-        return sum(w for w, g in ws if stat_value(g, stat, side) > line) / sw
+        out = sum(w for w, g in ws if stat_value(g, stat, side) > line) / sw if sw else None
+        if len(self._rate) > 4096:
+            self._rate.clear()
+        self._rate[key] = out
+        return out
 
     @staticmethod
     def team_rate(tgs: list[list[tuple[float, dict, str]]], stat: str, total: bool, line: float,

@@ -15,6 +15,11 @@ on:
       confirmar:
         description: "ESCRIBIR = guardar líneas, métricas y etiquetas (vacío = solo leer)"
         default: ""
+      fases:
+        description: "Solo NBA: regular (solo fase regular) · todas (también play-in y playoffs)"
+        type: choice
+        options: ["regular", "todas"]
+        default: "regular"
 
 permissions:
   contents: read
@@ -45,4 +50,5 @@ jobs:
           PYTHONIOENCODING: utf-8
           LIGA: ${{ inputs.liga }}
           CONFIRMAR: ${{ inputs.confirmar }}
+          FASES: ${{ inputs.fases }}
         run: python scripts/ops/basket_backtest.py

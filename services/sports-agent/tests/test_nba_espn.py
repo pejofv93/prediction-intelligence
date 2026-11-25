@@ -54,7 +54,7 @@ def test_el_doc_sirve_al_modelo():
     from analyzers import basket_preview as bp
     doc, _ = ne.build_game_doc(_summary(), "1", "20251101", "N2025")
     games = bp.games_from_docs([doc], "NBA")
-    assert len(games) == 1 and games[0]["group"] == "N2025_2025-11-01"
+    assert len(games) == 1 and games[0]["group"] == "N2025_2025-11-01" and games[0]["phase"] == "RS"
 
 
 def test_temporadas_y_dias():

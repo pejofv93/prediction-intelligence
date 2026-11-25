@@ -79,3 +79,59 @@ def test_informe_por_temporada_y_comparacion_sin_corregir():
     assert "EQUIPO" not in text
     doc = bb.backtest_doc(out, "EUR", "2026-11-26T00:00:00+00:00")
     assert doc["bias_correction"] is True
+
+
+def _nba_docs(seasons=("N2024", "N2025"), per_season=180):
+    """Docs con la forma de nba_games (sin round: la jornada es el día; season_type de ESPN)."""
+    from datetime import date, timedelta
+    rnd = random.Random(5)
+    teams = [f"EQUIPO{i}" for i in range(10)]
+    out = []
+    for season in seasons:
+        d0 = date(int(season[1:]), 10, 22)
+        for i in range(per_season):
+            h, a = rnd.sample(teams, 2)
+            ot = 1 if i % 15 == 0 else 0
+            stype = 2 if i < per_season - 12 else (5 if i < per_season - 8 else 3)
+
+            def side():
+                return {"pts": 112 + rnd.randint(-15, 15) + 10 * ot, "reb": 44 + rnd.randint(-6, 6),
+                        "ast": 26 + rnd.randint(-5, 5), "fg3m": 13 + rnd.randint(-4, 4),
+                        "poss_est": 99.0 + 10 * ot}
+            out.append({"season": season, "game_id": f"{season}{i}",
+                        "date": (d0 + timedelta(days=i // 4)).isoformat(), "season_type": stype,
+                        "home_code": h, "away_code": a, "ot_periods": ot, "minutes": 240 + 25 * ot,
+                        "home": side(), "away": side(), "source": "espn_summary"})
+    # una de pretemporada y un All-Star que no deberían estar, por si acaso
+    for st in (1, 4):
+        out.append({**out[0], "game_id": f"x{st}", "season_type": st})
+    return out
+
+
+def test_nba_fases_regular_por_defecto():
+    games = bb.bp.games_from_docs(_nba_docs(), "NBA")
+    kept, counts = bb.filter_phases(games, "NBA")
+    assert counts == {"ASG": 1, "PI": 8, "PO": 16, "PRE": 1, "RS": 336}
+    assert len(kept) == 336 and {g["phase"] for g in kept} == {"RS"}
+    kept, _ = bb.filter_phases(games, "NBA", "todas")
+    assert {g["phase"] for g in kept} == {"RS", "PI", "PO"} and len(kept) == 360
+    # las demás ligas no se filtran
+    eur = bb.bp.games_from_docs(_games(), "EUR")
+    assert bb.filter_phases(eur, "EUR")[0] == eur
+
+
+def test_nba_jornada_por_dia_y_prorroga_sobre_48():
+    games = bb.bp.games_from_docs(_nba_docs(), "NBA")
+    g = next(g for g in games if g["ot"] == 1)
+    assert g["group"] == f"{g['season']}_{g['date']}"
+    # posesiones de un partido con una prórroga llevadas a 48 min: 109 × 48/53
+    assert abs(bb.bp.game_poss(g) - 109.0 * 48 / 53) < 1e-9
+
+
+def test_nba_informe_solo_agregados():
+    games, _ = bb.filter_phases(bb.bp.games_from_docs(_nba_docs(), "NBA"), "NBA")
+    text = "\n".join(bb.run(games, "NBA"))
+    assert "calentamiento N2024" in text and "evaluadas ['N2025']" in text
+    assert "Con prórroga: 24" in text
+    assert "'evaluados'" in text and "pts_total" in text
+    assert "EQUIPO" not in text

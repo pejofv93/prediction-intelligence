@@ -3,7 +3,8 @@ con los partidos ya guardados en Firestore. 0 peticiones a APIs.
 
 Liga (env LIGA, por defecto EUR):
   EUR → eur_games (Euroliga, live.euroleague.net)
-  NBA → nba_games (ESPN, cuando se cargue)
+  NBA → nba_games (ESPN). Jornada = día de EE. UU.; prórroga sobre 48 min. Env FASES: «regular»
+        (por defecto, solo fase regular) o «todas» (también play-in y playoffs).
   ACB → hlb_games con league = "ACB" (Highlightly baloncesto, cuando se cargue)
 
 La temporada más antigua es de calentamiento: de ella salen las líneas fijas (percentiles
@@ -35,6 +36,21 @@ SOURCES = {"EUR": ("eur_games", None), "NBA": ("nba_games", None),
            "ACB": ("hlb_games", ("league", "==", "ACB"))}
 METRIC_FIELDS = ("market", "n_matches", "n_lines", "brier_league", "brier_model", "delta", "ci_lo", "ci_hi",
                  "ci_label")
+
+
+# NBA (env FASES): «regular» (por defecto) = solo fase regular, entrenando y evaluando; «todas» =
+# también play-in y playoffs (ritmo y rotaciones distintos: mejor medirlos aparte). Pretemporada
+# y All-Star fuera siempre. Las demás ligas no se filtran.
+NBA_FASES = {"regular": {"RS"}, "todas": {"RS", "PI", "PO"}}
+
+
+def filter_phases(games: list[dict], league: str, fases: str = "regular") -> tuple[list[dict], dict]:
+    """(partidos que entran, recuento por fase de todos los leídos)."""
+    counts = dict(sorted(Counter(str(g.get("phase")) for g in games).items()))
+    if league != "NBA":
+        return games, counts
+    keep = NBA_FASES[fases]
+    return [g for g in games if g.get("phase") in keep], counts
 
 
 def load_docs(league: str) -> list[dict]:
@@ -178,9 +194,15 @@ def main() -> int:
     if league not in SOURCES:
         print(f"LIGA debe ser una de {sorted(SOURCES)}")
         return 1
+    fases = (os.environ.get("FASES") or "regular").lower()
+    if fases not in NBA_FASES:
+        print(f"FASES debe ser una de {sorted(NBA_FASES)}")
+        return 1
     docs = load_docs(league)
     games = bp.games_from_docs(docs, league)
-    print(f"Docs leídos: {len(docs)} · utilizables: {len(games)}")
+    games, by_phase = filter_phases(games, league, fases)
+    print(f"Docs leídos: {len(docs)} · utilizables por fase: {by_phase} · "
+          f"entran: {len(games)}" + (f" (fases: {fases})" if league == "NBA" else ""))
     try:
         out = compute(games, league)
     except ValueError as e:
