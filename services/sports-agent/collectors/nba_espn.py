@@ -293,7 +293,8 @@ async def run_nba_espn(seasons: Optional[list[str]] = None, dry_run: bool = True
         only_missing = True
         max_days = max_days or DAILY_MAX_DAYS
     seasons = seasons or default_seasons(today)
-    if dry_run and not max_days:
+    dry_sample = dry_run and not max_days
+    if dry_sample:
         max_days = DRY_RUN_MAX_DAYS
     deadline = time.monotonic() + time_budget_s
     loop = asyncio.get_running_loop()
@@ -317,6 +318,9 @@ async def run_nba_espn(seasons: Optional[list[str]] = None, dry_run: bool = True
             todo = [d for d in season_days(season, yesterday) if d not in done_days]
             if daily:
                 todo.reverse()
+            elif dry_sample and len(todo) > 3 * DRY_RUN_MAX_DAYS:
+                # prueba: unos días de mitad de temporada, no los de pretemporada de octubre
+                todo = todo[len(todo) // 3:]
             s["days_skipped"] = len(season_days(season, yesterday)) - len(todo)
             docs: dict[str, dict] = {}
             for i, day in enumerate(todo):

@@ -189,6 +189,15 @@ def test_pasada_diaria_fuera_de_temporada_no_pide_nada(monkeypatch):
     assert calls == []
 
 
+def test_dry_run_sin_tope_prueba_dias_de_mitad_de_temporada(monkeypatch):
+    fetch, calls = _fetcher(monkeypatch, lambda d: {"events": [_ev(d + "1")]})
+    s = asyncio.run(ne.run_nba_espn(seasons=["N2024"], dry_run=True, today=date(2026, 11, 25),
+                                    fetch=fetch, state_loader=lambda season: {}))
+    days = [c.split("dates=")[1] for c in calls if "scoreboard" in c]
+    assert days == ["20241231", "20250101", "20250102", "20250103", "20250104"]
+    assert s["seasons"]["N2024"]["docs"] == 5
+
+
 def test_endpoint_rechaza_temporadas_fuera_de_rango():
     from fastapi.testclient import TestClient
     import main
