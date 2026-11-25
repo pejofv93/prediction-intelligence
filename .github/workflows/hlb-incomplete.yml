@@ -1,0 +1,36 @@
+# ¿Qué les falta a los partidos de la ACB incompletos? (scripts/ops/hlb_incomplete.py)
+# SOLO LECTURA de hlb_games; no gasta cuota de Highlightly. Solo motivos y recuentos: ni
+# equipos, ni ids, ni cifras. Manual, sin cron.
+name: hlb-incomplete
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  consultar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Partidos ACB incompletos (solo lectura)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ops/hlb_incomplete.py
