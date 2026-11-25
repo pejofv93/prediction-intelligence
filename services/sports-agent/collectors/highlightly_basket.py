@@ -52,9 +52,8 @@ HLB_MAX_ATTEMPTS = 3
 HLB_HISTORY_SEASONS = 3           # la actual y las 3 anteriores
 _HTTP_TIMEOUT = 60.0
 
-# Id de la ACB en Highlightly: SALE DE LA SONDA (leagues?leagueName=ACB). None = sin confirmar;
-# mientras tanto el endpoint exige league_id.
-ACB_LEAGUE_ID: Optional[int] = None
+# Id de la ACB en Highlightly: sale de la sonda (leagues?leagueName=ACB).
+ACB_LEAGUE_ID: Optional[int] = 100351      # sonda del 25-nov-2026: ACB · ES · 2020-2026
 LEAGUE_CODE = "ACB"
 
 GAMES, STATE = "hlb_games", "hlb_load_state"
@@ -69,12 +68,15 @@ _STAT_ALIASES: dict[str, tuple[str, ...]] = {
     "blk": ("blocks",),
     "tov": ("turnovers", "total turnovers"),
     "fouls": ("personal fouls", "fouls"),
-    "fgm": ("field goals made",), "fga": ("field goals attempted",),
+    # Nombres reales de la ACB (sonda del 25-nov-2026): «Successful X» = anotados, «X» = intentados
+    "fgm": ("field goals made", "successful field goals"),
+    "fga": ("field goals attempted", "field goals"),
     "fg3m": ("3-point field goals made", "three pointers made", "3pt made", "3 points made",
-             "three-pointers made", "3-pointers made"),
+             "three-pointers made", "3-pointers made", "successful 3 pointers"),
     "fg3a": ("3-point field goals attempted", "three pointers attempted", "3pt attempted",
-             "3 points attempted", "three-pointers attempted", "3-pointers attempted"),
-    "ftm": ("free throws made",), "fta": ("free throws attempted",),
+             "3 points attempted", "three-pointers attempted", "3-pointers attempted", "3 pointers"),
+    "ftm": ("free throws made", "successful free throws"),
+    "fta": ("free throws attempted", "free throws"),
 }
 # Campos «hechos/intentados» en un solo valor ("35/70" o "35-70")
 _PAIR_ALIASES: dict[tuple[str, str], tuple[str, ...]] = {
@@ -195,6 +197,11 @@ def map_stats(raw: dict) -> dict:
             if mm is not None:
                 out[made], out[att] = mm, aa
                 break
+    # Comprobación de coherencia: anotados > intentados = nombres mal leídos → el par queda vacío
+    # (el partido sale incompleto y no entra en el modelo) en vez de guardar tiros al revés.
+    for made, att in _PAIR_ALIASES:
+        if out[made] is not None and out[att] is not None and out[made] > out[att]:
+            out[made] = out[att] = None
     return out
 
 

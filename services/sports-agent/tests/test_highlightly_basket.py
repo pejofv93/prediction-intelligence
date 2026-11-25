@@ -90,6 +90,25 @@ def test_parser_con_pares_y_alias():
     assert hb.parse_statistics([], meta) is None
 
 
+def test_nombres_reales_de_la_acb():
+    # sonda del 25-nov-2026: 14 campos, «Successful X» = anotados y «X» = intentados
+    raw = {"Successful Field Goals": 30, "Field Goals": 64, "Successful 3 Pointers": 9,
+           "3 Pointers": 26, "Successful Free Throws": 15, "Free Throws": 20, "Assists": 18,
+           "Rebounds": 35, "Offensive Rebounds": 10, "Defensive Rebounds": 25, "Steals": 7,
+           "Blocks": 2, "Turnovers": 12, "Personal Fouls": 19}
+    st = hb.map_stats(raw)
+    assert (st["fgm"], st["fga"], st["fg3m"], st["fg3a"], st["ftm"], st["fta"]) == (30, 64, 9, 26, 15, 20)
+    assert (st["reb"], st["oreb"], st["dreb"], st["ast"], st["tov"], st["fouls"]) == (35, 10, 25, 18, 12, 19)
+    b = hb.team_block(84, st)
+    assert b is not None and b["poss_est"] == round(64 + 0.44 * 20 - 10 + 12, 1)
+    assert hb.ACB_LEAGUE_ID == 100351
+
+
+def test_anotados_mayor_que_intentados_deja_el_par_vacio():
+    st = hb.map_stats({"Successful 3 Pointers": 12, "3 Pointers": 9})
+    assert st["fg3m"] is None and st["fg3a"] is None
+
+
 def test_el_doc_completo_sirve_al_modelo():
     from analyzers import basket_preview as bp
     meta = hb.listing_meta(_match(10, "2026-10-05"), 99, 2026)
@@ -99,7 +118,8 @@ def test_el_doc_completo_sirve_al_modelo():
     assert len(games) == 1 and games[0]["season"] == "A2026" and games[0]["home"] == "1"
 
 
-def test_sin_league_id_ni_clave_no_pide_nada():
+def test_sin_league_id_ni_clave_no_pide_nada(monkeypatch):
+    monkeypatch.setattr(hb, "ACB_LEAGUE_ID", None)
     s = asyncio.run(hb.run_hlb_load(league_id=None, api_key="x", store=Store(), quota=object()))
     assert not s["ok"] and "league_id" in s["errors"][0]
     s = asyncio.run(hb.run_hlb_load(league_id=5, api_key="", store=Store(), quota=object()))
