@@ -1,8 +1,10 @@
 """
 Resumen diario de Tendencias por Telegram (hilo de Tendencias). Fichas de partido del día (hora de
 Madrid): masculino (match_previews, mp-v1), copas (match_previews_cups), Europa
-(match_previews_uefa, mp-e1) y femenino (match_previews_women, mp-w1). En copas y Europa la ⭐ solo
-llega tras 50 graduados en directo con IC95 bajo 0 (antes, "medido en backtest": sin píldora).
+(match_previews_uefa, mp-e1), femenino (match_previews_women, mp-w1) y baloncesto
+(match_previews_basket, bp-v1, Euroliga). En copas y Europa la ⭐ solo llega tras 50 graduados en
+directo con IC95 bajo 0 (antes, "medido en backtest": sin píldora). Baloncesto, como las ligas de
+fútbol: ⭐ en los mercados con ventaja medida en su backtest (frente a la media de la liga y del equipo).
 
 Formato (20-nov-2026, decisión del usuario): HTML de Telegram, UN mensaje para el día (se parte
 solo si no cabe; un partido nunca se corta). Por partido: icono + liga + hora, equipos en negrita,
@@ -37,6 +39,9 @@ DIV_NAMES = {"SP1": "LaLiga", "SP2": "Segunda", "I1": "Serie A", "E0": "Premier"
              "WLF": "Liga F", "WSL": "WSL", "WFBL": "Frauen-Bundesliga", "WSA": "Serie A fem.", "WD1": "D1 Arkema"}
 DIV_ORDER = ("SP1", "SP2", "E0", "I1", "D1", "F1", "P1", "N1", "WLF", "WSL", "WFBL", "WSA", "WD1")
 UEFA_NAMES = {"CL": "Champions League", "EL": "Europa League", "ECL": "Conference League"}
+# Baloncesto (bp-v1): sus estadísticas y el nombre de la liga si la ficha no lo trae.
+BASKET_STATS = (("pts", "Puntos"), ("reb", "Rebotes"), ("ast", "Asistencias"), ("fg3m", "Triples"))
+BASKET_NAMES = {"EUR": "Euroliga"}
 SEP = "━━━━━━━━━━━━━━"
 STAR_LEGEND = "⭐ = el modelo acierta más que la media de la liga"
 WEEKDAYS = ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
@@ -100,7 +105,12 @@ def _pct(p: float) -> str:
 EDGE = "ventaja medida"
 PILL_MIN, PILL_MAX, PILL_MAX_N = 0.60, 0.90, 5
 PILL_NOUN = {"corners": "córners", "cards": "tarjetas", "fouls": "faltas", "shots": "remates",
-             "sot": "remates a puerta", "goals": "goles"}
+             "sot": "remates a puerta", "goals": "goles",
+             "pts": "puntos", "reb": "rebotes", "ast": "asistencias", "fg3m": "triples"}
+
+
+def is_basket(p: dict) -> bool:
+    return p.get("group") == "basket"
 
 
 def esc(text) -> str:
@@ -108,7 +118,10 @@ def esc(text) -> str:
 
 
 def names(p: dict) -> tuple[str, str]:
-    """Nombres de pantalla en español ("Ath Bilbao" → "Athletic"); solo presentación."""
+    """Nombres de pantalla en español ("Ath Bilbao" → "Athletic"); solo presentación. Baloncesto: el
+    nombre del feed tal cual (la tabla es de clubes de fútbol)."""
+    if is_basket(p):
+        return p["home_team"], p["away_team"]
     return display_name(p["home_team"], p.get("group")), display_name(p["away_team"], p.get("group"))
 
 
@@ -126,7 +139,7 @@ def match_pills(p: dict) -> list[dict]:
         return []
     out = []
     home, away = names(p)
-    for key, _ in STATS:
+    for key, _ in (BASKET_STATS if is_basket(p) else STATS):
         b = (p.get("stats") or {}).get(key) or {}
         if not b.get("available"):
             continue
@@ -157,6 +170,8 @@ def group_icon_label(p: dict) -> str:
     if p.get("group") == "uefa":
         return f"🌍 {p.get('comp_name') or UEFA_NAMES.get(p.get('comp') or p.get('div'), 'Europa')}"
     div = p.get("div") or "?"
+    if is_basket(p):
+        return f"🏀 {p.get('league_name') or BASKET_NAMES.get(div, div)}"
     if p.get("group") == "women" or div.startswith("W"):
         return f"👩 {DIV_NAMES.get(div, div)}"
     return f"⚽ {DIV_NAMES.get(div, div)}"
@@ -182,8 +197,10 @@ def pair_label(p: dict) -> str:
 def _group_rank(p: dict) -> int:
     if p.get("group") in ("uefa", "cups"):
         return len(DIV_ORDER) + (0 if p.get("group") == "uefa" else 1)
+    if is_basket(p):                    # a la misma hora, detrás del fútbol
+        return len(DIV_ORDER) + 2
     div = p.get("div") or ""
-    return DIV_ORDER.index(div) if div in DIV_ORDER else len(DIV_ORDER) + 2
+    return DIV_ORDER.index(div) if div in DIV_ORDER else len(DIV_ORDER) + 3
 
 
 def build_messages(previews: list[dict], day: date) -> list[str]:
@@ -232,7 +249,8 @@ def read_day_previews(lo: datetime, hi: datetime) -> list[dict]:
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     out = []
-    for coll in ("match_previews", "match_previews_cups", "match_previews_uefa", "match_previews_women"):
+    for coll in ("match_previews", "match_previews_cups", "match_previews_uefa", "match_previews_women",
+                 "match_previews_basket"):
         q = (col(coll).where(filter=FieldFilter("kickoff_utc", ">=", lo.isoformat()))
              .where(filter=FieldFilter("kickoff_utc", "<", hi.isoformat())))
         out.extend(s.to_dict() for s in q.stream())

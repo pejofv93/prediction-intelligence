@@ -101,6 +101,34 @@ def test_europa_con_icono_y_competicion_y_sin_pildora_hasta_la_estrella():
     assert ts._group_rank(league) < ts._group_rank(eu) < ts._group_rank(cup) < ts._group_rank(_preview(div="XX"))
 
 
+def _basket(home="Zorrovia Norte", away="Quimeria Valle", ko="2026-11-26T19:00:00+00:00"):
+    def stat():
+        return {"available": True, "lines": {"home": _block([(75.5, 0.86), (80.5, 0.71), (85.5, 0.52)]),
+                                             "away": _block([(75.5, 0.66), (80.5, 0.48)]),
+                                             "total": _block([(155.5, 0.80), (160.5, 0.70)])}}
+    return {"home_team": home, "away_team": away, "div": "EUR", "group": "basket", "league_name": "Euroliga",
+            "kickoff_utc": ko, "stats": {s: stat() for s in ("pts", "reb", "ast", "fg3m")}}
+
+
+def test_baloncesto_icono_pildoras_como_las_ligas_y_orden():
+    b = _basket()
+    m = ts.build_messages([b], date(2026, 11, 26))[0]
+    assert "0 con ⭐" in m and "🏀 Zorrovia Norte–Quimeria Valle" in m            # sin ventaja medida: sin píldora
+    b["stats"]["pts"]["lines"]["total"]["market_label"] = "ventaja medida"
+    assert ts.match_pills(b) == []                                                # el total nunca da píldora
+    _edge(b, "pts", "home")
+    _edge(b, "fg3m", "away")
+    pills = ts.match_pills(b)
+    assert [(x["key"], x["line"], x["p"]) for x in pills] == [("pts", 80.5, 0.71), ("fg3m", 75.5, 0.66)]
+    m = ts.build_messages([b], date(2026, 11, 26))[0]
+    assert "🏀 Euroliga · 20:00" in m and "<b>Zorrovia Norte – Quimeria Valle</b>" in m
+    assert "⭐ Zorrovia Norte más de <b>80,5</b> puntos · <b>71 %</b>" in m
+    assert "⭐ Quimeria Valle más de <b>75,5</b> triples · <b>66 %</b>" in m
+    assert ts.group_icon_label({"group": "basket", "div": "EUR"}) == "🏀 Euroliga"
+    cup = {**_preview(div="P1"), "group": "cups", "cup": "Taça"}
+    assert ts._group_rank(cup) < ts._group_rank(b) < ts._group_rank(_preview(div="XX"))
+
+
 def test_pildoras_solo_ventaja_medida_sin_0_5_salvo_marca():
     p = _preview()
     p["stats"]["corners"]["lines"]["home"] = _block([(3.5, 0.85), (4.5, 0.73), (5.5, 0.60), (6.5, 0.47)])
