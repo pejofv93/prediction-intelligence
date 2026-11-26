@@ -110,6 +110,21 @@ jobs:
             analyzers.player_props=services/sports-agent/analyzers/player_props.py
           rm -f warn.json err.txt
 
+      - name: Permiso de logs — ¿puede esta cuenta (la de GCP_SA_KEY) escribir en Cloud Logging?
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+        run: |
+          # testIamPermissions: la cuenta pregunta por SUS permisos; no necesita leer la política IAM.
+          # Solo se imprime qué permisos tiene, en el proyecto de los logs y en el del secreto.
+          TOKEN=$(gcloud auth print-access-token)
+          for P in prediction-intelligence "$GOOGLE_CLOUD_PROJECT"; do
+            R=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              -d '{"permissions":["logging.logEntries.create","logging.logEntries.list"]}' \
+              "https://cloudresourcemanager.googleapis.com/v1/projects/$P:testIamPermissions")
+            echo "proyecto $([ "$P" = prediction-intelligence ] && echo 'de los logs' || echo 'del secreto'): $(echo "$R" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("permissions") or d.get("error",{}).get("status") or "ninguno")')"
+          done
+          echo "misma cuenta que sports-analyze: $(python3 -c 'import json,os; print(json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))["client_email"].split("@")[0])')"
+
       - name: Props de jugadores — understat y goleadores de football-data por día y origen (Cloud Run / Actions)
         env:
           DAYS: ${{ inputs.days }}

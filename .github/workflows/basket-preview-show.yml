@@ -11,6 +11,9 @@ on:
       pubkey_b64:
         description: "Clave pública RSA (PEM en base64, una línea)"
         required: true
+      dias:
+        description: "Ventana en días (las fichas reales usan 3; más para ver jornadas que aún no entran)"
+        default: "3"
 
 permissions:
   contents: read
@@ -40,7 +43,10 @@ jobs:
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           PYTHONIOENCODING: utf-8
           OUT_FILE: ${{ runner.temp }}/fichas.txt
-        run: python scripts/ops/basket_preview_show.py
+          DIAS: ${{ inputs.dias }}
+        run: |
+          [[ "$DIAS" =~ ^[0-9]{1,2}$ ]] || { echo "dias inválido"; exit 1; }
+          python scripts/ops/basket_preview_show.py
 
       - name: Cifrar
         env:

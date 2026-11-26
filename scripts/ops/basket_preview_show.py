@@ -79,11 +79,13 @@ def main() -> int:
     print(sesgo)
 
     collected: dict = {}
-    summary = asyncio.run(bl.run_basket_previews(dry_run=True, backtest=doc, collect=collected))
+    days = int(os.environ.get("DIAS") or bl.WINDOW_DAYS)   # ventana de la prueba (las fichas reales: 3 días)
+    summary = asyncio.run(bl.run_basket_previews(dry_run=True, backtest=doc, collect=collected, days=days))
     print("Prueba sin escribir: " + json.dumps({k: summary.get(k) for k in
-                                                 ("ok", "dry_run", "fixtures_window", "history_games", "counts",
+                                                 ("ok", "dry_run", "days", "fixtures_window", "history_games", "counts",
                                                   "would_write", "edge_markets", "errors", "aviso")},
                                                 ensure_ascii=False))
+    summary["days"] = days
     previews = sorted(collected.values(), key=lambda p: (p["kickoff_utc"], p["match_id"]))
     lines = [f"Fichas de la Euroliga que se escribirían ({len(previews)}), {summary.get('now')}",
              f"Etiquetas calculadas en el momento (backtest en memoria, sin guardar): ventaja medida en {edge}",
