@@ -68,6 +68,10 @@ STAT_NAMES = {"pts": "puntos", "reb": "rebotes", "ast": "asistencias", "fg3m": "
 # Líneas aprobadas por liga y mercado ({liga: {mercado: (l25, l50, l75)}}). Vacío hasta revisar
 # el backtest: mientras tanto, fixed_lines con la temporada de calentamiento.
 FIXED_LINES: dict[str, dict[str, tuple[float, ...]]] = {}
+# Temporadas con las que se diseñó el modelo (se miraron al elegir parámetros): para la ⭐ el
+# mercado tiene que ganar también en las demás temporadas evaluadas juntas (26-nov: en la Euroliga
+# 2025-26 sale con ventaja en 7 de 8 mercados; 2024-25 y 2026-27, en 4 y 2).
+DESIGN_SEASONS: dict[str, tuple[str, ...]] = {"EUR": ("E2025",)}
 
 
 def market_key(stat: str, scope: str) -> str:
@@ -437,15 +441,22 @@ def metrics_doc_id(league: str, kind: str) -> str:
     return f"{MODEL_VERSION}-{league}_{kind}"
 
 
-def labels_from_backtest(met_league: dict, met_team: dict) -> dict[str, str]:
+def labels_from_backtest(met_league: dict, met_team: dict,
+                         clean: tuple[dict, dict] | None = None) -> dict[str, str]:
     """{mercado: etiqueta} del backtest (salidas de match_preview.market_metrics frente a la media
     de la liga y frente a la del equipo). «ventaja medida» solo si el IC95 por partido de
     (Brier modelo − Brier referencia) queda entero bajo 0 frente a LAS DOS medias; si no, «solo
-    referencia». Con una sola liga, la celda de la liga y la de todas («ALL») son la misma."""
+    referencia». Con una sola liga, la celda de la liga y la de todas («ALL») son la misma.
+    `clean` = (liga, equipo) de las temporadas evaluadas SIN las de diseño (DESIGN_SEASONS): si se
+    pasa, el mercado tiene que cumplir lo mismo también ahí."""
+    def edge(ml: dict, mt: dict, mk: str) -> bool:
+        a, b = ml.get(f"{mk}|ALL") or {}, mt.get(f"{mk}|ALL") or {}
+        return a.get("ci_label") == LABEL_EDGE and b.get("ci_label") == LABEL_EDGE
+
     out = {}
     for mk in {v["market"] for v in met_league.values()} | {v["market"] for v in met_team.values()}:
-        a, b = met_league.get(f"{mk}|ALL") or {}, met_team.get(f"{mk}|ALL") or {}
-        out[mk] = LABEL_EDGE if a.get("ci_label") == LABEL_EDGE and b.get("ci_label") == LABEL_EDGE else LABEL_REF
+        ok = edge(met_league, met_team, mk) and (clean is None or edge(clean[0], clean[1], mk))
+        out[mk] = LABEL_EDGE if ok else LABEL_REF
     return dict(sorted(out.items()))
 
 

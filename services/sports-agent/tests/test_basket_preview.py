@@ -173,6 +173,16 @@ def test_etiquetas_ventaja_solo_si_gana_a_las_dos_medias():
     assert bp.metrics_doc_id("EUR", "backtest") == "bp-v1-EUR_backtest"
 
 
+def test_etiquetas_exigen_ventaja_tambien_en_temporadas_limpias():
+    edge, ref = bp.LABEL_EDGE, bp.LABEL_REF
+    todo = {**_cell("fg3m_team", edge), **_cell("pts_total", edge)}
+    limpias_liga = {**_cell("fg3m_team", edge), **_cell("pts_total", ref)}
+    limpias_equipo = {**_cell("fg3m_team", edge), **_cell("pts_total", edge)}
+    labels = bp.labels_from_backtest(todo, todo, clean=(limpias_liga, limpias_equipo))
+    assert labels == {"fg3m_team": edge, "pts_total": ref}
+    assert bp.DESIGN_SEASONS["EUR"] == ("E2025",)
+
+
 def test_ficha_con_forma_de_mp_v1():
     games = _league(seasons=("E2024", "E2025"))
     hist = bp.History(games)
