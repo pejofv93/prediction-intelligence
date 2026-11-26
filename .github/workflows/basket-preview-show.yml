@@ -1,0 +1,62 @@
+# Prueba SIN ESCRIBIR de las fichas de la Euroliga (scripts/ops/basket_preview_show.py): el backtest
+# se calcula en memoria (no se guarda match_preview_metrics/bp-v1-EUR_backtest) y con él las fichas
+# de los próximos 3 días. Lee eur_games, match_previews_basket y el feed público de la Euroliga.
+# 0 escrituras, 0 peticiones a Highlightly. Log: solo recuentos. Las fichas salen en un artefacto
+# cifrado con la clave pública que se pasa (RSA OAEP + AES-256), retenido 1 día. Manual.
+name: basket-preview-show
+
+on:
+  workflow_dispatch:
+    inputs:
+      pubkey_b64:
+        description: "Clave pública RSA (PEM en base64, una línea)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  show:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx scipy
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Fichas de la Euroliga sin escribir
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          OUT_FILE: ${{ runner.temp }}/fichas.txt
+        run: python scripts/ops/basket_preview_show.py
+
+      - name: Cifrar
+        env:
+          PUBKEY_B64: ${{ inputs.pubkey_b64 }}
+        run: |
+          mkdir -p enc
+          echo "$PUBKEY_B64" | base64 -d > "$RUNNER_TEMP/pub.pem"
+          openssl rand -hex 32 > "$RUNNER_TEMP/k"
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in "$RUNNER_TEMP/fichas.txt" \
+            -out enc/fichas.txt.enc -pass file:"$RUNNER_TEMP/k"
+          openssl pkeyutl -encrypt -pubin -inkey "$RUNNER_TEMP/pub.pem" \
+            -pkeyopt rsa_padding_mode:oaep -in "$RUNNER_TEMP/k" -out enc/k.enc
+          shred -u "$RUNNER_TEMP/fichas.txt" "$RUNNER_TEMP/k"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: basket-fichas-enc
+          path: enc/
+          retention-days: 1

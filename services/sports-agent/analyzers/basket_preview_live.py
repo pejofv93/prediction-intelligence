@@ -100,9 +100,12 @@ def preview_content(fx: dict, pred: dict, labels_source: str) -> dict:
 
 async def run_basket_previews(dry_run: bool = True, now: Optional[datetime] = None, days: int = WINDOW_DAYS,
                               feed: Optional[list[dict]] = None, docs: Optional[list[dict]] = None,
-                              backtest: Optional[dict] = None, existing: Optional[dict] = None) -> dict:
+                              backtest: Optional[dict] = None, existing: Optional[dict] = None,
+                              collect: Optional[dict] = None) -> dict:
     """Fichas de Euroliga de los próximos `days` días. Los parámetros opcionales son para tests
-    (None = leer del feed / Firestore)."""
+    (None = leer del feed / Firestore). backtest: el documento del backtest ya calculado (la prueba
+    sin escribir de scripts/ops/basket_preview_show.py lo calcula en el momento, sin guardarlo).
+    collect: si se da, recibe las fichas que se escribirían {match_id: ficha}, también en dry_run."""
     from collectors.basketball_collector import _eur_season_code
 
     now = now or datetime.now(timezone.utc)
@@ -164,6 +167,8 @@ async def run_basket_previews(dry_run: bool = True, now: Optional[datetime] = No
         summary["previews"] = [fx["match_id"] for fx in fxs]          # ids, sin equipos
     summary["counts"] = dict(counts)
     summary["would_write" if dry_run else "written"] = len(to_write)
+    if collect is not None:
+        collect.update(to_write)
     if not dry_run and to_write:
         try:
             _set_docs(PREVIEWS_B, to_write)
