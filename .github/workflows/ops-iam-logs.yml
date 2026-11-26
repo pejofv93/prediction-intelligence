@@ -1,0 +1,33 @@
+# SOLO LECTURA (manual): por qué la cuenta de GCP_SA_KEY no escribe en Cloud Logging
+# (scripts/ops/iam_logs_check.py). Log: sí/no, nombres de roles y motivos de error; ni correos
+# ni la política IAM.
+name: ops-iam-logs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  iam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Cuenta, roles en la política IAM, permisos y API
+        env:
+          PROJECT: prediction-intelligence
+        run: TOKEN=$(gcloud auth print-access-token) python scripts/ops/iam_logs_check.py
