@@ -18,7 +18,8 @@ frente a las dos medias y etiquetas), nada más. De él salen las fichas de balo
 frente a la media de la liga Y frente a la del equipo). Solo esos dan píldoras ⭐ en la web y en
 Telegram, como en las ligas de fútbol (mp-v1_backtest). Sin el documento no se escriben fichas.
 Log: solo agregados (recuentos, líneas de la liga, Brier, IC95, n por mercado): nada de equipos ni
-partidos.
+partidos. Además (26-nov): el desglose por temporada evaluada, mercado a mercado, y la comparación
+con el modelo sin corregir el sesgo (bp.BIAS_CORRECTION; lo que se guarda es lo corregido).
 """
 import os
 import sys
@@ -60,6 +61,51 @@ def fmt_metrics(name: str, met: dict) -> list[str]:
     return out
 
 
+def by_season(rows: dict, seasons: list[str]) -> list[str]:
+    """Desglose por temporada evaluada: por mercado, partidos y diferencia de Brier [IC95] frente a
+    las dos medias (las etiquetas se siguen sacando de todas juntas)."""
+    from analyzers.match_preview import market_metrics
+    out = ["\nPor temporada  mercado: partidos · frente a la liga: diferencia [IC95] etiqueta · "
+           "frente al equipo: diferencia [IC95] etiqueta"]
+    for season in seasons:
+        met = {}
+        for key in ("vs_liga", "vs_equipo"):
+            r = [x for x in rows[key] if x[0] == season]
+            met[key] = {v["market"]: v for v in (market_metrics(r) if r else {}).values() if v["div"] == "ALL"}
+        out.append(f"  [{season}]")
+        for mk in sorted(met["vs_liga"]):
+            cells = []
+            for key in ("vs_liga", "vs_equipo"):
+                v = met[key].get(mk)
+                if v is None:
+                    cells.append("—")
+                    continue
+                lo = "—" if v["ci_lo"] is None else f"{v['ci_lo']:+.4f}"
+                hi = "—" if v["ci_hi"] is None else f"{v['ci_hi']:+.4f}"
+                cells.append(f"{v['delta']:+.4f} [{lo}, {hi}] {v['ci_label']}")
+            out.append(f"    {mk:11} {met['vs_liga'][mk]['n_matches']:4d} · " + " · ".join(cells))
+    return out
+
+
+def compare_uncorrected(hist, league: str, evals: list[str], lines: dict, met_corr: dict) -> list[str]:
+    """Brier del modelo sin corregir el sesgo frente al corregido, por mercado (frente a la liga)."""
+    from analyzers.match_preview import market_metrics
+    acc: dict = {}
+    rows = bp.backtest_rows(hist, league, evals, lines, correct=False, bias_acc=acc)
+    raw = {v["market"]: v for v in market_metrics(rows["vs_liga"]).values() if v["div"] == "ALL"}
+    cor = {v["market"]: v for v in met_corr.values() if v["div"] == "ALL"}
+    out = ["\nSin corregir el sesgo → corregido  mercado: Brier modelo (diferencia frente a la liga)"]
+    for mk in sorted(cor):
+        a, b = raw.get(mk), cor[mk]
+        if a is None:
+            continue
+        out.append(f"  {mk:11} {a['brier_model']:.4f} ({a['delta']:+.4f}, {a['ci_label']}) → "
+                   f"{b['brier_model']:.4f} ({b['delta']:+.4f}, {b['ci_label']})")
+    out.append("Sesgo medio del total sin corregir (mismos partidos): "
+               + str({s: round(sum(v) / len(v), 3) for s, v in acc.items() if v}))
+    return out
+
+
 def run(games: list[dict], league: str) -> list[str]:
     """Todo el cálculo sobre partidos ya convertidos; devuelve las líneas del informe."""
     return compute(games, league)["report"]
@@ -80,9 +126,12 @@ def compute(games: list[dict], league: str) -> dict:
         lines_out.append(f"  {mk:11} {lines[mk]}")
     hist = bp.History(games)
     counts = Counter()
-    rows = bp.backtest_rows(hist, league, evals, lines, counts=counts)
+    acc: dict = {}
+    rows = bp.backtest_rows(hist, league, evals, lines, counts=counts, bias_acc=acc)
     lines_out.append(f"\nRecuentos: {dict(counts)}")
-    lines_out.append(f"Sesgo medio del total (real − modelo): {bp.mean_bias(hist, league, evals)}")
+    lines_out.append(f"Corrección de sesgo: {'sí' if bp.BIAS_CORRECTION else 'no'}")
+    lines_out.append("Sesgo medio del total (real − media usada): "
+                     + str({s: round(sum(v) / len(v), 3) for s, v in acc.items() if v}))
     met: dict = {}
     for ref, key in (("modelo frente a la media de la liga", "vs_liga"),
                      ("modelo frente a la media del equipo", "vs_equipo")):
@@ -91,8 +140,11 @@ def compute(games: list[dict], league: str) -> dict:
             lines_out.append(f"\n[{ref}] sin filas")
             continue
         lines_out += fmt_metrics(ref, met[key])
-    by_season = Counter(r[0] for r in rows["vs_liga"])
-    lines_out.append(f"\nLíneas evaluadas por temporada: {dict(sorted(by_season.items()))}")
+    n_season = Counter(r[0] for r in rows["vs_liga"])
+    lines_out.append(f"\nLíneas evaluadas por temporada: {dict(sorted(n_season.items()))}")
+    lines_out += by_season(rows, evals)
+    if bp.BIAS_CORRECTION and met.get("vs_liga"):
+        lines_out += compare_uncorrected(hist, league, evals, lines, met["vs_liga"])
     labels = bp.labels_from_backtest(met["vs_liga"], met["vs_equipo"])
     lines_out.append(f"\nEtiquetas (IC95 entero bajo 0 frente a las dos medias): {labels}")
     return {"report": lines_out, "warmup": warm, "seasons": evals, "lines": lines, "labels": labels,
@@ -104,6 +156,7 @@ def compute(games: list[dict], league: str) -> dict:
 def backtest_doc(out: dict, league: str, now_iso: str) -> dict:
     """match_preview_metrics/bp-v1-{liga}_backtest: solo agregados (nada de equipos ni partidos)."""
     return {"model_version": bp.MODEL_VERSION, "kind": "backtest", "league": league, "computed_at": now_iso,
+            "bias_correction": bp.BIAS_CORRECTION,
             "warmup": out["warmup"], "seasons": out["seasons"], "counts": out["counts"],
             "n_matches": out["n_matches"], "lines": {mk: list(v) for mk, v in out["lines"].items()},
             "labels": out["labels"], "metrics": out["metrics"],

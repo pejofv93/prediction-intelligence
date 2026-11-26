@@ -219,3 +219,51 @@ def test_prorroga_nba_sobre_48_minutos():
     g = {"league": "NBA", "ot": 1, "h": _side(110, poss=106.0), "a": _side(108, poss=106.0)}
     assert bp.game_poss(g) == pytest.approx(106 * 48 / 53)
     assert bp.game_poss({**g, "league": "EUR"}) == pytest.approx(106 * 40 / 45)
+
+
+# ── Corrección de sesgo (26-nov) ────────────────────────────────────────────────
+
+def test_residuos_sesgo_y_desviacion_centrada():
+    r = bp.Residuals()
+    for i in range(bp.MIN_RESID - 1):
+        r.add("EUR", "E2025", "pts", "total", 3.0 + (1 if i % 2 else -1))
+    assert r.bias("EUR", "E2025", "pts", "total") == 0.0        # pocos residuos: sin corrección
+    r.add("EUR", "E2024", "pts", "total", 3.0)                   # la temporada anterior también cuenta
+    assert r.bias("EUR", "E2025", "pts", "total") == pytest.approx(3.0, abs=0.05)
+    assert r.sd("EUR", "E2025", "pts", "total") == pytest.approx(1.0, abs=0.05)          # alrededor del sesgo
+    assert r.sd("EUR", "E2025", "pts", "total", correct=False) == pytest.approx(10 ** 0.5, abs=0.05)
+    assert r.bias("EUR", "E2025", "pts", "total", correct=False) == 0.0
+
+
+def test_correccion_quita_la_deriva_del_total():
+    """Liga en la que se anota más cada temporada (+6 por equipo en E2025): sin corregir, el
+    total sale corto; con la corrección, el sesgo medio baja a casi nada."""
+    games = _league(seasons=("E2024", "E2025"))
+    for g in games:
+        if g["season"] == "E2025":
+            g["h"]["pts"] += 6
+            g["a"]["pts"] += 6
+    hist = bp.History(games)
+    raw, cor = {}, {}
+    bp.backtest_rows(hist, "EUR", ["E2025"], {}, correct=False, bias_acc=raw)
+    bp.backtest_rows(hist, "EUR", ["E2025"], {}, correct=True, bias_acc=cor)
+    m_raw = sum(raw["pts"]) / len(raw["pts"])
+    m_cor = sum(cor["pts"]) / len(cor["pts"])
+    assert m_raw > 1.5 and abs(m_cor) < abs(m_raw) / 2
+
+
+def test_ficha_lleva_la_media_corregida():
+    games = _league(seasons=("E2024", "E2025"))
+    for g in games:
+        if g["season"] == "E2025":
+            g["h"]["pts"] += 6
+            g["a"]["pts"] += 6
+    hist = bp.History(games)
+    day = "2025-12-31"
+    resid = bp.residuals_until(hist, "EUR", "E2025")
+    p = bp.predict_game(hist, resid, "EUR", "E2025", day, "T0", "T1", {})
+    pts = p["stats"]["pts"]
+    assert pts["bias_total"] > 0 and p["params"]["bias_correction"] is True
+    raw = bp.expected(hist, "EUR", "E2025", day, "T0", "T1")
+    assert pts["exp_total"] == pytest.approx(raw["total"]["pts"] + pts["bias_total"], abs=0.01)
+    assert pts["exp_home"] == pytest.approx(raw["h"]["pts"] + pts["bias_team"], abs=0.01)

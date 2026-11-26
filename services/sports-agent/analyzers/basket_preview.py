@@ -23,8 +23,12 @@ Modelo (por 100 posesiones, ajustado por rival, ritmo, casa/fuera y prórroga):
     media_local[s]     = posesiones × R_casa[s]/100  × ataque_local[s]     × defensa_visitante[s]
     media_visitante[s] = posesiones × R_fuera[s]/100 × ataque_visitante[s] × defensa_local[s]
     total = las dos sumadas (los puntos con prórroga, como gradúan las casas)
-  P(más de x,5) = normal con la desviación de los residuos de las jornadas anteriores de la liga
-  (walk-forward); sin residuos suficientes, la desviación de la liga.
+  Corrección de sesgo (25-nov: el total de puntos salía de media 2,3 por debajo del real): a la
+  media del modelo se le suma el residuo medio (real − modelo) de las jornadas anteriores de la
+  liga, temporada actual y anterior, por estadística y ámbito (equipo / total). Walk-forward: solo
+  residuos de jornadas ya jugadas. Sin MIN_RESID residuos, sin corrección.
+  P(más de x,5) = normal centrada en la media corregida con la desviación de esos mismos residuos
+  alrededor de su media (walk-forward); sin residuos suficientes, la desviación de la liga.
 
 Referencias (las dos «medias» con las que se compara el modelo):
   media de la liga  = frecuencia de «más de x,5» en la liga hasta la fecha (actual 1 + anterior
@@ -51,6 +55,7 @@ SHRINK_K = 8.0
 W_CUR, W_PREV = 1.0, 0.5
 MIN_CUR = 5                  # partidos de la temporada actual de cada equipo para predecir
 MIN_RESID = 60               # residuos de la liga para usar su desviación en vez de la bruta
+BIAS_CORRECTION = True       # sumar el residuo medio de las jornadas anteriores (ver docstring)
 TEAM_REF_PRIOR = 2.0         # partidos ficticios a la frecuencia de la liga en la media del equipo
 REG_MIN, OT_MIN = 40.0, 5.0
 REG_MIN_BY_LEAGUE = {"NBA": 48.0}     # FIBA 40 min; NBA 48. La prórroga es de 5 en las dos
@@ -304,12 +309,25 @@ class Residuals:
     def add(self, league: str, season: str, stat: str, scope: str, r: float) -> None:
         self._r[(league, season, stat, scope)].append(r)
 
-    def sd(self, league: str, season: str, stat: str, scope: str) -> Optional[float]:
-        vals = self._r.get((league, season, stat, scope), []) + \
+    def _vals(self, league: str, season: str, stat: str, scope: str) -> list[float]:
+        return self._r.get((league, season, stat, scope), []) + \
             self._r.get((league, prev_season(season), stat, scope), [])
+
+    def bias(self, league: str, season: str, stat: str, scope: str, correct: bool = True) -> float:
+        """Residuo medio (real − modelo); 0 sin MIN_RESID residuos o sin corrección."""
+        vals = self._vals(league, season, stat, scope)
+        if not correct or len(vals) < MIN_RESID:
+            return 0.0
+        return sum(vals) / len(vals)
+
+    def sd(self, league: str, season: str, stat: str, scope: str, correct: bool = True) -> Optional[float]:
+        """Desviación de los residuos alrededor del sesgo que se corrige (sin corrección, alrededor
+        de 0, como antes del 26-nov)."""
+        vals = self._vals(league, season, stat, scope)
         if len(vals) < MIN_RESID:
             return None
-        return math.sqrt(sum(x * x for x in vals) / len(vals))
+        b = self.bias(league, season, stat, scope, correct)
+        return math.sqrt(sum((x - b) ** 2 for x in vals) / len(vals))
 
 
 def _groups(games: list[dict]) -> list[list[dict]]:
@@ -322,12 +340,15 @@ def _groups(games: list[dict]) -> list[list[dict]]:
 
 def backtest_rows(hist: History, league: str, seasons: Iterable[str], lines: dict[str, tuple],
                   k: float = SHRINK_K, counts: Optional[dict] = None,
-                  resid: Optional[Residuals] = None) -> dict[str, list[tuple]]:
+                  resid: Optional[Residuals] = None, correct: bool = BIAS_CORRECTION,
+                  bias_acc: Optional[dict] = None) -> dict[str, list[tuple]]:
     """
     Walk-forward por jornada: cada jornada se predice solo con lo jugado antes de su primer día;
     sus residuos entran después. Filas (season, liga, mercado, línea, y, p_ref, p_modelo, partido)
     con la forma de match_preview.backtest_rows, en dos listas: 'vs_liga' y 'vs_equipo'.
     Los dos equipos con al menos MIN_CUR partidos de la temporada antes del corte.
+    correct: media corregida con el residuo medio de las jornadas anteriores. bias_acc: si se da,
+    recoge por estadística (real − media usada) del total en los partidos evaluados.
     """
     counts = counts if counts is not None else defaultdict(int)
     resid = resid or Residuals()
@@ -355,15 +376,19 @@ def backtest_rows(hist: History, league: str, seasons: Iterable[str], lines: dic
                 counts["evaluados"] += 1
                 mk = f"{g['group']}_{g['home']}_{g['away']}_{g['date']}"
                 for s in STATS:
+                    if bias_acc is not None:
+                        bias_acc.setdefault(s, []).append(
+                            stat_value(g, s, None) - e["total"][s] - resid.bias(league, season, s, "total", correct))
                     for scope in SCOPES:
                         lns = lines.get(market_key(s, scope)) or ()
-                        sd = resid.sd(league, season, s, scope) or \
+                        sd = resid.sd(league, season, s, scope, correct) or \
                             hist.league_sd(league, season, cutoff, s, scope)
                         if not sd:
                             continue
+                        b = resid.bias(league, season, s, scope, correct)
                         sides = ("h", "a") if scope == "team" else (None,)
                         for side in sides:
-                            mean = e[side][s] if side else e["total"][s]
+                            mean = (e[side][s] if side else e["total"][s]) + b
                             y = stat_value(g, s, side)
                             for ln in lns:
                                 pl = hist.league_rate(league, season, cutoff, s, side, ln)
@@ -467,19 +492,23 @@ def predict_game(hist: History, resid: Residuals, league: str, season: str, matc
     poss_league = lm["pace"] * (1 + lm["ot_rate"] * OT_MIN / reg_minutes(league))
     used = [g for tg in e["tg"] for w, g, _ in tg if w == W_CUR]
     stats: dict = {}
+    bias = {(s, sc): resid.bias(league, season, s, sc, BIAS_CORRECTION) for s in STATS for sc in SCOPES}
     for s in STATS:
+        bt, btot = bias[(s, "team")], bias[(s, "total")]
         block = {"available": True,
                  "league_mean_home": round(poss_league * lm["rate"][s][0] / 100, 2),
                  "league_mean_away": round(poss_league * lm["rate"][s][1] / 100, 2),
-                 "exp_home": round(e["h"][s], 2), "exp_away": round(e["a"][s], 2),
-                 "exp_total": round(e["total"][s], 2), "lines": {}}
+                 "exp_home": round(e["h"][s] + bt, 2), "exp_away": round(e["a"][s] + bt, 2),
+                 "exp_total": round(e["total"][s] + btot, 2), "bias_team": round(bt, 3),
+                 "bias_total": round(btot, 3), "lines": {}}
         for scope in SCOPES:
             mk = market_key(s, scope)
-            sd = resid.sd(league, season, s, scope) or hist.league_sd(league, season, match_date, s, scope)
+            sd = resid.sd(league, season, s, scope, BIAS_CORRECTION) or \
+                hist.league_sd(league, season, match_date, s, scope)
             fixed = tuple(lines.get(mk) or ())
             label = labels.get(mk, LABEL_REF)
             for side in (("h", "a") if scope == "team" else (None,)):
-                mean = e[side][s] if side else e["total"][s]
+                mean = (e[side][s] if side else e["total"][s]) + bias[(s, scope)]
                 tgs = [e["tg"][0 if side == "h" else 1]] if side else list(e["tg"])
                 out = {}
                 for ln in sorted(set(fixed) | {_round_half(mean)}):
@@ -502,7 +531,8 @@ def predict_game(hist: History, resid: Residuals, league: str, season: str, matc
                 }
         stats[s] = block
     return {"model_version": MODEL_VERSION, "league": league, "season": season, "match_date": match_date,
-            "params": {"k": k, "weights": [W_CUR, W_PREV], "min_cur": MIN_CUR, "min_resid": MIN_RESID},
+            "params": {"k": k, "weights": [W_CUR, W_PREV], "min_cur": MIN_CUR, "min_resid": MIN_RESID,
+                       "bias_correction": BIAS_CORRECTION},
             "exp_poss": round(e["poss"], 2),
             "data_cutoff": max((g["date"] for g in used), default=None),
             "low_sample": low_sample, "teams": teams, "stats": stats}

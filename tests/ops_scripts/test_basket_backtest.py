@@ -68,3 +68,14 @@ def test_documento_del_backtest_solo_agregados():
     assert set(doc["metrics"]) == {"vs_liga", "vs_equipo"} and set(doc["metrics"]["vs_liga"]) == markets
     assert all(isinstance(v, list) for v in doc["lines"].values())
     assert "EQUIPO" not in repr(doc)          # ni un equipo en el documento
+
+
+def test_informe_por_temporada_y_comparacion_sin_corregir():
+    games = bb.bp.games_from_docs(_games(("E2023", "E2024", "E2025")), "EUR")
+    out = bb.compute(games, "EUR")
+    text = "\n".join(out["report"])
+    assert "Por temporada" in text and "[E2024]" in text and "[E2025]" in text
+    assert "Sin corregir el sesgo" in text and "Corrección de sesgo: sí" in text
+    assert "EQUIPO" not in text
+    doc = bb.backtest_doc(out, "EUR", "2026-11-26T00:00:00+00:00")
+    assert doc["bias_correction"] is True
