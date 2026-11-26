@@ -4,8 +4,12 @@ services/sports-agent/analyzers/player_props.py
 Goleador probable — modelo Poisson con xG de understat.com
 
 Fuentes:
-  1. understat.com POST /main/getPlayersStats/ — xG por jugador, sin key, ~590 jugadores/liga
-  2. Fallback: football-data.org /competitions/{code}/scorers — top 20 goleadores por liga
+  1. understat.com POST /main/getPlayersStats/ — APAGADA (_UNDERSTAT_ENABLED): desde al menos el
+     16-nov responde 405 a la petición y su página de error en todas las direcciones, desde
+     Cloud Run, GitHub y fuera de GCP (~96 fallos por pasada, 0 cargas).
+  2. football-data.org /competitions/{code}/scorers — top 20 goleadores por liga. Una petición
+     por liga y día (_FDORG_CACHE); con 429 espera lo que pida la API (máx. _FDORG_MAX_WAIT s) y
+     reintenta una vez. Los fallos dejan en el aviso el código HTTP y no se repiten en _FDORG_FAIL_TTL.
 
 Fórmula:
   P(marca) = 1 - Poisson(0, total_xG / partidos_jugados)
@@ -16,10 +20,12 @@ Umbral: P > 0.25 sin comparar con bookmaker.
 
 Ligas: PD, PL, BL1, SA, FL1
 """
+import asyncio
 import gzip
 import json
 import logging
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -36,6 +42,10 @@ _MIN_GAMES     = 10      # mínimo partidos jugados para que el xG sea significa
 _P_THRESHOLD   = 0.25   # señal si P(marca) > 25%
 _MAX_PER_TEAM  = 3      # máximo señales por equipo por partido
 _UNDERSTAT_TTL = timedelta(hours=6)
+_UNDERSTAT_ENABLED = False   # understat devuelve 405/página de error en todas partes (26-nov)
+_FDORG_TTL      = timedelta(hours=24)   # goleadores: cambian una vez por jornada
+_FDORG_FAIL_TTL = timedelta(hours=1)    # tras un fallo, no volver a pedir esa liga en esta pasada
+_FDORG_MAX_WAIT = 65.0                  # 429: espera máxima antes del único reintento (s)
 
 # Mapeo liga interna → nombre understat
 _UNDERSTAT_LEAGUE_MAP: dict[str, str] = {
@@ -57,6 +67,8 @@ _FDORG_LEAGUE_MAP: dict[str, str] = {
 
 # Cache: {liga: (fetched_at, {player_name_lower: player_dict})}
 _UNDERSTAT_CACHE: dict[str, tuple[datetime, dict]] = {}
+# {liga: (fetched_at, {jugador: dict})}; un dict vacío = fallo reciente (vale _FDORG_FAIL_TTL)
+_FDORG_CACHE: dict[str, tuple[datetime, dict]] = {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -189,15 +201,33 @@ async def _fetch_fdorg_scorers(league: str) -> dict[str, dict]:
     code = _FDORG_LEAGUE_MAP.get(league)
     if not code:
         return {}
+    now = datetime.now(timezone.utc)
+    cached = _FDORG_CACHE.get(league)
+    if cached and (now - cached[0]) < (_FDORG_TTL if cached[1] else _FDORG_FAIL_TTL):
+        return cached[1]
+    url = f"https://api.football-data.org/v4/competitions/{code}/scorers?limit=20"
+    data = None
+    for attempt in (1, 2):
+        try:
+            req = urllib.request.Request(url, headers={"X-Auth-Token": FOOTBALL_API_KEY})
+            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt == 1:
+                wait = _retry_wait(e.headers)
+                logger.warning("fdorg_scorers(%s): HTTP 429 — reintento en %.0f s", league, wait)
+                await asyncio.sleep(wait)
+                continue
+            logger.warning("fdorg_scorers(%s): fetch falló HTTP %d (intento %d)", league, e.code, attempt)
+            break
+        except Exception as e:
+            logger.warning("fdorg_scorers(%s): fetch falló %s", league, type(e).__name__)
+            break
+    if data is None:
+        _FDORG_CACHE[league] = (now, {})
+        return {}
     try:
-        url = f"https://api.football-data.org/v4/competitions/{code}/scorers?limit=20"
-        req = urllib.request.Request(
-            url,
-            headers={"X-Auth-Token": FOOTBALL_API_KEY},
-        )
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
-            data = json.loads(r.read().decode("utf-8"))
-
         result: dict[str, dict] = {}
         for s in data.get("scorers", []):
             p     = s.get("player", {})
@@ -225,11 +255,25 @@ async def _fetch_fdorg_scorers(league: str) -> dict[str, dict]:
                 "source":      "fdorg_scorers",
             }
         logger.info("fdorg_scorers(%s): %d jugadores cargados", league, len(result))
+        _FDORG_CACHE[league] = (now, result)
         return result
 
-    except Exception:
-        logger.warning("fdorg_scorers(%s): fetch falló", league, exc_info=True)
+    except Exception as e:
+        logger.warning("fdorg_scorers(%s): respuesta ilegible %s", league, type(e).__name__)
+        _FDORG_CACHE[league] = (now, {})
         return {}
+
+
+def _retry_wait(headers) -> float:
+    """Segundos que pide football-data antes de volver a llamar (Retry-After o
+    X-RequestCounter-Reset), entre 1 y _FDORG_MAX_WAIT; 60 si no lo dice."""
+    for h in ("Retry-After", "X-RequestCounter-Reset"):
+        try:
+            v = float((headers or {}).get(h))
+        except (TypeError, ValueError):
+            continue
+        return min(max(v, 1.0), _FDORG_MAX_WAIT)
+    return 60.0
 
 
 # ── Señal sin bookmaker ───────────────────────────────────────────────────────
@@ -331,10 +375,11 @@ async def generate_player_props_signals(
     if league not in _UNDERSTAT_LEAGUE_MAP:
         return []
 
-    # 1. Cargar stats de jugadores (understat → fdorg fallback)
-    players = await _fetch_understat_players(league)
+    # 1. Cargar stats de jugadores (understat apagado → goleadores de football-data)
+    players = await _fetch_understat_players(league) if _UNDERSTAT_ENABLED else {}
     if not players:
-        logger.info("player_props(%s): understat vacío — intentando fdorg_scorers", match_id)
+        if _UNDERSTAT_ENABLED:
+            logger.info("player_props(%s): understat vacío — intentando fdorg_scorers", match_id)
         players = await _fetch_fdorg_scorers(league)
     if not players:
         logger.debug("player_props(%s): sin datos de jugadores para %s", match_id, league)

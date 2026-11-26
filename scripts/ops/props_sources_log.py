@@ -20,7 +20,7 @@ KINDS = (
     ("fdorg ok", re.compile(r"fdorg_scorers\(.*\): (\d+) jugadores cargados")),
     ("fdorg falla", re.compile(r"fdorg_scorers\(.*\): fetch falló")),
 )
-HTTP = re.compile(r"HTTP Error (\d{3})")
+HTTP = re.compile(r"HTTP(?: Error)? (\d{3})")   # «HTTP Error 429» (antes) y «HTTP 429» (27-nov)
 
 
 def summarize(entries: list[dict]) -> list[str]:
