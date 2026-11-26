@@ -248,11 +248,22 @@ def parse_statistics(raw, meta: dict) -> Optional[dict]:
     return out
 
 
+def is_empty_sheet(d: dict) -> bool:
+    """Ficha guardada como hecha pero vacía (0 campos en algún equipo): Highlightly aún no había
+    publicado las estadísticas (25-nov: 4 de la ACB). Se vuelve a pedir en las próximas pasadas."""
+    return d.get("status") == "done" and d.get("complete") is False and not d.get("n_fields")
+
+
+def needs_detail(d: dict) -> bool:
+    """Terminado y sin ficha útil: pendiente, con error o vacío; menos de HLB_MAX_ATTEMPTS intentos."""
+    return bool(d.get("finished")) and (d.get("status") in ("pending", "error") or is_empty_sheet(d)) \
+        and d.get("attempts", 0) < HLB_MAX_ATTEMPTS
+
+
 def to_fetch(docs: list[dict], n: int, current: int) -> list[dict]:
     """Terminados sin hacer: primero la temporada actual, cada una del más reciente al más
     antiguo; máximo n."""
-    ok = [d for d in docs if d.get("finished") and d.get("status") in ("pending", "error")
-          and d.get("attempts", 0) < HLB_MAX_ATTEMPTS]
+    ok = [d for d in docs if needs_detail(d)]
     ok.sort(key=lambda d: (d.get("hl_season") != current, -(d.get("hl_season") or 0),
                            hl.hp._neg_date(d.get("date") or "")))
     return ok[:max(0, n)]
@@ -350,8 +361,7 @@ async def run_hlb_load(league_id: Optional[int] = None, seasons: Optional[list[i
             else:
                 row["listed"] = "ya listada"
                 docs = store.by_league_season(GAMES, league_id, season)
-            pend = [d for d in docs if d.get("finished") and d.get("status") in ("pending", "error")
-                    and d.get("attempts", 0) < HLB_MAX_ATTEMPTS]
+            pend = [d for d in docs if needs_detail(d)]
             row["pending_detail"] = len(pend)
             pending.extend(pend)
             summary["seasons"].append(row)
@@ -381,6 +391,9 @@ async def _fetch_details(todo: list[dict], api_key, quota, store, client, budget
             break
         raw = await hlb_get(client, api_key, f"/statistics/{d['match_id']}", quota=quota)
         parsed = parse_statistics(raw, d) if raw is not None else None
+        if parsed is not None and not parsed["n_fields"]:
+            parsed = None        # ficha vacía: como un error, se repite en la próxima pasada (hasta 3)
+            counts["vacia"] = counts.get("vacia", 0) + 1
         status, attempts = hl.next_status(parsed is not None, d.get("attempts", 0))
         upd = {"status": status, "attempts": attempts,
                "fetched_at": datetime.now(timezone.utc).isoformat(), **(parsed or {})}

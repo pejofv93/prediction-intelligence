@@ -186,3 +186,36 @@ def test_429_corta_la_pasada():
     s = _run(store, httpx.AsyncClient(transport=httpx.MockTransport(handler)), dry_run=False,
              seasons=[2026], max_requests=10)
     assert not s["ok"] and "agotada" in s["errors"][0]
+
+
+def test_ficha_vacia_se_repite_hasta_tres_intentos():
+    """25-nov: 4 partidos de la ACB llegaron con 0 campos (Highlightly aún sin estadísticas) y se
+    daban por hechos para siempre. Ahora una ficha vacía cuenta como error y se vuelve a pedir."""
+    seasons = {2026: [_match(1, "2026-11-20")]}
+    vacia = [{"team": {"id": 1, "name": "Local Inventado"}, "statistics": []},
+             {"team": {"id": 2, "name": "Visitante Inventado"}, "statistics": []}]
+    store = Store()
+    s = _run(store, _client(seasons, stats=vacia), dry_run=False, seasons=[2026])
+    d = store.data[hb.GAMES]["1"]
+    assert s["fetched"].get("vacia") == 1 and d["status"] == "error" and d["attempts"] == 1
+    # siguiente pasada: ya trae estadísticas → completo
+    calls = []
+    s = _run(store, _client(seasons, calls=calls), dry_run=False, seasons=[2026])
+    assert calls == ["/statistics/1"] and store.data[hb.GAMES]["1"]["complete"] is True
+    assert store.data[hb.GAMES]["1"]["status"] == "done"
+
+
+def test_vacias_ya_guardadas_como_hechas_se_vuelven_a_pedir():
+    """Las que se guardaron antes del arreglo (estado done, 0 campos) entran en la cola; tras 3
+    intentos vacíos quedan «empty» y no se piden más."""
+    base = {"finished": True, "league_id": 99, "hl_season": 2026, "date": "2026-11-20"}
+    assert hb.needs_detail({**base, "status": "done", "complete": False, "n_fields": 0, "attempts": 1})
+    assert not hb.needs_detail({**base, "status": "done", "complete": False, "n_fields": 12, "attempts": 1})
+    assert not hb.needs_detail({**base, "status": "done", "complete": True, "n_fields": 30, "attempts": 1})
+    assert not hb.needs_detail({**base, "status": "done", "complete": False, "n_fields": 0, "attempts": 3})
+    vacia = [{"team": {"id": 1}, "statistics": []}, {"team": {"id": 2}, "statistics": []}]
+    store = Store()
+    _run(store, _client({2026: [_match(1, "2026-11-20")]}, stats=vacia), dry_run=False, seasons=[2026])
+    for _ in range(3):
+        _run(store, _client({2026: [_match(1, "2026-11-20")]}, stats=vacia), dry_run=False, seasons=[2026])
+    assert store.data[hb.GAMES]["1"]["status"] == "empty" and store.data[hb.GAMES]["1"]["attempts"] == 3
