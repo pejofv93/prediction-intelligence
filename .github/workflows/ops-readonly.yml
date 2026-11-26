@@ -109,3 +109,25 @@ jobs:
             analyzers.value_bet_engine=services/sports-agent/analyzers/value_bet_engine.py \
             analyzers.player_props=services/sports-agent/analyzers/player_props.py
           rm -f warn.json err.txt
+
+      - name: Props de jugadores — understat y goleadores de football-data por día y origen (Cloud Run / Actions)
+        env:
+          DAYS: ${{ inputs.days }}
+          PYTHONIOENCODING: utf-8
+          FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days inválido"; exit 1; }
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="sports-agent" AND (textPayload:"understat" OR textPayload:"fdorg_scorers")' \
+            --project prediction-intelligence --freshness "${DAYS}d" --limit 20000 \
+            --format 'json(timestamp,textPayload,resource.labels.revision_name)' > props.json 2> err.txt \
+            || { grep -oE "PERMISSION_DENIED" err.txt | head -1; exit 1; }
+          LOGS_FILE=props.json python scripts/ops/props_sources_log.py
+          rm -f props.json err.txt
+          # Sonda desde este runner (IP de GitHub): solo el código HTTP de una petición a cada fuente.
+          echo "understat POST getPlayersStats: $(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'X-Requested-With: XMLHttpRequest' -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)' \
+            --data 'league=EPL&season=2025' https://understat.com/main/getPlayersStats/)"
+          echo "understat portada: $(curl -s -o /dev/null -w '%{http_code} %{size_download}' https://understat.com/)"
+          echo "football-data scorers PL: $(curl -s -o /dev/null -w '%{http_code}' \
+            -H "X-Auth-Token: $FOOTBALL_API_KEY" 'https://api.football-data.org/v4/competitions/PL/scorers?limit=20')"
