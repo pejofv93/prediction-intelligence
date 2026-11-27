@@ -7,9 +7,12 @@ SOLO LECTURA por defecto (el workflow uefa-backtest no ofrece otra cosa). Con CO
 a mano, más adelante y con OK) guardaría UN documento: match_preview_metrics/mp-e1_backtest (métricas
 agregadas por mercado y etiquetas), nada más.
 
-Lee hl_team_stats (grupo uefa) y hl_matches (partidos de liga de Highlightly, para emparejar ids con
-nombres de football-data) de Firestore, y baja los CSV públicos de football-data.co.uk de las 8 ligas,
-las segundas y B1/T1/G1/SC0 desde 2019/20. No pide nada a Highlightly.
+Lee hl_team_stats (grupo uefa), hl_matches y hl_league_listing (partidos de liga de Highlightly, para
+el mapa id de Highlightly → equipo del CSV) de Firestore, y baja los CSV públicos de football-data.co.uk
+de las 8 ligas, las segundas y B1/T1/G1/SC0 desde 2019/20. No pide nada a Highlightly.
+Emparejamiento SOLO por id (27-nov). Auditoría: compara con el emparejamiento anterior (id con el mapa
+de hl_matches y, si no, parecido de nombre) y cuenta los equipos que iban por nombre, los que el mapa
+nuevo lleva a otro club (falsos) y los que se quedan sin emparejar.
 Log: solo agregados (recuentos, métricas por mercado y competición, factores por liga): nada de
 equipos ni de partidos.
 """
@@ -28,6 +31,7 @@ from analyzers import match_preview_cups as mc  # noqa: E402
 from analyzers import match_preview_uefa as mu  # noqa: E402
 
 DOC_ID = "mp-e1_backtest"
+LEGACY_MIN_SIM = 0.80     # el respaldo por nombre de antes del 27-nov (solo para la auditoría)
 FIRST_SEASON_END = int(os.environ.get("FIRST_SEASON_END") or 2020)   # 2019/20: la anterior a 2020/21
 
 
@@ -71,8 +75,85 @@ def print_metrics(name: str, rows: list[tuple], by_comp: bool = False, n_boot: i
     return met
 
 
-def report(docs: list[dict], league: list[dict], matches: list[dict], n_boot: int = mu.N_BOOT) -> dict:
-    """Backtest completo e impresión de agregados. Devuelve {"labels", "metrics", "counts", "comp_labels"}."""
+def legacy_resolver(ids: dict, tdiv: dict, similarity, min_sim: float = LEGACY_MIN_SIM):
+    """El emparejamiento de antes del 27-nov (solo para la auditoría): por id y, si no, por parecido
+    único de nombre con los equipos con CSV de esa temporada o la anterior. Devuelve (nombre, vía)."""
+    by_season: dict = {}
+    for t, s in tdiv:
+        by_season.setdefault(s, set()).add(t)
+    cache: dict = {}
+
+    def resolve(hl_id, hl_name: str, season: str):
+        cands = by_season.get(season, set()) | by_season.get(mp.prev_season(season), set())
+        n = ids.get(hl_id, ids.get(str(hl_id))) if hl_id is not None else None
+        if n in cands:
+            return n, "id"
+        key = (hl_name, season)
+        if key not in cache:
+            best = None
+            if hl_name:
+                scored = sorted(((similarity(hl_name, c), c) for c in cands), reverse=True)
+                if scored and scored[0][0] >= min_sim and not (len(scored) > 1 and scored[1][0] == scored[0][0]):
+                    best = scored[0][1]
+            cache[key] = best
+        return (cache[key], "nombre") if cache[key] else (None, None)
+
+    return resolve
+
+
+def audit_matching(docs: list[dict], old_resolve, new_resolve, ids_new: dict) -> tuple[dict, list[dict]]:
+    """Emparejamiento anterior frente al nuevo (solo por id), por equipo de Highlightly distinto (su
+    temporada más reciente). Devuelve (recuentos, detalle por equipo dudoso). Categorías:
+      falso_otro_club        antes por nombre y el id lleva a otro club (o el club elegido tiene su propio
+                             id en el mapa, distinto): el caso del Inter de la Conference
+      por_nombre_ahora_igual antes por nombre y el id confirma el mismo club
+      por_nombre_sin_id      antes por nombre y ahora sin emparejar (muestra insuficiente)
+      id_igual / nuevo_por_id / sin_emparejar
+    El detalle (nombres) NO va al log: lo usa el fichero cifrado de la prueba de fichas."""
+    owner: dict = {}
+    for hid, name in ids_new.items():
+        owner.setdefault(name, set()).add(str(hid))
+    last: dict = {}
+    for d in docs:
+        date = (d.get("date") or "")[:10]
+        if len(date) != 10 or d.get("comp") not in mu.COMPS:
+            continue
+        season = mc.season_of(date)
+        for side in ("home", "away"):
+            hid = d.get(f"{side}_team_id")
+            if hid is None:
+                continue
+            if str(hid) not in last or season > last[str(hid)][2]:
+                last[str(hid)] = (hid, d.get(f"{side}_team") or "", season)
+    counts, detail = Counter(), []
+    for key, (hid, hl_name, season) in last.items():
+        old, via = old_resolve(hid, hl_name, season)
+        new = new_resolve(hid, hl_name, season)
+        if via == "nombre":
+            other_owner = bool(owner.get(old, set()) - {key})
+            if (new is not None and new != old) or (new is None and other_owner):
+                cat = "falso_otro_club"
+            elif new == old:
+                cat = "por_nombre_ahora_igual"
+            else:
+                cat = "por_nombre_sin_id"
+        elif via == "id":
+            cat = "id_igual" if new == old else "id_cambia"
+        else:
+            cat = "nuevo_por_id" if new is not None else "sin_emparejar"
+        counts[cat] += 1
+        if via == "nombre" or cat == "id_cambia":
+            detail.append({"hl": hl_name, "season": season, "antes": old, "ahora": new, "cat": cat})
+    counts["nombres_repetidos_entre_ids"] = len(mu.shared_names(ids_new))
+    return dict(sorted(counts.items())), sorted(detail, key=lambda r: (r["cat"], r["hl"]))
+
+
+def report(docs: list[dict], league: list[dict], matches: list[dict], n_boot: int = mu.N_BOOT,
+           league_old: list[dict] | None = None) -> dict:
+    """Backtest completo e impresión de agregados. league = partidos de liga de Highlightly para el
+    mapa de ids (hl_matches + hl_league_listing); league_old = solo hl_matches (el mapa de antes, para
+    la auditoría; None = sin auditoría). Devuelve {"labels", "metrics", "counts", "comp_labels",
+    "audit", "audit_detail", …}."""
     from collectors.highlightly_players import team_similarity
     hist = mp.History(matches, prev_divs=mu.ALL_DIVS)
     csv_by_div_day: dict = {}
@@ -81,8 +162,15 @@ def report(docs: list[dict], league: list[dict], matches: list[dict], n_boot: in
     ids = mc.hl_id_names(league, csv_by_div_day, team_similarity)
     tdiv = mu.team_divs_all(hist)
     print(f"Ids de Highlightly emparejados por votos: {len(ids)} · equipos-temporada con liga en CSV: {len(tdiv)}")
+    resolve = mu.make_resolver(ids, tdiv)
+    audit, audit_detail = {}, []
+    if league_old is not None:
+        ids_old = mc.hl_id_names(league_old, csv_by_div_day, team_similarity)
+        audit, audit_detail = audit_matching(docs, legacy_resolver(ids_old, tdiv, team_similarity), resolve, ids)
+        print(f"Auditoría del emparejamiento (equipos de Highlightly distintos; antes: {len(ids_old)} ids + "
+              f"nombre; ahora: {len(ids)} ids, solo id):", audit)
     counts = Counter()
-    ms = mu.uefa_matches(docs, mu.make_resolver(ids, tdiv, team_similarity), counts)
+    ms = mu.uefa_matches(docs, resolve, counts)
     print("Partidos por competición y temporada:",
           dict(sorted(Counter(f"{m['comp']}_{m['season']}" for m in ms).items())))
     engine = mu.Engine(hist, tdiv)
@@ -95,7 +183,7 @@ def report(docs: list[dict], league: list[dict], matches: list[dict], n_boot: in
                   if t else mu.OTHER] += 1
     print("Lados europeos por liga (CSV) o sin liga:", dict(sides.most_common()))
     print("Amarillas ausentes (lados de partido):", mc.yellow_diag(docs))
-    out: dict = {"counts": dict(counts)}
+    out: dict = {"counts": dict(counts), "audit": audit, "audit_detail": audit_detail}
     for variant in mu.VARIANTS:
         for cov in (*mu.COVERAGES, "todos"):
             sub = (rows[f"{variant}|ambos"] + rows[f"{variant}|un_lado"]) if cov == "todos" else rows[f"{variant}|{cov}"]
@@ -151,16 +239,19 @@ def report(docs: list[dict], league: list[dict], matches: list[dict], n_boot: in
 
 def main() -> int:
     from shared.firestore_client import iter_all
+    from collectors.highlightly_loader import LEAGUE_LISTING, league_listing_matches
     docs = [d.to_dict() or {} for d in iter_all("hl_team_stats", where=("group", "==", "uefa"))]
-    league = [d.to_dict() or {} for d in iter_all("hl_matches")]
-    print(f"Partidos europeos leídos: {len(docs)} · partidos de liga de Highlightly: {len(league)}")
+    league_old = [d.to_dict() or {} for d in iter_all("hl_matches")]
+    league = league_old + league_listing_matches(d.to_dict() or {} for d in iter_all(LEAGUE_LISTING))
+    print(f"Partidos europeos leídos: {len(docs)} · partidos de liga de Highlightly: {len(league_old)} "
+          f"(hl_matches) + {len(league) - len(league_old)} (hl_league_listing)")
     if not docs:
         print("Sin partidos del grupo uefa en hl_team_stats: falta la carga (job uefa). Nada que medir.")
         return 0
     last_end = max((int(mc.season_of(d["date"])[2:]) + 2000 for d in docs if d.get("date")), default=2027)
     matches, failed = asyncio.run(_history(last_end))
     print(f"Historial de liga (CSV): {len(matches)} partidos · CSV que faltan: {failed or 'ninguno'}")
-    out = report(docs, league, matches)
+    out = report(docs, league, matches, league_old=league_old)
     if os.environ.get("CONFIRMAR") == "ESCRIBIR":
         from datetime import datetime, timezone
         from shared.firestore_client import col
@@ -168,6 +259,7 @@ def main() -> int:
             "model_version": mu.MODEL_VERSION, "computed_at": datetime.now(timezone.utc).isoformat(),
             "reference": "frecuencia de la competición", "coverage": "ambos equipos con datos de liga",
             "counts": out["counts"], "labels": out["labels"], "comp_labels": out["comp_labels"],
+            "matching": "solo id de Highlightly (hl_matches + hl_league_listing)", "audit": out["audit"],
             "metrics": {k: v for k, v in (out.get("metrics") or {}).items() if v["div"] == "ALL"},
             "eval_seasons": out["eval_seasons"], "clean_seasons": out["clean_seasons"],
             "design_seasons": list(mu.DESIGN_SEASONS), "by_season": out["by_season"],

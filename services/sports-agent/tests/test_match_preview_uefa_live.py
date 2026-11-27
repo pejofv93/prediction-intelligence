@@ -48,7 +48,8 @@ def _uefa_docs():
 
 def _state(fixtures, now=NOW):
     return {"listed": {}, "fixtures": fixtures,
-            "id_names": {"updated_at": now.isoformat(), "map": {str(v): k for k, v in IDS.items()}}}
+            "id_names": {"updated_at": now.isoformat(), "map": {str(v): k for k, v in IDS.items()},
+                         "version": ul.ID_SOURCES}}
 
 
 def _fx(hl_id, comp, home, away, hid, aid, ko="2026-11-25T20:00:00+00:00"):

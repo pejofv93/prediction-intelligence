@@ -67,6 +67,8 @@ def test_prueba_sin_escribir_saca_fichas_de_la_jornada_y_no_escribe(monkeypatch,
     assert "Zorrovia" not in log                              # el log público, sin equipos
     assert text.count("\n== ") == 2                           # solo la jornada (el de dentro de 12 días no)
     assert "Zorrovia Norte – Zorrovia Bahía" in text and "factor de liga" in text
+    assert "'nombres_con_dos_equipos_de_highlightly': 0" in log
+    assert "Partidos europeos guardados por fecha" in log and "por jugar · pending" in log
 
 
 def test_ventana_jornada_y_dias():
@@ -79,3 +81,11 @@ def test_ventana_jornada_y_dias():
     w, lo, hi = sh.pick_window(fx, date(2026, 12, 9), 14)
     assert (lo, hi, len(w)) == ("2026-12-09", "2026-12-22", 4)
     assert sh.pick_window([], None, 0) == ([], "", "")
+
+
+def test_emparejamiento_falso_en_la_ventana_se_detecta():
+    p = {"home_resolved": True, "away_resolved": True, "home_team": "Inter", "away_team": "Getafe",
+         "hl_home_id": 1, "hl_away_id": 2}
+    q = {**p, "hl_home_id": 99, "away_team": "Roma", "hl_away_id": 3}
+    assert sh.false_matches([p])["nombres_con_dos_equipos_de_highlightly"] == 0
+    assert sh.false_matches([p, q]) == {"equipos_emparejados": 4, "nombres_con_dos_equipos_de_highlightly": 1}

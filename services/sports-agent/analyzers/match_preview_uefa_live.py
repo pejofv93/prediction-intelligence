@@ -13,10 +13,11 @@ detalle de CL y EL con ficha).
 
 Modelo: el historial de liga de las 8 ligas, las segundas y B1/T1/G1/SC0 (CSV de football-data.co.uk) y
 los partidos europeos ya cargados (hl_team_stats grupo uefa, esta temporada y la anterior); cada ficha
-solo con lo jugado antes de su fecha. Equipo de Highlightly → nombre de football-data: por id (mapa de
-votos sobre hl_matches, guardado en el estado y recalculado cada ID_MAP_DAYS días, como copas) y, si no,
-por parecido único. Un equipo sin datos de liga sale con su nombre de Highlightly y la ficha en
-"muestra insuficiente".
+solo con lo jugado antes de su fecha. Equipo de Highlightly → nombre de football-data: SOLO por id (mapa
+de votos sobre hl_matches y hl_league_listing, read_id_sources, guardado en el estado con su versión
+ID_SOURCES y recalculado cada ID_MAP_DAYS días o si cambia la versión). Un equipo sin id en el mapa o
+sin datos de liga sale con su nombre de Highlightly y la ficha en "muestra insuficiente"; nunca otro
+club con un nombre parecido.
 
 Etiquetas: las de match_preview_metrics/mp-e1_backtest. Desde el 27-nov (decisión del usuario) con la
 regla de la Euroliga más una condición: "ventaja medida" (⭐, la única que da píldoras en Telegram y en
@@ -58,6 +59,7 @@ MODEL_VERSION = mu.MODEL_VERSION
 HL_UEFA_FIXTURES_API = "highlightly_uefa_fixtures"   # contador propio
 HL_UEFA_FIXTURES_DAILY = 4          # tras el PRO: CL y EL, un día nuevo cada una ≈ 2 al día
 HL_UEFA_FIXTURES_DAILY_PRO = 15
+ID_SOURCES = "hl_matches+hl_league_listing"   # versión del mapa de ids (otra = se recalcula)
 WINDOW_DAYS = 3
 POST_PRO_COMPS = ("CL", "EL")
 
@@ -184,6 +186,14 @@ async def load_history(season: str, client=None) -> tuple[list[dict], list[str]]
     return mp.matches_from_team_rows(rows), failed
 
 
+def read_id_sources() -> list[dict]:
+    """Partidos de liga de Highlightly para el mapa de ids: hl_matches (8 ligas, desde 2024/25) y
+    hl_league_listing (resto de ligas con CSV y las 8 antes de 2024/25; job league_ids)."""
+    from collectors.highlightly_loader import LEAGUE_LISTING, league_listing_matches
+    from shared.firestore_client import iter_all
+    return ml._read_hl_matches() + league_listing_matches(d.to_dict() or {} for d in iter_all(LEAGUE_LISTING))
+
+
 def _read_uefa_docs(seasons: set) -> list[dict]:
     from shared.firestore_client import iter_all
     docs = [d.to_dict() or {} for d in iter_all("hl_team_stats", where=("group", "==", "uefa"))]
@@ -210,7 +220,8 @@ def uefa_fixture(f: dict, season: str, resolve) -> dict:
             "comp_name": mu.COMP_NAMES[f["comp"]], "league_id": f["league_id"], "date": f["date"],
             "kickoff_utc": f["kickoff_utc"], "home_team": home or f["hl_home"], "away_team": away or f["hl_away"],
             "home_resolved": home is not None, "away_resolved": away is not None,
-            "hl_match_id": f["hl_match_id"], "source": "highlightly"}
+            "hl_match_id": f["hl_match_id"], "hl_home_id": f["hl_home_id"], "hl_away_id": f["hl_away_id"],
+            "source": "highlightly"}
 
 
 def labels_for(backtest: Optional[dict], live: Optional[dict] = None) -> dict[str, str]:
@@ -274,13 +285,13 @@ async def run_uefa_previews(dry_run: bool = True, now: Optional[datetime] = None
             if failed:
                 summary["errors"].append(f"aviso: faltan CSV de historial: {failed}")
         hist = mp.History(matches, prev_divs=mu.ALL_DIVS)
-        ids, rebuilt = await asyncio.to_thread(ml.id_map, state, now, hist, read_hl_matches or ml._read_hl_matches,
-                                               team_similarity)
+        ids, rebuilt = await asyncio.to_thread(ml.id_map, state, now, hist, read_hl_matches or read_id_sources,
+                                               team_similarity, ID_SOURCES)
         if rebuilt:
-            new_state["id_names"] = {"updated_at": now.isoformat(), "map": ids}
-        summary["id_map"] = {"ids": len(ids), "recalculado": rebuilt}
+            new_state["id_names"] = {"updated_at": now.isoformat(), "map": ids, "version": ID_SOURCES}
+        summary["id_map"] = {"ids": len(ids), "recalculado": rebuilt, "nombres_con_varios_ids": len(mu.shared_names(ids))}
         tdiv = mu.team_divs_all(hist)
-        resolve = mu.make_resolver(ids, tdiv, team_similarity)
+        resolve = mu.make_resolver(ids, tdiv)
         if uefa_docs is None:
             uefa_docs = await asyncio.to_thread(_read_uefa_docs, {season, mp.prev_season(season)})
         engine, ecounts = build_engine(hist, resolve, uefa_docs, now.date().isoformat())

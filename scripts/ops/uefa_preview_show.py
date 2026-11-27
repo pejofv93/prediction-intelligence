@@ -57,6 +57,34 @@ def upcoming(docs: list[dict], now: datetime) -> list[dict]:
     return sorted(out, key=lambda f: (f["kickoff_utc"], f["comp"], str(f["hl_match_id"])))
 
 
+def stored_by_date(docs: list[dict], now: datetime, back: int = 7, ahead: int = 14) -> dict:
+    """Recuento de partidos europeos guardados por fecha cercana: {"AAAA-MM-DD comp": {terminado/
+    pendiente · estado del detalle: n}}. Solo recuentos."""
+    lo = (now.date() - timedelta(days=back)).isoformat()
+    hi = (now.date() + timedelta(days=ahead)).isoformat()
+    out: dict = {}
+    for d in docs:
+        day = (d.get("date") or "")[:10]
+        if lo <= day <= hi and d.get("comp") in mu.COMPS:
+            k = f"{'terminado' if d.get('finished') else 'por jugar'} · {d.get('status')}"
+            cell = out.setdefault(f"{day} {d['comp']}", {})
+            cell[k] = cell.get(k, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def false_matches(previews: list[dict]) -> dict:
+    """Comprobación de la ventana: equipos de football-data a los que se emparejan dos equipos de
+    Highlightly distintos (señal de emparejamiento falso). Solo recuentos."""
+    by_name: dict = {}
+    for p in previews:
+        for side in ("home", "away"):
+            if p.get(f"{side}_resolved"):
+                hid = p.get(f"hl_{side}_id")
+                by_name.setdefault(p[f"{side}_team"], set()).add(hid)
+    return {"equipos_emparejados": sum(1 for p in previews for s in ("home", "away") if p.get(f"{s}_resolved")),
+            "nombres_con_dos_equipos_de_highlightly": sum(1 for v in by_name.values() if len(v) > 1)}
+
+
 def mp_parse(s: str) -> datetime:
     from analyzers.match_preview_store import _parse
     return _parse(s)
@@ -126,13 +154,18 @@ def main() -> int:
     desde = date.fromisoformat(os.environ["DESDE"]) if os.environ.get("DESDE") else None
     now = datetime.now(timezone.utc)
 
+    from collectors.highlightly_loader import LEAGUE_LISTING, league_listing_matches
     docs = [d.to_dict() or {} for d in iter_all("hl_team_stats", where=("group", "==", "uefa"))]
-    league = [d.to_dict() or {} for d in iter_all("hl_matches")]
-    print(f"Partidos europeos leídos: {len(docs)} · partidos de liga de Highlightly: {len(league)}")
+    league_old = [d.to_dict() or {} for d in iter_all("hl_matches")]
+    league = league_old + league_listing_matches(d.to_dict() or {} for d in iter_all(LEAGUE_LISTING))
+    print(f"Partidos europeos leídos: {len(docs)} · partidos de liga de Highlightly: {len(league_old)} "
+          f"(hl_matches) + {len(league) - len(league_old)} (hl_league_listing)")
+    print("Partidos europeos guardados por fecha (últimos 7 días y próximos 14) · comp · terminado · detalle:",
+          stored_by_date(docs, now))
     last_end = max((int(mc.season_of(d["date"])[2:]) + 2000 for d in docs if d.get("date")), default=2027)
     matches, failed = asyncio.run(ub._history(last_end))
     print(f"Historial de liga (CSV): {len(matches)} partidos · CSV que faltan: {failed or 'ninguno'}")
-    res = ub.report(docs, league, matches)
+    res = ub.report(docs, league, matches, league_old=league_old)
     backtest = {"model_version": mu.MODEL_VERSION, "labels": res["labels"], "clean_seasons": res["clean_seasons"]}
     edge = sorted(mk for mk, lab in res["labels"].items() if lab == mp.LABEL_EDGE)
     print(f"\nBacktest en memoria (sin guardar): ⭐ en {edge}")
@@ -153,7 +186,8 @@ def main() -> int:
     for m in hist_m:
         csv_by_div_day.setdefault((m["div"], m["date"]), []).append(m)
     ids = {str(k): v for k, v in mc.hl_id_names(league, csv_by_div_day, team_similarity).items()}
-    state = {"listed": {}, "fixtures": fx, "id_names": {"updated_at": now.isoformat(), "map": ids}}
+    state = {"listed": {}, "fixtures": fx,
+             "id_names": {"updated_at": now.isoformat(), "map": ids, "version": ul.ID_SOURCES}}
     uefa_docs = [d for d in docs if d.get("date") and mc.season_of(d["date"][:10]) in keep]
 
     writes = []
@@ -170,10 +204,17 @@ def main() -> int:
                 for side in ("home", "away") if b["lines"][side]["highlight"])
     print(f"Fichas: {len(previews)} · con muestra insuficiente: {sum(1 for p in previews if p['low_sample'])} · "
           f"bloques con ⭐ (equipo): {stars} · escrituras bloqueadas: {len(writes)}")
+    fm = false_matches(previews)
+    print("Comprobación de emparejamientos de la ventana:", fm)
 
     lines = [f"Fichas de Europa que se escribirían ({len(previews)}), {now.isoformat()}, ventana {lo} → {hi}",
              f"Etiquetas calculadas en el momento (backtest en memoria, sin guardar): ⭐ en {edge}",
-             f"Temporadas limpias: {res['clean_seasons']}"]
+             f"Temporadas limpias: {res['clean_seasons']}",
+             f"Auditoría del emparejamiento: {res['audit']}",
+             f"Comprobación de la ventana: {fm}",
+             "\n---- Equipos que antes iban por nombre (o cambian de club con el id) ----"]
+    lines += [f"  [{r['cat']}] {r['hl']} ({r['season']}): antes {r['antes']} → ahora {r['ahora'] or 'sin emparejar'}"
+              for r in res["audit_detail"]]
     for p in previews:
         lines += ficha_text(p)
     if previews:
@@ -190,7 +231,7 @@ def main() -> int:
     with open(out_file, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print("Fichas en el fichero cifrado. Nada escrito en Firestore.")
-    return 0 if summary.get("ok") and not writes else 1
+    return 0 if summary.get("ok") and not writes and not fm["nombres_con_dos_equipos_de_highlightly"] else 1
 
 
 if __name__ == "__main__":

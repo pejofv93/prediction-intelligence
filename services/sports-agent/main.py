@@ -554,11 +554,12 @@ async def run_hl_load_job(job: str, dry_run: bool = True, max_requests: int = 20
     """Carga de Highlightly del mes PRO (solo estadísticas para la web de Tendencias; no la usa
     el motor de apuestas). job = nt | women | women_probe | players | maint (mantenimiento diario,
     tope propio de 50 al día) | cups (copas: cruces entre equipos de las 8 ligas) | uefa_probe (sondeo
-    de ids de CL/EL/ECL, ≤ 9 peticiones) | uefa (Europa: todos los partidos de UEFA_SEASONS). dry_run=true
+    de ids de CL/EL/ECL, ≤ 9 peticiones) | uefa (Europa: todos los partidos de UEFA_SEASONS) | league_ids
+    (listado por temporada de las ligas con CSV → hl_league_listing, mapa de ids de Europa). dry_run=true
     por defecto: solo lista y cuenta. leagues: ids de ligas femeninas extra, separados por comas."""
     import re
     from collectors.highlightly_loader import run_hl_load
-    jobs = ("nt", "women", "women_probe", "players", "maint", "cups", "uefa_probe", "uefa")
+    jobs = ("nt", "women", "women_probe", "players", "maint", "cups", "uefa_probe", "uefa", "league_ids")
     if job not in jobs:
         raise HTTPException(status_code=400, detail="job = " + " | ".join(jobs))
     if leagues and not re.fullmatch(r"\d+(,\d+)*", leagues):

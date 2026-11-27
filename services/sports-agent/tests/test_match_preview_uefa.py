@@ -7,7 +7,6 @@ from datetime import date, timedelta
 
 from analyzers import match_preview as mp
 from analyzers import match_preview_uefa as mu
-from collectors.highlightly_players import team_similarity
 
 BASE = {"goals": 1.4, "corners": 5.0, "cards": 2.0, "shots": 12.0, "sot": 4.0, "fouls": 11.0}
 FACTOR = {"SP1": 1.5, "B1": 0.65}           # lo que rinde cada liga en Europa frente a su liga
@@ -77,14 +76,19 @@ def test_factor_de_liga_recupera_el_signo():
     assert mu.fit_league_factors([]) == {}
 
 
-def test_resolver_por_id_y_por_parecido_unico():
-    tdiv = {("Club Brugia", "2526"): "B1", ("Real Iberia", "2526"): "SP1", ("Sporting Iberia", "2526"): "SP1",
+def test_resolver_solo_por_id_nunca_por_nombre():
+    tdiv = {("Club Brugia", "2526"): "B1", ("Real Iberia", "2526"): "SP1", ("Inter", "2526"): "I1",
             ("Sporting Lusia", "2526"): "P1"}
-    res = mu.make_resolver({77: "Real Iberia"}, tdiv, team_similarity)
+    res = mu.make_resolver({77: "Real Iberia", "80": "Inter", 81: "Equipo de 3ª"}, tdiv)
     assert res(77, "Cualquier nombre", "2526") == "Real Iberia"
-    assert res(78, "Club Brugia KV", "2526") == "Club Brugia"          # sin id: parecido único
-    assert res(79, "Equipo Lejano", "2526") is None
+    assert res("77", "Real Iberia", "2526") == "Real Iberia"            # id como texto (estado guardado)
+    assert res(78, "Club Brugia KV", "2526") is None                  # sin id en el mapa: sin emparejar
+    assert res(79, "Inter", "2526") is None                           # mismo nombre, otro club: NUNCA
+    assert res(80, "Internazionale", "2526") == "Inter"
+    assert res(81, "Equipo de 3ª", "2526") is None                    # id con mapa pero sin liga con CSV
+    assert res(None, "Real Iberia", "2526") is None
     assert res(77, "Real Iberia", "2627") == "Real Iberia"             # temporada nueva sin CSV: la anterior
+    assert mu.shared_names({1: "Inter", 2: "Inter", 3: "Real Iberia"}) == {"Inter": 2}
 
 
 def _doc(mid, comp="CL", status="done", day="2025-10-01", hid=1, aid=2, home="Real Iberia", away="Equipo Lejano"):
@@ -96,7 +100,7 @@ def _doc(mid, comp="CL", status="done", day="2025-10-01", hid=1, aid=2, home="Re
 
 
 def test_uefa_matches_cuenta_descartes_y_deja_sin_nombre_al_desconocido():
-    res = mu.make_resolver({1: "Real Iberia"}, {("Real Iberia", "2526"): "SP1"}, team_similarity)
+    res = mu.make_resolver({1: "Real Iberia"}, {("Real Iberia", "2526"): "SP1"})
     c = Counter()
     ms = mu.uefa_matches([_doc(1), _doc(2, comp=None), _doc(3, status="pending"),
                           {**_doc(4), "stats": {}}], res, c)

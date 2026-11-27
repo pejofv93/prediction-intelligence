@@ -7,7 +7,10 @@
 #        cups (copas y supercopas: cruces entre equipos de las 8 ligas; después de players) ·
 #        uefa_probe (sondeo de ids de Champions, Europa League y Conference League, ≤ 9 peticiones:
 #        imprime ids, temporadas, recuentos y nombres de campo de /statistics; sin datos de equipos) ·
-#        uefa (Europa: todos los partidos de UEFA_SEASONS; falla si aún no se han rellenado los ids)
+#        uefa (Europa: todos los partidos de UEFA_SEASONS; falla si aún no se han rellenado los ids) ·
+#        league_ids (listado por temporada de las ligas con CSV de fuera de las 8 y de las 8 antes de
+#        2024/25 → hl_league_listing, para emparejar los equipos de Europa por id; dry_run: solo busca
+#        los ids de liga e imprime nombres de liga y temporadas, sin equipos)
 #   dry_run=true (por defecto): solo lista y cuenta; no escribe ni pide detalle.
 #   Escribir exige dry_run=false Y confirmar=ESCRIBIR.
 #
@@ -21,7 +24,7 @@ on:
       job:
         description: "Qué cargar"
         type: choice
-        options: [nt, women, women_probe, players, maint, cups, uefa_probe, uefa]
+        options: [nt, women, women_probe, players, maint, cups, uefa_probe, uefa, league_ids]
         default: nt
       dry_run:
         description: "true = solo lista y cuenta"

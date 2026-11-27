@@ -163,11 +163,14 @@ def map_team(hl_name: str, candidates: set[str], similarity) -> Optional[str]:
     return scored[0][1]
 
 
-def id_map(state: dict, now: datetime, hist: mp.History, read_hl_matches, similarity) -> tuple[dict, bool]:
-    """{id de Highlightly (str): nombre de football-data}; recalculado si tiene ID_MAP_DAYS o más."""
+def id_map(state: dict, now: datetime, hist: mp.History, read_hl_matches, similarity,
+           version: Optional[str] = None) -> tuple[dict, bool]:
+    """{id de Highlightly (str): nombre de football-data}; recalculado si tiene ID_MAP_DAYS o más, o si
+    el guardado es de otra versión de fuentes (version; copas no la usa)."""
     cur = state.get("id_names") or {}
     try:
-        fresh = cur.get("map") and now - _parse(cur["updated_at"]) < timedelta(days=ID_MAP_DAYS)
+        fresh = (cur.get("map") and cur.get("version") == version
+                 and now - _parse(cur["updated_at"]) < timedelta(days=ID_MAP_DAYS))
     except (KeyError, TypeError, ValueError):
         fresh = False
     if fresh:

@@ -314,7 +314,8 @@ def test_maint_lista_por_fecha_guarda_y_pide_lo_terminado():
 def test_maint_tope_deja_pendientes_para_la_pasada_siguiente():
     days, stats, boxes = _maint_world()
     store = _maint_store()
-    n_list = 2 * len(L._maint_comps(None))          # dos días, una página por competición
+    # dos días, una página por competición (y las de Europa de la temporada en curso)
+    n_list = 2 * (len(L._maint_comps(None)) + len(L.uefa_maint_lids(NOW)))
     out = _run("maint", _Client(stats=stats, boxes=boxes, days=days), store, max_requests=n_list + 1)
     assert out["fetched"]["done"] == 1
     assert len(store.c[L.STATE]["maint_backlog"]["items"]) == 3
@@ -638,15 +639,20 @@ def _uefa_maint(monkeypatch, cap=20):
     return store, _Client(stats=stats, days=days)
 
 
-def test_maint_europa_tras_el_pro_solo_cl_y_el_con_ficha_y_gradua(monkeypatch):
+def test_maint_europa_tras_el_pro_solo_cl_y_el_con_ficha_o_sin_ella_y_gradua(monkeypatch):
     store, client = _uefa_maint(monkeypatch)
+    # Un partido de Champions de ese día SIN ficha (y sin guardar): también se guarda y se pide.
+    client.days[(9001, "2026-12-15")].append(_sm(63, "Aland FC", "Qarabeta", 10, 99, "2026-12-15", 2026))
+    client.stats[63] = _stats(10, "Aland FC", 99, "Qarabeta")
     out = _run("maint", client, store, max_requests=3000, now=AFTER_PRO)
     assert out["ok"] and out["uefa_budget"] == 20
     assert sum("leagueId=9001&date=2026-12-15" in u for u in client.calls) == 1
+    assert sum("leagueId=9002&date=2026-12-15" in u for u in client.calls) == 1   # EL, aunque sin fichas
     assert not any("leagueId=9003" in u for u in client.calls)                 # la Conference no
-    assert {u.rsplit("/", 1)[1] for u in client.calls if "/statistics/" in u} == {"60", "61", "62"}
+    assert {u.rsplit("/", 1)[1] for u in client.calls if "/statistics/" in u} == {"60", "61", "62", "63"}
     assert store.c[L.TEAM_STATS]["60"]["group"] == "uefa" and store.c[L.TEAM_STATS]["60"]["comp"] == "CL"
-    assert store.c[L.STATE]["maint_2026-12-16"]["uefa_used"] == 4
+    assert store.c[L.TEAM_STATS]["63"]["status"] == "done"
+    assert store.c[L.STATE]["maint_2026-12-16"]["uefa_used"] == 6
     g = out["uefa_grade"]
     assert g["counts"] == {"graduada": 3, "esperando estadísticas": 1}           # la de la Conference
     assert store.c["match_preview_grades_uefa"]["CL_2026-12-15_60"]["status"] == "graduada"
@@ -655,9 +661,10 @@ def test_maint_europa_tras_el_pro_solo_cl_y_el_con_ficha_y_gradua(monkeypatch):
 def test_maint_europa_tope_propio_por_fecha_tras_el_pro(monkeypatch):
     store, client = _uefa_maint(monkeypatch, cap=2)
     out = _run("maint", client, store, max_requests=3000, now=AFTER_PRO)
-    assert out["ok"] and sum(1 for u in client.calls if "leagueId=9001" in u or "/statistics/6" in u) == 2
+    # Tope 2: los dos listados (CL y EL) y ningún detalle; los 3 de Champions quedan en el backlog.
+    assert out["ok"] and sum(1 for u in client.calls if "leagueId=900" in u or "/statistics/6" in u) == 2
     assert store.c[L.STATE]["maint_2026-12-16"]["uefa_used"] == 2
-    assert sum(1 for it in store.c[L.STATE]["maint_backlog"]["items"] if it["job"] == "uefa") == 2
+    assert sum(1 for it in store.c[L.STATE]["maint_backlog"]["items"] if it["job"] == "uefa") == 3
     # Otra pasada el mismo día: el tope de Europa ya está gastado; lo demás sigue.
     client2 = _Client(stats=client.stats, days=client.days)
     out2 = _run("maint", client2, store, max_requests=3000, now=AFTER_PRO)
@@ -667,6 +674,95 @@ def test_maint_europa_tope_propio_por_fecha_tras_el_pro(monkeypatch):
 def test_maint_europa_con_pro_las_tres_y_sin_tope_propio(monkeypatch):
     assert L.uefa_maint_cap(datetime(2026, 12, 12).date()) is None
     assert L.uefa_maint_cap(datetime(2026, 12, 13).date()) == L.HL_UEFA_MAINT_DAILY
-    prev = [_uefa_preview(1, "CL", 9001, "2026-11-12"), _uefa_preview(2, "ECL", 9003, "2026-11-12")]
-    assert L.uefa_targets(prev, ["2026-11-12"], NOW.date()) == {"2026-11-12": {9001: {1}, 9003: {2}}}
-    assert L.uefa_targets(prev, ["2026-11-12"], AFTER_PRO.date()) == {"2026-11-12": {9001: {1}}}
+    assert L.uefa_maint_lids(NOW, _UEFA_FAKE) == [9001, 9002, 9003]            # temporada 2026, las tres
+    assert L.uefa_maint_lids(AFTER_PRO, _UEFA_FAKE) == [9001, 9002]            # tras el PRO, sin la ECL
+    assert L.uefa_maint_lids(datetime(2027, 3, 1, tzinfo=timezone.utc), {"CL": [(1, 2025), (2, 2026)]}) == [2]
+    assert L.uefa_maint_lids(datetime(2027, 7, 1, tzinfo=timezone.utc), {"CL": [(1, 2025), (2, 2026)]}) == []
+
+
+# ── Mapa de ids de equipo (job league_ids) ───────────────────────────────────────
+
+class _LeagueClient(_Client):
+    LEAGUES = {"Pro League": [{"id": 501, "name": "Pro League", "country": {"name": "Belgium"}, "seasons": [2025, 2026]},
+                              {"id": 502, "name": "Pro League", "country": {"name": "Saudi Arabia"}}],
+               "Premiership": [{"id": 601, "name": "Premiership", "country": {"name": "Scotland"}},
+                               {"id": 602, "name": "Premiership", "country": {"name": "Northern Ireland"}}],
+               "Super Lig": [{"id": 701, "name": "Süper Lig", "country": {"name": "Türkiye"}}]}
+
+    async def get(self, url, headers=None):
+        m = re.search(r"/leagues\?leagueName=([^&]+)", url)
+        if m:
+            from urllib.parse import unquote
+            self.calls.append(url)
+            return _Resp(200, {"data": self.LEAGUES.get(unquote(m.group(1)), [])})
+        return await super().get(url, headers)
+
+
+class _ReplaceStore(_Store):
+    def replace(self, coll, docs):
+        for k, v in docs.items():
+            self.c.setdefault(coll, {})[str(k)] = dict(v)
+            self.writes += 1
+
+
+def test_pick_league_solo_uno_por_nombre_exacto_y_pais():
+    cands = [{"id": 1, "name": "Premiership", "country": "Scotland"},
+             {"id": 2, "name": "Premiership", "country": "Northern Ireland"},
+             {"id": 3, "name": "Premiership Cup", "country": "Scotland"}]
+    assert L.pick_league(cands, ("scotland",), ("Premiership",))["id"] == 1
+    assert L.pick_league(cands + [{"id": 4, "name": "premiership", "country": "Scotland"}],
+                         ("scotland",), ("Premiership",)) is None            # dos ids: ambiguo
+    assert L.pick_league(cands, ("wales",), ("Premiership",)) is None
+
+
+def test_league_listing_doc_y_partidos_para_el_mapa():
+    lst = [_m(1, "Club Brugia", "Gante", 10, 11, date="2025-08-01"), _m(2, "Sin id", "Gante", None, 11)]
+    doc = L.league_listing_doc("B1", 501, 2025, lst, NOW)
+    assert doc["season"] == "2526" and doc["n"] == 1 and doc["hl_season"] == 2025
+    assert L.league_listing_matches([doc]) == [{"div": "B1", "date": "2025-08-01", "home_team": "Club Brugia",
+                                                "home_team_id": 10, "away_team": "Gante", "away_team_id": 11}]
+
+
+def test_league_ids_dry_run_solo_busca_ligas_y_cuenta(monkeypatch):
+    monkeypatch.setattr(L, "LEAGUE_ID_SEARCH", {"B1": (("belgium",), ("Pro League",)),
+                                                "SC0": (("scotland",), ("Premiership",)),
+                                                "T1": (("turkey", "türkiye"), ("Super Lig", "Süper Lig")),
+                                                "G1": (("greece",), ("Super League 1",))})
+    client = _LeagueClient()
+    out = _run("league_ids", client, _ReplaceStore(), dry_run=True)
+    ids = {r["div"]: r["id"] for r in out["leagues"]}
+    assert ids == {"B1": 501, "SC0": 601, "T1": 701, "G1": None}
+    assert not out["ok"] and any(e.startswith("G1:") for e in out["errors"])      # G1 se salta
+    assert all("/leagues?" in u for u in client.calls)                          # nada más que búsquedas
+    n_seasons = L.UEFA_CURRENT_SEASON - L.LEAGUE_ID_FIRST + 1
+    n_main = len(L.hp.HL_LEAGUES) * (L.LEAGUE_ID_MAIN_UNTIL - L.LEAGUE_ID_FIRST + 1)
+    assert out["seasons_total"] == out["seasons_todo"] == 3 * n_seasons + n_main
+
+
+def test_league_ids_lista_guarda_y_no_repite(monkeypatch):
+    monkeypatch.setattr(L, "LEAGUE_ID_SEARCH", {"B1": (("belgium",), ("Pro League",))})
+    monkeypatch.setattr(L.hp, "HL_LEAGUES", {"SP1": 119924})
+    monkeypatch.setattr(L, "LEAGUE_ID_FIRST", 2025)
+    monkeypatch.setattr(L, "LEAGUE_ID_MAIN_UNTIL", 2025)
+    routes = {(501, 2026): [_m(1, "Club Brugia", "Gante", 10, 11, date="2026-08-01")],
+              (501, 2025): [_m(2, "Club Brugia", "Gante", 10, 11, date="2025-08-01")],
+              (119924, 2025): [_m(3, "Real Iberia", "Sevilla", 20, 21, date="2025-08-20")]}
+    store = _ReplaceStore()
+    out = _run("league_ids", _LeagueClient(routes=routes), store)
+    assert out["ok"], out["errors"]
+    assert set(store.c[L.LEAGUE_LISTING]) == {"B1_2627", "B1_2526", "SP1_2526"}
+    assert store.c[L.LEAGUE_LISTING]["B1_2526"]["matches"][0]["hi"] == 10
+    # Otra pasada: las pasadas no se repiten y la actual tampoco hasta LEAGUE_ID_RELIST_DAYS.
+    out2 = _run("league_ids", _LeagueClient(routes=routes), store)
+    assert out2["seasons_todo"] == 0
+    out3 = _run("league_ids", _LeagueClient(routes=routes), store, now=NOW + timedelta(days=8))
+    assert out3["seasons_todo"] == 1 and out3["listed"] == [{"div": "B1", "season": 2026, "matches": 1}]
+
+
+def test_listado_con_repetidos_no_se_da_por_listado(monkeypatch):
+    monkeypatch.setattr(L, "UEFA_SEASONS", {"CL": [(9001, 2026)], "EL": [(9002, 2026)], "ECL": [(9003, 2026)]})
+    dup = [_m(1, "Aland", "Bravia", 10, 20, date="2026-11-25", desc="Not started")] * 2
+    store = _Store()
+    out = _run("uefa", _Client(routes={(9001, 2026): dup}), store)
+    assert out["comps"][0]["duplicados"] == 1
+    assert "uefa_9001_2026" not in store.c.get(L.STATE, {})                      # se relista la próxima vez

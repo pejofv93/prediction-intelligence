@@ -9,8 +9,12 @@ Datos:
     amarilla ausente = sin dato (las líneas de tarjetas de ese lado no cuentan).
   - Fuerza de cada equipo en su liga: el History de mp-v1 con los CSV de football-data.co.uk de las 8
     ligas, las segundas y EUROPE_DIVS (B1, T1, G1, SC0; cero peticiones a Highlightly).
-  - Id de Highlightly → nombre de football-data: por id (votos sobre hl_matches, mc.hl_id_names) y, si
-    no está, por parecido único ≥ MIN_SIM con los equipos de las ligas con CSV de esa temporada.
+  - Id de Highlightly → nombre de football-data: SOLO por id (decisión del usuario, 27-nov). Mapa por
+    votos (mc.hl_id_names) sobre los partidos de liga de Highlightly (hl_matches y hl_league_listing)
+    emparejados con la fila del CSV del mismo día y división. Un id sin mapa, o cuyo equipo no tiene
+    liga con CSV esa temporada ni la anterior, se queda sin emparejar ("muestra insuficiente"): nunca
+    otro club con un nombre parecido (antes había un respaldo por nombre que emparejaba, p. ej., un
+    "Inter" de la Conference con el de la Serie A).
 
 Modelo mp-e1, por estadística (walk-forward: cada partido solo con lo jugado ANTES de su fecha):
   log λ_local = log(media de la competición en casa) + log(ataque del local) + log(defensa del visitante)
@@ -62,7 +66,6 @@ DESIGN_SEASONS: tuple[str, ...] = ()
 # Temporadas recientes (decisión del usuario, 27-nov): con ellas juntas, el modelo no puede salir peor
 # que la referencia (diferencia media de Brier por partido ≤ 0) para llevar ⭐.
 RECENT_SEASONS: tuple[str, ...] = ("2526", "2627")
-MIN_SIM = 0.80
 COVERAGES = ("ambos", "un_lado")
 VARIANTS = ("e1_vs_comp", "v1_vs_comp", "e1_vs_v1")
 LABEL_BACKTEST = mc.LABEL_BACKTEST
@@ -81,33 +84,32 @@ def team_divs_all(hist: mp.History) -> dict[tuple[str, str], str]:
     return out
 
 
-def _best_unique(name: str, cands: Iterable[str], similarity, min_sim: float) -> Optional[str]:
-    scored = sorted(((similarity(name or "", c), c) for c in cands), reverse=True)
-    if not scored or scored[0][0] < min_sim or (len(scored) > 1 and scored[1][0] == scored[0][0]):
-        return None
-    return scored[0][1]
-
-
-def make_resolver(ids: dict, tdiv: dict[tuple[str, str], str], similarity,
-                  min_sim: float = MIN_SIM) -> Callable[[object, str, str], Optional[str]]:
+def make_resolver(ids: dict, tdiv: dict[tuple[str, str], str]) -> Callable[[object, str, str], Optional[str]]:
     """resolve(id de Highlightly, nombre de Highlightly, temporada) → nombre de football-data o None.
-    Primero por id (si ese equipo tiene liga esa temporada o la anterior); si no, por parecido único."""
+    SOLO por id: el nombre del mapa si ese equipo tiene liga con CSV esa temporada o la anterior. El
+    nombre de Highlightly no se usa (se mantiene en la firma para los que llaman)."""
     by_season: dict[str, set] = defaultdict(set)
     for t, s in tdiv:
         by_season[s].add(t)
-    cache: dict = {}
 
     def resolve(hl_id, hl_name: str, season: str) -> Optional[str]:
-        cands = by_season.get(season, set()) | by_season.get(mp.prev_season(season), set())
-        n = ids.get(hl_id, ids.get(str(hl_id))) if hl_id is not None else None
-        if n in cands:
-            return n
-        key = (hl_name, season)
-        if key not in cache:
-            cache[key] = _best_unique(hl_name, cands, similarity, min_sim) if hl_name else None
-        return cache[key]
+        if hl_id is None:
+            return None
+        n = ids.get(hl_id, ids.get(str(hl_id)))
+        if n is None and str(hl_id).isdigit():
+            n = ids.get(int(hl_id))
+        if n is None:
+            return None
+        return n if n in by_season.get(season, set()) or n in by_season.get(mp.prev_season(season), set()) else None
 
     return resolve
+
+
+def shared_names(ids: dict) -> dict[str, int]:
+    """{nombre de football-data: nº de ids de Highlightly} de los nombres a los que el mapa lleva más de
+    un id (duplicados de Highlightly o un voto dudoso): informativo, para la auditoría."""
+    c = Counter(ids.values())
+    return {n: k for n, k in c.items() if k > 1}
 
 
 def uefa_matches(docs: Iterable[dict], resolve, counts: Counter) -> list[dict]:

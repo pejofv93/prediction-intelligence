@@ -13,9 +13,10 @@ Trabajos (job):
                Copas (fichas mp-v1-cups): solo los (copa, día) de esos días con alguna ficha de
                copa, y el detalle solo de esos cruces; después gradúa las fichas de copa
                (match_preview_cups_live.run_cup_grade). Sin fichas de copa no gasta nada más.
-               Europa (fichas mp-e1), igual: solo los (id, día) con ficha y el detalle de esos
-               partidos; después gradúa (match_preview_uefa_live.run_uefa_grade). Tras HL_PRO_UNTIL,
-               solo Champions y Europa League y con tope propio HL_UEFA_MAINT_DAILY por fecha.
+               Europa (fichas mp-e1): cada día, las competiciones de la temporada en curso (con
+               ficha o sin ella) y el detalle de todos sus partidos terminados; después gradúa
+               (match_preview_uefa_live.run_uefa_grade). Tras HL_PRO_UNTIL, solo Champions y
+               Europa League y con tope propio HL_UEFA_MAINT_DAILY por fecha.
   women_probe  sondeo: 1 listado + 1 /statistics de Frauen-Bundesliga, Serie A, D1 y Champions
   players      box score (jugadores) de los clubes de las 8 ligas → /box-score por partido
   cups         copas y supercopas de esos países (CUPS, 2020-2026): solo cruces entre dos equipos
@@ -26,6 +27,10 @@ Trabajos (job):
   uefa         Europa (UEFA_SEASONS, ids del sondeo): TODOS los partidos (previas, fase principal,
                playoff y eliminatorias), sin filtrar a los equipos de las 8 ligas → /statistics.
                Sin ids en UEFA_SEASONS falla con un error claro (no pide nada).
+  league_ids   mapa de ids de equipo para Europa: busca en /leagues las ligas con CSV de fuera de
+               las 8 (B1, T1, G1, SC0, E1, I2, F2, D2) y lista por temporada esas (2020/21 a la
+               actual) y las 8 de 2020/21 a 2023/24 → hl_league_listing. Sin estadísticas. dry_run:
+               solo las búsquedas de ligas.
 
 Cada pasada: 1) lista los partidos de cada (competición, temporada) pendiente, 2) pide el
 detalle de los partidos terminados que falten, del más reciente al más antiguo, hasta el tope
@@ -133,13 +138,36 @@ UEFA_PROBE_SEASON = 2025
 # Partidos de fase principal + playoff + eliminatorias en 2025/26 (sin previas): si el listado trae
 # muchos más, las previas van en el mismo id.
 UEFA_MAIN_PHASE_2025 = {"CL": 189, "EL": 189, "ECL": 153}
-# Mantenimiento de Europa (fichas mp-e1): lista y pide solo los partidos con ficha. Después de
-# HL_PRO_UNTIL, solo Champions y Europa League y con un tope propio por fecha (UTC) dentro de los
-# HL_MAINT_DAILY: una jornada de EL con ficha son 1 listado + 18 detalles. Lo que no quepa queda en
-# el backlog para el día siguiente.
+# Mantenimiento de Europa (fichas mp-e1): cada día pendiente lista por fecha las competiciones de la
+# temporada en curso (tengan ficha o no) y pide el detalle de TODOS sus partidos terminados, así el
+# historial europeo no depende del listado por temporada (27-nov: 45 partidos del 25 y 26-nov nunca
+# llegaron a guardarse con él). Después de HL_PRO_UNTIL, solo Champions y Europa League y con un tope
+# propio por fecha (UTC) dentro de los HL_MAINT_DAILY: un jueves de EL son 2 listados + 18 detalles.
+# Lo que no quepa queda en el backlog para el día siguiente.
 UEFA_PREVIEWS = "match_previews_uefa"
 UEFA_MAINT_POST_PRO = ("CL", "EL")
 HL_UEFA_MAINT_DAILY = 20
+
+# Mapa de ids de equipo para Europa (job league_ids, 27-nov): listado por temporada de las ligas con
+# CSV que no están en hl_matches (players solo tiene las 8 ligas desde 2024/25) → un documento por
+# (liga, temporada) en hl_league_listing con id, fecha e ids y nombres de los dos equipos. Con eso el
+# mapa id de Highlightly → equipo del CSV sale por votos (mismo día y división, como en copas) y el
+# emparejamiento de Europa va SOLO por id. Ids de las ligas de fuera de las 8: se buscan en /leagues por
+# nombre EXACTO y país; si no sale uno solo, esa liga se salta (queda en el resumen).
+LEAGUE_LISTING = "hl_league_listing"
+LEAGUE_ID_SEARCH: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "B1": (("belgium",), ("Pro League", "Jupiler Pro League", "First Division A")),
+    "T1": (("turkey", "türkiye", "turkiye"), ("Super Lig", "Süper Lig", "Trendyol Süper Lig")),
+    "G1": (("greece",), ("Super League 1", "Super League")),
+    "SC0": (("scotland",), ("Premiership",)),
+    "E1": (("england",), ("Championship",)),
+    "I2": (("italy",), ("Serie B",)),
+    "F2": (("france",), ("Ligue 2",)),
+    "D2": (("germany",), ("2. Bundesliga",)),
+}
+LEAGUE_ID_FIRST = 2020                  # 2020/21: la primera temporada europea cargada
+LEAGUE_ID_MAIN_UNTIL = 2023             # las 8 ligas: hl_matches ya trae 2024/25 en adelante
+LEAGUE_ID_RELIST_DAYS = 7               # la temporada en curso se vuelve a listar como mucho cada 7 días
 
 _YOUTH_WOMEN = re.compile(r"\bU\s?-?\d{2}\b|\bunder[- ]?\d{2}\b|olympic|women|femenin|f[ée]minin|frauen|\bW$",
                           re.IGNORECASE)
@@ -437,6 +465,8 @@ async def run_hl_load(job: str, dry_run: bool = True, max_requests: int = HL_LOA
             summary["probe"] = await _uefa_probe(client, api_key, quota, budget)
         elif job == "maint":
             await _maint(dry_run, leagues, now, api_key, quota, store, client, budget, summary)
+        elif job == "league_ids":
+            await _league_ids(dry_run, now, api_key, quota, store, client, budget, summary)
         else:
             await _load(job, dry_run, leagues, now, api_key, quota, store, client, budget, summary)
     except hp.HighlightlyBudgetExhausted:
@@ -476,7 +506,9 @@ async def _load(job, dry_run, leagues, now, api_key, quota, store, client, budge
                 break     # sin presupuesto o error: se sigue en la próxima pasada (CORE va primero)
             row["listed"] = True
             docs = _ingest(job, listing, league_id, season, is_core, core_ids, store, dry_run, row)
-            if not dry_run:
+            # Partidos repetidos entre páginas = el orden cambió mientras se paginaba y puede faltar
+            # alguno: no se da por listada y se repite en la pasada siguiente.
+            if not dry_run and not row["duplicados"]:
                 store.put(STATE, {key: {"listed_at": now.isoformat(), "all_finished": row["all_finished"],
                                         "kept": row["kept"]}})
             row.pop("all_finished")
@@ -533,6 +565,8 @@ def _ingest(job, listing, league_id, season, is_core, core_ids: set, store, dry_
         if k and x["finished"] and not k.get("finished"):
             new[str(x["match_id"])] = {**k, "finished": True, "goals_home": x.get("goals_home"),
                                        "goals_away": x.get("goals_away"), "state": x.get("state")}
+    uniq = {str(x["match_id"]) for x in metas if x["match_id"] is not None}
+    row["duplicados"] = sum(1 for x in metas if x["match_id"] is not None) - len(uniq)
     row.update({"listed_total": len(listing), "kept": len(metas),
                 "finished": sum(1 for x in metas if x["finished"]), "new": len(new),
                 "all_finished": bool(metas) and all(x["finished"] for x in metas)})
@@ -627,7 +661,7 @@ async def _maint(dry_run, leagues, now, api_key, quota, store, client, budget, s
     cup_prev = _cup_previews(store, now)
     targets = cup_targets(cup_prev, days)
     uefa_prev = _uefa_previews(store, now)
-    utargets = uefa_targets(uefa_prev, days, now.date())
+    ulids = uefa_maint_lids(now)
     # Europa: tope propio por fecha después de HL_PRO_UNTIL (dentro del de mantenimiento).
     ucap = uefa_maint_cap(now.date())
     ubudget = _SubBudget(budget, budget.left if ucap is None
@@ -641,15 +675,15 @@ async def _maint(dry_run, leagues, now, api_key, quota, store, client, budget, s
     for day in days:
         complete = True
         comps = (_maint_comps(leagues) + [("cups", lid, True) for lid in sorted(targets.get(day, {}))]
-                 + [("uefa", lid, True) for lid in sorted(utargets.get(day, {}))])
+                 + [("uefa", lid, True) for lid in ulids])
         for job, league_id, is_core in comps:
             listing = await _list_day(client, api_key, quota, ubudget if job == "uefa" else budget, league_id, day)
             if listing is None:      # sin presupuesto o error: ese día se repite en la pasada siguiente
                 complete = False
                 break
             ids = core_ids
-            if job in ("cups", "uefa"):        # solo los partidos con ficha
-                listing = [m for m in listing if m.get("id") in (targets if job == "cups" else utargets)[day][league_id]]
+            if job == "cups":        # solo los partidos con ficha
+                listing = [m for m in listing if m.get("id") in targets[day][league_id]]
                 ids = {i for m in listing for i in ((m.get("homeTeam") or {}).get("id"),
                                                     (m.get("awayTeam") or {}).get("id")) if i is not None}
             by_season: dict = {}
@@ -721,18 +755,14 @@ def _uefa_previews(store, now: datetime) -> list[dict]:
         return []
 
 
-def uefa_targets(previews: list[dict], days: list[str], today: date) -> dict[str, dict[int, set]]:
-    """{día: {id de liga: {ids de Highlightly}}} de las fichas de Europa de esos días: lo único que el
-    mantenimiento lista y pide de Europa. Después de HL_PRO_UNTIL solo Champions y Europa League
-    (UEFA_MAINT_POST_PRO); la Conference se queda sin detalle (decisión del usuario, 24-nov-2026)."""
-    comps = UEFA_COMPS if today <= hp.HL_PRO_UNTIL else UEFA_MAINT_POST_PRO
-    out: dict = {}
-    want = set(days)
-    for p in previews:
-        if (p.get("date") in want and p.get("comp") in comps and p.get("league_id") is not None
-                and p.get("hl_match_id") is not None):
-            out.setdefault(p["date"], {}).setdefault(int(p["league_id"]), set()).add(p["hl_match_id"])
-    return out
+def uefa_maint_lids(now: datetime, seasons: Optional[dict] = None) -> list[int]:
+    """Ids de Highlightly de la temporada en curso que el mantenimiento lista cada día (con ficha o
+    sin ella). Después de HL_PRO_UNTIL solo Champions y Europa League (UEFA_MAINT_POST_PRO); la
+    Conference se queda sin detalle (decisión del usuario, 24-nov-2026)."""
+    seasons = UEFA_SEASONS if seasons is None else seasons
+    comps = UEFA_COMPS if now.date() <= hp.HL_PRO_UNTIL else UEFA_MAINT_POST_PRO
+    cur = now.year if now.month >= 7 else now.year - 1
+    return [lid for c in comps for lid, y in seasons.get(c, []) if y == cur]
 
 
 async def _uefa_grade(dry_run: bool, now: datetime, store, previews: list[dict]) -> dict:
@@ -835,6 +865,103 @@ async def _probe(client, api_key, quota, budget: _Budget) -> list[dict]:
                                                                if p["home"][f] is None]}
         out.append(row)
     return out
+
+
+# ── Mapa de ids de equipo (job league_ids) ─────────────────────────────────────
+
+def _fdco(y: int) -> str:
+    return f"{y % 100:02d}{(y + 1) % 100:02d}"
+
+
+def pick_league(cands: list[dict], countries: tuple[str, ...], names: tuple[str, ...]) -> Optional[dict]:
+    """El único candidato de /leagues con ese país y uno de esos nombres (sin mayúsculas); si hay
+    cero o más de uno, None."""
+    want = {n.lower() for n in names}
+    ok = [c for c in cands if (c.get("country") or "").strip().lower() in countries
+          and (c.get("name") or "").strip().lower() in want]
+    return ok[0] if len({c.get("id") for c in ok}) == 1 else None
+
+
+def league_listing_doc(div: str, hl_league_id: int, season: int, listing: list[dict], now: datetime) -> dict:
+    """Listado de una (liga, temporada) → documento compacto de hl_league_listing (sin estadísticas)."""
+    ms = []
+    for m in listing:
+        h, a = m.get("homeTeam") or {}, m.get("awayTeam") or {}
+        if m.get("id") is None or h.get("id") is None or a.get("id") is None:
+            continue
+        ms.append({"i": m.get("id"), "d": (m.get("date") or "")[:10], "h": h.get("name"), "hi": h.get("id"),
+                   "a": a.get("name"), "ai": a.get("id")})
+    return {"div": div, "season": _fdco(season), "hl_league_id": hl_league_id, "hl_season": season,
+            "listed_at": now.isoformat(), "n": len(ms), "matches": ms}
+
+
+def league_listing_matches(docs) -> list[dict]:
+    """Documentos de hl_league_listing → partidos con la forma de hl_matches (div, date, equipos e
+    ids), para mc.hl_id_names."""
+    out = []
+    for d in docs:
+        for m in d.get("matches") or []:
+            out.append({"div": d.get("div"), "date": m.get("d"), "home_team": m.get("h"),
+                        "home_team_id": m.get("hi"), "away_team": m.get("a"), "away_team_id": m.get("ai")})
+    return out
+
+
+def league_id_targets(found: dict[str, Optional[int]]) -> list[tuple[str, int, int]]:
+    """(div, id de liga, temporada) a listar: las ligas de fuera de las 8 con id, de 2020/21 a la
+    actual, y las 8 ligas de 2020/21 a LEAGUE_ID_MAIN_UNTIL. La temporada más reciente primero."""
+    out = [(div, lid, y) for div, lid in found.items() if lid
+           for y in range(LEAGUE_ID_FIRST, UEFA_CURRENT_SEASON + 1)]
+    out += [(div, lid, y) for div, lid in hp.HL_LEAGUES.items()
+            for y in range(LEAGUE_ID_FIRST, LEAGUE_ID_MAIN_UNTIL + 1)]
+    return sorted(out, key=lambda t: (-t[2], t[0]))
+
+
+async def _league_ids(dry_run, now, api_key, quota, store, client, budget: _Budget, summary: dict) -> None:
+    """Ids de las ligas de fuera de las 8 (/leagues por nombre exacto y país) y listado por temporada
+    → hl_league_listing. dry_run: solo las búsquedas (ids, nombres de liga y temporadas; sin equipos)
+    y cuántas temporadas faltan."""
+    found: dict[str, Optional[int]] = {}
+    leagues = []
+    for div, (countries, names) in LEAGUE_ID_SEARCH.items():
+        cands: list[dict] = []
+        for name in names:
+            if pick_league(cands, countries, names) or not budget.take():
+                break
+            raw = await hp.hl_get(client, api_key, f"/leagues?leagueName={quote(name)}", quota=quota)
+            data = raw.get("data", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+            cands += [_league_row(x) for x in data if isinstance(x, dict) and is_senior_men(x.get("name") or "")]
+        pick = pick_league(cands, countries, names)
+        found[div] = pick["id"] if pick else None
+        leagues.append({"div": div, "id": found[div], "name": pick["name"] if pick else None,
+                        "seasons": [y for y in (pick or {}).get("seasons", []) if y >= LEAGUE_ID_FIRST],
+                        "candidates": [{"id": c["id"], "name": c["name"], "country": c["country"]}
+                                       for c in cands[:8]]})
+        if not pick:
+            summary["errors"].append(f"{div}: sin una liga única con ese nombre y país (se salta)")
+    summary["leagues"] = leagues
+    targets = league_id_targets(found)
+    todo = []
+    for div, lid, y in targets:
+        doc = store.get(LEAGUE_LISTING, f"{div}_{_fdco(y)}")
+        if doc and (y < UEFA_CURRENT_SEASON or
+                    now - datetime.fromisoformat(doc["listed_at"]) < timedelta(days=LEAGUE_ID_RELIST_DAYS)):
+            continue
+        todo.append((div, lid, y))
+    summary["seasons_total"], summary["seasons_todo"] = len(targets), len(todo)
+    if dry_run:
+        return
+    done = []
+    for div, lid, y in todo:
+        listing = await _list_all(client, api_key, quota, budget, lid, y)
+        if listing is None:
+            break         # sin presupuesto o error: se sigue en la pasada siguiente
+        if len({m.get("id") for m in listing}) < len(listing):
+            summary["errors"].append(f"{div}_{y}: partidos repetidos entre páginas (se repite otra vez)")
+            continue
+        doc = league_listing_doc(div, lid, y, listing, now)
+        store.replace(LEAGUE_LISTING, {f"{div}_{doc['season']}": doc})
+        done.append({"div": div, "season": y, "matches": doc["n"]})
+    summary["listed"] = done
 
 
 # ── Sondeo de Europa ───────────────────────────────────────────────────────────
