@@ -18,11 +18,12 @@ votos sobre hl_matches, guardado en el estado y recalculado cada ID_MAP_DAYS dí
 por parecido único. Un equipo sin datos de liga sale con su nombre de Highlightly y la ficha en
 "muestra insuficiente".
 
-Etiquetas (como copas, decisión del usuario): las de match_preview_metrics/mp-e1_backtest ("medido en
-backtest" o "solo referencia"); "ventaja medida" (⭐, la única que da píldoras en Telegram y en la web)
-solo cuando el mercado lleva STARS_AFTER_LIVE (50) partidos graduados en directo con el IC95 en directo
-entero bajo 0 (mc.final_labels con match_preview_metrics/mp-e1_live). Sin el documento del backtest no
-se escriben fichas.
+Etiquetas: las de match_preview_metrics/mp-e1_backtest. Desde el 27-nov (decisión del usuario) con la
+regla de la Euroliga: "ventaja medida" (⭐, la única que da píldoras en Telegram y en la web) si el
+backtest la mide en todo el periodo y en las temporadas limpias (mu.star_labels); si no, "solo
+referencia". mc.final_labels con match_preview_metrics/mp-e1_live solo puede añadir ⭐ a un mercado
+"medido en backtest" (documentos antiguos), nunca quitarla. Sin el documento del backtest no se
+escriben fichas.
 Graduación (run_uefa_grade): la lanza el mantenimiento diario de Highlightly (job maint), que lista los
 (id, día) de las fichas y pide /statistics solo de esos partidos → match_preview_grades_uefa y
 match_preview_metrics/mp-e1_live.
@@ -219,16 +220,18 @@ def labels_for(backtest: Optional[dict], live: Optional[dict] = None) -> dict[st
 
 def uefa_preview_content(fx: dict, pred: dict, labels_source: Optional[str]) -> dict:
     return {**fx, **pred, "model_version": MODEL_VERSION, "group": "uefa", "labels_source": labels_source,
-            "label_policy": f"medido en backtest; estrella tras ~{mc.STARS_AFTER_LIVE} partidos graduados en directo"}
+            "label_policy": "ventaja medida en backtest: todo el periodo y temporadas limpias"}
 
 
 async def run_uefa_previews(dry_run: bool = True, now: Optional[datetime] = None, highlightly: bool = True,
                             state: Optional[dict] = None, matches: Optional[list[dict]] = None,
                             uefa_docs: Optional[list[dict]] = None, backtest: Optional[dict] = None,
                             live: Optional[dict] = None, existing: Optional[dict] = None, client=None,
-                            read_hl_matches=None, lids: Optional[list] = None) -> dict:
+                            read_hl_matches=None, lids: Optional[list] = None,
+                            collect: Optional[dict] = None) -> dict:
     """Fichas de Europa de los próximos WINDOW_DAYS días. Los parámetros opcionales son para tests
-    (None = leer de Firestore / football-data)."""
+    (None = leer de Firestore / football-data). collect: si se pasa, recibe {match_id: ficha} de
+    todas las fichas calculadas (la prueba sin escribir, scripts/ops/uefa_preview_show.py)."""
     from collectors.highlightly_players import team_similarity
 
     now = now or datetime.now(timezone.utc)
@@ -294,6 +297,8 @@ async def run_uefa_previews(dry_run: bool = True, now: Optional[datetime] = None
             for side in ("home", "away"):        # nombre de pantalla aunque no tenga datos de liga
                 pred["teams"][side]["team"] = fx[f"{side}_team"]
             content = uefa_preview_content(fx, pred, BACKTEST_DOC)
+            if collect is not None:
+                collect[fx["match_id"]] = content
             action = decide(content, existing.get(fx["match_id"]), now)
             counts[action] += 1
             by_comp[fx["comp"]][action] += 1
@@ -338,8 +343,9 @@ def live_doc(rows: list[tuple], live: dict, backtest: Optional[dict], now: datet
             "n_graduated": len({r[7] for r in rows}), "n_by_market": mc.live_counts(live),
             "stars_after": mc.STARS_AFTER_LIVE, "labels": labels,
             "star_markets": sorted(mk for mk, lab in labels.items() if lab == mp.LABEL_EDGE),
-            "rule": (f"estrella: medido en backtest + al menos {mc.STARS_AFTER_LIVE} partidos graduados "
-                     "+ IC95 en directo entero bajo 0 (todas las competiciones)"),
+            "rule": ("estrella: ventaja medida en el backtest (todo el periodo y temporadas limpias); con un "
+                     f"backtest antiguo, medido en backtest + {mc.STARS_AFTER_LIVE} graduados con IC95 en "
+                     "directo entero bajo 0"),
             "metrics": live, "computed_at": now.isoformat()}
 
 
