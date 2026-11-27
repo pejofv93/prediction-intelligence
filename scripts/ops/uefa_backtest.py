@@ -1,5 +1,6 @@
 """Backtest de Europa (Champions, Europa League, Conference League) con mp-e1:
-analyzers/match_preview_uefa.py.
+analyzers/match_preview_uefa.py. Walk-forward por fecha; desglose por temporada evaluada y ⭐ con la
+regla de la Euroliga (todo el periodo + temporadas limpias juntas, mu.star_labels).
 
 SOLO LECTURA por defecto (el workflow uefa-backtest no ofrece otra cosa). Con CONFIRMAR=ESCRIBIR (solo
 a mano, más adelante y con OK) guardaría UN documento: match_preview_metrics/mp-e1_backtest (métricas
@@ -108,11 +109,35 @@ def report(docs: list[dict], league: list[dict], matches: list[dict], n_boot: in
         lgs = sorted({lg for _, lg in b})
         print(f"  {s:8} " + " · ".join(f"{lg} {math.exp(b[('att', lg)]):.2f}/{math.exp(b[('def', lg)]):.2f}"
                                        for lg in lgs))
-    out["labels"] = mu.labels_from_backtest(out.get("metrics") or {})
+    main_rows = rows["e1_vs_comp|ambos"]
+    by_season = mu.season_metrics(main_rows, n_boot=n_boot)
+    print("\nPor temporada (mp-e1 frente a la competición, los dos equipos con datos, las tres juntas)"
+          "  mercado: partidos · diferencia [IC95] · etiqueta")
+    for season, met in by_season.items():
+        print(f"  temporada {season}")
+        for v in sorted((v for v in met.values() if v["div"] == "ALL"), key=lambda v: v["market"]):
+            print(f"    {v['market']:14} {v['n_matches']:4d} · {v['delta']:+.4f} "
+                  f"[{_fmt(v['ci_lo'])}, {_fmt(v['ci_hi'])}] · {v['ci_label']}")
+    evals = sorted(by_season)
+    clean = mu.clean_seasons(evals)
+    met_clean = None
+    if clean != evals:
+        met_clean = print_metrics(f"temporadas limpias juntas {clean} (sin las de diseño)",
+                                  [r for r in main_rows if r[0] in clean], n_boot=n_boot)
+    else:
+        print(f"\nTemporadas limpias = todas las evaluadas {evals} (ninguna usada para diseñar mp-e1): "
+              "la regla de temporadas limpias coincide con la de todo el periodo.")
+    out["eval_seasons"], out["clean_seasons"] = evals, clean
+    out["by_season"] = {s: {v["market"]: {f: v[f] for f in ("n_matches", "delta", "ci_lo", "ci_hi", "ci_label")}
+                            for v in met.values() if v["div"] == "ALL"} for s, met in by_season.items()}
+    out["labels"] = mu.star_labels(out.get("metrics") or {}, met_clean)
     out["comp_labels"] = mu.comp_labels(out.get("metrics") or {})
-    print("\nEtiquetas (mp-e1 frente a la competición, los dos equipos con datos, todas las competiciones):",
-          out["labels"])
-    print("Etiquetas por competición (≥ 300 partidos):", out["comp_labels"] or "ninguna competición llega")
+    edge_seasons = {mk: sum(1 for s in out["by_season"].values() if (s.get(mk) or {}).get("ci_label") == mp.LABEL_EDGE)
+                    for mk in out["labels"]}
+    print("\nEtiquetas (regla de la Euroliga: IC95 entero bajo 0 frente a la competición en todo el periodo "
+          "y en las temporadas limpias juntas; los dos equipos con datos, las tres competiciones):", out["labels"])
+    print(f"Temporadas (de {len(evals)}) con el IC95 entero bajo 0, por mercado (informativo):", edge_seasons)
+    print("Por competición (≥ 300 partidos, informativo):", out["comp_labels"] or "ninguna competición llega")
     return out
 
 
@@ -136,7 +161,11 @@ def main() -> int:
             "reference": "frecuencia de la competición", "coverage": "ambos equipos con datos de liga",
             "counts": out["counts"], "labels": out["labels"], "comp_labels": out["comp_labels"],
             "metrics": {k: v for k, v in (out.get("metrics") or {}).items() if v["div"] == "ALL"},
-            "stars_after_live": mc.STARS_AFTER_LIVE})
+            "eval_seasons": out["eval_seasons"], "clean_seasons": out["clean_seasons"],
+            "design_seasons": list(mu.DESIGN_SEASONS), "by_season": out["by_season"],
+            "rule": ("ventaja medida: IC95 por partido de (Brier mp-e1 − Brier de la frecuencia de la "
+                     "competición) entero bajo 0, las tres competiciones juntas, en todo el periodo y en las "
+                     "temporadas limpias juntas (clean_seasons: sin las de diseño)")})
         print(f"Escrito match_preview_metrics/{DOC_ID} (métricas agregadas y etiquetas).")
     else:
         print("Sin escribir (solo lectura).")

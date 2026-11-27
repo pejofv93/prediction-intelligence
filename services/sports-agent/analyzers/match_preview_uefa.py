@@ -25,9 +25,10 @@ Modelo mp-e1, por estadística (walk-forward: cada partido solo con lo jugado AN
   partidos, las tres competiciones juntas con los mismos pesos.
 Etiquetas: IC95 por bootstrap agrupado por partido (las líneas de un partido no son independientes).
   "Medido en backtest" por mercado (todas las competiciones) solo si el IC95 de (mp-e1 − frecuencia de la
-  competición) queda entero bajo 0; por competición solo con ≥ MIN_COMP_EVAL partidos evaluables. La
-  estrella ("ventaja medida") sigue la regla de copas (mc.final_labels: 50 graduados en directo con el
-  IC95 en directo entero bajo 0).
+  competición) queda entero bajo 0; por competición solo con ≥ MIN_COMP_EVAL partidos evaluables.
+  Estrella ("ventaja medida", star_labels, regla de la Euroliga desde el 27-nov): el mismo IC95 entero
+  bajo 0 en todo el periodo Y en las temporadas limpias juntas (sin DESIGN_SEASONS). Antes: regla de
+  copas (50 graduados en directo); mc.final_labels la sigue aplicando encima (nunca quita una ⭐).
 """
 import math
 from collections import Counter, defaultdict
@@ -52,6 +53,11 @@ NEWTON_ITERS = 30
 MIN_COMP_EVAL = 300                  # partidos evaluables para etiquetar por competición
 N_BOOT = 1000
 EVAL_SEASONS = ("2122", "2223", "2324", "2425", "2526", "2627")    # 2020/21 solo calienta
+# Temporadas europeas usadas para diseñar mp-e1: ninguna. El modelo y sus parámetros (4e2c31e, 24-nov)
+# se escribieron antes de cargar los partidos europeos (25-nov) y no se han tocado desde entonces; el
+# único backtest visto (25-nov) no cambió nada. Si un ajuste futuro se decide mirando una temporada,
+# va aquí y sale de las temporadas limpias.
+DESIGN_SEASONS: tuple[str, ...] = ()
 MIN_SIM = 0.80
 COVERAGES = ("ambos", "un_lado")
 VARIANTS = ("e1_vs_comp", "v1_vs_comp", "e1_vs_v1")
@@ -403,6 +409,34 @@ def labels_from_backtest(metrics: dict[str, dict]) -> dict[str, str]:
     """{mercado: "medido en backtest" | "solo referencia"} con las tres competiciones juntas (como
     copas: nunca estrella desde el backtest)."""
     return mc.labels_from_backtest(metrics)
+
+
+def clean_seasons(evals: Iterable[str]) -> list[str]:
+    """Temporadas evaluadas que no se usaron para diseñar mp-e1 (sin DESIGN_SEASONS)."""
+    return [s for s in evals if s not in DESIGN_SEASONS]
+
+
+def season_metrics(rows: list[tuple], n_boot: int = N_BOOT) -> dict[str, dict[str, dict]]:
+    """{temporada: market_metrics de las filas de esa temporada} (desglose del backtest)."""
+    by: dict[str, list[tuple]] = defaultdict(list)
+    for r in rows:
+        by[r[0]].append(r)
+    return {s: market_metrics(sub, n_boot=n_boot) for s, sub in sorted(by.items())}
+
+
+def star_labels(met_all: dict[str, dict], met_clean: Optional[dict[str, dict]] = None) -> dict[str, str]:
+    """{mercado: "ventaja medida" | "solo referencia"} con la regla de la Euroliga (decisión del
+    usuario, 27-nov): ⭐ desde el backtest si el IC95 por partido de (Brier mp-e1 − Brier de la
+    frecuencia de la competición) queda entero bajo 0 con las tres competiciones juntas, en todo el
+    periodo y también en las temporadas limpias juntas (met_clean; None = son las mismas)."""
+    def edge(met: dict, mk: str) -> bool:
+        return (met.get(f"{mk}|ALL") or {}).get("ci_label") == mp.LABEL_EDGE
+
+    out = {}
+    for mk in sorted({v["market"] for v in met_all.values()}):
+        ok = edge(met_all, mk) and (met_clean is None or edge(met_clean, mk))
+        out[mk] = mp.LABEL_EDGE if ok else mp.LABEL_REF
+    return out
 
 
 def comp_labels(metrics: dict[str, dict]) -> dict[str, dict[str, str]]:

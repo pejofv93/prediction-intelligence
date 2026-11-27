@@ -49,6 +49,8 @@ def test_report_solo_agregados(capsys, monkeypatch):
     assert "Zorrovia" not in text and "Quimeria" not in text and "QUIMERIA" not in text
     assert "5000" not in text                                                # ni ids de partido
     assert set(out["labels"]), text
-    assert set(out["labels"].values()) <= {"medido en backtest", "solo referencia"}
+    assert set(out["labels"].values()) <= {"ventaja medida", "solo referencia"}
+    assert out["eval_seasons"] == ["2526"] and out["clean_seasons"] == ["2526"] and set(out["by_season"]) == {"2526"}
+    assert "Por temporada" in text and "temporada 2526" in text
     assert out["counts"]["uefa_utilizables"] == 80
     assert "[e1_vs_comp · ambos]" in text and "[e1_vs_v1 · todos]" in text and "Factor de liga" in text

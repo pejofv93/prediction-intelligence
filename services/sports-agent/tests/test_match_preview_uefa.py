@@ -160,6 +160,27 @@ def test_metricas_bootstrap_y_etiquetas_como_copas():
     assert mu.comp_labels(met) == {"CL": {"corners_team": "medido en backtest", "goals_total": "solo referencia"}}
 
 
+def test_estrella_regla_euroliga_todo_el_periodo_y_temporadas_limpias(monkeypatch):
+    rows = []
+    for i in range(400):
+        y, season = i % 2, ("2425" if i < 200 else "2526")
+        good = season == "2425"                       # corners_team solo acierta en 2425
+        rows.append((season, "CL", "corners_team", 4.5, y, 0.5, (0.9 if y else 0.1) if good else 0.5, f"m{i}"))
+        rows.append((season, "CL", "sot_team", 4.5, y, 0.5, 0.8 if y else 0.2, f"m{i}"))
+        rows.append((season, "CL", "goals_total", 2.5, y, 0.5, 0.5, f"m{i}"))
+    met = mu.market_metrics(rows, n_boot=300)
+    assert mu.star_labels(met) == {"corners_team": mp.LABEL_EDGE, "goals_total": mp.LABEL_REF,
+                                   "sot_team": mp.LABEL_EDGE}
+    by = mu.season_metrics(rows, n_boot=300)
+    assert set(by) == {"2425", "2526"} and by["2526"]["corners_team|ALL"]["ci_label"] == mp.LABEL_REF
+    monkeypatch.setattr(mu, "DESIGN_SEASONS", ("2425",))
+    clean = mu.clean_seasons(["2425", "2526"])
+    assert clean == ["2526"]
+    met_clean = mu.market_metrics([r for r in rows if r[0] in clean], n_boot=300)
+    assert mu.star_labels(met, met_clean) == {"corners_team": mp.LABEL_REF, "goals_total": mp.LABEL_REF,
+                                              "sot_team": mp.LABEL_EDGE}
+
+
 def test_ficha_forma_de_mp_v1_y_muestra_insuficiente_si_falta_un_lado():
     league, euro = _world()
     eng = _engine(league, min_fit=40)
