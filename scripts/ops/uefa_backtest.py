@@ -1,6 +1,7 @@
 """Backtest de Europa (Champions, Europa League, Conference League) con mp-e1:
 analyzers/match_preview_uefa.py. Walk-forward por fecha; desglose por temporada evaluada y ⭐ con la
-regla de la Euroliga (todo el periodo + temporadas limpias juntas, mu.star_labels).
+regla de la Euroliga (todo el periodo + temporadas limpias juntas) y, en 2025/26 + 2026/27 juntas, el
+modelo no peor que la referencia (mu.star_labels).
 
 SOLO LECTURA por defecto (el workflow uefa-backtest no ofrece otra cosa). Con CONFIRMAR=ESCRIBIR (solo
 a mano, más adelante y con OK) guardaría UN documento: match_preview_metrics/mp-e1_backtest (métricas
@@ -127,15 +128,22 @@ def report(docs: list[dict], league: list[dict], matches: list[dict], n_boot: in
     else:
         print(f"\nTemporadas limpias = todas las evaluadas {evals} (ninguna usada para diseñar mp-e1): "
               "la regla de temporadas limpias coincide con la de todo el periodo.")
-    out["eval_seasons"], out["clean_seasons"] = evals, clean
+    recent = [s for s in evals if s in mu.RECENT_SEASONS]
+    recent_rows = [r for r in main_rows if r[0] in recent]
+    met_recent = print_metrics(f"temporadas recientes juntas {list(mu.RECENT_SEASONS)}", recent_rows,
+                               n_boot=n_boot) if recent_rows else {}
+    out["eval_seasons"], out["clean_seasons"], out["recent_seasons"] = evals, clean, recent
+    out["recent"] = {v["market"]: {f: v[f] for f in ("n_matches", "delta", "ci_lo", "ci_hi")}
+                     for v in met_recent.values() if v["div"] == "ALL"}
     out["by_season"] = {s: {v["market"]: {f: v[f] for f in ("n_matches", "delta", "ci_lo", "ci_hi", "ci_label")}
                             for v in met.values() if v["div"] == "ALL"} for s, met in by_season.items()}
-    out["labels"] = mu.star_labels(out.get("metrics") or {}, met_clean)
+    out["labels"] = mu.star_labels(out.get("metrics") or {}, met_clean, met_recent)
     out["comp_labels"] = mu.comp_labels(out.get("metrics") or {})
     edge_seasons = {mk: sum(1 for s in out["by_season"].values() if (s.get(mk) or {}).get("ci_label") == mp.LABEL_EDGE)
                     for mk in out["labels"]}
-    print("\nEtiquetas (regla de la Euroliga: IC95 entero bajo 0 frente a la competición en todo el periodo "
-          "y en las temporadas limpias juntas; los dos equipos con datos, las tres competiciones):", out["labels"])
+    print("\nEtiquetas (IC95 entero bajo 0 frente a la competición en todo el periodo y en las temporadas "
+          f"limpias juntas, y en {list(mu.RECENT_SEASONS)} juntas diferencia media ≤ 0; los dos equipos con "
+          "datos, las tres competiciones):", out["labels"])
     print(f"Temporadas (de {len(evals)}) con el IC95 entero bajo 0, por mercado (informativo):", edge_seasons)
     print("Por competición (≥ 300 partidos, informativo):", out["comp_labels"] or "ninguna competición llega")
     return out
@@ -163,9 +171,11 @@ def main() -> int:
             "metrics": {k: v for k, v in (out.get("metrics") or {}).items() if v["div"] == "ALL"},
             "eval_seasons": out["eval_seasons"], "clean_seasons": out["clean_seasons"],
             "design_seasons": list(mu.DESIGN_SEASONS), "by_season": out["by_season"],
+            "recent_seasons": out["recent_seasons"], "recent": out["recent"],
             "rule": ("ventaja medida: IC95 por partido de (Brier mp-e1 − Brier de la frecuencia de la "
                      "competición) entero bajo 0, las tres competiciones juntas, en todo el periodo y en las "
-                     "temporadas limpias juntas (clean_seasons: sin las de diseño)")})
+                     "temporadas limpias juntas (clean_seasons: sin las de diseño), y en recent_seasons "
+                     "juntas diferencia media ≤ 0 (el modelo no peor que la referencia)")})
         print(f"Escrito match_preview_metrics/{DOC_ID} (métricas agregadas y etiquetas).")
     else:
         print("Sin escribir (solo lectura).")

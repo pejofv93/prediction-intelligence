@@ -19,9 +19,9 @@ por parecido único. Un equipo sin datos de liga sale con su nombre de Highlight
 "muestra insuficiente".
 
 Etiquetas: las de match_preview_metrics/mp-e1_backtest. Desde el 27-nov (decisión del usuario) con la
-regla de la Euroliga: "ventaja medida" (⭐, la única que da píldoras en Telegram y en la web) si el
-backtest la mide en todo el periodo y en las temporadas limpias (mu.star_labels); si no, "solo
-referencia". mc.final_labels con match_preview_metrics/mp-e1_live solo puede añadir ⭐ a un mercado
+regla de la Euroliga más una condición: "ventaja medida" (⭐, la única que da píldoras en Telegram y en
+la web) si el backtest la mide en todo el periodo y en las temporadas limpias, y en 2025/26 + 2026/27
+juntas el modelo no sale peor que la referencia (mu.star_labels); si no, "solo referencia". mc.final_labels con match_preview_metrics/mp-e1_live solo puede añadir ⭐ a un mercado
 "medido en backtest" (documentos antiguos), nunca quitarla. Sin el documento del backtest no se
 escriben fichas.
 Graduación (run_uefa_grade): la lanza el mantenimiento diario de Highlightly (job maint), que lista los
@@ -220,7 +220,7 @@ def labels_for(backtest: Optional[dict], live: Optional[dict] = None) -> dict[st
 
 def uefa_preview_content(fx: dict, pred: dict, labels_source: Optional[str]) -> dict:
     return {**fx, **pred, "model_version": MODEL_VERSION, "group": "uefa", "labels_source": labels_source,
-            "label_policy": "ventaja medida en backtest: todo el periodo y temporadas limpias"}
+            "label_policy": "ventaja medida en backtest: todo el periodo y temporadas limpias; 2025/26 + 2026/27 no peor"}
 
 
 async def run_uefa_previews(dry_run: bool = True, now: Optional[datetime] = None, highlightly: bool = True,
@@ -343,7 +343,8 @@ def live_doc(rows: list[tuple], live: dict, backtest: Optional[dict], now: datet
             "n_graduated": len({r[7] for r in rows}), "n_by_market": mc.live_counts(live),
             "stars_after": mc.STARS_AFTER_LIVE, "labels": labels,
             "star_markets": sorted(mk for mk, lab in labels.items() if lab == mp.LABEL_EDGE),
-            "rule": ("estrella: ventaja medida en el backtest (todo el periodo y temporadas limpias); con un "
+            "rule": ("estrella: ventaja medida en el backtest (todo el periodo y temporadas limpias; 2025/26 + "
+                     "2026/27 no peor que la referencia); con un "
                      f"backtest antiguo, medido en backtest + {mc.STARS_AFTER_LIVE} graduados con IC95 en "
                      "directo entero bajo 0"),
             "metrics": live, "computed_at": now.isoformat()}

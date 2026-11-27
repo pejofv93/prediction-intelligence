@@ -179,6 +179,12 @@ def test_estrella_regla_euroliga_todo_el_periodo_y_temporadas_limpias(monkeypatc
     met_clean = mu.market_metrics([r for r in rows if r[0] in clean], n_boot=300)
     assert mu.star_labels(met, met_clean) == {"corners_team": mp.LABEL_REF, "goals_total": mp.LABEL_REF,
                                               "sot_team": mp.LABEL_EDGE}
+    # Recientes: corners_team en 2526 empata (≤ 0 → cumple); un mercado peor en recientes → solo referencia
+    met_rec = mu.market_metrics([r for r in rows if r[0] == "2526"], n_boot=300)
+    assert mu.star_labels(met, None, met_rec)["corners_team"] == mp.LABEL_EDGE
+    worse = {**met_rec, "sot_team|ALL": {**met_rec["sot_team|ALL"], "delta": 0.001}}
+    assert mu.star_labels(met, None, worse)["sot_team"] == mp.LABEL_REF
+    assert mu.star_labels(met, None, {})["sot_team"] == mp.LABEL_REF          # sin partidos recientes
 
 
 def test_ficha_forma_de_mp_v1_y_muestra_insuficiente_si_falta_un_lado():

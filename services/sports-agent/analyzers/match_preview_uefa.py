@@ -26,8 +26,9 @@ Modelo mp-e1, por estadística (walk-forward: cada partido solo con lo jugado AN
 Etiquetas: IC95 por bootstrap agrupado por partido (las líneas de un partido no son independientes).
   "Medido en backtest" por mercado (todas las competiciones) solo si el IC95 de (mp-e1 − frecuencia de la
   competición) queda entero bajo 0; por competición solo con ≥ MIN_COMP_EVAL partidos evaluables.
-  Estrella ("ventaja medida", star_labels, regla de la Euroliga desde el 27-nov): el mismo IC95 entero
-  bajo 0 en todo el periodo Y en las temporadas limpias juntas (sin DESIGN_SEASONS). Antes: regla de
+  Estrella ("ventaja medida", star_labels, desde el 27-nov): el mismo IC95 entero bajo 0 en todo el
+  periodo (y en las temporadas limpias juntas, sin DESIGN_SEASONS) Y, en RECENT_SEASONS juntas, el
+  modelo no peor que la referencia (diferencia media ≤ 0). Antes: regla de
   copas (50 graduados en directo); mc.final_labels la sigue aplicando encima (nunca quita una ⭐).
 """
 import math
@@ -58,6 +59,9 @@ EVAL_SEASONS = ("2122", "2223", "2324", "2425", "2526", "2627")    # 2020/21 sol
 # único backtest visto (25-nov) no cambió nada. Si un ajuste futuro se decide mirando una temporada,
 # va aquí y sale de las temporadas limpias.
 DESIGN_SEASONS: tuple[str, ...] = ()
+# Temporadas recientes (decisión del usuario, 27-nov): con ellas juntas, el modelo no puede salir peor
+# que la referencia (diferencia media de Brier por partido ≤ 0) para llevar ⭐.
+RECENT_SEASONS: tuple[str, ...] = ("2526", "2627")
 MIN_SIM = 0.80
 COVERAGES = ("ambos", "un_lado")
 VARIANTS = ("e1_vs_comp", "v1_vs_comp", "e1_vs_v1")
@@ -424,17 +428,23 @@ def season_metrics(rows: list[tuple], n_boot: int = N_BOOT) -> dict[str, dict[st
     return {s: market_metrics(sub, n_boot=n_boot) for s, sub in sorted(by.items())}
 
 
-def star_labels(met_all: dict[str, dict], met_clean: Optional[dict[str, dict]] = None) -> dict[str, str]:
-    """{mercado: "ventaja medida" | "solo referencia"} con la regla de la Euroliga (decisión del
-    usuario, 27-nov): ⭐ desde el backtest si el IC95 por partido de (Brier mp-e1 − Brier de la
-    frecuencia de la competición) queda entero bajo 0 con las tres competiciones juntas, en todo el
-    periodo y también en las temporadas limpias juntas (met_clean; None = son las mismas)."""
-    def edge(met: dict, mk: str) -> bool:
-        return (met.get(f"{mk}|ALL") or {}).get("ci_label") == mp.LABEL_EDGE
+def star_labels(met_all: dict[str, dict], met_clean: Optional[dict[str, dict]] = None,
+                met_recent: Optional[dict[str, dict]] = None) -> dict[str, str]:
+    """{mercado: "ventaja medida" | "solo referencia"} (decisión del usuario, 27-nov). ⭐ desde el
+    backtest si el IC95 por partido de (Brier mp-e1 − Brier de la frecuencia de la competición) queda
+    entero bajo 0 con las tres competiciones juntas en todo el periodo, también en las temporadas
+    limpias juntas (met_clean; None = son las mismas) y, si se pasa met_recent (RECENT_SEASONS juntas),
+    ahí el modelo no sale peor que la referencia (diferencia media ≤ 0; sin partidos = no cumple)."""
+    def cell(met: dict, mk: str) -> dict:
+        return met.get(f"{mk}|ALL") or {}
 
     out = {}
     for mk in sorted({v["market"] for v in met_all.values()}):
-        ok = edge(met_all, mk) and (met_clean is None or edge(met_clean, mk))
+        ok = cell(met_all, mk).get("ci_label") == mp.LABEL_EDGE
+        ok = ok and (met_clean is None or cell(met_clean, mk).get("ci_label") == mp.LABEL_EDGE)
+        if met_recent is not None:
+            d = cell(met_recent, mk).get("delta")
+            ok = ok and d is not None and d <= 0
         out[mk] = mp.LABEL_EDGE if ok else mp.LABEL_REF
     return out
 
