@@ -128,6 +128,22 @@ def test_nba_jornada_por_dia_y_prorroga_sobre_48():
     assert abs(bb.bp.game_poss(g) - 109.0 * 48 / 53) < 1e-9
 
 
+def test_nba_recientes_en_el_informe_y_el_documento():
+    games, _ = bb.filter_phases(bb.bp.games_from_docs(_nba_docs(("N2024", "N2025", "N2026")), "NBA"), "NBA")
+    out = bb.compute(games, "NBA")
+    text = "\n".join(out["report"])
+    assert "temporadas recientes juntas ['N2025', 'N2026']" in text and "diferencia media ≤ 0" in text
+    doc = bb.backtest_doc(out, "NBA", "2026-11-28T00:00:00+00:00")
+    assert doc["recent_seasons"] == ["N2025", "N2026"] and set(doc["recent"]) == {"vs_liga", "vs_equipo"}
+    assert "recent_seasons" in doc["rule"] and "EQUIPO" not in repr(doc)
+    for mk, lab in doc["labels"].items():          # una ⭐ nunca con diferencia > 0 en las recientes
+        if lab == bb.bp.LABEL_EDGE:
+            assert all(doc["recent"][k][mk]["delta"] <= 0 for k in ("vs_liga", "vs_equipo"))
+    # la Euroliga no lleva la condición
+    eur = bb.backtest_doc(bb.compute(bb.bp.games_from_docs(_games(), "EUR"), "EUR"), "EUR", "x")
+    assert "recent_seasons" not in eur and "recent_seasons" not in eur["rule"]
+
+
 def test_nba_informe_solo_agregados():
     games, _ = bb.filter_phases(bb.bp.games_from_docs(_nba_docs(), "NBA"), "NBA")
     text = "\n".join(bb.run(games, "NBA"))

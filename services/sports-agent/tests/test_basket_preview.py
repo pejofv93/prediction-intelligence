@@ -183,6 +183,22 @@ def test_etiquetas_exigen_ventaja_tambien_en_temporadas_limpias():
     assert bp.DESIGN_SEASONS["EUR"] == ("E2025",)
 
 
+def test_etiquetas_nba_no_peor_en_las_recientes():
+    # Regla de Europa para la NBA (28-nov): además, en las recientes juntas diferencia media ≤ 0
+    # frente a las dos medias; sin partidos ahí, no cumple.
+    edge, ref = bp.LABEL_EDGE, bp.LABEL_REF
+    todo = {**_cell("pts_team", edge), **_cell("ast_total", edge), **_cell("reb_team", edge)}
+
+    def d(mk, delta):
+        return {f"{mk}|ALL": {"market": mk, "div": "ALL", "delta": delta}}
+    liga = {**d("pts_team", -0.001), **d("ast_total", 0.002), **d("reb_team", 0.0)}
+    equipo = {**d("pts_team", 0.0), **d("ast_total", -0.003)}          # reb_team sin partidos
+    labels = bp.labels_from_backtest(todo, todo, recent=(liga, equipo))
+    assert labels == {"ast_total": ref, "pts_team": edge, "reb_team": ref}
+    assert bp.labels_from_backtest(todo, todo) == {"ast_total": edge, "pts_team": edge, "reb_team": edge}
+    assert bp.RECENT_SEASONS == {"NBA": ("N2025", "N2026")}           # la Euroliga, sin cambios
+
+
 def test_ficha_con_forma_de_mp_v1():
     games = _league(seasons=("E2024", "E2025"))
     hist = bp.History(games)

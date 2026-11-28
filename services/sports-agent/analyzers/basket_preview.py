@@ -72,6 +72,11 @@ FIXED_LINES: dict[str, dict[str, tuple[float, ...]]] = {}
 # mercado tiene que ganar también en las demás temporadas evaluadas juntas (26-nov: en la Euroliga
 # 2025-26 sale con ventaja en 7 de 8 mercados; 2024-25 y 2026-27, en 4 y 2).
 DESIGN_SEASONS: dict[str, tuple[str, ...]] = {"EUR": ("E2025",)}
+# Temporadas recientes por liga (decisión del usuario, 28-nov, la misma regla que Europa): con ellas
+# juntas el modelo no puede salir peor que la referencia (diferencia media de Brier por partido ≤ 0
+# frente a la media de la liga y frente a la del equipo; sin partidos = no cumple) para llevar ⭐.
+# Solo NBA: la Euroliga sigue con su regla del 26-nov.
+RECENT_SEASONS: dict[str, tuple[str, ...]] = {"NBA": ("N2025", "N2026")}
 
 
 def market_key(stat: str, scope: str) -> str:
@@ -473,20 +478,28 @@ def metrics_doc_id(league: str, kind: str) -> str:
 
 
 def labels_from_backtest(met_league: dict, met_team: dict,
-                         clean: tuple[dict, dict] | None = None) -> dict[str, str]:
+                         clean: tuple[dict, dict] | None = None,
+                         recent: tuple[dict, dict] | None = None) -> dict[str, str]:
     """{mercado: etiqueta} del backtest (salidas de match_preview.market_metrics frente a la media
     de la liga y frente a la del equipo). «ventaja medida» solo si el IC95 por partido de
     (Brier modelo − Brier referencia) queda entero bajo 0 frente a LAS DOS medias; si no, «solo
     referencia». Con una sola liga, la celda de la liga y la de todas («ALL») son la misma.
     `clean` = (liga, equipo) de las temporadas evaluadas SIN las de diseño (DESIGN_SEASONS): si se
-    pasa, el mercado tiene que cumplir lo mismo también ahí."""
+    pasa, el mercado tiene que cumplir lo mismo también ahí. `recent` = (liga, equipo) de
+    RECENT_SEASONS juntas: si se pasa, ahí la diferencia media frente a LAS DOS medias tiene que ser
+    ≤ 0 (el modelo no peor que la referencia; sin partidos = no cumple)."""
     def edge(ml: dict, mt: dict, mk: str) -> bool:
         a, b = ml.get(f"{mk}|ALL") or {}, mt.get(f"{mk}|ALL") or {}
         return a.get("ci_label") == LABEL_EDGE and b.get("ci_label") == LABEL_EDGE
 
+    def not_worse(ml: dict, mt: dict, mk: str) -> bool:
+        ds = [(m.get(f"{mk}|ALL") or {}).get("delta") for m in (ml, mt)]
+        return all(d is not None and d <= 0 for d in ds)
+
     out = {}
     for mk in {v["market"] for v in met_league.values()} | {v["market"] for v in met_team.values()}:
         ok = edge(met_league, met_team, mk) and (clean is None or edge(clean[0], clean[1], mk))
+        ok = ok and (recent is None or not_worse(recent[0], recent[1], mk))
         out[mk] = LABEL_EDGE if ok else LABEL_REF
     return dict(sorted(out.items()))
 

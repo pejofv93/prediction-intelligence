@@ -167,11 +167,27 @@ def compute(games: list[dict], league: str) -> dict:
         met_clean = tuple(market_metrics([x for x in rows[k] if x[0] in clean]) for k in ("vs_liga", "vs_equipo"))
         lines_out += fmt_metrics(f"temporadas limpias juntas {clean} (sin las de diseño), frente a la liga", met_clean[0])
         lines_out += fmt_metrics(f"temporadas limpias juntas {clean} (sin las de diseño), frente al equipo", met_clean[1])
-    labels = bp.labels_from_backtest(met["vs_liga"], met["vs_equipo"], clean=met_clean)
+    recent = [s for s in evals if s in bp.RECENT_SEASONS.get(league, ())]
+    met_recent = None
+    if league in bp.RECENT_SEASONS:
+        met_recent = tuple(market_metrics([x for x in rows[k] if x[0] in recent]) if recent else {}
+                           for k in ("vs_liga", "vs_equipo"))
+        if recent:
+            lines_out += fmt_metrics(f"temporadas recientes juntas {recent}, frente a la liga", met_recent[0])
+            lines_out += fmt_metrics(f"temporadas recientes juntas {recent}, frente al equipo", met_recent[1])
+        else:
+            lines_out.append(f"\nTemporadas recientes {list(bp.RECENT_SEASONS[league])}: ninguna evaluada (no cumple)")
+    labels = bp.labels_from_backtest(met["vs_liga"], met["vs_equipo"], clean=met_clean, recent=met_recent)
     regla = "en todo el periodo" + (f" y en las temporadas limpias juntas {clean}" if met_clean else "")
+    if met_recent is not None:
+        regla += f"; en las recientes juntas {recent} diferencia media ≤ 0 frente a las dos"
     lines_out.append(f"\nEtiquetas (IC95 entero bajo 0 frente a las dos medias, {regla}): {labels}")
     return {"report": lines_out, "warmup": warm, "seasons": evals, "lines": lines, "labels": labels,
             "clean_seasons": clean if met_clean else evals,
+            "recent_seasons": recent if met_recent is not None else None,
+            "recent": ({k: {v["market"]: {f: v[f] for f in ("n_matches", "delta", "ci_lo", "ci_hi")}
+                            for v in m.values() if v["div"] == "ALL"}
+                        for k, m in zip(("vs_liga", "vs_equipo"), met_recent)} if met_recent is not None else None),
             "counts": dict(counts), "n_matches": counts.get("evaluados", 0),
             "metrics": {k: {v["market"]: {f: v[f] for f in METRIC_FIELDS} for v in m.values() if v["div"] == "ALL"}
                         for k, m in met.items()}}
@@ -184,9 +200,13 @@ def backtest_doc(out: dict, league: str, now_iso: str) -> dict:
             "warmup": out["warmup"], "seasons": out["seasons"], "counts": out["counts"],
             "n_matches": out["n_matches"], "lines": {mk: list(v) for mk, v in out["lines"].items()},
             "labels": out["labels"], "metrics": out["metrics"], "clean_seasons": out.get("clean_seasons"),
+            **({"recent_seasons": out["recent_seasons"], "recent": out["recent"]}
+               if out.get("recent_seasons") is not None else {}),
             "rule": ("ventaja medida: IC95 por partido de (Brier modelo − Brier referencia) entero bajo 0 "
                      "frente a la media de la liga y frente a la del equipo, en todo el periodo y en las "
-                     "temporadas limpias juntas (clean_seasons: sin las de diseño)")}
+                     "temporadas limpias juntas (clean_seasons: sin las de diseño)"
+                     + ("; y en recent_seasons juntas diferencia media ≤ 0 frente a las dos (el modelo no "
+                        "peor que la referencia)" if out.get("recent_seasons") is not None else ""))}
 
 
 def main() -> int:
