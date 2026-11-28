@@ -147,6 +147,27 @@ jobs:
           grep -q '^done ' out.txt
           grep -q '^summary: {"ok": true' out.txt
 
+      - name: Programado — Europa (CL, EL y ECL), fichas (escriben; no bloquea)
+        # Independiente de los otros pasos. Lista los partidos de los próximos 3 días por (competición,
+        # día) en Highlightly con tope propio (highlightly_uefa_fixtures); etiquetas de
+        # match_preview_metrics/mp-e1_backtest (sin él no escribe). La graduación la lanza el
+        # mantenimiento diario de Highlightly (hl-load-daily). El resumen solo lleva recuentos.
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.programado == 'true') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          path="run-uefa-previews?dry_run=false&highlightly=true"
+          echo "== $path"
+          curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
+            -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
+            --max-time 1100 \
+            --no-buffer \
+            --fail --silent --show-error > out.txt
+          grep -v '^summary: ' out.txt
+          grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
+          grep -q '^done ' out.txt
+          grep -q '^summary: {"ok": true' out.txt
+
       - name: Programado — baloncesto (Euroliga), fichas y graduación (escriben; no bloquea)
         # Independiente de los otros pasos. Calendario del feed de la Euroliga (sin clave) e historial
         # eur_games (tarea diaria 06:30 UTC). Sin match_preview_metrics/bp-v1-EUR_backtest no escribe
