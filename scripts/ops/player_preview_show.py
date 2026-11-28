@@ -54,14 +54,16 @@ def player_block(hist: pp.History, names: dict, div: str, season: str, side: str
 
 def player_pill(players_by_team: dict) -> dict | None:
     """Como mucho 1 píldora de jugador por partido: entre los mercados con ⭐, en cada uno la línea
-    MÁS ALTA entre el 60 % y el 90 %; de todas, la de mayor %."""
+    MÁS ALTA entre el 60 % y el 90 %, sin las de 0,5 salvo «marca» (la regla de las píldoras de
+    equipo); de todas, la de mayor %."""
     best = None
     for team, players in players_by_team.items():
         for p in players:
             for s, m in p["markets"].items():
                 if not m["star"]:
                     continue
-                ok = [(float(ln), pr) for ln, pr in m["probs"].items() if PILL_MIN <= pr <= PILL_MAX]
+                ok = [(float(ln), pr) for ln, pr in m["probs"].items()
+                      if PILL_MIN <= pr <= PILL_MAX and (float(ln) != 0.5 or s == "goals")]
                 if not ok:
                     continue
                 ln, pr = max(ok)
