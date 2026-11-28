@@ -5,6 +5,8 @@ Reglas de alerta (Fase 2):
   - surebets con rating >= MATCHED_ALERT_SUREBET_MIN_RATING
   - coberturas con peaje mejor que MATCHED_ALERT_COVERAGE_MIN_RATING
   - solo confianza fiable (MATCHED_ALERT_CONFIDENCE)
+  - solo si back y lay son de casas con licencia en España o del exchange de betfair.es
+    (28-nov); las de "solo referencia" se guardan sin enviarse (corte "reference_only")
 El dedup (no re-alertar la misma señal viva) lo gestiona el scanner con el flag
 `alerted` en Firestore. Aquí solo se decide y se formatea/envía.
 
@@ -38,7 +40,18 @@ _ALLOWED_CONFIDENCE = {c.strip() for c in MATCHED_ALERT_CONFIDENCE.split(",") if
 
 def alert_cut_reason(sig: MatchedSignal) -> str | None:
     """None si la señal se alerta; si no, el primer filtro que la corta (para el registro
-    por escaneo en matched_scan_runs). El orden es el de siempre: no cambia qué se alerta."""
+    por escaneo en matched_scan_runs). El orden de los filtros es el de siempre y, al final,
+    "reference_only" (decisión del usuario, 28-nov): si la casa del back o el exchange del lay
+    no tienen licencia en España (ni es el exchange de betfair.es), la señal se guarda en
+    Firestore pero NO se envía a Telegram."""
+    reason = _threshold_cut_reason(sig)
+    if reason is None and reference_only_reason(sig.back_bookmaker, sig.lay_bookmaker):
+        return "reference_only"
+    return reason
+
+
+def _threshold_cut_reason(sig: MatchedSignal) -> str | None:
+    """Umbral, confianza, cuota y proxies de liquidez (los filtros de siempre)."""
     if sig.confidence not in _ALLOWED_CONFIDENCE:
         return "confidence"
     # Longshots: cuota alta → liquidez de exchange ínfima → surebet no ejecutable.

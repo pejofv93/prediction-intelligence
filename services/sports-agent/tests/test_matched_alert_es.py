@@ -48,6 +48,45 @@ def test_casa_es_y_betfair_es_formato_apostable():
     assert "BACK Bwin ES @2.10" in text
 
 
-def test_la_decision_de_alertar_no_cambia():
-    # solo presentación: el filtro de envío es el mismo con casa ES o sin ella
-    assert alert_cut_reason(_sig()) == alert_cut_reason(_sig(back="bwin_es", lay="betfair_es_exchange"))
+def test_solo_referencia_se_guarda_sin_enviar():
+    # 28-nov: sin licencia en España (back o lay) → no se envía; con casa ES y betfair.es, sí
+    assert alert_cut_reason(_sig(back="bwin_es", lay="betfair_es_exchange")) is None
+    assert alert_cut_reason(_sig()) == "reference_only"
+    assert alert_cut_reason(_sig(back="bwin_es")) == "reference_only"                  # lay .com
+    assert alert_cut_reason(_sig(lay="betfair_es_exchange")) == "reference_only"       # back sin licencia
+    cov = dict(signal_type="coverage", qualifying_rating=-0.8)
+    assert alert_cut_reason(_sig(**cov)) == "reference_only"
+    assert alert_cut_reason(_sig(back="bwin_es", lay="betfair_es_exchange", **cov)) is None
+
+
+def test_los_demas_cortes_siguen_primero():
+    # una señal que ya no pasaba el umbral sigue contando por su motivo de siempre
+    assert alert_cut_reason(_sig(confidence="medium")) == "surebet_not_high"
+    assert alert_cut_reason(_sig(qualifying_rating=0.1)) == "surebet_rating"
+
+
+def test_el_escaner_guarda_pero_no_alerta_solo_referencia(monkeypatch):
+    from datetime import datetime, timezone
+    from matched import scanner
+
+    writes = {}
+
+    class Doc:
+        def __init__(self, i):
+            self.i = i
+
+        def set(self, d, merge=False):
+            writes[self.i] = d
+
+    class Col:
+        def stream(self):
+            return []
+
+        def document(self, i):
+            return Doc(i)
+
+    monkeypatch.setattr(scanner, "col", lambda name: Col())
+    ref, es = _sig(signal_id="ref"), _sig(signal_id="es", back="bwin_es", lay="betfair_es_exchange")
+    written, to_alert, stats = scanner._persist([ref, es], datetime(2098, 12, 31, tzinfo=timezone.utc))
+    assert written == 2 and set(writes) == {"ref", "es"} and writes["ref"]["alerted"] is False
+    assert [s.signal_id for s in to_alert] == ["es"] and stats["cut"] == {"reference_only": 1}
