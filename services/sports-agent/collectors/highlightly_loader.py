@@ -19,6 +19,10 @@ Trabajos (job):
                Europa League y con tope propio HL_UEFA_MAINT_DAILY por fecha.
   women_probe  sondeo: 1 listado + 1 /statistics de Frauen-Bundesliga, Serie A, D1 y Champions
   players      box score (jugadores) de los clubes de las 8 ligas → /box-score por partido
+  players_v2   vuelve a pedir el box score de los partidos de players YA hechos cuyo doc de
+               hl_match_players es de antes del 28-nov-2026 (sin asistencias, remates fuera ni
+               xG/xA; hl_matches sin fields_version 2), del más reciente al más antiguo. Deja libre
+               HL_LOAD_RESERVE como las demás cargas. Un fallo no toca lo ya guardado.
   cups         copas y supercopas de esos países (CUPS, 2020-2026): solo cruces entre dos equipos
                de las 8 ligas (sacados de players) → /statistics. Va después de players.
   uefa_probe   sondeo de Europa (Champions, Europa League, Conference League), ≤ 10 peticiones (tope: max_requests): por
@@ -471,6 +475,8 @@ async def run_hl_load(job: str, dry_run: bool = True, max_requests: int = HL_LOA
             await _maint(dry_run, leagues, now, api_key, quota, store, client, budget, summary)
         elif job == "league_ids":
             await _league_ids(dry_run, now, api_key, quota, store, client, budget, summary)
+        elif job == "players_v2":
+            await _players_v2(dry_run, api_key, quota, store, client, budget, summary)
         else:
             await _load(job, dry_run, leagues, now, api_key, quota, store, client, budget, summary)
     except hp.HighlightlyBudgetExhausted:
@@ -814,6 +820,65 @@ async def _cup_grade(dry_run: bool, now: datetime, store, previews: list[dict]) 
     return res
 
 
+def v2_pending(docs: list[dict]) -> list[dict]:
+    """Partidos de players ya hechos sin el box score con los campos del 28-nov (fields_version 2),
+    del más reciente al más antiguo."""
+    ok = [d for d in docs if d.get("status") == "done" and int(d.get("fields_version") or 1) < hp.BOX_FIELDS_VERSION]
+    ok.sort(key=lambda d: d.get("date") or "", reverse=True)
+    return ok
+
+
+async def _players_v2(dry_run, api_key, quota, store, client, budget, summary):
+    pend = []
+    for lid in hp.HL_LEAGUES.values():
+        for s in PLAYER_SEASONS:
+            pend += store.by_league_season(MATCHES, lid, hp.hl_season(s))
+    pend = v2_pending(pend)
+    # Los que ya tienen el doc nuevo en hl_match_players (2023/24 y lo del mantenimiento desde el
+    # 28-nov) no se piden: solo se marcan en hl_matches. Se mira por tandas hasta llenar la pasada.
+    picks, already = [], {}
+    for k in range(0, len(pend), 300):
+        if len(picks) >= budget.left:
+            break
+        chunk = pend[k:k + 300]
+        have = store.existing(PLAYERS, [d["match_id"] for d in chunk])
+        for d in chunk:
+            if int((have.get(str(d["match_id"])) or {}).get("fields_version") or 1) >= hp.BOX_FIELDS_VERSION:
+                already[str(d["match_id"])] = {"fields_version": hp.BOX_FIELDS_VERSION}
+            else:
+                picks.append(d)
+    summary["pending_detail"] = len(pend)
+    summary["already_v2"] = len(already)
+    if dry_run:
+        summary["would_fetch"] = min(len(picks), budget.left)
+        return
+    if already:
+        store.put(MATCHES, already)
+    sem = asyncio.Semaphore(HL_LOAD_CONCURRENCY)
+    counts = {"done": 0, "failed": 0}
+    upd, extra = {}, {}
+
+    async def one(d):
+        async with sem:
+            if not budget.take():
+                return
+            raw = await hp.hl_get(client, api_key, f"/box-score/{d['match_id']}", quota=quota)
+            parsed = hp.parse_box_score(raw, d) if raw is not None else None
+            if parsed is None:          # lo guardado se queda como estaba
+                counts["failed"] += 1
+                return
+            counts["done"] += 1
+            upd[str(d["match_id"])] = {"fields_version": hp.BOX_FIELDS_VERSION}
+            extra[str(d["match_id"])] = parsed
+
+    await asyncio.gather(*(one(d) for d in picks[:budget.left]))
+    if extra:
+        store.put(PLAYERS, extra)
+        store.put(MATCHES, upd)
+    summary["fetched"] = counts
+    summary["pending_after"] = len(pend) - len(already) - counts["done"]
+
+
 async def _fetch_details(job, picks, api_key, quota, store, client, budget, summary):
     coll = MATCHES if job == "players" else TEAM_STATS
     sem = asyncio.Semaphore(HL_LOAD_CONCURRENCY)
@@ -833,7 +898,8 @@ async def _fetch_details(job, picks, api_key, quota, store, client, budget, summ
             status, attempts = next_status(parsed is not None, d.get("attempts", 0))
             counts[status] += 1
             if job == "players":
-                upd[str(d["match_id"])] = {"status": status, "attempts": attempts}
+                upd[str(d["match_id"])] = {"status": status, "attempts": attempts,
+                                           **({"fields_version": hp.BOX_FIELDS_VERSION} if parsed else {})}
                 if parsed:
                     extra[str(d["match_id"])] = parsed
             else:

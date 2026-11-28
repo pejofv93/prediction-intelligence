@@ -229,6 +229,32 @@ def test_players_guarda_box_score_y_consulta_por_hl_season():
     assert store.by_league_season(L.MATCHES, lid, 2025)
 
 
+def test_players_v2_repide_solo_los_antiguos_y_no_toca_si_falla():
+    lid = L.hp.HL_LEAGUES["SP1"]
+    store = _Store()
+    base = {"league_id": lid, "hl_season": 2025, "status": "done", "finished": True,
+            "home_team": "Racing", "away_team": "Sporting", "home_team_id": 1, "away_team_id": 2, "div": "SP1",
+            "season": "2526"}
+    for mid, day in ((601, "2026-01-01"), (602, "2026-02-01"), (603, "2026-03-01"), (604, "2026-04-01")):
+        store.c.setdefault(L.MATCHES, {})[str(mid)] = {**base, "match_id": mid, "date": day}
+        store.c.setdefault(L.PLAYERS, {})[str(mid)] = {"match_id": mid, "teams": "viejo"}
+    store.c[L.PLAYERS]["603"]["fields_version"] = 2           # ya con los campos nuevos: no se pide
+    box = [{"team": {"id": t, "name": n}, "players": [
+        {"id": 7, "name": "X", "minutesPlayed": 90, "statistics": {"shotsTotal": 2, "assists": 1}}]}
+        for t, n in ((1, "Racing"), (2, "Sporting"))]
+    client = _Client(boxes={601: box, 602: box})               # 604 falla (respuesta vacía)
+    dry = _run("players_v2", client, store, dry_run=True)
+    assert dry["pending_detail"] == 4 and dry["already_v2"] == 1 and dry["would_fetch"] == 3 and not client.calls
+    out = _run("players_v2", client, store)
+    assert out["ok"] and out["fetched"] == {"done": 2, "failed": 1} and out["pending_after"] == 1
+    assert sorted(u.rsplit("/", 1)[1] for u in client.calls) == ["601", "602", "604"]       # 603 no
+    assert store.c[L.PLAYERS]["601"]["fields_version"] == 2 and store.c[L.PLAYERS]["604"]["teams"] == "viejo"
+    assert store.c[L.MATCHES]["603"]["fields_version"] == 2 and "fields_version" not in store.c[L.MATCHES]["604"]
+    assert store.c[L.MATCHES]["604"]["status"] == "done"      # el fallo no cambia el estado
+    again = _run("players_v2", _Client(), store, dry_run=True)
+    assert again["pending_detail"] == 1
+
+
 def test_women_probe_gasta_como_mucho_8():
     routes = {(70566, 2025): [_m(900, "Wolfsburg Women", "Essen", 1, 2)]}
     client = _Client(routes, stats={900: _stats(1, "Wolfsburg Women", 2, "Essen", complete=False)})

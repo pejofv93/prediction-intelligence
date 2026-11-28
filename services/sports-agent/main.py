@@ -569,7 +569,8 @@ async def run_hl_load_job(job: str, dry_run: bool = True, max_requests: int = 20
     por defecto: solo lista y cuenta. leagues: ids de ligas femeninas extra, separados por comas."""
     import re
     from collectors.highlightly_loader import run_hl_load
-    jobs = ("nt", "women", "women_probe", "players", "maint", "cups", "uefa_probe", "uefa", "league_ids")
+    jobs = ("nt", "women", "women_probe", "players", "players_v2", "maint", "cups", "uefa_probe", "uefa",
+            "league_ids")
     if job not in jobs:
         raise HTTPException(status_code=400, detail="job = " + " | ".join(jobs))
     if leagues and not re.fullmatch(r"\d+(,\d+)*", leagues):

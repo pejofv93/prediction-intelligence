@@ -24,7 +24,7 @@ on:
       job:
         description: "Qué cargar"
         type: choice
-        options: [nt, women, women_probe, players, maint, cups, uefa_probe, uefa, league_ids]
+        options: [nt, women, women_probe, players, players_v2, maint, cups, uefa_probe, uefa, league_ids]
         default: nt
       dry_run:
         description: "true = solo lista y cuenta"
