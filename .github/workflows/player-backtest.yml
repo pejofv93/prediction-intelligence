@@ -1,0 +1,44 @@
+# Backtest walk-forward por día del modelo de jugadores pp-v1 (scripts/ops/player_backtest.py): remates,
+# a puerta, fuera, goles y asistencias por jugador en las 8 ligas, con el box score de Highlightly ya
+# guardado (hl_match_players). 0 peticiones a APIs. Manual.
+# Por defecto no escribe; con confirmar=ESCRIBIR guarda SOLO match_preview_metrics/pp-v1_backtest.
+# Log: solo agregados (recuentos, Brier, IC95 y n por mercado, liga y temporada), sin jugadores,
+# equipos ni partidos (términos de Highlightly).
+name: player-backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmar:
+        description: "ESCRIBIR = guardar líneas, métricas y etiquetas (vacío = solo leer)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-cloud-firestore httpx scipy
+
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Backtest de jugadores (escribe solo con confirmar=ESCRIBIR)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          CONFIRMAR: ${{ inputs.confirmar }}
+        run: python scripts/ops/player_backtest.py
