@@ -3,9 +3,9 @@ analyzers/match_preview_uefa.py. Walk-forward por fecha; desglose por temporada 
 regla de la Euroliga (todo el periodo + temporadas limpias juntas) y, en 2025/26 + 2026/27 juntas, el
 modelo no peor que la referencia (mu.star_labels).
 
-SOLO LECTURA por defecto (el workflow uefa-backtest no ofrece otra cosa). Con CONFIRMAR=ESCRIBIR (solo
-a mano, más adelante y con OK) guardaría UN documento: match_preview_metrics/mp-e1_backtest (métricas
-agregadas por mercado y etiquetas), nada más.
+SOLO LECTURA por defecto. Con CONFIRMAR=ESCRIBIR (workflow uefa-backtest, confirmar=ESCRIBIR, a mano)
+guarda UN documento: match_preview_metrics/mp-e1_backtest (métricas agregadas por mercado y etiquetas
+que leen las fichas de Europa), nada más.
 
 Lee hl_team_stats (grupo uefa), hl_matches y hl_league_listing (partidos de liga de Highlightly, para
 el mapa id de Highlightly → equipo del CSV) de Firestore, y baja los CSV públicos de football-data.co.uk

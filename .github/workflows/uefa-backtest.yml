@@ -1,12 +1,17 @@
 # Backtest de Europa (Champions, Europa League, Conference League) con mp-e1
-# (scripts/ops/uefa_backtest.py). SOLO LECTURA: lee hl_team_stats (grupo uefa) y hl_matches de
-# Firestore + CSV públicos de football-data.co.uk. No pide nada a Highlightly y no escribe nada (no
-# pasa CONFIRMAR). Log: solo agregados (recuentos, métricas por mercado y competición, factores por
-# liga). Manual.
+# (scripts/ops/uefa_backtest.py). Lee hl_team_stats (grupo uefa), hl_matches y hl_league_listing de
+# Firestore + CSV públicos de football-data.co.uk. No pide nada a Highlightly. Por defecto SOLO LECTURA;
+# con confirmar=ESCRIBIR guarda UN documento, match_preview_metrics/mp-e1_backtest (métricas agregadas
+# y etiquetas ⭐ que usan las fichas de Europa), nada más. Log: solo agregados (recuentos, métricas por
+# mercado y competición, factores por liga). Manual.
 name: uefa-backtest
 
 on:
   workflow_dispatch:
+    inputs:
+      confirmar:
+        description: "ESCRIBIR = guardar match_preview_metrics/mp-e1_backtest (vacío = solo leer)"
+        default: ""
 
 permissions:
   contents: read
@@ -30,9 +35,10 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Backtest de Europa (solo lectura)
+      - name: Backtest de Europa (escribe solo con confirmar=ESCRIBIR)
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
           FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
           PYTHONIOENCODING: utf-8
+          CONFIRMAR: ${{ inputs.confirmar }}
         run: python scripts/ops/uefa_backtest.py
