@@ -194,3 +194,75 @@ def test_exportacion_web_de_baloncesto(monkeypatch):
     monkeypatch.setattr(st, "_read_upcoming_previews", fake_read)
     out = st.build_web_export(NOW)
     assert bl.PREVIEWS_B in seen and [m["id"] for m in out["matches"]] == ["EUR_E2026_801", "EUR_E2026_802"]
+
+
+# ── NBA (28-nov, sin activar: solo la prueba sin escribir) ──────────────────────
+
+def _nba_docs():
+    """nba_games inventados: N2025 entera de fase regular y N2026 hasta el día anterior a NOW; uno
+    de playoffs que no debe entrar en el historial."""
+    rng = random.Random(9)
+    out = []
+    pairs = [(h, a) for h in TEAMS for a in TEAMS if h != a]
+    for season, start in (("N2025", date(2025, 10, 22)), ("N2026", date(2026, 10, 21))):
+        for r in range(40):
+            day = start + timedelta(days=2 * r)
+            if day >= NOW.date():
+                break
+            for j, (h, a) in enumerate(pairs[(3 * r) % len(pairs):(3 * r) % len(pairs) + 3]):
+                out.append({"season": season, "game_id": f"{season}{r}{j}", "date": day.isoformat(),
+                            "season_type": 2, "home_code": h[0], "away_code": a[0], "ot_periods": 0,
+                            "home": _side(rng, 118 if h[0] == "ZRV" else 112), "away": _side(rng, 112)})
+    out.append({**out[0], "game_id": "po1", "season_type": 3})
+    return out
+
+
+def _ev(eid, home, away, ko, stype=2, completed=False, status="STATUS_SCHEDULED"):
+    return {"id": eid, "date": ko, "season": {"type": stype},
+            "status": {"type": {"completed": completed, "name": status}},
+            "competitions": [{"competitors": [
+                {"homeAway": "home", "team": {"abbreviation": home[0], "displayName": home[1]}},
+                {"homeAway": "away", "team": {"abbreviation": away[0], "displayName": away[1]}}]}]}
+
+
+BOARDS = {
+    "20261125": {"events": [_ev("401", TEAMS[0], TEAMS[1], "2026-11-26T00:30Z"),          # 25-nov en EE. UU.
+                            _ev("400", TEAMS[2], TEAMS[3], "2026-11-25T03:00Z", completed=True,
+                                status="STATUS_FINAL")]},
+    "20261126": {"events": [_ev("402", TEAMS[2], TEAMS[3], "2026-11-27T01:00Z"),
+                            _ev("403", TEAMS[4], TEAMS[5], "2026-11-27T02:00Z", status="STATUS_POSTPONED"),
+                            _ev("404", TEAMS[4], TEAMS[5], "2026-11-27T03:00Z", stype=1)]},     # pretemporada
+    "20261201": {"events": [_ev("405", TEAMS[1], TEAMS[0], "2026-12-02T00:00Z")]},            # fuera de la ventana
+}
+
+
+def test_nba_calendario_de_espn_fase_regular_y_ventana():
+    fx = bl.fixtures_from_espn(BOARDS, NOW, 3)
+    assert [f["match_id"] for f in fx] == ["NBA_N2026_401", "NBA_N2026_402"]
+    f = fx[0]
+    assert f["date"] == "2026-11-25" and f["kickoff_utc"] == "2026-11-26T00:30:00+00:00"
+    assert (f["div"], f["league_name"], f["home_code"], f["home_team"]) == ("NBA", "NBA", "ZRV", "Zorrovia Norte")
+
+
+def test_nba_fichas_sin_escribir_con_nba_games(monkeypatch):
+    escritos = []
+    monkeypatch.setattr(bl, "_set_docs", lambda c, d: escritos.append((c, d)))
+    nba_bt = {**BACKTEST, "lines": {"pts_team": [105.5, 112.5, 118.5], "pts_total": [215.5, 224.5, 232.5],
+                                    "reb_team": [32.5, 35.5, 38.5], "reb_total": [67.5, 70.5, 73.5],
+                                    "ast_team": [15.5, 18.5, 21.5], "ast_total": [33.5, 36.5, 39.5],
+                                    "fg3m_team": [7.5, 10.5, 12.5], "fg3m_total": [17.5, 20.5, 23.5]}}
+    got = {}
+    s = _run(league="NBA", feed=BOARDS, docs=_nba_docs(), backtest=nba_bt, collect=got)
+    assert s["ok"] and s["league"] == "NBA" and s["fixtures_window"] == 2 and s["would_write"] == 2
+    assert s["history_games"] == len([d for d in _nba_docs() if d["season_type"] == 2])   # sin playoffs
+    assert not escritos and "Zorrovia" not in repr(s)
+    p = got["NBA_N2026_401"]
+    assert p["group"] == "basket" and p["div"] == "NBA" and p["labels_source"] == "bp-v1-NBA_backtest"
+    assert p["data_cutoff"] < "2026-11-25" and p["stats"]["pts"]["lines"]["home"]["highlight"]
+
+
+def test_nba_scoreboard_caido_es_fallo_y_sin_backtest_aviso():
+    s = _run(league="NBA", feed={}, docs=_nba_docs())
+    assert not s["ok"] and "ESPN" in s["errors"][0]
+    s = _run(league="NBA", feed=BOARDS, docs=_nba_docs(), backtest={})
+    assert s["ok"] and "bp-v1-NBA_backtest" in s["aviso"]

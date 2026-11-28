@@ -19,11 +19,17 @@ Fichas → match_previews_basket/EUR_{temporada}_{gamecode}; grupo "basket", div
 Graduación (run_basket_grade) contra eur_games → match_preview_grades_basket y
 match_preview_metrics/bp-v1-EUR_live (métricas en directo frente a las dos medias; informativas).
 dry_run=True por defecto: calcula y cuenta, no escribe. Resúmenes del log: solo recuentos.
+
+NBA (28-nov, SIN activar: la pasada programada y POST /run-basket-previews solo lanzan la Euroliga;
+de momento solo la usa la prueba sin escribir basket-preview-show con liga=NBA): run_basket_previews
+con league="NBA" lee el calendario del scoreboard de ESPN (sin clave, una petición por día de EE. UU.),
+solo fase regular (la del backtest), historial nba_games y líneas/etiquetas de
+match_preview_metrics/bp-v1-NBA_backtest. Fichas → match_previews_basket/NBA_{temporada}_{id ESPN}.
 """
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from analyzers import basket_preview as bp
@@ -37,7 +43,8 @@ logger = logging.getLogger(__name__)
 PREVIEWS_B = "match_previews_basket"
 GROUP = "basket"
 LEAGUE = "EUR"
-LEAGUE_NAMES = {"EUR": "Euroliga"}
+LEAGUE_NAMES = {"EUR": "Euroliga", "NBA": "NBA"}
+HISTORY_COLL = {"EUR": "eur_games", "NBA": "nba_games"}
 WINDOW_DAYS = 3
 BACKTEST_DOC = bp.metrics_doc_id(LEAGUE, "backtest")
 GRADES_B = "match_preview_grades_basket"
@@ -80,16 +87,84 @@ def fixtures_from_feed(games: list[dict], now: datetime, days: int = WINDOW_DAYS
     return sorted(out, key=lambda f: (f["kickoff_utc"], f["match_id"]))
 
 
+# NBA: solo fase regular (tipo 2 de ESPN), como el backtest; aplazados y cancelados fuera.
+NBA_SEASON_TYPES = {2}
+_NBA_NOT_PLAYED = {"STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_CANCELLED", "STATUS_FORFEIT"}
+
+
+def _espn_kickoff(raw) -> Optional[datetime]:
+    """'2026-11-29T00:30Z' (ESPN, sin segundos) → datetime UTC."""
+    s = str(raw or "")
+    for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return _kickoff(s) if s else None
+
+
+def fixtures_from_espn(boards: dict, now: datetime, days: int = WINDOW_DAYS) -> list[dict]:
+    """{día de EE. UU. 'YYYYMMDD': scoreboard de ESPN} → partidos de fase regular sin terminar que
+    empiezan entre ahora y now + days. «date» es el día de EE. UU., como en nba_games (el historial
+    se corta por él)."""
+    from collectors.nba_espn import season_code
+    hi = now + timedelta(days=days)
+    out, seen = [], set()
+    for us_day, sb in sorted((boards or {}).items()):
+        for ev in (sb or {}).get("events") or []:
+            st = (ev.get("status") or {}).get("type") or {}
+            if st.get("completed") or st.get("name") in _NBA_NOT_PLAYED:
+                continue
+            if (ev.get("season") or {}).get("type") not in NBA_SEASON_TYPES:
+                continue
+            comp = (ev.get("competitions") or [{}])[0] or {}
+            sides = {c.get("homeAway"): (c.get("team") or {}) for c in comp.get("competitors") or []}
+            home, away = sides.get("home") or {}, sides.get("away") or {}
+            eid = str(ev.get("id") or "")
+            ko = _espn_kickoff(ev.get("date") or comp.get("date"))
+            if (ko is None or not now <= ko <= hi or not eid or eid in seen
+                    or not home.get("abbreviation") or not away.get("abbreviation")):
+                continue
+            seen.add(eid)
+            d = date(int(us_day[:4]), int(us_day[4:6]), int(us_day[6:8]))
+            season = season_code(d)
+            out.append({"match_id": f"NBA_{season}_{eid}", "div": "NBA", "league": "NBA",
+                        "league_name": LEAGUE_NAMES["NBA"], "season": season, "gamecode": eid,
+                        "date": d.isoformat(), "kickoff_utc": ko.isoformat(), "phase": "RS", "round": None,
+                        "home_code": home["abbreviation"], "away_code": away["abbreviation"],
+                        "home_team": home.get("displayName") or home["abbreviation"],
+                        "away_team": away.get("displayName") or away["abbreviation"],
+                        "source": "espn_scoreboard"})
+    return sorted(out, key=lambda f: (f["kickoff_utc"], f["match_id"]))
+
+
+def _fetch_espn_boards(now: datetime, days: int) -> dict:
+    """Scoreboards de ESPN de los días de EE. UU. que pueden caer en la ventana (desde ayer: un
+    partido de las 00:30 UTC es del día anterior allí). Los que fallan se omiten."""
+    from collectors.nba_espn import SCOREBOARD_URL, http_get_json
+    out = {}
+    d, end = (now - timedelta(days=1)).date(), (now + timedelta(days=days)).date()
+    while d <= end:
+        day = d.strftime("%Y%m%d")
+        sb, code, _ = http_get_json(SCOREBOARD_URL.format(day=day))
+        if sb is not None:
+            out[day] = sb
+        else:
+            logger.warning("basket_previews NBA: scoreboard %s sin leer (HTTP %s)", day, code)
+        d += timedelta(days=1)
+    return out
+
+
 def _fetch_feed(season: str) -> list[dict]:
     from collectors.basketball_collector import _fetch_eur_season_games
     return _fetch_eur_season_games(season)
 
 
-def _read_games(seasons: list[str]) -> list[dict]:
+def _read_games(seasons: list[str], coll: str = "eur_games") -> list[dict]:
     from shared.firestore_client import iter_all
     out = []
     for s in seasons:
-        out += [d.to_dict() or {} for d in iter_all("eur_games", where=("season", "==", s))]
+        out += [d.to_dict() or {} for d in iter_all(coll, where=("season", "==", s))]
     return out
 
 
@@ -101,57 +176,77 @@ def preview_content(fx: dict, pred: dict, labels_source: str) -> dict:
 async def run_basket_previews(dry_run: bool = True, now: Optional[datetime] = None, days: int = WINDOW_DAYS,
                               feed: Optional[list[dict]] = None, docs: Optional[list[dict]] = None,
                               backtest: Optional[dict] = None, existing: Optional[dict] = None,
-                              collect: Optional[dict] = None) -> dict:
-    """Fichas de Euroliga de los próximos `days` días. Los parámetros opcionales son para tests
-    (None = leer del feed / Firestore). backtest: el documento del backtest ya calculado (la prueba
-    sin escribir de scripts/ops/basket_preview_show.py lo calcula en el momento, sin guardarlo).
+                              collect: Optional[dict] = None, league: str = LEAGUE) -> dict:
+    """Fichas de la liga (EUR por defecto; NBA, ver arriba) de los próximos `days` días. Los
+    parámetros opcionales son para tests (None = leer del feed / Firestore; en la NBA, feed =
+    {día de EE. UU.: scoreboard}). backtest: el documento del backtest ya calculado (la prueba sin
+    escribir de scripts/ops/basket_preview_show.py lo calcula en el momento, sin guardarlo).
     collect: si se da, recibe las fichas que se escribirían {match_id: ficha}, también en dry_run."""
     from collectors.basketball_collector import _eur_season_code
 
+    if league not in HISTORY_COLL:
+        raise ValueError(f"liga sin fichas: {league}")
     now = now or datetime.now(timezone.utc)
-    summary: dict = {"ok": True, "dry_run": dry_run, "now": now.isoformat(), "league": LEAGUE, "counts": {},
+    backtest_doc_id = bp.metrics_doc_id(league, "backtest")
+    summary: dict = {"ok": True, "dry_run": dry_run, "now": now.isoformat(), "league": league, "counts": {},
                      "errors": []}
     if backtest is None:
-        backtest = _get_doc(METRICS, BACKTEST_DOC)
+        backtest = _get_doc(METRICS, backtest_doc_id)
     if not backtest or not backtest.get("lines"):
         # No es un fallo: hasta guardar el backtest (basket-backtest con confirmar=ESCRIBIR) no hay fichas.
-        summary["aviso"] = f"sin {METRICS}/{BACKTEST_DOC}: no se escriben fichas de baloncesto"
+        summary["aviso"] = f"sin {METRICS}/{backtest_doc_id}: no se escriben fichas de baloncesto"
         return summary
-    season = _eur_season_code(now)
-    if feed is None:
-        try:
-            feed = await asyncio.get_running_loop().run_in_executor(None, _fetch_feed, season)
-        except Exception:
-            logger.error("basket_previews: no se pudo leer el feed de la Euroliga", exc_info=True)
-            feed = None
-    if not feed:
-        summary.update(ok=False, errors=["feed de la Euroliga vacío o caído: sin calendario"])
-        return summary
-    fxs = fixtures_from_feed(feed, now, days)
+    if league == "NBA":
+        from collectors.nba_espn import season_code
+        season = season_code(now.date())
+        if feed is None:
+            try:
+                feed = await asyncio.to_thread(_fetch_espn_boards, now, days)
+            except Exception:
+                logger.error("basket_previews: no se pudo leer el scoreboard de ESPN", exc_info=True)
+                feed = None
+        if not feed:
+            summary.update(ok=False, errors=["scoreboard de ESPN vacío o caído: sin calendario"])
+            return summary
+        fxs = fixtures_from_espn(feed, now, days)
+    else:
+        season = _eur_season_code(now)
+        if feed is None:
+            try:
+                feed = await asyncio.get_running_loop().run_in_executor(None, _fetch_feed, season)
+            except Exception:
+                logger.error("basket_previews: no se pudo leer el feed de la Euroliga", exc_info=True)
+                feed = None
+        if not feed:
+            summary.update(ok=False, errors=["feed de la Euroliga vacío o caído: sin calendario"])
+            return summary
+        fxs = fixtures_from_feed(feed, now, days)
     summary["fixtures_window"] = len(fxs)
     counts: dict[str, int] = defaultdict(int)
     to_write: dict[str, dict] = {}
     if fxs:
         if docs is None:
-            docs = await asyncio.to_thread(_read_games, [bp.prev_season(season), season])
+            docs = await asyncio.to_thread(_read_games, [bp.prev_season(season), season], HISTORY_COLL[league])
         today = now.date().isoformat()
-        games = [g for g in bp.games_from_docs(docs, LEAGUE) if g["date"] < today]
+        games = [g for g in bp.games_from_docs(docs, league) if g["date"] < today]
+        if league == "NBA":
+            games = [g for g in games if g.get("phase") == "RS"]      # como el backtest (fase regular)
         summary["history_games"] = len(games)
         hist = bp.History(games)
-        resid = await asyncio.to_thread(bp.residuals_until, hist, LEAGUE, season)
+        resid = await asyncio.to_thread(bp.residuals_until, hist, league, season)
         lines = {mk: tuple(v) for mk, v in (backtest.get("lines") or {}).items()}
         labels = dict(backtest.get("labels") or {})
         summary["edge_markets"] = sorted(mk for mk, lab in labels.items() if lab == bp.LABEL_EDGE)
         if existing is None:
             existing = _get_many(PREVIEWS_B, [fx["match_id"] for fx in fxs])
         for fx in fxs:
-            pred = await asyncio.to_thread(bp.predict_game, hist, resid, LEAGUE, fx["season"], fx["date"],
+            pred = await asyncio.to_thread(bp.predict_game, hist, resid, league, fx["season"], fx["date"],
                                            fx["home_code"], fx["away_code"], lines, labels)
             if pred is None:
                 counts["sin historial de liga"] += 1
                 continue
             pred["teams"]["home"]["team"], pred["teams"]["away"]["team"] = fx["home_team"], fx["away_team"]
-            content = preview_content(fx, pred, BACKTEST_DOC)
+            content = preview_content(fx, pred, backtest_doc_id)
             action = decide(content, existing.get(fx["match_id"]), now)
             counts[action] += 1
             if pred["low_sample"]:

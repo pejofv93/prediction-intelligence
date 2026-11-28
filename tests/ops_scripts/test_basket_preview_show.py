@@ -44,7 +44,7 @@ def test_prueba_sin_escribir_saca_fichas_y_no_escribe(monkeypatch, tmp_path, cap
     writes = []
     monkeypatch.setattr(sh.bb, "load_docs", lambda league: docs)
     monkeypatch.setattr(sh.bl, "_fetch_feed", lambda season: feed)
-    monkeypatch.setattr(sh.bl, "_read_games", lambda seasons: [d for d in docs if d["season"] in seasons])
+    monkeypatch.setattr(sh.bl, "_read_games", lambda seasons, coll="eur_games": [d for d in docs if d["season"] in seasons])
     monkeypatch.setattr(sh.bl, "_get_many", lambda coll, ids: {})
     monkeypatch.setattr(sh.bl, "_set_docs", lambda c, d: writes.append(c))
     monkeypatch.setattr(sh.bl, "_get_doc", lambda *a: (_ for _ in ()).throw(AssertionError("no debe leer el doc")))

@@ -67,11 +67,16 @@ def telegram_preview(previews: list[dict]) -> list[str]:
 
 
 def main() -> int:
-    out_file = os.environ.get("OUT_FILE") or "fichas_euroliga.txt"
-    docs = bb.load_docs("EUR")
-    games = bp.games_from_docs(docs, "EUR")
-    res = bb.compute(games, "EUR")
-    doc = bb.backtest_doc(res, "EUR", datetime.now(timezone.utc).isoformat())
+    league = (os.environ.get("LIGA") or "EUR").upper()      # EUR (Euroliga) o NBA
+    if league not in bl.HISTORY_COLL:
+        print(f"LIGA debe ser una de {sorted(bl.HISTORY_COLL)}")
+        return 1
+    name = bl.LEAGUE_NAMES[league]
+    out_file = os.environ.get("OUT_FILE") or "fichas_baloncesto.txt"
+    docs = bb.load_docs(league)
+    games, _ = bb.filter_phases(bp.games_from_docs(docs, league), league)
+    res = bb.compute(games, league)
+    doc = bb.backtest_doc(res, league, datetime.now(timezone.utc).isoformat())
     edge = sorted(mk for mk, lab in doc["labels"].items() if lab == bp.LABEL_EDGE)
     print(f"Backtest en memoria (sin guardar): {res['n_matches']} partidos evaluados; "
           f"mercados con ventaja medida: {edge}")
@@ -80,14 +85,15 @@ def main() -> int:
 
     collected: dict = {}
     days = int(os.environ.get("DIAS") or bl.WINDOW_DAYS)   # ventana de la prueba (las fichas reales: 3 días)
-    summary = asyncio.run(bl.run_basket_previews(dry_run=True, backtest=doc, collect=collected, days=days))
+    summary = asyncio.run(bl.run_basket_previews(dry_run=True, backtest=doc, collect=collected, days=days,
+                                                 league=league))
     print("Prueba sin escribir: " + json.dumps({k: summary.get(k) for k in
                                                  ("ok", "dry_run", "days", "fixtures_window", "history_games", "counts",
                                                   "would_write", "edge_markets", "errors", "aviso")},
                                                 ensure_ascii=False))
     summary["days"] = days
     previews = sorted(collected.values(), key=lambda p: (p["kickoff_utc"], p["match_id"]))
-    lines = [f"Fichas de la Euroliga que se escribirían ({len(previews)}), {summary.get('now')}",
+    lines = [f"Fichas de {name} que se escribirían ({len(previews)}), {summary.get('now')}",
              f"Etiquetas calculadas en el momento (backtest en memoria, sin guardar): ventaja medida en {edge}",
              sesgo]
     for p in previews:
