@@ -266,3 +266,45 @@ def test_nba_scoreboard_caido_es_fallo_y_sin_backtest_aviso():
     assert not s["ok"] and "ESPN" in s["errors"][0]
     s = _run(league="NBA", feed=BOARDS, docs=_nba_docs(), backtest={})
     assert s["ok"] and "bp-v1-NBA_backtest" in s["aviso"]
+
+
+_NBA_BT = {**BACKTEST, "lines": {"pts_team": [105.5, 112.5, 118.5], "pts_total": [215.5, 224.5, 232.5],
+                                 "reb_team": [32.5, 35.5, 38.5], "reb_total": [67.5, 70.5, 73.5],
+                                 "ast_team": [15.5, 18.5, 21.5], "ast_total": [33.5, 36.5, 39.5],
+                                 "fg3m_team": [7.5, 10.5, 12.5], "fg3m_total": [17.5, 20.5, 23.5]}}
+
+
+def test_graduacion_por_liga_nba_con_nba_games(monkeypatch):
+    # Activación de la NBA (28-nov): cada liga gradúa solo sus fichas, con su historial y su _live.
+    got = {}
+    _run(league="NBA", feed=BOARDS, docs=_nba_docs(), backtest=_NBA_BT, collect=got)
+    nba = list(got.values())
+    eur = list(_written_previews(monkeypatch).values())
+    later = datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc)
+    nba_game = {"season": "N2026", "game_id": "401", "date": "2026-11-25", "home_code": "ZRV", "away_code": "QMR",
+                "home": {"pts": 120, "reb": 40, "ast": 20, "fg3m": 12}, "away": {"pts": 110, "reb": 30, "ast": 14,
+                                                                                "fg3m": 6}}
+    pedidos = []
+
+    def fake_get_many(coll, ids):
+        pedidos.append((coll, sorted(ids)))
+        return {"N2026_401": nba_game} if coll == "nba_games" else {}
+    monkeypatch.setattr(bl, "_get_many", fake_get_many)
+    old_eur = {"match_id": "EUR_E2026_700", "div": "EUR", "status": "graduada", "low_sample": False, "lines": []}
+    out = {}
+    s = asyncio.run(bl.run_basket_grade(dry_run=False, now=later, previews=nba + eur, graded={},
+                                        all_grades=[old_eur], write=lambda c, d: out.setdefault(c, {}).update(d),
+                                        league="NBA"))
+    assert s["ok"] and s["league"] == "NBA" and s["counts"] == {"graduada": 1, "esperando nba_games": 1}
+    assert set(out[bl.GRADES_B]) == {"NBA_N2026_401"}                  # nada de la Euroliga
+    assert pedidos == [("nba_games", ["N2026_401", "N2026_402"])]
+    live = out["match_preview_metrics"]
+    assert set(live) == {"bp-v1-NBA_live"} and live["bp-v1-NBA_live"]["league"] == "NBA"
+    assert live["bp-v1-NBA_live"]["n_graduated"] == 1                  # sin la graduada de la Euroliga
+    total = [ln for ln in out[bl.GRADES_B]["NBA_N2026_401"]["lines"] if ln["market"] == "pts_total"]
+    assert total and all(ln["value"] == 230 for ln in total)
+    # y la Euroliga sigue sin ver las de la NBA
+    pedidos.clear()
+    s = asyncio.run(bl.run_basket_grade(now=later, previews=nba + eur, graded={}, all_grades=[]))
+    assert s["league"] == "EUR" and all(c == "eur_games" for c, _ in pedidos)
+    assert not any(i.startswith("N20") for _, ids in pedidos for i in ids)

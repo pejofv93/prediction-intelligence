@@ -1,6 +1,6 @@
 """
 services/sports-agent/analyzers/basket_preview_live.py
-Fichas de baloncesto de Tendencias (bp-v1, de momento solo Euroliga) y su graduación. Mismo esquema
+Fichas de baloncesto de Tendencias (bp-v1: Euroliga y NBA) y su graduación. Mismo esquema
 que las fichas de fútbol (match_preview_store) y de Europa (match_preview_uefa_live): se recalculan si
 cambia el contenido, se congelan 2 h antes del inicio y se gradúa la versión congelada.
 
@@ -20,11 +20,12 @@ Graduación (run_basket_grade) contra eur_games → match_preview_grades_basket 
 match_preview_metrics/bp-v1-EUR_live (métricas en directo frente a las dos medias; informativas).
 dry_run=True por defecto: calcula y cuenta, no escribe. Resúmenes del log: solo recuentos.
 
-NBA (28-nov, SIN activar: la pasada programada y POST /run-basket-previews solo lanzan la Euroliga;
-de momento solo la usa la prueba sin escribir basket-preview-show con liga=NBA): run_basket_previews
-con league="NBA" lee el calendario del scoreboard de ESPN (sin clave, una petición por día de EE. UU.),
+NBA (activada el 28-nov: la pasada programada lanza las fichas y la graduación de las dos ligas;
+POST /run-basket-previews y /run-basket-grade con league=NBA): run_basket_previews con league="NBA" lee el calendario del scoreboard de ESPN (sin clave, una petición por día de EE. UU.),
 solo fase regular (la del backtest), historial nba_games y líneas/etiquetas de
 match_preview_metrics/bp-v1-NBA_backtest. Fichas → match_previews_basket/NBA_{temporada}_{id ESPN}.
+Graduación por liga: cada ficha solo con el historial de su liga (nba_games/{temporada}_{id ESPN}, que
+mantiene la tarea diaria de las 06:30 UTC) y métricas en directo propias (bp-v1-NBA_live).
 """
 import asyncio
 import logging
@@ -315,8 +316,13 @@ def rows_from_grades(grades, ref: str = "p_league") -> list[tuple]:
     return rows
 
 
-def live_doc(grades: list[dict], now: datetime) -> dict:
-    """match_preview_metrics/bp-v1-EUR_live: métricas en directo frente a las dos medias (solo
+def preview_league(p: dict) -> str:
+    """Liga de una ficha o graduación de baloncesto (las de la Euroliga anteriores llevan div = EUR)."""
+    return p.get("league") or p.get("div") or LEAGUE
+
+
+def live_doc(grades: list[dict], now: datetime, league: str = LEAGUE) -> dict:
+    """match_preview_metrics/bp-v1-{liga}_live: métricas en directo frente a las dos medias (solo
     agregados). Informativo: las etiquetas de las fichas siguen saliendo del backtest."""
     from analyzers.match_preview import market_metrics
     met = {}
@@ -326,7 +332,7 @@ def live_doc(grades: list[dict], now: datetime) -> dict:
                                                      "ci_lo", "ci_hi", "ci_label")}
                     for v in (market_metrics(rows) if rows else {}).values() if v["div"] == "ALL"}
     graded = [g for g in grades if g.get("status") == "graduada" and not g.get("low_sample")]
-    return {"model_version": bp.MODEL_VERSION, "kind": "live", "league": LEAGUE, "group": GROUP,
+    return {"model_version": bp.MODEL_VERSION, "kind": "live", "league": league, "group": GROUP,
             "n_graduated": len(graded), "labels": bp.labels_from_backtest(
                 {f"{mk}|ALL": {**v, "market": mk} for mk, v in met["vs_liga"].items()},
                 {f"{mk}|ALL": {**v, "market": mk} for mk, v in met["vs_equipo"].items()}),
@@ -351,23 +357,28 @@ def _read_all_grades() -> list[dict]:
 async def run_basket_grade(dry_run: bool = True, now: Optional[datetime] = None,
                            previews: Optional[list[dict]] = None, results: Optional[dict] = None,
                            graded: Optional[dict] = None, all_grades: Optional[list[dict]] = None,
-                           write=None) -> dict:
-    """Gradúa las fichas de baloncesto congeladas con eur_games → match_preview_grades_basket y
-    match_preview_metrics/bp-v1-EUR_live. Los parámetros opcionales son para tests. Resumen: solo
-    recuentos."""
+                           write=None, league: str = LEAGUE) -> dict:
+    """Gradúa las fichas congeladas de la liga (EUR por defecto, o NBA) con su historial (eur_games o
+    nba_games) → match_preview_grades_basket y match_preview_metrics/bp-v1-{liga}_live. Solo toca las
+    fichas de esa liga. Los parámetros opcionales son para tests. Resumen: solo recuentos."""
+    if league not in HISTORY_COLL:
+        raise ValueError(f"liga sin fichas: {league}")
     now = now or datetime.now(timezone.utc)
     write = write or _set_docs
-    summary: dict = {"ok": True, "dry_run": dry_run, "counts": {}, "errors": []}
+    coll = HISTORY_COLL[league]
+    live_doc_id = bp.metrics_doc_id(league, "live")
+    summary: dict = {"ok": True, "dry_run": dry_run, "league": league, "counts": {}, "errors": []}
     if previews is None:
         previews = await asyncio.to_thread(_read_previews_to_grade, now)
     else:
         lo, hi = now - timedelta(days=GRADE_LOOKBACK_DAYS), now - timedelta(hours=GRADE_AFTER_H)
         previews = [p for p in previews if lo <= _parse(p["kickoff_utc"]) <= hi]
+    previews = [p for p in previews if preview_league(p) == league]
     if graded is None:
         graded = _get_many(GRADES_B, [p["match_id"] for p in previews])
     pending = [p for p in previews if p["match_id"] not in graded]
     if results is None:
-        results = _get_many("eur_games", [f"{p['season']}_{p['gamecode']}" for p in pending])
+        results = _get_many(coll, [f"{p['season']}_{p['gamecode']}" for p in pending])
     docs: dict[str, dict] = {}
     counts: dict[str, int] = defaultdict(int)
     for p in pending:
@@ -388,16 +399,16 @@ async def run_basket_grade(dry_run: bool = True, now: Optional[datetime] = None,
         elif now - _parse(p["kickoff_utc"]) >= timedelta(days=NO_RESULT_DAYS):
             doc = {**base, "status": "sin resultado"}
         else:
-            counts["esperando eur_games"] += 1
+            counts[f"esperando {coll}"] += 1
             continue
         counts[doc["status"]] += 1
         docs[p["match_id"]] = doc
     summary["counts"] = dict(counts)
     if all_grades is None:
         all_grades = await asyncio.to_thread(_read_all_grades)
-    merged = {g["match_id"]: g for g in all_grades if g.get("match_id")}
+    merged = {g["match_id"]: g for g in all_grades if g.get("match_id") and preview_league(g) == league}
     merged.update(docs)
-    ldoc = live_doc(list(merged.values()), now)
+    ldoc = live_doc(list(merged.values()), now, league)
     summary.update(n_graduated=ldoc["n_graduated"],
                    live_edge_markets=sorted(mk for mk, lab in ldoc["labels"].items() if lab == bp.LABEL_EDGE))
     summary["would_write" if dry_run else "written"] = len(docs)
@@ -406,7 +417,7 @@ async def run_basket_grade(dry_run: bool = True, now: Optional[datetime] = None,
             if docs:
                 write(GRADES_B, docs)
             if ldoc["n_graduated"]:
-                write(METRICS, {LIVE_DOC: ldoc})
+                write(METRICS, {live_doc_id: ldoc})
         except Exception:
             logger.error("basket_grade: error escribiendo", exc_info=True)
             summary["errors"].append("escritura fallida (ver logs del servicio)")

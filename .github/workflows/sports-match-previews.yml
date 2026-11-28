@@ -40,6 +40,11 @@ on:
       programado:
         description: "Solo el repartidor (/dispatch): true = hacer lo mismo que el cron"
         default: "false"
+      basket_liga:
+        description: "basket_previews / basket_grade: EUR (Euroliga) o NBA"
+        type: choice
+        options: ["EUR", "NBA"]
+        default: "EUR"
 
 concurrency:
   group: sports-match-previews
@@ -63,6 +68,7 @@ jobs:
           HL: ${{ inputs.highlightly }}
           HL_MAX: ${{ inputs.hl_max }}
           HL_DIVS: ${{ inputs.hl_divs }}
+          BASKET_LIGA: ${{ inputs.basket_liga || 'EUR' }}
         run: |
           [[ "$HL_DIVS" =~ ^[A-Z0-9,]*$ ]] || { echo "hl_divs inválido"; exit 1; }
           case "$JOB" in
@@ -74,8 +80,8 @@ jobs:
             women_grade)    path="run-women-grade?dry_run=$DRY_RUN" ;;
             cup_previews)   path="run-cup-previews?dry_run=$DRY_RUN&highlightly=$HL" ;;   # solo recuentos en el log
             uefa_previews)  path="run-uefa-previews?dry_run=$DRY_RUN&highlightly=$HL" ;;  # solo recuentos en el log
-            basket_previews) path="run-basket-previews?dry_run=$DRY_RUN" ;;                 # Euroliga; solo recuentos e ids
-            basket_grade)    path="run-basket-grade?dry_run=$DRY_RUN" ;;                    # Euroliga; solo recuentos
+            basket_previews) path="run-basket-previews?dry_run=$DRY_RUN&league=$BASKET_LIGA" ;;  # solo recuentos e ids
+            basket_grade)    path="run-basket-grade?dry_run=$DRY_RUN&league=$BASKET_LIGA" ;;     # solo recuentos
           esac
           curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
             -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
@@ -168,25 +174,27 @@ jobs:
           grep -q '^done ' out.txt
           grep -q '^summary: {"ok": true' out.txt
 
-      - name: Programado — baloncesto (Euroliga), fichas y graduación (escriben; no bloquea)
-        # Independiente de los otros pasos. Calendario del feed de la Euroliga (sin clave) e historial
-        # eur_games (tarea diaria 06:30 UTC). Sin match_preview_metrics/bp-v1-EUR_backtest no escribe
-        # fichas (aviso en verde). La graduación corre aunque fallen las fichas. El resumen solo lleva
-        # recuentos e ids.
+      - name: Programado — baloncesto (Euroliga y NBA), fichas y graduación (escriben; no bloquea)
+        # Independiente de los otros pasos. Euroliga: calendario del feed de la Euroliga (sin clave) e
+        # historial eur_games. NBA (desde el 28-nov): calendario del scoreboard de ESPN (sin clave) e
+        # historial nba_games. Los dos historiales, de la tarea diaria de las 06:30 UTC. Sin
+        # match_preview_metrics/bp-v1-{liga}_backtest no escribe fichas (aviso en verde). Cada liga y
+        # cada parte corre aunque falle otra. El resumen solo lleva recuentos e ids.
         if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.programado == 'true') }}
         continue-on-error: true
         run: |
           set -uo pipefail
           fallos=""
-          for path in "run-basket-previews?dry_run=false" "run-basket-grade?dry_run=false"; do
+          for path in "run-basket-previews?dry_run=false&league=EUR" "run-basket-grade?dry_run=false&league=EUR" \
+                      "run-basket-previews?dry_run=false&league=NBA" "run-basket-grade?dry_run=false&league=NBA"; do
             echo "== $path"
             curl -X POST "${{ secrets.SPORTS_AGENT_URL }}/$path" \
               -H "x-cloud-token: ${{ secrets.CLOUD_RUN_TOKEN }}" \
               --max-time 1100 \
               --no-buffer \
-              --fail --silent --show-error > out.txt || fallos="$fallos ${path%%\?*}(curl)"
+              --fail --silent --show-error > out.txt || fallos="$fallos ${path%%\?*}:${path##*league=}(curl)"
             grep -v '^summary: ' out.txt
             grep '^summary: ' out.txt | sed 's/^summary: //' | python3 -m json.tool --no-ensure-ascii
-            { grep -q '^done ' out.txt && grep -q '^summary: {"ok": true' out.txt; } || fallos="$fallos ${path%%\?*}"
+            { grep -q '^done ' out.txt && grep -q '^summary: {"ok": true' out.txt; } || fallos="$fallos ${path%%\?*}:${path##*league=}"
           done
           [ -z "$fallos" ] || { echo "fallaron:$fallos"; exit 1; }

@@ -478,24 +478,30 @@ async def run_uefa_previews_job(dry_run: bool = True, highlightly: bool = True) 
 
 
 @app.post("/run-basket-previews", dependencies=[Depends(verify_token)])
-async def run_basket_previews_job(dry_run: bool = True, days: int = 3) -> StreamingResponse:
+async def run_basket_previews_job(dry_run: bool = True, days: int = 3, league: str = "EUR") -> StreamingResponse:
     """Baloncesto (bp-v1, Euroliga): fichas de los próximos `days` días en match_previews_basket.
     Calendario: feed de la Euroliga (sin clave); historial: eur_games. Líneas y etiquetas de
     match_preview_metrics/bp-v1-EUR_backtest: sin ese documento no escribe fichas (aviso, no fallo).
     dry_run=true por defecto. Resumen solo con recuentos e ids."""
     if not 1 <= days <= 3:
         raise HTTPException(status_code=400, detail="days 1-3")
-    from analyzers.basket_preview_live import run_basket_previews
-    return _stream_with_summary("basket-previews", run_basket_previews, dry_run=dry_run, days=days)
+    from analyzers.basket_preview_live import HISTORY_COLL, run_basket_previews
+    league = league.upper()
+    if league not in HISTORY_COLL:
+        raise HTTPException(status_code=400, detail="league: EUR o NBA")
+    return _stream_with_summary("basket-previews", run_basket_previews, dry_run=dry_run, days=days, league=league)
 
 
 @app.post("/run-basket-grade", dependencies=[Depends(verify_token)])
-async def run_basket_grade_job(dry_run: bool = True) -> StreamingResponse:
+async def run_basket_grade_job(dry_run: bool = True, league: str = "EUR") -> StreamingResponse:
     """Baloncesto (bp-v1, Euroliga): gradúa las fichas congeladas con eur_games (lo baja la tarea
     diaria de las 06:30 UTC) → match_preview_grades_basket y match_preview_metrics/bp-v1-EUR_live.
     dry_run=true por defecto. Resumen solo con recuentos."""
-    from analyzers.basket_preview_live import run_basket_grade
-    return _stream_with_summary("basket-grade", run_basket_grade, dry_run=dry_run)
+    from analyzers.basket_preview_live import HISTORY_COLL, run_basket_grade
+    league = league.upper()
+    if league not in HISTORY_COLL:
+        raise HTTPException(status_code=400, detail="league: EUR o NBA")
+    return _stream_with_summary("basket-grade", run_basket_grade, dry_run=dry_run, league=league)
 
 
 @app.post("/run-women-previews", dependencies=[Depends(verify_token)])
