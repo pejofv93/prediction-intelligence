@@ -1,4 +1,5 @@
 # Dos consultas de SOLO LECTURA (manual, sin cron). No escribe nada.
+#  - envíos: lo que suma «Enviadas por nivel» desde una fecha (scripts/ops/sent_since.py).
 #  - fichas: aciertos de las fichas graduadas por liga y mercado (scripts/ops/previews_grade_summary.py).
 #  - logging: qué cuota de Cloud Logging agota job_runner desde Actions (scripts/ops/logging_quota_check.py).
 #  - avisos: avisos de la última pasada de analyze en Actions por tipo (scripts/ops/warning_types.py).
@@ -15,6 +16,9 @@ on:
       days:
         description: "collect: días de logs"
         default: "16"
+      enviadas_desde:
+        description: "envíos: primer envío desde (AAAA-MM-DD)"
+        default: "2026-11-21"
 
 permissions:
   contents: read
@@ -47,6 +51,16 @@ jobs:
           PYTHONIOENCODING: utf-8
           SINCE: ${{ inputs.since }}
         run: python scripts/ops/previews_grade_summary.py
+
+      - name: Envíos de Sports desde una fecha (Enviadas por nivel; sin equipos)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+          FIRESTORE_COLLECTION_PREFIX: ${{ secrets.FIRESTORE_COLLECTION_PREFIX }}
+          PYTHONIOENCODING: utf-8
+          SINCE: ${{ inputs.enviadas_desde }}
+        run: |
+          [[ "$SINCE" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}$ ]] || { echo "enviadas_desde inválido"; exit 1; }
+          python scripts/ops/sent_since.py
 
       - name: Tiempo por paso de sports-collect (logs de Cloud Run)
         env:
