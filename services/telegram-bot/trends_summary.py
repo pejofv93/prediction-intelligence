@@ -2,9 +2,11 @@
 Resumen diario de Tendencias por Telegram (hilo de Tendencias). Fichas de partido del día (hora de
 Madrid): masculino (match_previews, mp-v1), copas (match_previews_cups), Europa
 (match_previews_uefa, mp-e1), femenino (match_previews_women, mp-w1) y baloncesto
-(match_previews_basket, bp-v1, Euroliga). En copas y Europa la ⭐ solo llega tras 50 graduados en
-directo con IC95 bajo 0 (antes, "medido en backtest": sin píldora). Baloncesto, como las ligas de
-fútbol: ⭐ en los mercados con ventaja medida en su backtest (frente a la media de la liga y del equipo).
+(match_previews_basket, bp-v1, Euroliga). En copas la ⭐ solo llega tras 50 graduados en directo con
+IC95 bajo 0 (antes, "medido en backtest": sin píldora). Europa (desde el 28-nov), como las ligas: ⭐ en
+los mercados con ventaja medida en su backtest (match_preview_metrics/mp-e1_backtest; la etiqueta va
+guardada en la ficha). Baloncesto, como las ligas de fútbol: ⭐ en los mercados con ventaja medida en
+su backtest (frente a la media de la liga y del equipo).
 
 Formato (20-nov-2026, decisión del usuario): HTML de Telegram, UN mensaje para el día (se parte
 solo si no cabe; un partido nunca se corta). Por partido: icono + liga + hora, equipos en negrita,
@@ -207,6 +209,7 @@ def _group_rank(p: dict) -> int:
 
 
 BASKET_FAIL = "⚠️ Baloncesto: no se pudieron montar sus fichas de hoy."
+UEFA_FAIL = "⚠️ Europa: no se pudieron leer sus fichas de hoy."
 
 
 def _basket_ok(p: dict) -> bool:
@@ -275,8 +278,8 @@ def build_messages(previews: list[dict], day: date, avisos: Optional[list[str]] 
 
 
 def read_day_previews(lo: datetime, hi: datetime, avisos: Optional[list[str]] = None) -> list[dict]:
-    """Fichas del día de todas las colecciones. Si el baloncesto no se puede leer, se sigue sin él
-    y se deja el aviso en `avisos` (el fútbol, como siempre)."""
+    """Fichas del día de todas las colecciones. Si el baloncesto o Europa no se pueden leer, se sigue
+    sin ellos y se deja el aviso en `avisos` (el fútbol, como siempre)."""
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
     out = []
@@ -284,13 +287,14 @@ def read_day_previews(lo: datetime, hi: datetime, avisos: Optional[list[str]] = 
                  "match_previews_basket"):
         q = (col(coll).where(filter=FieldFilter("kickoff_utc", ">=", lo.isoformat()))
              .where(filter=FieldFilter("kickoff_utc", "<", hi.isoformat())))
-        if coll != "match_previews_basket":
+        fail = {"match_previews_basket": BASKET_FAIL, "match_previews_uefa": UEFA_FAIL}.get(coll)
+        if fail is None:
             out.extend(s.to_dict() for s in q.stream())
             continue
         try:
             out.extend([s.to_dict() for s in q.stream()])
         except Exception:
-            logger.warning("trends_summary: no se pudieron leer las fichas de baloncesto", exc_info=True)
+            logger.warning("trends_summary: no se pudieron leer las fichas de %s", coll, exc_info=True)
             if avisos is not None:
-                avisos.append(BASKET_FAIL)
+                avisos.append(fail)
     return out

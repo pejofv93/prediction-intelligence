@@ -209,6 +209,42 @@ def test_ficha_de_baloncesto_rota_no_tumba_el_resumen():
     assert ts.BASKET_FAIL not in "\n".join(ts.build_messages([futbol], date(2026, 11, 20)))
 
 
+def test_europa_con_estrella_del_backtest_da_pildora():
+    # Desde el 28-nov la etiqueta de Europa sale del backtest y va guardada en la ficha: "ventaja
+    # medida" da píldora como en las ligas; con muestra insuficiente, ninguna.
+    eu = {**_preview(div="CL", home="Zorrovia Norte", away="Quimeria Valle", ko="2026-12-08T20:00:00+00:00"),
+          "group": "uefa", "comp": "CL", "comp_name": "Champions League"}
+    _edge(eu, "corners", "home")
+    m = ts.build_messages([eu], date(2026, 12, 8))[0]
+    assert "1 con ⭐" in m and "🌍 Champions League · 21:00" in m and "⭐ Zorrovia Norte más de" in m
+    assert ts.match_pills({**eu, "low_sample": True}) == []
+
+
+def test_lectura_de_europa_caida_no_tumba_el_resumen(monkeypatch):
+    import sys
+    import types
+    futbol = _preview()
+
+    class Q:
+        def __init__(self, coll):
+            self.coll = coll
+
+        def where(self, filter=None):
+            return self
+
+        def stream(self):
+            if self.coll == "match_previews_uefa":
+                raise RuntimeError("Firestore caído")
+            return [types.SimpleNamespace(to_dict=lambda: futbol)] if self.coll == "match_previews" else []
+
+    fake = types.ModuleType("shared.firestore_client")
+    fake.col = Q
+    monkeypatch.setitem(sys.modules, "shared.firestore_client", fake)
+    avisos = []
+    lo = datetime(2026, 11, 20, tzinfo=timezone.utc)
+    assert ts.read_day_previews(lo, lo, avisos) == [futbol] and avisos == [ts.UEFA_FAIL]
+
+
 def test_lectura_de_baloncesto_caida_no_tumba_el_resumen(monkeypatch):
     import sys
     import types
