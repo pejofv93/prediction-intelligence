@@ -2,11 +2,13 @@
 Resumen diario de Tendencias por Telegram (hilo de Tendencias). Fichas de partido del día (hora de
 Madrid): masculino (match_previews, mp-v1), copas (match_previews_cups), Europa
 (match_previews_uefa, mp-e1), femenino (match_previews_women, mp-w1) y baloncesto
-(match_previews_basket, bp-v1, Euroliga). En copas la ⭐ solo llega tras 50 graduados en directo con
+(match_previews_basket, bp-v1, Euroliga y NBA). En copas la ⭐ solo llega tras 50 graduados en directo con
 IC95 bajo 0 (antes, "medido en backtest": sin píldora). Europa (desde el 28-nov), como las ligas: ⭐ en
 los mercados con ventaja medida en su backtest (match_preview_metrics/mp-e1_backtest; la etiqueta va
 guardada en la ficha). Baloncesto, como las ligas de fútbol: ⭐ en los mercados con ventaja medida en
-su backtest (frente a la media de la liga y del equipo).
+su backtest (frente a la media de la liga y del equipo). NBA (desde el 28-nov): entran los partidos
+de la noche de hoy en EE. UU. (su «date» es el día de EE. UU.; en Madrid empiezan de madrugada, del
+día siguiente), con la hora marcada «(madrugada)»; así llegan antes de jugarse.
 
 Formato (20-nov-2026, decisión del usuario): HTML de Telegram, UN mensaje para el día (se parte
 solo si no cabe; un partido nunca se corta). Por partido: icono + liga + hora, equipos en negrita,
@@ -46,7 +48,10 @@ DIV_ORDER = ("SP1", "SP2", "E0", "I1", "D1", "F1", "P1", "N1", "WLF", "WSL", "WF
 UEFA_NAMES = {"CL": "Champions League", "EL": "Europa League", "ECL": "Conference League"}
 # Baloncesto (bp-v1): sus estadísticas y el nombre de la liga si la ficha no lo trae.
 BASKET_STATS = (("pts", "Puntos"), ("reb", "Rebotes"), ("ast", "Asistencias"), ("fg3m", "Triples"))
-BASKET_NAMES = {"EUR": "Euroliga"}
+BASKET_NAMES = {"EUR": "Euroliga", "NBA": "NBA"}
+# NBA: el resumen lee las fichas de baloncesto hasta estas horas después del fin del día de Madrid
+# (los partidos de la noche de EE. UU. empiezan entre las 00:00 y las ~05:00 UTC).
+NBA_NIGHT_H = 12
 SEP = "━━━━━━━━━━━━━━"
 STAR_LEGEND = "⭐ = el modelo acierta más que la media de la liga"
 WEEKDAYS = ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
@@ -118,6 +123,19 @@ def is_basket(p: dict) -> bool:
     return p.get("group") == "basket"
 
 
+def is_nba(p: dict) -> bool:
+    return is_basket(p) and (p.get("league") or p.get("div")) == "NBA"
+
+
+def in_summary_day(p: dict, day: date, lo: datetime, hi: datetime) -> bool:
+    """¿Entra la ficha en el resumen de `day`? NBA: si su día de EE. UU. es `day` (los partidos de
+    esta noche, aunque en Madrid sean de madrugada del día siguiente). El resto: si empieza dentro
+    del día de Madrid [lo, hi)."""
+    if is_nba(p):
+        return str(p.get("date") or "")[:10] == day.isoformat()
+    return lo <= _parse(p["kickoff_utc"]) < hi
+
+
 def esc(text) -> str:
     return html.escape(str(text), quote=False)
 
@@ -187,7 +205,9 @@ def match_block(p: dict, pills: list[dict] | None = None) -> str:
     ko = madrid(_parse(p["kickoff_utc"]))
     home, away = names(p)
     pills = match_pills(p) if pills is None else pills
-    out = [SEP, f"{group_icon_label(p)} · {ko:%H:%M}", f"<b>{esc(home)} – {esc(away)}</b>"]
+    # NBA: la hora de Madrid cae en la madrugada siguiente al día del resumen
+    late = " (madrugada)" if is_nba(p) and ko.date().isoformat() > str(p.get("date") or "")[:10] else ""
+    out = [SEP, f"{group_icon_label(p)} · {ko:%H:%M}{late}", f"<b>{esc(home)} – {esc(away)}</b>"]
     out += [pill_html(x) for x in pills]
     return "\n".join(out)
 
@@ -279,20 +299,26 @@ def build_messages(previews: list[dict], day: date, avisos: Optional[list[str]] 
 
 def read_day_previews(lo: datetime, hi: datetime, avisos: Optional[list[str]] = None) -> list[dict]:
     """Fichas del día de todas las colecciones. Si el baloncesto o Europa no se pueden leer, se sigue
-    sin ellos y se deja el aviso en `avisos` (el fútbol, como siempre)."""
+    sin ellos y se deja el aviso en `avisos` (el fútbol, como siempre). Baloncesto: se lee hasta
+    NBA_NIGHT_H horas más tarde y se filtra con in_summary_day (la NBA de esta noche entra; la de
+    anoche, ya jugada, no)."""
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
+    day = madrid(lo).date()
     out = []
     for coll in ("match_previews", "match_previews_cups", "match_previews_uefa", "match_previews_women",
                  "match_previews_basket"):
+        basket = coll == "match_previews_basket"
+        top = hi + timedelta(hours=NBA_NIGHT_H) if basket else hi
         q = (col(coll).where(filter=FieldFilter("kickoff_utc", ">=", lo.isoformat()))
-             .where(filter=FieldFilter("kickoff_utc", "<", hi.isoformat())))
+             .where(filter=FieldFilter("kickoff_utc", "<", top.isoformat())))
         fail = {"match_previews_basket": BASKET_FAIL, "match_previews_uefa": UEFA_FAIL}.get(coll)
         if fail is None:
             out.extend(s.to_dict() for s in q.stream())
             continue
         try:
-            out.extend([s.to_dict() for s in q.stream()])
+            docs = [s.to_dict() for s in q.stream()]
+            out.extend([p for p in docs if in_summary_day(p, day, lo, hi)] if basket else docs)
         except Exception:
             logger.warning("trends_summary: no se pudieron leer las fichas de %s", coll, exc_info=True)
             if avisos is not None:

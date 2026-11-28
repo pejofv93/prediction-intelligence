@@ -271,3 +271,55 @@ def test_lectura_de_baloncesto_caida_no_tumba_el_resumen(monkeypatch):
     assert previews == [futbol] and avisos == [ts.BASKET_FAIL]
     text = "\n".join(ts.build_messages(previews, date(2026, 11, 20), avisos))
     assert "Athletic" in text and text.count(ts.BASKET_FAIL) == 1
+
+
+# ── NBA (activada el 28-nov): los partidos de esta noche en EE. UU. entran en el resumen de hoy ──
+
+def _nba(home, away, us_day, ko):
+    return {**_basket(home=home, away=away, ko=ko), "div": "NBA", "league": "NBA", "league_name": "NBA",
+            "date": us_day}
+
+
+def test_nba_entra_la_de_esta_noche_y_no_la_de_anoche(monkeypatch):
+    import sys
+    import types
+    day, lo, hi = ts.day_window(datetime(2026, 11, 28, 8, tzinfo=UTC))       # resumen del sábado 28-nov
+    anoche = _nba("Anoche Uno", "Anoche Dos", "2026-11-27", "2026-11-28T01:00:00+00:00")   # ya jugado
+    esta_noche = _nba("Noche Uno", "Noche Dos", "2026-11-28", "2026-11-29T00:30:00+00:00")
+    manana = _nba("Manana Uno", "Manana Dos", "2026-11-29", "2026-11-30T01:00:00+00:00")
+    eur_hoy = _basket(ko="2026-11-28T19:00:00+00:00")
+    eur_manana = _basket(home="Otra Ciudad", ko="2026-11-29T08:00:00+00:00")   # dentro del margen leído
+    assert [ts.in_summary_day(p, day, lo, hi) for p in (anoche, esta_noche, manana, eur_hoy, eur_manana)] == [
+        False, True, False, True, False]
+    futbol = _preview(ko="2026-11-28T15:00:00+00:00")
+    pedidos = {}
+
+    class Q:
+        def __init__(self, coll):
+            self.coll, self.f = coll, []
+
+        def where(self, filter=None):
+            self.f.append(filter)
+            return self
+
+        def stream(self):
+            pedidos[self.coll] = self.f
+            docs = {"match_previews": [futbol],
+                    "match_previews_basket": [anoche, esta_noche, eur_hoy, eur_manana]}.get(self.coll, [])
+            return [types.SimpleNamespace(to_dict=lambda d=d: d) for d in docs]
+
+    fake = types.ModuleType("shared.firestore_client")
+    fake.col = Q
+    monkeypatch.setitem(sys.modules, "shared.firestore_client", fake)
+    avisos = []
+    got = ts.read_day_previews(lo, hi, avisos)
+    assert got == [futbol, esta_noche, eur_hoy] and avisos == []
+    msgs = ts.build_messages(got, day)
+    m = "\n".join(msgs)
+    assert "Anoche" not in m and "Otra Ciudad" not in m
+    assert "🏀 Noche Uno–Noche Dos" in m                              # sin ⭐: en la línea final
+    _edge(esta_noche, "pts", "home")
+    m = "\n".join(ts.build_messages(got, day))
+    assert "🏀 NBA · 01:30 (madrugada)" in m and m.count("(madrugada)") == 1
+    assert "🏀 Zorrovia Norte–Quimeria Valle" in m                    # la Euroliga de hoy, sin ⭐
+    assert ts.group_icon_label({"group": "basket", "div": "NBA"}) == "🏀 NBA"
