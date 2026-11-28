@@ -26,7 +26,6 @@ from analyzers.match_preview import LABEL_EDGE  # noqa: E402
 
 SHOW_PER_TEAM = 5
 PILL_MIN, PILL_MAX = 0.60, 0.90
-MAP_MIN_SIM = 0.5
 NOUN = {"shots": "remates", "sot": "remates a puerta", "off": "remates fuera", "goals": "goles",
         "assists": "asistencias"}
 
@@ -83,6 +82,23 @@ def pill_text(x: dict) -> str:
     return f"⭐ {body} · <b>{round(x['p'] * 100)} %</b>"
 
 
+def team_map(teams_by_div: dict, fixtures: list[dict]) -> dict:
+    """(div, nombre de football-data) → id de equipo de Highlightly, con los alias y reglas de
+    collectors.match_fixtures.map_team (los de producción). Solo emparejados únicos en los dos
+    sentidos; si dos equipos de Highlightly caen en el mismo nombre, ninguno."""
+    from collectors.match_fixtures import map_team
+    out = {}
+    for div, teams in teams_by_div.items():
+        fd = {x for f in fixtures if f.get("div") == div for x in (f["home_team"], f["away_team"])}
+        rev = defaultdict(set)
+        for tid, name in teams.items():
+            got, ok = map_team(name, fd)
+            if ok:
+                rev[got].add(tid)
+        out.update({(div, k): next(iter(v)) for k, v in rev.items() if len(v) == 1})
+    return out
+
+
 def _upcoming(now: datetime, days: int) -> list[dict]:
     from google.cloud.firestore_v1.base_query import FieldFilter
     from shared.firestore_client import col
@@ -92,7 +108,7 @@ def _upcoming(now: datetime, days: int) -> list[dict]:
 
 
 def main() -> int:
-    from collectors.highlightly_players import HL_LEAGUES, team_similarity
+    from collectors.highlightly_players import HL_LEAGUES
     now = datetime.now(timezone.utc)
     days = int(os.environ.get("DIAS") or 3)
     out_file = os.environ.get("OUT_FILE") or "fichas_jugadores.txt"
@@ -120,6 +136,7 @@ def main() -> int:
                 teams_by_div[g["div"]][g[side]["team_id"]] = g[side]["team"]
 
     fixtures = [f for f in _upcoming(now, days) if f.get("div") in HL_LEAGUES]
+    hl_of = team_map(teams_by_div, fixtures)
     counts = Counter()
     lines = [f"Jugadores en las fichas de fútbol (prueba sin escribir, pp-v1), {now.isoformat()}",
              f"Backtest en memoria: ⭐ en {edge or 'ningún mercado'}",
@@ -127,12 +144,7 @@ def main() -> int:
     web = []
     for f in sorted(fixtures, key=lambda x: (x["kickoff_utc"], x["div"])):
         div = f["div"]
-        cand = teams_by_div.get(div) or {}
-
-        def best(name):
-            sc = sorted(((team_similarity(name, n), tid) for tid, n in cand.items()), reverse=True)
-            return sc[0][1] if sc and sc[0][0] >= MAP_MIN_SIM else None
-        hid, aid = best(f["home_team"]), best(f["away_team"])
+        hid, aid = hl_of.get((div, f["home_team"])), hl_of.get((div, f["away_team"]))
         if hid is None or aid is None:
             counts["sin emparejar en Highlightly"] += 1
             continue

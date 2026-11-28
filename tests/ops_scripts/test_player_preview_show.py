@@ -28,3 +28,12 @@ def test_bloque_y_una_pildora_por_partido():
     assert ps.player_pill({"Equipo 1": ps.player_block(hist, names, "SP1", "2526", "home", 1, 2, {})}) is None
     goal = ps.pill_text({"player": "Jugador 9", "team": "Equipo 1", "stat": "goals", "line": 0.5, "p": 0.61})
     assert goal == "⭐ Jugador 9 (Equipo 1) <b>marca</b> · <b>61 %</b>"
+
+
+def test_emparejado_con_alias_de_produccion():
+    teams = {"E0": {10: "Manchester United", 11: "Manchester City", 12: "Brentford"}}
+    fx = [{"div": "E0", "home_team": "Man United", "away_team": "Brentford"},
+          {"div": "E0", "home_team": "Arsenal", "away_team": "Man City"}]
+    m = ps.team_map(teams, fx)
+    assert m[("E0", "Man United")] == 10 and m[("E0", "Man City")] == 11 and m[("E0", "Brentford")] == 12
+    assert ("E0", "Arsenal") not in m
