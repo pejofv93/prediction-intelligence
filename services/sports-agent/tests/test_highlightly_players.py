@@ -8,12 +8,14 @@ import pytest
 from collectors import highlightly_players as h
 
 
-def _player(pid, name, pos, minutes, shots=0, sot=0, fc=0, fd=0, y=0, y2=None, r=0, saves=0, conceded=0):
+def _player(pid, name, pos, minutes, shots=0, sot=0, fc=0, fd=0, y=0, y2=None, r=0, saves=0, conceded=0,
+            ast=0, off=0, xg=None, xa=None):
     return {"id": pid, "name": name, "position": pos, "isSubstitute": False, "minutesPlayed": minutes,
             "matchRating": "7.0",
             "statistics": {"shotsTotal": shots, "shotsOnTarget": sot, "fouledOthers": fc, "fouledByOthers": fd,
                            "cardsYellow": y, "cardsSecondYellow": y if y2 is None else y2, "cardsRed": r,
-                           "goalsSaved": saves, "goalsConceded": conceded, "goalsScored": 0}}
+                           "goalsSaved": saves, "goalsConceded": conceded, "goalsScored": 0,
+                           "assists": ast, "shotsOffTarget": off, "expectedGoals": xg, "expectedAssists": xa}}
 
 
 # Visitante PRIMERO, como hace a veces la API real
@@ -24,8 +26,8 @@ RAW = [
         _player(23, "Suplente V", "Goalkeeper", 0)]},
     {"team": {"id": 1, "name": "Local FC"}, "players": [
         _player(11, "Portero L", "Goalkeeper", 90, saves=1),
-        _player(12, "Delantero L", "Forward", 70, shots=5, sot=3, fc=1, fd=3, r=1),
-        _player(13, "Medio L", "Midfielder", 20, shots=1, fc=1, fd=0, y=1)]},
+        _player(12, "Delantero L", "Forward", 70, shots=5, sot=3, fc=1, fd=3, r=1, off=2, xg=0.734, xa="0.1"),
+        _player(13, "Medio L", "Midfielder", 20, shots=1, fc=1, fd=0, y=1, ast=1, off=1)]},
 ]
 META = {"match_id": 999, "div": "D1", "season": "2627", "date": "2026-11-01",
         "home_team": "Local FC", "away_team": "Visitante SV", "home_team_id": 1, "away_team_id": 2}
@@ -63,6 +65,16 @@ def test_totales_y_faltas_recibidas():
     assert home["shots_total"] == 6 and home["shots_on_target"] == 3
     assert home["fouls_committed"] == 2 and home["fouls_drawn"] == 3
     assert home["saves"] == 1 and home["reds"] == 1
+
+
+def test_asistencias_remates_fuera_y_esperados():
+    doc = h.parse_box_score(RAW, META)
+    assert doc["fields_version"] == 2
+    home = doc["teams"][0]
+    assert home["totals"]["assists"] == 1 and home["totals"]["shots_off_target"] == 3
+    fw = home["players"][1]
+    assert (fw["shots_off_target"], fw["xg"], fw["xa"]) == (2, 0.734, 0.1)
+    assert home["players"][2]["xg"] is None and "xg" not in home["totals"]      # sin dato: None; no se suma
 
 
 def test_box_score_vacio_o_incompleto():

@@ -99,7 +99,11 @@ WOMEN_PROBE = {70566: "Frauen-Bundesliga", 119073: "Serie A Women", 55248: "Femi
 # Ediciones de cada liga extra. La Champions femenina cambió de id con el formato de liga (2025):
 # 2023 y 2024 están en 447559 (15 campos: córners, tarjetas, remates y faltas; sin xG).
 WOMEN_EXTRA_SEASONS = {1014325: [(447559, 2023), (447559, 2024), (1014325, 2025), (1014325, 2026)]}
-PLAYER_SEASONS = ("2425", "2526", "2627")
+# 2023/24 añadida el 28-nov-2026 (decisión del usuario, antes del fin del PRO): con 2023/24 de
+# calentamiento el backtest de jugadores evalúa tres temporadas.
+PLAYER_SEASONS = ("2324", "2425", "2526", "2627")
+# Equipos «de las 8 ligas» para las copas: las temporadas de siempre (2023/24 no cambia las copas).
+CUP_TEAM_SEASONS = ("2425", "2526", "2627")
 # Mantenimiento: competiciones vivas. Se lista por fecha, así que las temporadas nuevas de estas
 # ligas entran solas. Las fases finales (Euro, Copa América, Mundial) se añaden a mano cuando toquen.
 MAINT_NT = [(28016, True), (817744, True), (5039, True), (29718, True), (9294, False)]
@@ -597,7 +601,7 @@ def cup_team_ids(store, now: datetime, dry_run: bool) -> set:
         return set(doc["ids"])
     ids = set()
     for lid in hp.HL_LEAGUES.values():
-        for s in PLAYER_SEASONS:
+        for s in CUP_TEAM_SEASONS:
             for d in store.by_league_season(MATCHES, lid, hp.hl_season(s)):
                 ids |= {d.get("home_team_id"), d.get("away_team_id")}
     ids.discard(None)

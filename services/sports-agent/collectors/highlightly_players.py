@@ -65,7 +65,15 @@ _PLAYER_FIELDS = {
     "cardsRed": "reds",
     "goalsSaved": "saves",
     "goalsScored": "goals",
+    # 28-nov-2026 (sondeo de campos, decisión del usuario: jugadores en las fichas): asistencias y
+    # remates fuera. Los docs anteriores no los traen (fields_version ausente o 1).
+    "assists": "assists",
+    "shotsOffTarget": "shots_off_target",
 }
+# Decimales (28-nov-2026): goles y asistencias esperados por jugador; se guardan, no se suman.
+_PLAYER_FLOAT_FIELDS = {"expectedGoals": "xg", "expectedAssists": "xa"}
+# 1 = hasta el 28-nov (sin asistencias, remates fuera ni xG/xA); 2 = con ellos.
+BOX_FIELDS_VERSION = 2
 
 
 # ── Temporadas ──────────────────────────────────────────────────────────────
@@ -123,6 +131,14 @@ def _int(v) -> int:
         return 0
 
 
+def _float(v) -> Optional[float]:
+    """Número decimal de la API o None (no hay o no se puede leer)."""
+    try:
+        return round(float(v), 3) if v is not None and v != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_box_score(raw, meta: dict) -> Optional[dict]:
     """
     raw: respuesta de /box-score/{id} (lista de 2 equipos, o dict con 'data').
@@ -152,6 +168,8 @@ def parse_box_score(raw, meta: dict) -> Optional[dict]:
             for src, dst in _PLAYER_FIELDS.items():
                 row[dst] = _int(st.get(src))
                 sums[dst] += row[dst]
+            for src, dst in _PLAYER_FLOAT_FIELDS.items():
+                row[dst] = _float(st.get(src))
             row["cards"] = row["yellows"] + row["reds"]
             players.append(row)
         teams.append({"team_id": tid, "team": tname, "side": side, "players": players, "totals": sums})
@@ -161,7 +179,8 @@ def parse_box_score(raw, meta: dict) -> Optional[dict]:
     return {
         "match_id": meta["match_id"], "div": meta["div"], "season": meta["season"], "date": meta["date"],
         "home_team": meta["home_team"], "away_team": meta["away_team"], "teams": teams,
-        "source": "highlightly", "unreliable_fields_dropped": ["cardsSecondYellow", "goalsConceded"],
+        "source": "highlightly", "fields_version": BOX_FIELDS_VERSION,
+        "unreliable_fields_dropped": ["cardsSecondYellow", "goalsConceded"],
         "fdco_match_key": None, "checks": None,
     }
 
