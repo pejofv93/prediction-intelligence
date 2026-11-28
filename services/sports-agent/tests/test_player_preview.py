@@ -80,3 +80,20 @@ def test_backtest_walk_forward_solo_temporadas_evaluadas():
     assert {r[2] for r in rows_p} == set(pp.MARKETS)
     assert all(0 <= r[5] <= 1 and 0 <= r[6] <= 1 and r[4] in (0, 1) for r in rows_p)
     assert counts["evaluados"] > 0 and "Jugador" not in repr(counts)
+
+
+def test_traspasado_solo_cuenta_con_su_equipo_actual():
+    docs = _season_docs()
+    # el delantero 301 pasa al equipo 1 en los dos últimos partidos del equipo 1 (titular): aún tiene
+    # apariciones con el equipo 3 entre sus 3 últimas → no sale en el 1 hasta jugar 3 con él
+    games = pp.games_from_docs(docs)
+    t1 = [g for g in games if 1 in (g["home"]["team_id"], g["away"]["team_id"])]
+    for g in t1[-2:]:
+        side = "home" if g["home"]["team_id"] == 1 else "away"
+        g[side]["players"].append({"pid": 301, "name": "Jugador 301", "pos": "Forward", "start": True, "min": 90,
+                                   "st": {"shots": 3, "sot": 1, "off": 2, "goals": 0, "assists": 0}})
+    h = pp.History()
+    for g in games:
+        h.update(g)
+    assert h.plays(1, 301) and not h.same_team(301, 1) and 301 not in h.candidates(1)
+    assert {a[2] for a in h.recent_apps(301)} == {1, 3}                # aparece con los dos equipos

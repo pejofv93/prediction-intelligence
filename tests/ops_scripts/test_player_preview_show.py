@@ -37,3 +37,14 @@ def test_emparejado_con_alias_de_produccion():
     m = ps.team_map(teams, fx)
     assert m[("E0", "Man United")] == 10 and m[("E0", "Man City")] == 11 and m[("E0", "Brentford")] == 12
     assert ("E0", "Arsenal") not in m
+
+
+def test_comprobacion_por_equipo_en_cada_jugador():
+    games = ps.pp.games_from_docs(_season_docs())
+    hist, names = ps.pp.History(), {}
+    for g in games:
+        hist.update(g)
+    block = ps.player_block(hist, names, "SP1", "2526", "home", 1, None, {})
+    assert block and all(p["checked"] and len(p["recent"]) == 3 and all(r["same_team"] for r in p["recent"])
+                         for p in block)
+    assert "comprobado: últimas apariciones" in ps.player_line(block[0])

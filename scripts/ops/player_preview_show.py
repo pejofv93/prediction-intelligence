@@ -45,8 +45,12 @@ def player_block(hist: pp.History, names: dict, div: str, season: str, side: str
             star = labels.get(mk) == LABEL_EDGE and not pred["low_sample"]
             markets[s] = {"exp": round(sp["lam"], 2), "main": pp.main_line(probs),
                           "probs": {str(k): round(v, 3) for k, v in probs.items()}, "star": star}
+        apps = hist.recent_apps(pid)
         out.append({"pid": pid, "name": names.get(pid, "?"), "pos": pred["pos"], "last_date": pred["last_date"],
-                    "exp_min": pred["exp_min"], "low_sample": pred["low_sample"], "markets": markets})
+                    "exp_min": pred["exp_min"], "low_sample": pred["low_sample"], "markets": markets,
+                    # comprobación por id de equipo del box score: sus últimas apariciones de liga
+                    "recent": [{"date": a[0], "min": a[1], "same_team": a[2] == tid} for a in apps],
+                    "checked": bool(apps) and all(a[2] == tid for a in apps)})
     out.sort(key=lambda p: -(p["markets"].get("shots", {}).get("exp") or 0))
     return out[:SHOW_PER_TEAM]
 
@@ -80,6 +84,27 @@ def pill_text(x: dict) -> str:
     else:
         body = f"{x['player']} ({x['team']}) más de <b>{ln}</b> {NOUN[x['stat']]}"
     return f"⭐ {body} · <b>{round(x['p'] * 100)} %</b>"
+
+
+# Equipos que el usuario pidió revisar (28-nov): div:nombre de football-data, separados por comas.
+DEFAULT_TEAMS = ("SP1:Real Madrid,SP1:Barcelona,SP1:Ath Madrid,E0:Man City,E0:Arsenal,E0:Liverpool,"
+                 "D1:Bayern Munich,I1:Inter")
+
+
+def player_line(p: dict) -> str:
+    cells = []
+    for s in pp.STATS:
+        m = p["markets"].get(s)
+        if not m:
+            cells.append(f"{pp.STAT_NAMES[s]} —")
+            continue
+        ln = m["main"]
+        cells.append(f"{'⭐' if m['star'] else ''}{pp.STAT_NAMES[s]} +{ln}: {m['probs'][str(ln)]:.0%}")
+    low = " · muestra insuficiente" if p["low_sample"] else ""
+    chk = ", ".join(f"{r['date']} {r['min']}'" + ("" if r["same_team"] else " OTRO EQUIPO") for r in p["recent"])
+    ok = "comprobado" if p["checked"] else "NO COMPROBADO"
+    return (f"    {p['name']} ({p['pos']}, ~{p['exp_min']:.0f} min, último partido: {p['last_date']}{low}) · "
+            + " · ".join(cells) + f"\n      {ok}: últimas apariciones de liga con este equipo (box score): {chk}")
 
 
 def team_map(teams_by_div: dict, fixtures: list[dict]) -> dict:
@@ -141,6 +166,18 @@ def main() -> int:
     lines = [f"Jugadores en las fichas de fútbol (prueba sin escribir, pp-v1), {now.isoformat()}",
              f"Backtest en memoria: ⭐ en {edge or 'ningún mercado'}",
              *[ln for ln in res["report"] if ln.startswith(("Recuentos", "Etiquetas", "Evaluadas"))], ""]
+    # Los 5 de cada equipo pedido, con un rival neutro (sin factor de rival) y en casa.
+    asked = [x.split(":", 1) for x in (os.environ.get("EQUIPOS") or DEFAULT_TEAMS).split(",") if ":" in x]
+    asked_map = team_map(teams_by_div, [{"div": d, "home_team": n, "away_team": ""} for d, n in asked])
+    lines.append("== Equipos pedidos (rival neutro, en casa)")
+    for d, n in asked:
+        tid = asked_map.get((d, n))
+        if tid is None or d not in season_by_div:
+            lines.append(f"  {d} {n}: sin emparejar en Highlightly")
+            continue
+        lines.append(f"  {d} {n} (Highlightly: {teams_by_div[d].get(tid)}):")
+        lines += [player_line(p) for p in player_block(hist, names, d, season_by_div[d], "home", tid, None, labels)]
+    lines.append("")
     web = []
     for f in sorted(fixtures, key=lambda x: (x["kickoff_utc"], x["div"])):
         div = f["div"]
@@ -158,18 +195,8 @@ def main() -> int:
         lines.append(f"== {f['kickoff_utc'][:16]} {div} · {f['home_team']} – {f['away_team']}")
         for team, players in by_team.items():
             lines.append(f"  {team}:")
-            for p in players:
-                cells = []
-                for s in pp.STATS:
-                    m = p["markets"].get(s)
-                    if not m:
-                        cells.append(f"{pp.STAT_NAMES[s]} —")
-                        continue
-                    ln = m["main"]
-                    cells.append(f"{'⭐' if m['star'] else ''}{pp.STAT_NAMES[s]} +{ln}: {m['probs'][str(ln)]:.0%}")
-                low = " · muestra insuficiente" if p["low_sample"] else ""
-                lines.append(f"    {p['name']} ({p['pos']}, ~{p['exp_min']:.0f} min, último partido: "
-                             f"{p['last_date']}{low}) · " + " · ".join(cells))
+            lines += [player_line(p) for p in players]
+            counts["jugadores no comprobados"] += sum(not p["checked"] for p in players)
         lines.append("  Telegram: " + (pill_text(pill) if pill else "(sin píldora de jugador)"))
         web.append({"id": f.get("match_id"), "players": {t: [{k: v for k, v in p.items() if k != "pid"} for p in ps]
                                                           for t, ps in by_team.items()}})

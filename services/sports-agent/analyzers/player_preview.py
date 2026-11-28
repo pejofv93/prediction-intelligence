@@ -116,7 +116,7 @@ class History:
 
     def __init__(self):
         self.player = defaultdict(lambda: defaultdict(lambda: {"n": 0, "min": 0.0, "sum": _acc(), "n_ok": _acc()}))
-        self.player_last = defaultdict(lambda: deque(maxlen=MIN_LAST))    # (fecha, minutos)
+        self.player_last = defaultdict(lambda: deque(maxlen=MIN_LAST))    # (fecha, minutos, equipo)
         self.player_pos = {}
         self.team_last = defaultdict(lambda: deque(maxlen=PLAYS_LAST_N))  # {pid: titular}
         self.team_last_date = {}
@@ -151,7 +151,7 @@ class History:
                     if p["st"][s] is not None:
                         acc["sum"][s] += p["st"][s]
                         acc["n_ok"][s] += 1
-                self.player_last[p["pid"]].append((g["date"], p["min"]))
+                self.player_last[p["pid"]].append((g["date"], p["min"], t["team_id"]))
                 if p["pos"]:
                     self.player_pos[p["pid"]] = p["pos"]
                 if p["start"] and p["pos"] in POSITIONS:
@@ -170,11 +170,23 @@ class History:
         starts = sum(1 for m in last if m.get(pid))
         return starts >= PLAYS_MIN_STARTS and pid in last[-1]
 
+    def same_team(self, pid, team_id) -> bool:
+        """Sus últimas PLAYS_LAST_N apariciones de liga (box score, por id de equipo, no por nombre)
+        fueron todas con este equipo: fuera los traspasados que aún salen en partidos del anterior."""
+        apps = list(self.player_last.get(pid) or [])[-PLAYS_LAST_N:]
+        return bool(apps) and all(a[2] == team_id for a in apps)
+
+    def recent_apps(self, pid, n: int = PLAYS_LAST_N) -> list[tuple]:
+        """[(fecha, minutos, id de equipo)] de sus últimas n apariciones de liga."""
+        return list(self.player_last.get(pid) or [])[-n:]
+
     def candidates(self, team_id) -> list:
-        """Jugadores de campo que cumplen la regla de «juega» (de los últimos partidos del equipo)."""
+        """Jugadores de campo que cumplen la regla de «juega» (de los últimos partidos del equipo) y
+        cuyas últimas apariciones fueron todas con este equipo."""
         last = list(self.team_last.get(team_id) or [])
         pids = {pid for m in last for pid in m}
-        return sorted(pid for pid in pids if self.player_pos.get(pid) in POSITIONS and self.plays(team_id, pid))
+        return sorted(pid for pid in pids if self.player_pos.get(pid) in POSITIONS and self.plays(team_id, pid)
+                      and self.same_team(pid, team_id))
 
     def _two(self, d: dict, season: str):
         return [d[s] for s in (season, prev_season(season)) if s in d]
@@ -190,7 +202,7 @@ class History:
         last = list(self.player_last[pid])
         if not n_apps or not last or mins <= 0:
             return None
-        exp_min = min(90.0, sum(m for _, m in last) / len(last))
+        exp_min = min(90.0, sum(a[1] for a in last) / len(last))
         lgs = [self.league[(div, s)] for s in (season, prev_season(season)) if (div, s) in self.league]
         poss = [self.pos[(div, s, pos)] for s in (season, prev_season(season)) if (div, s, pos) in self.pos]
         concs = self._two(self.conc[opp_id], season)
