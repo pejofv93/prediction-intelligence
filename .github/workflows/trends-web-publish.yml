@@ -103,7 +103,7 @@ jobs:
       - name: Tests de la protección y de la exportación
         run: |
           set -euo pipefail
-          node --test trends_web/tests/middleware.test.mjs trends_web/tests/initials.test.mjs trends_web/tests/close.test.mjs trends_web/tests/basket.test.mjs
+          node --test trends_web/tests/middleware.test.mjs trends_web/tests/initials.test.mjs trends_web/tests/close.test.mjs trends_web/tests/basket.test.mjs trends_web/tests/uefa.test.mjs
           pip install --quiet httpx pytest
           python -m pytest -q trends_web/tests
 

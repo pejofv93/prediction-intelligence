@@ -14,7 +14,9 @@ const DIV_NAMES = { SP1: "LaLiga", SP2: "Segunda", I1: "Serie A", E0: "Premier",
                     WLF: "Liga F", WSL: "WSL", WFBL: "Frauen-Bundesliga", WSA: "Serie A fem.",
                     WD1: "D1 Arkema",
                     // Baloncesto (bp-v1)
-                    EUR: "Euroliga" };
+                    EUR: "Euroliga",
+                    // Europa (mp-e1)
+                    CL: "Champions League", EL: "Europa League", ECL: "Conference League" };
 
 const state = { view: "teams", div: null, split: 0, market: null, sort: -1, desc: false, byGap: false,
                 day: null, match: null };
@@ -198,12 +200,14 @@ const dayLabel = (k) => new Date(`${k}T12:00:00`).toLocaleDateString("es-ES",
 const hhmm = (iso) => new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
 const isWomen = (m) => m.group === "women";
 const isCup = (m) => m.group === "cups";
+const isUefa = (m) => m.group === "uefa";
 const leagueName = (div) => DIV_NAMES[div] || div;
 const groupTitle = (m) => (isWomen(m) ? `Femenino · ${leagueName(m.div)}`
   : isCup(m) ? `Copas · ${m.cup || "copa"}`
+  : isUefa(m) ? `Europa · ${m.comp_name || leagueName(m.div)}`
   : isBasket(m) ? `Baloncesto · ${m.league_name || leagueName(m.div)}` : leagueName(m.div));
-// Una copa no se mezcla con su liga; el baloncesto, en su propio grupo.
-const groupKey = (m) => (isCup(m) ? `cup:${m.cup}` : isBasket(m) ? `basket:${m.div}` : m.div);
+// Una copa no se mezcla con su liga; Europa y el baloncesto, en su propio grupo.
+const groupKey = (m) => (isCup(m) ? `cup:${m.cup}` : isUefa(m) ? `uefa:${m.div}` : isBasket(m) ? `basket:${m.div}` : m.div);
 // Línea destacada: como mucho UNA por mercado y lado (local, visitante, total), la que más se
 // separa de la liga, y solo si llega a STANDOUT_PTS puntos (los que se ven en la ficha) en un
 // mercado con ventaja medida (block.highlight, que ya es falso con muestra insuficiente).
@@ -242,10 +246,11 @@ function renderMatchList() {
   }
   const todays = PREV.matches.filter((m) => dayKey(m.kickoff_utc) === state.day);
   const byDiv = new Map();
-  // Primero las ligas masculinas, después "Copas", "Femenino" y al final "Baloncesto", cada una en
-  // orden de hora.
-  const men = todays.filter((x) => !isWomen(x) && !isCup(x) && !isBasket(x));
-  for (const m of [...men, ...todays.filter(isCup), ...todays.filter(isWomen), ...todays.filter(isBasket)])
+  // Primero las ligas masculinas, después "Europa", "Copas", "Femenino" y al final "Baloncesto",
+  // cada una en orden de hora.
+  const men = todays.filter((x) => !isWomen(x) && !isCup(x) && !isBasket(x) && !isUefa(x));
+  for (const m of [...men, ...todays.filter(isUefa), ...todays.filter(isCup), ...todays.filter(isWomen),
+                   ...todays.filter(isBasket)])
     byDiv.set(groupKey(m), [...(byDiv.get(groupKey(m)) || []), m]);
   list.replaceChildren(...safeGroups([...byDiv], (div, ms) => el("div", { class: "match-group" },
     el("h3", { text: groupTitle(ms[0]) }),
@@ -350,17 +355,18 @@ function matchPills(m) {
   }
   return out.sort((a, b) => b.p - a.p).slice(0, PILL_MAX_N);
 }
-// Un fallo al montar el baloncesto no puede tumbar la lista: ese grupo se cambia por un aviso y el
-// resto (fútbol, copas, femenino) se pinta igual. Los grupos de fútbol, como siempre.
+// Un fallo al montar el baloncesto o Europa no puede tumbar la lista: ese grupo se cambia por un
+// aviso y el resto (fútbol, copas, femenino) se pinta igual. Los grupos de fútbol, como siempre.
 const BASKET_FAIL = "No se pudieron mostrar las fichas de baloncesto.";
+const UEFA_FAIL = "No se pudieron mostrar las fichas de Europa.";
 function safeGroups(groups, build) {
   const out = [];
   for (const [key, ms] of groups) {
-    if (!isBasket(ms[0])) { out.push(build(key, ms)); continue; }
+    if (!isBasket(ms[0]) && !isUefa(ms[0])) { out.push(build(key, ms)); continue; }
     try { out.push(build(key, ms)); }
     catch (e) {
-      console.warn("fichas de baloncesto:", e);
-      out.push(el("p", { class: "warn", text: BASKET_FAIL }));
+      console.warn(isUefa(ms[0]) ? "fichas de Europa:" : "fichas de baloncesto:", e);
+      out.push(el("p", { class: "warn", text: isUefa(ms[0]) ? UEFA_FAIL : BASKET_FAIL }));
     }
   }
   return out;
@@ -432,6 +438,10 @@ function renderMatch() {
     isCup(m) ? el("p", { class: "warn",
       text: `Copa (modelo de clubes, ${m.model_version}): cada equipo con su fuerza en ${leagueName(m.div)}. ` +
             "\"Medido en backtest\" en córners, faltas, goles, remates y a puerta por equipo; sin estrellas hasta medirlo en directo." }) : null,
+    isUefa(m) ? el("p", { class: "warn",
+      text: `Europa (modelo ${m.model_version}, ${m.comp_name || leagueName(m.div)}): cada equipo con su fuerza en su liga ` +
+            "y lo jugado en Europa, frente a la media de la competición. Un equipo sin liga con datos sale con " +
+            "muestra insuficiente. ⭐ solo en los mercados con ventaja medida en el backtest de 2020/21 a 2026/27." }) : null,
     isBasket(m) ? el("p", { class: "warn",
       text: `Baloncesto (modelo ${m.model_version}, ${m.league_name || leagueName(m.div)}): por 100 posesiones, con ritmo, ` +
             "casa/fuera y prórroga (los puntos la cuentan). ⭐ solo en los mercados con ventaja medida en el backtest " +

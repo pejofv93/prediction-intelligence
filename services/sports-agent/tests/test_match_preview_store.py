@@ -306,3 +306,43 @@ def test_web_lectura_de_baloncesto_caida_no_tumba_el_futbol(monkeypatch):
     out = st.build_web_export(NOW)
     assert [m["id"] for m in out["matches"]] == [futbol["match_id"]]
     assert out["avisos"] == ["no se pudieron leer las fichas de baloncesto"]
+
+
+# ── Europa (mp-e1) en la web: grupo propio con el nombre de la competición ────────────────────────
+
+def _uefa_preview():
+    p = _frozen_preview()
+    return {**p, "match_id": "CL_x_1", "group": "uefa", "div": "CL", "comp": "CL",
+            "comp_name": "Champions League", "home_team": "Zorrovia Norte", "away_team": "Quimeria Valle"}
+
+
+def test_web_ficha_de_europa_con_su_competicion():
+    out = st.web_export([_uefa_preview()], NOW)
+    m = out["matches"][0]
+    assert m["group"] == "uefa" and m["div"] == "CL" and m["comp_name"] == "Champions League"
+    assert "comp_name" not in st.web_match(_frozen_preview())          # el fútbol no cambia
+
+
+def test_web_ficha_de_europa_rota_no_tumba_el_futbol():
+    futbol = _frozen_preview()
+    roto = {"group": "uefa", "div": "CL", "kickoff_utc": (NOW + timedelta(days=1)).isoformat(),
+            "home_team": "Zorrovia Norte", "away_team": "Quimeria Valle"}
+    out = st.web_export([futbol, roto, _basket_roto()], NOW)
+    assert [m["id"] for m in out["matches"]] == [futbol["match_id"]]
+    assert out["avisos"] == ["1 ficha(s) de baloncesto no se pudieron montar",
+                             "1 ficha(s) de Europa no se pudieron montar"]
+
+
+def test_web_lee_las_fichas_de_europa(monkeypatch):
+    futbol, eu = _frozen_preview(), _uefa_preview()
+    seen = []
+
+    def fake_read(now, days, collection=st.PREVIEWS):
+        seen.append(collection)
+        return {st.PREVIEWS: [futbol], "match_previews_uefa": [eu]}.get(collection, [])
+
+    monkeypatch.setattr(st, "_read_upcoming_previews", fake_read)
+    out = st.build_web_export(NOW)
+    assert "match_previews_uefa" in seen
+    assert sorted(m["group"] for m in out["matches"]) == ["men", "uefa"]
+    assert out.get("avisos") is None

@@ -27,7 +27,7 @@ import hashlib
 import json
 import logging
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -580,6 +580,8 @@ def web_match(p: dict) -> dict:
         **({"cup": p.get("cup")} if p.get("group") == "cups" else {}),
         # Baloncesto (bp-v1): nombre de la liga ("Euroliga"); div es su código ("EUR").
         **({"league_name": p.get("league_name") or p["div"]} if basket else {}),
+        # Europa (mp-e1): nombre de la competición ("Champions League"); div es su código ("CL").
+        **({"comp_name": p.get("comp_name") or p["div"]} if p.get("group") == "uefa" else {}),
         "home": home, "away": away, "badges": [badge_initials(home), badge_initials(away)],
         "data_cutoff": p.get("data_cutoff"),
         "low_sample": bool(p.get("low_sample")),
@@ -594,21 +596,23 @@ def web_export(previews: list[dict], now: datetime, days: int = WEB_DAYS) -> dic
     lo, hi = now - WEB_PAST, now + timedelta(days=days)
     keep = sorted((p for p in previews if lo <= _parse(p["kickoff_utc"]) <= hi),
                   key=lambda p: (p["kickoff_utc"], p["div"], p["home_team"]))
-    matches, bad_basket = [], 0
+    matches, bad = [], Counter()
     for p in keep:
-        if p.get("group") != "basket":
+        if p.get("group") not in ("basket", "uefa"):
             matches.append(web_match(p))      # fútbol: como siempre
             continue
-        # Una ficha de baloncesto que no se puede montar no tumba la web: se quita y se avisa.
+        # Una ficha de baloncesto o de Europa que no se puede montar no tumba la web: se quita y se avisa.
         try:
             matches.append(web_match(p))
         except Exception:
-            bad_basket += 1
-            logger.warning("web_export: ficha de baloncesto sin montar (se omite)", exc_info=True)
+            bad[p["group"]] += 1
+            logger.warning("web_export: ficha de %s sin montar (se omite)", p["group"], exc_info=True)
     out = {"model_version": mp.MODEL_VERSION, "generated_at": now.isoformat(), "days": days,
            "min_cur": mp.MIN_CUR, "matches": matches}
-    if bad_basket:
-        out["avisos"] = [f"{bad_basket} ficha(s) de baloncesto no se pudieron montar"]
+    avisos = [f"{bad[g]} ficha(s) de {name} no se pudieron montar"
+              for g, name in (("basket", "baloncesto"), ("uefa", "Europa")) if bad[g]]
+    if avisos:
+        out["avisos"] = avisos
     return out
 
 
@@ -624,13 +628,14 @@ def _read_upcoming_previews(now: datetime, days: int = WEB_DAYS, collection: str
 
 def build_web_export(now: Optional[datetime] = None, days: int = WEB_DAYS) -> dict:
     """Fichas de mp-v1 y, en sus grupos, las femeninas (mp-w1, match_previews_women), las de copa
-    (mp-v1-cups, match_previews_cups) y las de baloncesto (bp-v1, match_previews_basket). Si alguna
-    no se puede leer, la web sale sin ese grupo."""
+    (mp-v1-cups, match_previews_cups), las de baloncesto (bp-v1, match_previews_basket) y las de
+    Europa (mp-e1, match_previews_uefa: Champions, Europa League y Conference). Si alguna no se puede
+    leer, la web sale sin ese grupo."""
     now = now or _now()
     previews = _read_upcoming_previews(now, days)
     avisos = []
     for coll, name in (("match_previews_women", "femeninas"), ("match_previews_cups", "de copa"),
-                       ("match_previews_basket", "de baloncesto")):
+                       ("match_previews_basket", "de baloncesto"), ("match_previews_uefa", "de Europa")):
         try:
             previews += _read_upcoming_previews(now, days, collection=coll)
         except Exception:
